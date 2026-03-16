@@ -19,6 +19,7 @@ impl DashboardApp {
 impl eframe::App for DashboardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         panels::render_header(ctx, &mut self.model);
+        panels::render_terrain_library(ctx, &mut self.model);
         panels::render_status_log(ctx, &self.model);
         panels::render_event_list(ctx, &mut self.model);
         panels::render_camera_list(ctx, &mut self.model);

@@ -14,7 +14,7 @@ Coordinates the desktop app at the highest level. It owns the root `AppModel`, i
 - **Interacts with**: `install` in `theme.rs`, `AppModel::seed_demo` in `model.rs`
 
 ### `eframe::App::update`
-- **Does**: Lays out the shell around header, sidebars, status log, and map canvas
+- **Does**: Lays out the shell around header, terrain-library window, sidebars, status log, and map canvas
 - **Interacts with**: `render_*` functions in `panels/mod.rs`
 - **Rationale**: Keeps app composition separate from the details of each view
 

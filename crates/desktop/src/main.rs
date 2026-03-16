@@ -1,7 +1,9 @@
 mod app;
+mod city_catalog;
 mod model;
 mod panels;
 mod terrain_assets;
+mod terrain_precompute;
 mod theme;
 
 use app::DashboardApp;

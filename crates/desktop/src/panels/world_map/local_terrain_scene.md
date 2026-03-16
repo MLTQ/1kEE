@@ -6,7 +6,7 @@ Renders the high-zoom event terrain mode. This file exists to show one selected 
 ## Components
 
 ### `paint`
--- **Does**: Draws the local terrain frame, loads the streamed SRTM contour neighborhood around the current local viewport center, retains previously visited chunk geometry for the current selected event, renders height-separated contour slices, and returns marker positions for event/camera selection
+- **Does**: Draws the local terrain frame, loads the streamed SRTM contour neighborhood around the current local viewport center, retains previously visited chunk geometry for the current terrain focus, renders height-separated contour slices, and returns marker positions for event/camera selection
 - **Interacts with**: `AppModel` in `model.rs`, `contour_asset.rs`, `srtm_focus_cache.rs`, `globe_scene.rs`
 - **Rationale**: Keeps local terrain rendering isolated from the globe renderer so both views can evolve independently
 
@@ -35,8 +35,8 @@ Renders the high-zoom event terrain mode. This file exists to show one selected 
 - This scene now derives its contour extent and interval from the shared zoom state, so entering local terrain starts wide and progressively tightens to smaller high-detail patches as the analyst keeps zooming in.
 - Drag-driven camera rotation comes from `GlobeViewState`.
 - Vertical contour separation now comes from the user-controlled `local_layer_spread` value in `GlobeViewState`, and that control only affects elevation offset, not the base terrain-plane tilt.
-- Plain drag pans the local viewport center, which causes the terrain cache to stream across the surrounding region while the selected event marker remains at its true map position.
+- Plain drag pans the local viewport center, which causes the terrain cache to stream across the surrounding region while any selected event marker remains at its true map position.
 - The streamed neighborhood is intentionally wider again, so the local view keeps more surrounding landform context loaded around the viewport center before relying on panning and retention.
-- The local scene keys chunk retention to the selected event location, so already visited terrain buckets stay visible while panning and only reset when the analyst selects a different event.
+- The local scene keys chunk retention to the current terrain focus location, so already visited terrain buckets stay visible while panning and only reset when the analyst selects a different event or manual city focus.
 - When the current streamed neighborhood is still being generated, the scene shows a bucket-level cache progress bar based on ready versus pending contour exports.
 - Zooming back out below the local-mode threshold hands control back to the globe view.

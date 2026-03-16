@@ -8,7 +8,6 @@ const PRECOMPUTE_ZOOMS: &[f32] = &[3.0, 4.5, 6.5, 9.5, 12.0];
 
 #[derive(Clone)]
 pub struct PrecomputeJobSnapshot {
-    pub city_id: String,
     pub city_label: String,
     pub ready_assets: usize,
     pub pending_assets: usize,
@@ -58,9 +57,8 @@ pub fn tick(root: Option<&Path>) {
             continue;
         }
 
-        let city = city_catalog::by_id(&job.city_id).unwrap_or_else(|| {
-            panic!("unknown city id queued for precompute: {}", job.city_id)
-        });
+        let city = city_catalog::by_id(&job.city_id)
+            .unwrap_or_else(|| panic!("unknown city id queued for precompute: {}", job.city_id));
         let effective_root = job.root.as_deref().or(root);
         let status = aggregate_status(effective_root, city);
 
@@ -76,9 +74,16 @@ pub fn tick(root: Option<&Path>) {
         };
 
         for &zoom in PRECOMPUTE_ZOOMS {
-            let radius =
-                srtm_focus_cache::bucket_radius_for_target_radius_miles(zoom, PRECOMPUTE_RADIUS_MILES);
-            srtm_focus_cache::ensure_focus_contour_region(effective_root, city.location, zoom, radius);
+            let radius = srtm_focus_cache::bucket_radius_for_target_radius_miles(
+                zoom,
+                PRECOMPUTE_RADIUS_MILES,
+            );
+            srtm_focus_cache::ensure_focus_contour_region(
+                effective_root,
+                city.location,
+                zoom,
+                radius,
+            );
         }
     }
 }
@@ -93,7 +98,6 @@ pub fn snapshots(root: Option<&Path>) -> Vec<PrecomputeJobSnapshot> {
             let effective_root = job.root.as_deref().or(root);
             let status = aggregate_status(effective_root, city);
             Some(PrecomputeJobSnapshot {
-                city_id: job.city_id.clone(),
                 city_label: format!("{}, {}", city.name, city.country),
                 ready_assets: status.ready_assets,
                 pending_assets: status.pending_assets,
@@ -117,7 +121,10 @@ pub fn has_active_jobs(root: Option<&Path>) -> bool {
         .any(|job| job.state != PrecomputeJobState::Completed)
 }
 
-fn aggregate_status(root: Option<&Path>, city: &'static CityEntry) -> srtm_focus_cache::FocusContourRegionStatus {
+fn aggregate_status(
+    root: Option<&Path>,
+    city: &'static CityEntry,
+) -> srtm_focus_cache::FocusContourRegionStatus {
     let mut ready_assets = 0usize;
     let mut pending_assets = 0usize;
     let mut total_assets = 0usize;
@@ -125,7 +132,9 @@ fn aggregate_status(root: Option<&Path>, city: &'static CityEntry) -> srtm_focus
     for &zoom in PRECOMPUTE_ZOOMS {
         let radius =
             srtm_focus_cache::bucket_radius_for_target_radius_miles(zoom, PRECOMPUTE_RADIUS_MILES);
-        if let Some(status) = srtm_focus_cache::focus_contour_region_status(root, city.location, zoom, radius) {
+        if let Some(status) =
+            srtm_focus_cache::focus_contour_region_status(root, city.location, zoom, radius)
+        {
             ready_assets += status.ready_assets;
             pending_assets += status.pending_assets;
             total_assets += status.total_assets;

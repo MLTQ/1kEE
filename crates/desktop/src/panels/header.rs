@@ -39,9 +39,13 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
                     }
                 }
 
-                if let Some(event) = model.selected_event() {
+                if ui.button("Terrain Library").clicked() {
+                    model.terrain_library_open = true;
+                }
+
+                if model.terrain_focus_location().is_some() {
                     ui.separator();
-                    ui.label(format!("Focus: {}", event.location_name));
+                    ui.label(format!("Focus: {}", model.terrain_focus_location_name()));
                 }
 
                 ui.separator();

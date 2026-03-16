@@ -388,7 +388,7 @@ impl AppModel {
     }
 
     pub fn select_event(&mut self, event_id: &str) {
-        if self.selected_event_id.as_deref() == Some(event_id) {
+        if self.selected_event_id.as_deref() == Some(event_id) && self.focused_city_id.is_none() {
             return;
         }
 
@@ -418,7 +418,10 @@ impl AppModel {
 
         self.focused_city_id = Some(city.id.to_owned());
         self.globe_view.focus_on(city.location);
-        self.push_log(format!("City focus selected: {}, {}", city.name, city.country));
+        self.push_log(format!(
+            "City focus selected: {}, {}",
+            city.name, city.country
+        ));
     }
 
     pub fn clear_city_focus(&mut self) {

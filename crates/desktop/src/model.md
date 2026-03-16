@@ -31,8 +31,8 @@ Defines the shared domain and UI state for the 1kEE desktop demo. This file hold
 - **Interacts with**: `AppModel::nearby_cameras`, `world_map.rs`, `camera_list.rs`
 
 ### `AppModel`
-- **Does**: Owns all shared demo state and handles selection and simulated feed actions
-- **Interacts with**: `app.rs`, every renderer in `panels/`, `TerrainInventory` in `terrain_assets.rs`, `GlobeViewState`, user-selected asset roots
+- **Does**: Owns all shared demo state and handles event selection, manual city focus, terrain-library UI state, and simulated feed actions
+- **Interacts with**: `app.rs`, every renderer in `panels/`, `TerrainInventory` in `terrain_assets.rs`, `GlobeViewState`, `city_catalog.rs`, user-selected asset roots
 - **Rationale**: Keeps the current scaffold simple while preserving a clear seam for future background workers
 
 ### `haversine_km`
@@ -49,9 +49,11 @@ Defines the shared domain and UI state for the 1kEE desktop demo. This file hold
 | `header.rs` | `terrain_inventory` is available for top-level dataset status | Removing or relocating terrain status state |
 | `world_map/camera.rs` | `globe_view` is available for persistent camera interaction | Removing or relocating globe state without replacing the contract |
 | `header.rs` | `selected_root` can be updated from the UI to re-resolve terrain assets | Removing or relocating root-selection state without replacing the contract |
+| `terrain_library.rs` | City focus, search text, and selected city ids live here and can be mutated from UI actions | Removing or relocating terrain-library state without replacing the contract |
 
 ## Notes
 - This is still a single-threaded demo model.
 - Real event and camera ingest should eventually populate this state through dedicated adapter layers instead of `seed_demo`.
 - Terrain inventory is deliberately lightweight and should eventually point at preprocessed runtime assets, not raw source rasters.
 - The seeded default focus now starts in San Francisco so the local terrain renderer can be tuned against steeper urban relief.
+- Manual city focus now coexists with the event demo: selecting a city re-centers terrain without destroying the seeded event list, and selecting an event clears the manual city focus again.

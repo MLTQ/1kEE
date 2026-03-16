@@ -2,3 +2,13 @@
 /Derived
 /.beads/*.db-shm
 /.beads/*.db-wal
+
+*.tif
+
+*.prj
+
+data/natural_earth/
+
+data/srtm_gl1/
+
+data/GEBCO/

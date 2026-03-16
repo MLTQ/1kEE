@@ -29,7 +29,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 
     let layout = layout(rect);
     let Some(focus) = model.terrain_focus_location() else {
-        draw_empty_state(painter, rect, "No event selected");
+        draw_empty_state(painter, rect, "No terrain focus selected");
         return GlobeScene {
             event_markers: Vec::new(),
             camera_markers: Vec::new(),

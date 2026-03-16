@@ -66,6 +66,19 @@ pub fn contour_interval_for_zoom(zoom: f32) -> i32 {
     spec_for_zoom(zoom).interval_m
 }
 
+pub fn bucket_radius_for_target_radius_miles(zoom: f32, radius_miles: f32) -> i32 {
+    let half_extent_deg = half_extent_for_zoom(zoom);
+    let half_extent_km = half_extent_deg * 111.32;
+    let bucket_step_km = half_extent_deg * 0.45 * 111.32;
+    let target_km = radius_miles * 1.609_34;
+
+    if target_km <= half_extent_km {
+        0
+    } else {
+        (((target_km - half_extent_km) / bucket_step_km).ceil() as i32).clamp(0, 8)
+    }
+}
+
 pub fn ensure_focus_contour_region(
     selected_root: Option<&Path>,
     focus: GeoPoint,

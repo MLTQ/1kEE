@@ -2,12 +2,12 @@ mod camera;
 mod contour_asset;
 mod globe_scene;
 mod local_terrain_scene;
-mod srtm_focus_cache;
+pub(crate) mod srtm_focus_cache;
 mod srtm_stream;
 mod terrain_field;
 mod terrain_raster;
 
-use crate::model::{AppModel, EventSeverity};
+use crate::model::AppModel;
 use crate::theme;
 
 pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
