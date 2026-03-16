@@ -1,0 +1,4 @@
+/target
+/Derived
+/.beads/*.db-shm
+/.beads/*.db-wal

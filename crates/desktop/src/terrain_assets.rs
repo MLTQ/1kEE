@@ -1,0 +1,258 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
+pub struct TerrainInventory {
+    pub gebco_topography_tiles: usize,
+    pub gebco_tid_tiles: usize,
+    pub natural_earth_relief: bool,
+    pub srtm_tiles: usize,
+    pub runtime_height_preview: bool,
+    pub runtime_contours_200m: bool,
+    pub runtime_contours_500m: bool,
+    pub primary_runtime_source: &'static str,
+}
+
+impl TerrainInventory {
+    pub fn detect_from(selected_root: Option<&Path>) -> Self {
+        let data_root = find_data_root(selected_root).unwrap_or_else(|| PathBuf::from("data"));
+        let derived_root =
+            find_derived_root(selected_root).unwrap_or_else(|| PathBuf::from("Derived"));
+        let srtm_root = find_srtm_root(selected_root);
+        let gebco_topography_tiles = count_tifs(
+            data_root.join("GEBCO/gebco_2025_sub_ice_topo_geotiff"),
+            "gebco_2025_sub_ice_",
+        );
+        let gebco_tid_tiles = count_tifs(
+            data_root.join("GEBCO/gebco_2025_tid_geotiff"),
+            "gebco_2025_tid_",
+        );
+        let natural_earth_relief = data_root
+            .join("natural_earth/GRAY_HR_SR_OB_DR/GRAY_HR_SR_OB_DR.tif")
+            .exists();
+        let srtm_tiles = srtm_root
+            .as_ref()
+            .map(|root| count_tifs(root.clone(), ""))
+            .unwrap_or_default();
+        let runtime_height_preview = derived_root
+            .join("terrain/gebco_2025_preview_4096.png")
+            .exists();
+        let runtime_contours_200m = derived_root
+            .join("terrain/gebco_2025_contours_200m.gpkg")
+            .exists();
+        let runtime_contours_500m = derived_root
+            .join("terrain/gebco_2025_contours_500m.gpkg")
+            .exists();
+
+        let primary_runtime_source = if srtm_tiles > 0 {
+            "SRTM streamed land tiles + GEBCO global fallback"
+        } else if runtime_height_preview {
+            "GEBCO runtime preview asset"
+        } else if runtime_contours_200m || runtime_contours_500m {
+            "GEBCO runtime contours"
+        } else if gebco_topography_tiles > 0 {
+            "GEBCO global terrain"
+        } else if natural_earth_relief {
+            "Natural Earth raster relief"
+        } else {
+            "No terrain assets detected"
+        };
+
+        Self {
+            gebco_topography_tiles,
+            gebco_tid_tiles,
+            natural_earth_relief,
+            srtm_tiles,
+            runtime_height_preview,
+            runtime_contours_200m,
+            runtime_contours_500m,
+            primary_runtime_source,
+        }
+    }
+
+    pub fn status_label(&self) -> &'static str {
+        if self.runtime_height_preview || self.srtm_tiles > 0 {
+            "ready"
+        } else if self.gebco_topography_tiles > 0
+            || self.natural_earth_relief
+            || self.runtime_contours_200m
+            || self.runtime_contours_500m
+        {
+            "partial"
+        } else {
+            "missing"
+        }
+    }
+
+    pub fn status_summary(&self) -> String {
+        format!(
+            "GEBCO topo {} tiles | TID {} tiles | Natural Earth relief {} | SRTM {} tiles | Runtime height {} | 200m contours {} | 500m contours {}",
+            self.gebco_topography_tiles,
+            self.gebco_tid_tiles,
+            yes_no(self.natural_earth_relief),
+            self.srtm_tiles,
+            yes_no(self.runtime_height_preview),
+            yes_no(self.runtime_contours_200m),
+            yes_no(self.runtime_contours_500m)
+        )
+    }
+
+    pub fn status_lines(&self) -> Vec<String> {
+        let mut lines = vec![format!(
+            "Terrain assets detected: {}",
+            self.status_summary()
+        )];
+        lines.push(format!(
+            "Preferred runtime source: {}",
+            self.primary_runtime_source
+        ));
+
+        if self.srtm_tiles > 0 {
+            lines.push(format!(
+                "SRTM mirror detected ({} tiles) and should be streamed lazily from disk rather than preloaded.",
+                self.srtm_tiles
+            ));
+        }
+
+        lines
+    }
+}
+
+pub fn find_data_root(selected_root: Option<&Path>) -> Option<PathBuf> {
+    find_named_root(selected_root, &["Data", "data"])
+}
+
+pub fn find_derived_root(selected_root: Option<&Path>) -> Option<PathBuf> {
+    find_named_root(selected_root, &["Derived", "derived"])
+}
+
+pub fn find_srtm_root(selected_root: Option<&Path>) -> Option<PathBuf> {
+    if let Some(root) = selected_root {
+        if let Some(candidate) = find_srtm_root_from(root) {
+            return Some(candidate);
+        }
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(candidate) = find_srtm_root_from(&cwd) {
+            return Some(candidate);
+        }
+    }
+
+    [
+        PathBuf::from("/Volumes/Hilbert/Data/srtm_gl1/SRTM_GL1_srtm"),
+        PathBuf::from("/Volumes/Hilbert/Data/srtm_gl1"),
+    ]
+    .into_iter()
+    .find_map(|candidate| normalize_srtm_root(candidate.as_path()))
+}
+
+fn find_named_root(selected_root: Option<&Path>, names: &[&str]) -> Option<PathBuf> {
+    if let Some(root) = selected_root {
+        if root.exists() {
+            if let Some(name) = root.file_name().and_then(|name| name.to_str()) {
+                if names.iter().any(|candidate| candidate == &name) {
+                    return Some(root.to_path_buf());
+                }
+            }
+
+            if let Some(candidate) = names
+                .iter()
+                .map(|name| root.join(name))
+                .find(|candidate| candidate.exists())
+            {
+                return Some(candidate);
+            }
+
+            if let Some(candidate) = root.ancestors().find_map(|ancestor| {
+                names
+                    .iter()
+                    .map(|name| ancestor.join(name))
+                    .find(|candidate| candidate.exists())
+            }) {
+                return Some(candidate);
+            }
+        }
+    }
+
+    let cwd = std::env::current_dir().ok()?;
+    cwd.ancestors()
+        .find_map(|ancestor| {
+            names
+                .iter()
+                .map(|name| ancestor.join(name))
+                .find(|candidate| candidate.exists())
+        })
+        .or_else(|| {
+            workspace_root().and_then(|root| {
+                names
+                    .iter()
+                    .map(|name| root.join(name))
+                    .find(|candidate| candidate.exists())
+            })
+        })
+}
+
+fn find_srtm_root_from(root: &Path) -> Option<PathBuf> {
+    if let Some(candidate) = normalize_srtm_root(root) {
+        return Some(candidate);
+    }
+
+    root.ancestors().find_map(|ancestor| {
+        [
+            ancestor.join("srtm_gl1"),
+            ancestor.join("SRTM_GL1_srtm"),
+            ancestor.join("data").join("srtm_gl1"),
+            ancestor.join("Data").join("srtm_gl1"),
+        ]
+        .into_iter()
+        .find_map(|candidate| normalize_srtm_root(candidate.as_path()))
+    })
+}
+
+fn normalize_srtm_root(path: &Path) -> Option<PathBuf> {
+    if !path.exists() {
+        return None;
+    }
+
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "SRTM_GL1_srtm")
+    {
+        return Some(path.to_path_buf());
+    }
+
+    let nested = path.join("SRTM_GL1_srtm");
+    nested.exists().then_some(nested)
+}
+
+fn workspace_root() -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir.ancestors().nth(2).map(Path::to_path_buf)
+}
+
+fn count_tifs(root: PathBuf, prefix: &str) -> usize {
+    fs::read_dir(root)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(Result::ok))
+        .filter(|entry| is_matching_tif(entry.path(), prefix))
+        .count()
+}
+
+fn is_matching_tif(path: PathBuf, prefix: &str) -> bool {
+    let extension_ok = path.extension().and_then(|ext| ext.to_str()) == Some("tif");
+    let prefix_ok = if prefix.is_empty() {
+        true
+    } else {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(prefix))
+    };
+
+    extension_ok && prefix_ok
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
