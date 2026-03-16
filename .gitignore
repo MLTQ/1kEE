@@ -12,3 +12,7 @@ data/natural_earth/
 data/srtm_gl1/
 
 data/GEBCO/
+
+data/
+
+.DS_Store

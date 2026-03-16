@@ -30,5 +30,5 @@ Manages background city-oriented terrain precompute jobs on top of the existing 
 | `terrain_library.rs` | `snapshots` returns stable per-city progress counts and states | Changing field meanings or progress semantics |
 
 ## Notes
-- Precompute currently targets a fixed `25 mi` city radius across a shared local zoom ladder.
+- Precompute currently targets a fixed `25 mi` city radius across a shared local zoom ladder, using city rows resolved from the local GeoNames-derived catalog.
 - Jobs are intentionally additive with lazy loading: precomputed buckets simply become instantly reusable at runtime.

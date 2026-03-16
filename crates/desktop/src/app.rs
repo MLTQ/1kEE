@@ -16,6 +16,12 @@ impl DashboardApp {
     }
 }
 
+impl Drop for DashboardApp {
+    fn drop(&mut self) {
+        panels::world_map::srtm_focus_cache::terminate_active_gdal_jobs();
+    }
+}
+
 impl eframe::App for DashboardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         panels::render_header(ctx, &mut self.model);

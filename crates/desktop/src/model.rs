@@ -337,7 +337,7 @@ impl AppModel {
         self.events.iter().find(|event| event.id == selected_id)
     }
 
-    pub fn focused_city(&self) -> Option<&'static city_catalog::CityEntry> {
+    pub fn focused_city(&self) -> Option<city_catalog::CityEntry> {
         city_catalog::by_id(self.focused_city_id.as_deref()?)
     }
 

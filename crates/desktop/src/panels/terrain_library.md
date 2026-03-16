@@ -22,4 +22,4 @@ Renders the searchable city precompute and terrain-focus window. This file exist
 
 ## Notes
 - The visual model is intentionally close to a lightweight downloads manager rather than a settings form.
-- This first pass uses a bundled city catalog and additive precompute queue; the lazy terrain stream still handles anything not prewarmed.
+- The first pass now queries a local GeoNames-derived SQLite catalog and uses an additive precompute queue; the lazy terrain stream still handles anything not prewarmed.

@@ -31,8 +31,8 @@ Builds and caches local SRTM contour assets for the currently focused event usin
 
 ### GDAL command helpers
 - **Does**: Crop the needed SRTM tile subset into a local raster and run `gdal_contour` against it
-- **Interacts with**: local SRTM GeoTIFF tiles, `gdalwarp`, `gdal_contour`
-- **Rationale**: Uses the same validated source tooling that successfully reads the external SRTM mirror on this machine
+- **Interacts with**: local SRTM GeoTIFF tiles, `gdalwarp`, `gdal_contour`, app teardown in `app.rs`
+- **Rationale**: Uses the same validated source tooling that successfully reads the external SRTM mirror on this machine while still letting the desktop app cancel work cleanly during shutdown
 
 ## Contracts
 
@@ -48,5 +48,6 @@ Builds and caches local SRTM contour assets for the currently focused event usin
 - The zoom ladder is intentionally denser in local terrain mode than it was initially, so analysts can continue zooming through multiple contour extents instead of landing on one fixed terrain scene.
 - Incomplete `.tmp.gpkg` and SQLite sidecar files are treated as stale failed builds after a short age threshold and are cleaned automatically before the next retry, which lets the cache recover from disk-full interruptions.
 - GDAL subprocesses now have a bounded timeout so a wedged export does not leave a bucket pending forever.
+- App shutdown now flips the cache module into a shutdown state, stops new bucket builds from spawning, and terminates any tracked GDAL child processes so closing the app does not leave orphaned contour jobs behind.
 - Feature budgets are intentionally capped per zoom bucket because the close-focus renderer now magnifies these contours substantially; oversupplying vectors just adds lag.
 - Region generation uses overlapping bucket centers so local panning can stitch neighboring contour windows together without visible hard resets.

@@ -32,7 +32,7 @@ struct PrecomputeManager {
     jobs: Vec<PrecomputeJob>,
 }
 
-pub fn queue_city(root: Option<&Path>, city: &'static CityEntry) {
+pub fn queue_city(root: Option<&Path>, city: &CityEntry) {
     let mut guard = manager().lock().expect("precompute manager lock");
     let root = root.map(Path::to_path_buf);
     if guard
@@ -57,10 +57,11 @@ pub fn tick(root: Option<&Path>) {
             continue;
         }
 
-        let city = city_catalog::by_id(&job.city_id)
-            .unwrap_or_else(|| panic!("unknown city id queued for precompute: {}", job.city_id));
+        let Some(city) = city_catalog::by_id(&job.city_id) else {
+            continue;
+        };
         let effective_root = job.root.as_deref().or(root);
-        let status = aggregate_status(effective_root, city);
+        let status = aggregate_status(effective_root, &city);
 
         if status.total_assets > 0 && status.ready_assets >= status.total_assets {
             job.state = PrecomputeJobState::Completed;
@@ -96,7 +97,7 @@ pub fn snapshots(root: Option<&Path>) -> Vec<PrecomputeJobSnapshot> {
         .filter_map(|job| {
             let city = city_catalog::by_id(&job.city_id)?;
             let effective_root = job.root.as_deref().or(root);
-            let status = aggregate_status(effective_root, city);
+            let status = aggregate_status(effective_root, &city);
             Some(PrecomputeJobSnapshot {
                 city_label: format!("{}, {}", city.name, city.country),
                 ready_assets: status.ready_assets,
@@ -123,7 +124,7 @@ pub fn has_active_jobs(root: Option<&Path>) -> bool {
 
 fn aggregate_status(
     root: Option<&Path>,
-    city: &'static CityEntry,
+    city: &CityEntry,
 ) -> srtm_focus_cache::FocusContourRegionStatus {
     let mut ready_assets = 0usize;
     let mut pending_assets = 0usize;

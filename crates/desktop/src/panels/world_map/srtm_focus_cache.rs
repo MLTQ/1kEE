@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -150,6 +151,32 @@ pub fn focus_contour_region_status(
     })
 }
 
+pub fn terminate_active_gdal_jobs() {
+    shutdown_requested().store(true, Ordering::SeqCst);
+
+    let pids = if let Ok(mut guard) = active_children().lock() {
+        let pids = guard.iter().copied().collect::<Vec<_>>();
+        guard.clear();
+        pids
+    } else {
+        Vec::new()
+    };
+
+    for pid in &pids {
+        let _ = Command::new("/bin/kill")
+            .args(["-TERM", &pid.to_string()])
+            .status();
+    }
+
+    std::thread::sleep(Duration::from_millis(150));
+
+    for pid in &pids {
+        let _ = Command::new("/bin/kill")
+            .args(["-KILL", &pid.to_string()])
+            .status();
+    }
+}
+
 fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
     if zoom < 1.0 {
         FocusContourSpec {
@@ -236,6 +263,10 @@ fn ensure_bucket_asset(
     lon_bucket: i32,
     bucket_step: f32,
 ) -> Option<FocusContourAsset> {
+    if shutdown_requested().load(Ordering::Relaxed) {
+        return None;
+    }
+
     let bucket_center = GeoPoint {
         lat: (lat_bucket as f32 * bucket_step).clamp(-89.999, 89.999),
         lon: lon_bucket as f32 * bucket_step,
@@ -301,6 +332,10 @@ fn build_focus_contours(
     bounds: GeoBounds,
     spec: FocusContourSpec,
 ) -> Option<()> {
+    if shutdown_requested().load(Ordering::Relaxed) {
+        return None;
+    }
+
     cleanup_transient_artifacts(tif_path, gpkg_path);
     let tiles = tile_paths_for_bounds(srtm_root, bounds);
     if tiles.is_empty() {
@@ -315,6 +350,10 @@ fn build_focus_contours(
         let _ = fs::remove_file(&tmp_tif_path);
         run_gdalwarp(&tiles, &tmp_tif_path, bounds, spec).ok()?;
         fs::rename(&tmp_tif_path, tif_path).ok()?;
+    }
+
+    if shutdown_requested().load(Ordering::Relaxed) {
+        return None;
     }
 
     if gpkg_path.exists() {
@@ -423,11 +462,25 @@ fn gdal_tool_path(tool: &str) -> PathBuf {
 }
 
 fn run_command(mut command: Command, label: &str) -> std::io::Result<()> {
+    if shutdown_requested().load(Ordering::Relaxed) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            format!("{label} cancelled during shutdown"),
+        ));
+    }
+
     let mut child = command.spawn()?;
+    let pid = child.id();
+    if let Ok(mut guard) = active_children().lock() {
+        guard.insert(pid);
+    }
     let started = Instant::now();
 
     loop {
         if let Some(status) = child.try_wait()? {
+            if let Ok(mut guard) = active_children().lock() {
+                guard.remove(&pid);
+            }
             return if status.success() {
                 Ok(())
             } else {
@@ -437,9 +490,24 @@ fn run_command(mut command: Command, label: &str) -> std::io::Result<()> {
             };
         }
 
+        if shutdown_requested().load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            if let Ok(mut guard) = active_children().lock() {
+                guard.remove(&pid);
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                format!("{label} cancelled during shutdown"),
+            ));
+        }
+
         if started.elapsed() >= BUILD_TIMEOUT {
             let _ = child.kill();
             let _ = child.wait();
+            if let Ok(mut guard) = active_children().lock() {
+                guard.remove(&pid);
+            }
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 format!("{label} timed out after {:?}", BUILD_TIMEOUT),
@@ -517,6 +585,16 @@ fn shm_path_for(path: &Path) -> PathBuf {
 fn pending_set() -> &'static Mutex<HashSet<PathBuf>> {
     static PENDING: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
     PENDING.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn active_children() -> &'static Mutex<HashSet<u32>> {
+    static ACTIVE: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+    ACTIVE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn shutdown_requested() -> &'static AtomicBool {
+    static SHUTDOWN: OnceLock<AtomicBool> = OnceLock::new();
+    SHUTDOWN.get_or_init(|| AtomicBool::new(false))
 }
 
 fn is_pending(path: &Path) -> bool {

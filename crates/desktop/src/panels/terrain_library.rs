@@ -63,7 +63,7 @@ pub fn render_terrain_library(ctx: &egui::Context, model: &mut AppModel) {
                 .max_height(280.0)
                 .show(ui, |ui| {
                     for city in city_catalog::search(&model.city_filter, 80) {
-                        let mut checked = model.selected_city_ids.contains(city.id);
+                        let mut checked = model.selected_city_ids.contains(city.id.as_str());
                         egui::Frame::group(ui.style())
                             .fill(egui::Color32::from_rgb(15, 22, 28))
                             .inner_margin(egui::Margin::symmetric(10, 8))
@@ -71,9 +71,9 @@ pub fn render_terrain_library(ctx: &egui::Context, model: &mut AppModel) {
                                 ui.horizontal(|ui| {
                                     if ui.checkbox(&mut checked, "").changed() {
                                         if checked {
-                                            model.selected_city_ids.insert(city.id.to_owned());
+                                            model.selected_city_ids.insert(city.id.clone());
                                         } else {
-                                            model.selected_city_ids.remove(city.id);
+                                            model.selected_city_ids.remove(city.id.as_str());
                                         }
                                     }
 
@@ -89,7 +89,7 @@ pub fn render_terrain_library(ctx: &egui::Context, model: &mut AppModel) {
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
                                             if ui.button("Focus").clicked() {
-                                                model.focus_city(city.id);
+                                                model.focus_city(city.id.as_str());
                                             }
                                         },
                                     );
@@ -104,7 +104,7 @@ pub fn render_terrain_library(ctx: &egui::Context, model: &mut AppModel) {
                     let selected: Vec<_> = model.selected_city_ids.iter().cloned().collect();
                     for city_id in &selected {
                         if let Some(city) = city_catalog::by_id(city_id) {
-                            terrain_precompute::queue_city(model.selected_root.as_deref(), city);
+                            terrain_precompute::queue_city(model.selected_root.as_deref(), &city);
                         }
                     }
                     if !selected.is_empty() {
