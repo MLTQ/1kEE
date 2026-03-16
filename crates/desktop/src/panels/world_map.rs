@@ -45,10 +45,21 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         let rect = response.rect;
 
         camera::apply_interaction(ui.ctx(), &response, &mut model.globe_view);
+        let transition_progress = local_terrain_scene::transition_progress(model.globe_view.zoom);
         let scene = if local_terrain_mode {
             local_terrain_scene::paint(&painter, rect, model, ui.ctx().input(|input| input.time))
         } else {
-            globe_scene::paint(&painter, rect, model, ui.ctx().input(|input| input.time))
+            let scene =
+                globe_scene::paint(&painter, rect, model, ui.ctx().input(|input| input.time));
+            if transition_progress > 0.0 {
+                local_terrain_scene::paint_transition_overlay(
+                    &painter,
+                    rect,
+                    model,
+                    transition_progress,
+                );
+            }
+            scene
         };
 
         if model.terrain_focus_location().is_some() {

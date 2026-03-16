@@ -25,6 +25,10 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
                 metric_chip(ui, "Events", &model.events.len().to_string());
                 metric_chip(ui, "Cameras", &model.cameras.len().to_string());
 
+                if ui.button("Factal API").clicked() {
+                    model.factal_settings_open = true;
+                }
+
                 if ui.button("Pick Data Root").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
                         .set_directory(

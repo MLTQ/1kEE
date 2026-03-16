@@ -1,4 +1,5 @@
 use crate::city_catalog;
+use crate::settings_store;
 use crate::terrain_assets::{self, TerrainInventory};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -148,6 +149,8 @@ pub struct AppModel {
     pub globe_view: GlobeViewState,
     pub focused_city_id: Option<String>,
     pub selected_root: Option<PathBuf>,
+    pub factal_settings_open: bool,
+    pub factal_api_key: String,
     pub terrain_library_open: bool,
     pub city_filter: String,
     pub selected_city_ids: BTreeSet<String>,
@@ -161,6 +164,7 @@ impl AppModel {
     pub fn seed_demo() -> Self {
         let selected_root = std::env::current_dir().ok();
         let terrain_inventory = TerrainInventory::detect_from(selected_root.as_deref());
+        let factal_api_key = settings_store::load_factal_api_key().unwrap_or_default();
 
         let events = vec![
             EventRecord {
@@ -296,18 +300,28 @@ impl AppModel {
             }),
             focused_city_id: None,
             selected_root,
+            factal_settings_open: false,
+            factal_api_key: factal_api_key.clone(),
             terrain_library_open: false,
             city_filter: String::new(),
             selected_city_ids: BTreeSet::new(),
             activity_log: {
                 let mut lines = vec![
-                    "Factal demo stream connected to placeholder source.".into(),
+                    if factal_api_key.is_empty() {
+                        "Factal stream is in demo mode until an API key is configured.".into()
+                    } else {
+                        "Factal API key loaded from local settings; live polling is ready.".into()
+                    },
                     "Camera registry loaded from mock public-feed catalog.".into(),
                 ];
                 lines.extend(terrain_inventory.status_lines());
                 lines
             },
-            factal_stream_status: "connected".into(),
+            factal_stream_status: if factal_api_key.is_empty() {
+                "demo".into()
+            } else {
+                "configured".into()
+            },
             camera_registry_status: "loaded".into(),
             terrain_inventory,
         };
@@ -317,6 +331,10 @@ impl AppModel {
         }
 
         model
+    }
+
+    pub fn has_factal_api_key(&self) -> bool {
+        !self.factal_api_key.trim().is_empty()
     }
 
     pub fn set_selected_root(&mut self, root: PathBuf) {
@@ -428,6 +446,29 @@ impl AppModel {
                 self.globe_view.focus_on(event.location);
             }
         }
+    }
+
+    pub fn replace_factal_events(&mut self, events: Vec<EventRecord>) {
+        let previous_selected = self.selected_event_id.clone();
+        self.events = events;
+
+        if self.events.is_empty() {
+            self.selected_event_id = None;
+            self.selected_camera_id = None;
+            return;
+        }
+
+        let retained_selection = previous_selected
+            .as_deref()
+            .filter(|selected_id| self.events.iter().any(|event| event.id == *selected_id))
+            .map(str::to_owned);
+
+        self.selected_event_id =
+            retained_selection.or_else(|| self.events.first().map(|event| event.id.clone()));
+        self.selected_camera_id = self
+            .nearby_cameras(250.0)
+            .first()
+            .map(|camera| camera.id.clone());
     }
 
     pub fn select_camera(&mut self, camera_id: &str) {

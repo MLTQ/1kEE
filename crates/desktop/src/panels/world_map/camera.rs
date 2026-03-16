@@ -1,7 +1,6 @@
 use crate::model::GlobeViewState;
 
 use super::local_terrain_scene;
-use super::srtm_focus_cache;
 
 pub struct GlobeLod {
     pub lat_line_step: usize,
@@ -43,7 +42,7 @@ pub fn apply_interaction(
     });
 
     if scroll_y.abs() > f32::EPSILON {
-        view.zoom = (view.zoom * (scroll_y * 0.0055).exp()).clamp(0.6, 12.0);
+        view.zoom = (view.zoom * (scroll_y * 0.0055).exp()).clamp(0.6, 20.0);
         view.auto_spin = false;
     }
 
@@ -55,7 +54,7 @@ pub fn apply_interaction(
 
 fn pan_local_center(rect: egui::Rect, view: &mut GlobeViewState, delta: egui::Vec2) {
     let render_zoom = local_terrain_scene::local_render_zoom(view.zoom);
-    let half_extent_deg = srtm_focus_cache::half_extent_for_zoom(render_zoom);
+    let half_extent_deg = local_terrain_scene::visual_half_extent_for_zoom(render_zoom);
     let km_per_deg_lat = 111.32f32;
     let km_per_deg_lon = km_per_deg_lat * view.local_center.lat.to_radians().cos().abs().max(0.2);
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);

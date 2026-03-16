@@ -1,7 +1,9 @@
 mod app;
 mod city_catalog;
+mod factal_stream;
 mod model;
 mod panels;
+mod settings_store;
 mod terrain_assets;
 mod terrain_precompute;
 mod theme;

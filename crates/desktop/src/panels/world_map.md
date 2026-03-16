@@ -25,6 +25,7 @@ Implements the main geographic canvas for the demo. The current version wraps an
 ## Notes
 - The panel now uses a persistent 3D camera and zoom-dependent LOD.
 - The terrain path now prefers streamed SRTM land tiles, and contour overlays are generated into a shared SQLite-backed GDAL focus cache off the UI thread instead of one file per streamed bucket.
+- The globe now has a zoom overlap band where local terrain fades/scales in before the full local scene takes over, which makes the globe-to-local handoff much less abrupt.
 - At high zoom the panel now hands off from the globe renderer to a dedicated selected-event local terrain scene with a fixed oblique camera.
 - At high zoom the panel can also follow a manual city focus from the terrain library, which is useful for terrain inspection and precompute validation away from the seeded event list.
 - In local terrain mode, plain drag now pans the streamed viewport and `Ctrl`/`Shift` drag rotates the terrain camera independently from the globe orbit state.

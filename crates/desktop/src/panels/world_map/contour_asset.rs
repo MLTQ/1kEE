@@ -93,7 +93,10 @@ pub fn load_srtm_region_for_view(
         root: selected_root.map(Path::to_path_buf),
         anchor_lat_bucket: (scene_anchor.lat * 20.0).round() as i32,
         anchor_lon_bucket: (scene_anchor.lon * 20.0).round() as i32,
-        zoom_bucket: (zoom * 10.0).round() as i32,
+        zoom_bucket: assets
+            .first()
+            .map(|asset| asset.zoom_bucket)
+            .unwrap_or_default(),
     };
 
     if guard.scene_key.as_ref() != Some(&scene_key) {

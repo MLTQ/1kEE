@@ -49,6 +49,7 @@ Provides the globe renderer with local contour overlays around the selected focu
 - SRTM-generated contours are intentionally local and zoom-dependent; they are not meant to cover the whole visible globe.
 - The SRTM contour path is now asynchronous at generation time: the first frame for a new focus/zoom bucket may show no contours until the cache file is built.
 - The local-scene SRTM loader retains previously visited bucket keys per selected-event scene, so panning expands the streamed map instead of replacing it every time the viewport center moves.
+- Scene retention is now keyed to the actual contour-cache zoom bucket instead of raw fractional zoom, which avoids unnecessary resets while the analyst is still within the same underlying terrain LOD band.
 - The shared SQLite cache means all visited tiles live in one indexable file, which is a much better stepping stone toward global terrain streaming than the old directory of tiny GeoPackages.
 - The GEBCO loader stays on `500 m` contours until closer zoom, then switches to `200 m` for fallback detail.
 - Query extent, feature cap, clipping, and point simplification all tighten as zoom increases to keep interaction responsive.

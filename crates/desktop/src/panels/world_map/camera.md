@@ -26,7 +26,8 @@ Handles direct globe interaction and chooses level-of-detail settings from the c
 | `globe_scene.rs` | `lod` returns stable semantic density settings | Renaming/removing `GlobeLod` fields |
 
 ## Notes
-- Zoom now spans both globe navigation and a broader local-terrain range, so wheel input continues to tighten or widen the event terrain scene instead of freezing once local mode is active.
+- Zoom now spans globe navigation, a globe-to-local overlap band, and a broader local-terrain range up to `20x`, so wheel input continues to tighten or widen terrain detail instead of freezing once local mode is active.
+- In local terrain mode, wheel zoom now changes the visible terrain span continuously even when the underlying contour cache stays on the same LOD bucket for a while.
 - High zoom intentionally reduces global latitude/longitude line density so real terrain contours can dominate the scene.
 - Local terrain mode uses its own yaw/pitch pair so analysts can rotate the contour stack without disturbing the globe camera.
 - Local terrain mode also maintains its own viewport center, which is updated by plain drag using the current terrain half-extent so contour cache requests can stream across the wider region at any local zoom level.

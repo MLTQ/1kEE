@@ -5,8 +5,10 @@ use crate::theme;
 use super::contour_asset;
 use super::globe_scene::GlobeScene;
 use super::srtm_focus_cache;
+use super::srtm_stream;
 
-pub const LOCAL_MODE_MIN_ZOOM: f32 = 3.0;
+pub const LOCAL_TRANSITION_START_ZOOM: f32 = 2.2;
+pub const LOCAL_MODE_MIN_ZOOM: f32 = 4.0;
 const LOCAL_STREAM_RADIUS: i32 = 2;
 
 struct LocalLayout {
@@ -66,6 +68,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             viewport_center,
             render_zoom,
             contours,
+            1.0,
         );
         let (event_markers, camera_markers) = if let Some(event) = model.selected_event() {
             draw_markers(
@@ -110,14 +113,84 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     }
 }
 
+pub fn paint_transition_overlay(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    model: &AppModel,
+    progress: f32,
+) {
+    if progress <= 0.0 {
+        return;
+    }
+
+    let Some(focus) = model.terrain_focus_location() else {
+        return;
+    };
+
+    let viewport_center = model.globe_view.local_center;
+    let render_zoom = local_render_zoom(model.globe_view.zoom);
+    let Some(contours) = contour_asset::load_srtm_region_for_view(
+        model.selected_root.as_deref(),
+        focus,
+        viewport_center,
+        render_zoom,
+        LOCAL_STREAM_RADIUS,
+    ) else {
+        return;
+    };
+
+    let layout = transition_layout(rect, progress);
+    draw_contour_stack(
+        painter,
+        &layout,
+        &model.globe_view,
+        viewport_center,
+        render_zoom,
+        contours.as_ref(),
+        progress,
+    );
+}
+
 pub fn is_active(model: &AppModel) -> bool {
     model.globe_view.zoom >= LOCAL_MODE_MIN_ZOOM
         && model.terrain_focus_location().is_some()
         && terrain_assets::find_srtm_root(model.selected_root.as_deref()).is_some()
 }
 
+pub fn transition_progress(zoom: f32) -> f32 {
+    ((zoom - LOCAL_TRANSITION_START_ZOOM) / (LOCAL_MODE_MIN_ZOOM - LOCAL_TRANSITION_START_ZOOM))
+        .clamp(0.0, 1.0)
+}
+
 pub fn local_render_zoom(view_zoom: f32) -> f32 {
-    view_zoom.clamp(LOCAL_MODE_MIN_ZOOM, 12.0)
+    view_zoom.clamp(LOCAL_TRANSITION_START_ZOOM, 20.0)
+}
+
+pub fn visual_half_extent_for_zoom(view_zoom: f32) -> f32 {
+    const KNOTS: &[(f32, f32)] = &[
+        (LOCAL_TRANSITION_START_ZOOM, 1.55),
+        (3.0, 1.35),
+        (4.5, 0.95),
+        (6.5, 0.58),
+        (9.5, 0.31),
+        (12.0, 0.17),
+        (16.0, 0.09),
+        (20.0, 0.045),
+    ];
+
+    let zoom = view_zoom.clamp(LOCAL_TRANSITION_START_ZOOM, 20.0);
+    for window in KNOTS.windows(2) {
+        let (start_zoom, start_extent) = window[0];
+        let (end_zoom, end_extent) = window[1];
+        if zoom <= end_zoom {
+            let t = ((zoom - start_zoom) / (end_zoom - start_zoom)).clamp(0.0, 1.0);
+            let start_log = start_extent.ln();
+            let end_log = end_extent.ln();
+            return egui::lerp(start_log..=end_log, t).exp();
+        }
+    }
+
+    KNOTS.last().map(|(_, extent)| *extent).unwrap_or(0.17)
 }
 
 fn layout(rect: egui::Rect) -> LocalLayout {
@@ -132,6 +205,24 @@ fn layout(rect: egui::Rect) -> LocalLayout {
         width,
         height,
         horizontal_scale: rect.width() * 0.31,
+    }
+}
+
+fn transition_layout(rect: egui::Rect, progress: f32) -> LocalLayout {
+    let progress = progress.clamp(0.0, 1.0);
+    let target = layout(rect);
+    let scale = egui::lerp(0.52..=1.0, progress);
+    let vertical_origin = egui::lerp(
+        (rect.center().y + rect.height() * 0.1)..=(target.focus_center.y),
+        progress,
+    );
+
+    LocalLayout {
+        center: target.center,
+        focus_center: egui::pos2(target.focus_center.x, vertical_origin),
+        width: target.width * scale,
+        height: target.height * scale,
+        horizontal_scale: target.horizontal_scale * scale,
     }
 }
 
@@ -165,10 +256,11 @@ fn draw_contour_stack(
     layout: &LocalLayout,
     view: &GlobeViewState,
     focus: GeoPoint,
-    render_zoom: f32,
+    _render_zoom: f32,
     contours: &[contour_asset::ContourPath],
+    alpha: f32,
 ) {
-    let half_extent_deg = srtm_focus_cache::half_extent_for_zoom(render_zoom);
+    let half_extent_deg = visual_half_extent_for_zoom(view.zoom);
     let km_per_deg_lat = 111.32f32;
     let km_per_deg_lon = km_per_deg_lat * focus.lat.to_radians().cos().abs().max(0.2);
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
@@ -201,13 +293,13 @@ fn draw_contour_stack(
 
         let major = (contour.elevation_m.round() as i32).rem_euclid(50) == 0;
         let stroke = egui::Stroke::new(
-            if major { 1.35 } else { 0.7 },
+            if major { 1.35 } else { 0.7 } * (0.72 + alpha * 0.28),
             if major {
                 egui::Color32::from_rgb(244, 123, 61)
             } else {
                 egui::Color32::from_rgb(121, 212, 236)
             }
-            .gamma_multiply(if major { 1.0 } else { 0.78 }),
+            .gamma_multiply((if major { 1.0 } else { 0.78 }) * alpha),
         );
 
         painter.add(egui::Shape::line(points, stroke));
@@ -219,14 +311,14 @@ fn draw_markers(
     layout: &LocalLayout,
     view: &GlobeViewState,
     viewport_center: GeoPoint,
-    render_zoom: f32,
+    _render_zoom: f32,
     event: &EventRecord,
     nearby: &[NearbyCamera],
     selected_event_id: Option<&str>,
     selected_camera_id: Option<&str>,
     time: f64,
 ) -> (Vec<(String, egui::Pos2)>, Vec<(String, egui::Pos2)>) {
-    let half_extent_deg = srtm_focus_cache::half_extent_for_zoom(render_zoom);
+    let half_extent_deg = visual_half_extent_for_zoom(view.zoom);
     let km_per_deg_lat = 111.32f32;
     let km_per_deg_lon = km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
@@ -237,7 +329,7 @@ fn draw_markers(
         view,
         viewport_center,
         event.location,
-        24.0,
+        marker_elevation_m(model.selected_root.as_deref(), event.location),
         extent_x_km,
         extent_y_km,
     );
@@ -259,7 +351,7 @@ fn draw_markers(
                 view,
                 viewport_center,
                 camera.location,
-                24.0,
+                marker_elevation_m(model.selected_root.as_deref(), camera.location),
                 extent_x_km,
                 extent_y_km,
             )
@@ -343,7 +435,7 @@ fn draw_camera_marker(painter: &egui::Painter, marker: ProjectedLocalPoint, is_s
 
 fn draw_legend(painter: &egui::Painter, rect: egui::Rect, title: &str, render_zoom: f32) {
     let interval_m = srtm_focus_cache::contour_interval_for_zoom(render_zoom);
-    let half_extent_km = srtm_focus_cache::half_extent_for_zoom(render_zoom) * 111.32;
+    let half_extent_km = visual_half_extent_for_zoom(render_zoom) * 111.32;
     painter.text(
         egui::pos2(rect.left() + 24.0, rect.bottom() - 86.0),
         egui::Align2::LEFT_TOP,
@@ -420,6 +512,11 @@ fn draw_empty_state(painter: &egui::Painter, rect: egui::Rect, label: &str) {
         egui::FontId::proportional(18.0),
         theme::text_muted(),
     );
+}
+
+fn marker_elevation_m(selected_root: Option<&std::path::Path>, point: GeoPoint) -> f32 {
+    let terrain_elevation_m = srtm_stream::sample_elevation_m(selected_root, point).unwrap_or(0.0);
+    terrain_elevation_m + 18.0
 }
 
 fn project_local(
