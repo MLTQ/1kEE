@@ -13,7 +13,7 @@ pub struct ContourPath {
     pub points: Vec<GeoPoint>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq, Eq)]
 struct CacheKey {
     path: PathBuf,
     lat_bucket: i32,
@@ -28,8 +28,8 @@ struct CachedContours {
 
 struct LocalRegionCache {
     scene_key: Option<SceneKey>,
-    entries: HashMap<PathBuf, Arc<Vec<ContourPath>>>,
-    retained_paths: Vec<PathBuf>,
+    entries: HashMap<CacheKey, Arc<Vec<ContourPath>>>,
+    retained_keys: Vec<CacheKey>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -83,7 +83,7 @@ pub fn load_srtm_region_for_view(
         Mutex::new(LocalRegionCache {
             scene_key: None,
             entries: HashMap::new(),
-            retained_paths: Vec::new(),
+            retained_keys: Vec::new(),
         })
     });
     let mut guard = cache.lock().ok()?;
@@ -98,26 +98,47 @@ pub fn load_srtm_region_for_view(
 
     if guard.scene_key.as_ref() != Some(&scene_key) {
         guard.scene_key = Some(scene_key);
-        guard.retained_paths.clear();
+        guard.retained_keys.clear();
+        guard.entries.clear();
     }
 
-    let mut seen = guard.retained_paths.iter().cloned().collect::<HashSet<_>>();
+    let mut seen = guard.retained_keys.iter().cloned().collect::<HashSet<_>>();
     for asset in &assets {
-        if seen.insert(asset.path.clone()) {
-            guard.retained_paths.push(asset.path.clone());
+        let key = CacheKey {
+            path: asset.path.clone(),
+            lat_bucket: asset.lat_bucket,
+            lon_bucket: asset.lon_bucket,
+            zoom_bucket: asset.zoom_bucket,
+        };
+        if seen.insert(key.clone()) {
+            guard.retained_keys.push(key);
         }
     }
 
-    let retained_paths = guard.retained_paths.clone();
+    let retained_keys = guard.retained_keys.clone();
     let mut merged = Vec::new();
-    for path in &retained_paths {
-        let contours = if let Some(cached) = guard.entries.get(path) {
+    for key in &retained_keys {
+        let contours = if let Some(cached) = guard.entries.get(key) {
             Arc::clone(cached)
         } else {
-            let asset = assets.iter().find(|asset| asset.path == *path)?;
-            let contours =
-                Arc::new(query_local_contours(path, asset.simplify_step, per_asset_budget).ok()?);
-            guard.entries.insert(path.clone(), Arc::clone(&contours));
+            let asset = assets.iter().find(|asset| {
+                asset.path == key.path
+                    && asset.zoom_bucket == key.zoom_bucket
+                    && asset.lat_bucket == key.lat_bucket
+                    && asset.lon_bucket == key.lon_bucket
+            })?;
+            let contours = Arc::new(
+                query_local_contours(
+                    &key.path,
+                    key.zoom_bucket,
+                    key.lat_bucket,
+                    key.lon_bucket,
+                    asset.simplify_step,
+                    per_asset_budget,
+                )
+                .ok()?,
+            );
+            guard.entries.insert(key.clone(), Arc::clone(&contours));
             contours
         };
         merged.extend(contours.iter().cloned());
@@ -265,13 +286,20 @@ fn query_gebco_contours(
 
 fn query_local_contours(
     path: &Path,
+    zoom_bucket: i32,
+    lat_bucket: i32,
+    lon_bucket: i32,
     simplify_step: usize,
     feature_budget: usize,
 ) -> rusqlite::Result<Vec<ContourPath>> {
     let connection = Connection::open(path)?;
-    let mut statement = connection
-        .prepare("SELECT geom, elevation_m FROM contour ORDER BY ABS(elevation_m), fid")?;
-    let rows = statement.query_map([], |row| {
+    let mut statement = connection.prepare(
+        "SELECT geom, elevation_m
+         FROM contour_tiles
+         WHERE zoom_bucket = ?1 AND lat_bucket = ?2 AND lon_bucket = ?3
+         ORDER BY ABS(elevation_m), fid",
+    )?;
+    let rows = statement.query_map(params![zoom_bucket, lat_bucket, lon_bucket], |row| {
         let geometry: Vec<u8> = row.get(0)?;
         let elevation_m: f32 = row.get(1)?;
         Ok((geometry, elevation_m))
@@ -507,17 +535,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_gdal_generated_focus_contours() {
-        let path = Path::new("Derived/terrain/srtm_focus_cache/z3_lat259_lon12.gpkg");
+    fn reads_cached_sqlite_focus_contours() {
+        let path = Path::new("Derived/terrain/srtm_focus_cache.sqlite");
         if !path.exists() {
             return;
         }
 
-        let contours =
-            query_local_contours(path, 2, 1_500).expect("should read cached SRTM focus contours");
+        let connection = Connection::open(path).expect("should open shared SRTM cache DB");
+        let tile = connection
+            .query_row(
+                "SELECT zoom_bucket, lat_bucket, lon_bucket
+                 FROM contour_tile_manifest
+                 LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i32>(0)?,
+                        row.get::<_, i32>(1)?,
+                        row.get::<_, i32>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .expect("manifest lookup should succeed");
+        let Some((zoom_bucket, lat_bucket, lon_bucket)) = tile else {
+            return;
+        };
+
+        let contours = query_local_contours(path, zoom_bucket, lat_bucket, lon_bucket, 2, 1_500)
+            .expect("should read cached SRTM focus contours");
         assert!(
             !contours.is_empty(),
-            "expected parsed contours from cached GPKG"
+            "expected parsed contours from shared SQLite cache"
         );
         assert!(
             contours.iter().any(|contour| contour.points.len() >= 2),

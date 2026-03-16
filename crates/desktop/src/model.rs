@@ -359,7 +359,7 @@ impl AppModel {
 
     pub fn terrain_focus_location_name(&self) -> String {
         if let Some(city) = self.focused_city() {
-            format!("{}, {}", city.name, city.country)
+            city.location_label()
         } else if let Some(event) = self.selected_event() {
             event.location_name.clone()
         } else {
@@ -418,10 +418,7 @@ impl AppModel {
 
         self.focused_city_id = Some(city.id.to_owned());
         self.globe_view.focus_on(city.location);
-        self.push_log(format!(
-            "City focus selected: {}, {}",
-            city.name, city.country
-        ));
+        self.push_log(format!("City focus selected: {}", city.location_label()));
     }
 
     pub fn clear_city_focus(&mut self) {

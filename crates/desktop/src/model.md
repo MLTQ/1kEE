@@ -57,3 +57,4 @@ Defines the shared domain and UI state for the 1kEE desktop demo. This file hold
 - Terrain inventory is deliberately lightweight and should eventually point at preprocessed runtime assets, not raw source rasters.
 - The seeded default focus now starts in San Francisco so the local terrain renderer can be tuned against steeper urban relief.
 - Manual city focus now coexists with the event demo: selecting a city re-centers terrain without destroying the seeded event list, and selecting an event clears the manual city focus again.
+- Manual city focus labels now use region-qualified city names when the GeoNames catalog can resolve an admin1/state entry, so repeated place names are less ambiguous in the header, logs, and terrain library.

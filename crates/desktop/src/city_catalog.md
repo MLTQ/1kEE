@@ -6,7 +6,7 @@ Provides a searchable local GeoNames-backed city catalog for terrain focus and c
 ## Components
 
 ### `CityEntry`
-- **Does**: Stores one searchable city record with English display fields, coordinates, population, and alias strings
+- **Does**: Stores one searchable city record with English display fields, optional region/state labels, coordinates, population, and alias strings
 - **Interacts with**: `model.rs`, `terrain_library.rs`, `terrain_precompute.rs`
 
 ### `by_id`
@@ -22,9 +22,11 @@ Provides a searchable local GeoNames-backed city catalog for terrain focus and c
 
 | Dependent | Expects | Breaking changes |
 |-----------|---------|------------------|
-| `terrain_library.rs` | Search results are stable and include display name, country, and coordinates | Removing fields or changing search ordering drastically |
+| `terrain_library.rs` | Search results are stable and include display name, country, optional region, and coordinates | Removing fields or changing search ordering drastically |
 | `model.rs` | `by_id` returns consistent coordinates for manual terrain focus | Renaming ids or changing coordinates without migration |
 
 ## Notes
 - The runtime source is `Derived/geonames/populated_places.sqlite`, which is expected to be built from the downloaded official GeoNames dump.
+- The derived catalog now preserves `admin1_code` so the UI can disambiguate places like `Evergreen, Colorado, United States` versus `Evergreen, Montana, United States`.
+- Region names are currently normalized in-app for U.S. states plus a small set of other English-friendly admin1 mappings; unknown admin1 values fall back to the raw code instead of being dropped.
 - If the derived catalog is missing, search results will be empty rather than falling back to stale bundled literals.

@@ -99,7 +99,7 @@ pub fn snapshots(root: Option<&Path>) -> Vec<PrecomputeJobSnapshot> {
             let effective_root = job.root.as_deref().or(root);
             let status = aggregate_status(effective_root, &city);
             Some(PrecomputeJobSnapshot {
-                city_label: format!("{}, {}", city.name, city.country),
+                city_label: city.location_label(),
                 ready_assets: status.ready_assets,
                 pending_assets: status.pending_assets,
                 total_assets: status.total_assets,

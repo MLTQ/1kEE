@@ -43,7 +43,7 @@ pub fn render_terrain_library(ctx: &egui::Context, model: &mut AppModel) {
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 if let Some(city) = model.focused_city() {
-                    ui.label(format!("Manual focus: {}, {}", city.name, city.country));
+                    ui.label(format!("Manual focus: {}", city.location_label()));
                     if ui.button("Use Event Focus").clicked() {
                         model.clear_city_focus();
                     }
@@ -78,7 +78,7 @@ pub fn render_terrain_library(ctx: &egui::Context, model: &mut AppModel) {
                                     }
 
                                     ui.vertical(|ui| {
-                                        ui.strong(format!("{}, {}", city.name, city.country));
+                                        ui.strong(city.location_label());
                                         ui.small(format!(
                                             "{:.4}, {:.4}  ·  pop {:>8}",
                                             city.location.lat, city.location.lon, city.population

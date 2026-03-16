@@ -1,15 +1,18 @@
 use crate::model::GeoPoint;
 use crate::terrain_assets;
+use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const BUILD_TIMEOUT: Duration = Duration::from_secs(90);
-const STALE_TEMP_AGE: Duration = Duration::from_secs(45);
+const CACHE_DB_NAME: &str = "srtm_focus_cache.sqlite";
+const TEMP_DIR_NAME: &str = "srtm_focus_tmp";
+const MAX_BACKGROUND_BUILDS: usize = 2;
 
 #[derive(Clone)]
 pub struct FocusContourAsset {
@@ -43,6 +46,13 @@ struct GeoBounds {
     max_lat: f32,
     min_lon: f32,
     max_lon: f32,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct TileKey {
+    zoom_bucket: i32,
+    lat_bucket: i32,
+    lon_bucket: i32,
 }
 
 pub fn ensure_focus_contours(
@@ -92,6 +102,12 @@ pub fn ensure_focus_contour_region(
     let Some(cache_root) = focus_cache_root(selected_root) else {
         return Vec::new();
     };
+    let Some(cache_db_path) = focus_cache_db_path(selected_root) else {
+        return Vec::new();
+    };
+    if ensure_cache_schema(&cache_db_path).is_err() {
+        return Vec::new();
+    }
     let spec = spec_for_zoom(zoom);
     let bucket_step = spec.half_extent_deg * 0.45;
     let center_lat_bucket = (focus.lat / bucket_step).round() as i32;
@@ -103,6 +119,7 @@ pub fn ensure_focus_contour_region(
             if let Some(asset) = ensure_bucket_asset(
                 &srtm_root,
                 &cache_root,
+                &cache_db_path,
                 spec,
                 lat_bucket,
                 lon_bucket,
@@ -123,7 +140,8 @@ pub fn focus_contour_region_status(
     radius: i32,
 ) -> Option<FocusContourRegionStatus> {
     let _ = terrain_assets::find_srtm_root(selected_root)?;
-    let cache_root = focus_cache_root(selected_root)?;
+    let cache_db_path = focus_cache_db_path(selected_root)?;
+    let connection = open_cache_db(&cache_db_path).ok()?;
     let spec = spec_for_zoom(zoom);
     let bucket_step = spec.half_extent_deg * 0.45;
     let center_lat_bucket = (focus.lat / bucket_step).round() as i32;
@@ -134,11 +152,14 @@ pub fn focus_contour_region_status(
 
     for lat_bucket in (center_lat_bucket - radius)..=(center_lat_bucket + radius) {
         for lon_bucket in (center_lon_bucket - radius)..=(center_lon_bucket + radius) {
-            let stem = format!("z{}_lat{}_lon{}", spec.zoom_bucket, lat_bucket, lon_bucket);
-            let gpkg_path = cache_root.join(format!("{stem}.gpkg"));
-            if gpkg_path.exists() {
+            let tile = TileKey {
+                zoom_bucket: spec.zoom_bucket,
+                lat_bucket,
+                lon_bucket,
+            };
+            if tile_exists(&connection, tile).ok()? {
                 ready_assets += 1;
-            } else if is_pending(&gpkg_path) {
+            } else if is_pending(tile) {
                 pending_assets += 1;
             }
         }
@@ -258,6 +279,7 @@ impl GeoBounds {
 fn ensure_bucket_asset(
     srtm_root: &Path,
     cache_root: &Path,
+    cache_db_path: &Path,
     spec: FocusContourSpec,
     lat_bucket: i32,
     lon_bucket: i32,
@@ -272,14 +294,19 @@ fn ensure_bucket_asset(
         lon: lon_bucket as f32 * bucket_step,
     };
     let bounds = GeoBounds::around(bucket_center, spec.half_extent_deg);
-    let stem = format!("z{}_lat{}_lon{}", spec.zoom_bucket, lat_bucket, lon_bucket);
-    let gpkg_path = cache_root.join(format!("{stem}.gpkg"));
-    let tif_path = cache_root.join(format!("{stem}.tif"));
-    cleanup_stale_bucket_artifacts(&gpkg_path, &tif_path);
+    let tile = TileKey {
+        zoom_bucket: spec.zoom_bucket,
+        lat_bucket,
+        lon_bucket,
+    };
 
-    if gpkg_path.exists() {
+    if open_cache_db(cache_db_path)
+        .and_then(|connection| tile_exists(&connection, tile))
+        .ok()
+        .unwrap_or(false)
+    {
         return Some(FocusContourAsset {
-            path: gpkg_path,
+            path: cache_db_path.to_path_buf(),
             simplify_step: spec.simplify_step,
             zoom_bucket: spec.zoom_bucket,
             lat_bucket,
@@ -287,31 +314,31 @@ fn ensure_bucket_asset(
         });
     }
 
-    if is_pending(&gpkg_path) {
+    if is_pending(tile) {
+        return None;
+    }
+
+    if !try_acquire_build_slot() {
         return None;
     }
 
     let pending = pending_set();
     let mut guard = pending.lock().ok()?;
-    if !guard.insert(gpkg_path.clone()) {
+    if !guard.insert(tile) {
+        release_build_slot();
         return None;
     }
     drop(guard);
 
     let srtm_root = srtm_root.to_path_buf();
-    let tif_path_for_thread = tif_path.clone();
-    let gpkg_path_for_thread = gpkg_path.clone();
+    let cache_root = cache_root.to_path_buf();
+    let cache_db_path = cache_db_path.to_path_buf();
     std::thread::spawn(move || {
-        let _ = build_focus_contours(
-            &srtm_root,
-            &tif_path_for_thread,
-            &gpkg_path_for_thread,
-            bounds,
-            spec,
-        );
+        let _ = build_focus_contours(&srtm_root, &cache_root, &cache_db_path, tile, bounds, spec);
         if let Ok(mut guard) = pending_set().lock() {
-            guard.remove(&gpkg_path_for_thread);
+            guard.remove(&tile);
         }
+        release_build_slot();
     });
 
     None
@@ -320,15 +347,20 @@ fn ensure_bucket_asset(
 fn focus_cache_root(selected_root: Option<&Path>) -> Option<PathBuf> {
     let root = terrain_assets::find_derived_root(selected_root)
         .unwrap_or_else(|| std::env::temp_dir().join("1kee-derived"));
-    let cache_root = root.join("terrain/srtm_focus_cache");
+    let cache_root = root.join("terrain");
     fs::create_dir_all(&cache_root).ok()?;
     Some(cache_root)
 }
 
+fn focus_cache_db_path(selected_root: Option<&Path>) -> Option<PathBuf> {
+    Some(focus_cache_root(selected_root)?.join(CACHE_DB_NAME))
+}
+
 fn build_focus_contours(
     srtm_root: &Path,
-    tif_path: &Path,
-    gpkg_path: &Path,
+    cache_root: &Path,
+    cache_db_path: &Path,
+    tile: TileKey,
     bounds: GeoBounds,
     spec: FocusContourSpec,
 ) -> Option<()> {
@@ -336,34 +368,169 @@ fn build_focus_contours(
         return None;
     }
 
-    cleanup_transient_artifacts(tif_path, gpkg_path);
+    let (tmp_tif_path, tmp_gpkg_path) = temp_tile_paths(cache_root, tile);
+    cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
     let tiles = tile_paths_for_bounds(srtm_root, bounds);
     if tiles.is_empty() {
         return None;
     }
 
-    if !tif_path.exists() {
-        if let Some(parent) = tif_path.parent() {
-            fs::create_dir_all(parent).ok()?;
-        }
-        let tmp_tif_path = tif_path.with_extension("tmp.tif");
-        let _ = fs::remove_file(&tmp_tif_path);
-        run_gdalwarp(&tiles, &tmp_tif_path, bounds, spec).ok()?;
-        fs::rename(&tmp_tif_path, tif_path).ok()?;
+    if let Some(parent) = tmp_tif_path.parent() {
+        fs::create_dir_all(parent).ok()?;
     }
+    run_gdalwarp(&tiles, &tmp_tif_path, bounds, spec).ok()?;
 
     if shutdown_requested().load(Ordering::Relaxed) {
+        cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
         return None;
     }
 
-    if gpkg_path.exists() {
-        fs::remove_file(gpkg_path).ok();
-    }
-    let tmp_gpkg_path = gpkg_path.with_extension("tmp.gpkg");
-    let _ = fs::remove_file(&tmp_gpkg_path);
-    run_gdal_contour(tif_path, &tmp_gpkg_path, spec.interval_m).ok()?;
-    fs::rename(&tmp_gpkg_path, gpkg_path).ok()?;
+    run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m).ok()?;
+    import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path).ok()?;
+    cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
     Some(())
+}
+
+fn open_cache_db(path: &Path) -> rusqlite::Result<Connection> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok();
+    }
+    let connection = Connection::open(path)?;
+    connection.busy_timeout(Duration::from_secs(30))?;
+    connection.pragma_update(None, "journal_mode", "WAL")?;
+    connection.pragma_update(None, "synchronous", "NORMAL")?;
+    connection.pragma_update(None, "temp_store", "MEMORY")?;
+    ensure_cache_schema_with_connection(&connection)?;
+    Ok(connection)
+}
+
+fn ensure_cache_schema(path: &Path) -> rusqlite::Result<()> {
+    let _ = open_cache_db(path)?;
+    Ok(())
+}
+
+fn ensure_cache_schema_with_connection(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS contour_tile_manifest (
+            zoom_bucket INTEGER NOT NULL,
+            lat_bucket INTEGER NOT NULL,
+            lon_bucket INTEGER NOT NULL,
+            contour_count INTEGER NOT NULL,
+            built_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            PRIMARY KEY (zoom_bucket, lat_bucket, lon_bucket)
+        );
+
+        CREATE TABLE IF NOT EXISTS contour_tiles (
+            zoom_bucket INTEGER NOT NULL,
+            lat_bucket INTEGER NOT NULL,
+            lon_bucket INTEGER NOT NULL,
+            fid INTEGER NOT NULL,
+            elevation_m REAL NOT NULL,
+            geom BLOB NOT NULL,
+            PRIMARY KEY (zoom_bucket, lat_bucket, lon_bucket, fid)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_contour_tiles_lookup
+            ON contour_tiles (zoom_bucket, lat_bucket, lon_bucket, elevation_m, fid);
+        ",
+    )?;
+    Ok(())
+}
+
+fn tile_exists(connection: &Connection, tile: TileKey) -> rusqlite::Result<bool> {
+    connection
+        .query_row(
+            "SELECT 1
+             FROM contour_tile_manifest
+             WHERE zoom_bucket = ?1 AND lat_bucket = ?2 AND lon_bucket = ?3
+             LIMIT 1",
+            params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
+            |_row| Ok(()),
+        )
+        .optional()
+        .map(|value| value.is_some())
+}
+
+fn import_tile_into_cache(
+    cache_db_path: &Path,
+    tile: TileKey,
+    gpkg_path: &Path,
+) -> rusqlite::Result<()> {
+    let source = Connection::open(gpkg_path)?;
+    source.busy_timeout(Duration::from_secs(30))?;
+    let mut statement = source
+        .prepare("SELECT fid, geom, elevation_m FROM contour ORDER BY ABS(elevation_m), fid")?;
+    let mut rows = statement.query([])?;
+
+    let mut cache = open_cache_db(cache_db_path)?;
+    let transaction = cache.transaction()?;
+    transaction.execute(
+        "DELETE FROM contour_tiles
+         WHERE zoom_bucket = ?1 AND lat_bucket = ?2 AND lon_bucket = ?3",
+        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
+    )?;
+    transaction.execute(
+        "DELETE FROM contour_tile_manifest
+         WHERE zoom_bucket = ?1 AND lat_bucket = ?2 AND lon_bucket = ?3",
+        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
+    )?;
+
+    let mut contour_count = 0usize;
+    while let Some(row) = rows.next()? {
+        let fid: i64 = row.get(0)?;
+        let geometry: Vec<u8> = row.get(1)?;
+        let elevation_m: f32 = row.get(2)?;
+        transaction.execute(
+            "INSERT INTO contour_tiles (
+                 zoom_bucket,
+                 lat_bucket,
+                 lon_bucket,
+                 fid,
+                 elevation_m,
+                 geom
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                tile.zoom_bucket,
+                tile.lat_bucket,
+                tile.lon_bucket,
+                fid,
+                elevation_m,
+                geometry
+            ],
+        )?;
+        contour_count += 1;
+    }
+
+    transaction.execute(
+        "INSERT INTO contour_tile_manifest (
+             zoom_bucket,
+             lat_bucket,
+             lon_bucket,
+             contour_count,
+             built_at
+         ) VALUES (?1, ?2, ?3, ?4, unixepoch())",
+        params![
+            tile.zoom_bucket,
+            tile.lat_bucket,
+            tile.lon_bucket,
+            contour_count as i64
+        ],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn temp_tile_paths(cache_root: &Path, tile: TileKey) -> (PathBuf, PathBuf) {
+    let temp_root = cache_root.join(TEMP_DIR_NAME);
+    let stem = format!(
+        "z{}_lat{}_lon{}",
+        tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket
+    );
+    (
+        temp_root.join(format!("{stem}.tmp.tif")),
+        temp_root.join(format!("{stem}.tmp.gpkg")),
+    )
 }
 
 fn tile_paths_for_bounds(root: &Path, bounds: GeoBounds) -> Vec<PathBuf> {
@@ -518,44 +685,12 @@ fn run_command(mut command: Command, label: &str) -> std::io::Result<()> {
     }
 }
 
-fn cleanup_stale_bucket_artifacts(gpkg_path: &Path, tif_path: &Path) {
-    let tmp_gpkg_path = gpkg_path.with_extension("tmp.gpkg");
-    let tmp_tif_path = tif_path.with_extension("tmp.tif");
-    let journal_path = journal_path_for(&tmp_gpkg_path);
-
-    if is_stale(&tmp_gpkg_path) || is_stale(&journal_path) {
-        cleanup_transient_artifacts(tif_path, gpkg_path);
-    }
-
-    if !gpkg_path.exists() && is_stale(&tmp_tif_path) {
-        let _ = fs::remove_file(&tmp_tif_path);
-    }
-}
-
-fn cleanup_transient_artifacts(tif_path: &Path, gpkg_path: &Path) {
-    let tmp_tif_path = tif_path.with_extension("tmp.tif");
-    let tmp_gpkg_path = gpkg_path.with_extension("tmp.gpkg");
-    let journal_path = journal_path_for(&tmp_gpkg_path);
-    let wal_path = wal_path_for(&tmp_gpkg_path);
-    let shm_path = shm_path_for(&tmp_gpkg_path);
-
-    let _ = fs::remove_file(&tmp_tif_path);
-    let _ = fs::remove_file(&tmp_gpkg_path);
-    let _ = fs::remove_file(&journal_path);
-    let _ = fs::remove_file(&wal_path);
-    let _ = fs::remove_file(&shm_path);
-}
-
-fn is_stale(path: &Path) -> bool {
-    let Ok(metadata) = fs::metadata(path) else {
-        return false;
-    };
-    let Ok(modified) = metadata.modified() else {
-        return false;
-    };
-    modified
-        .elapsed()
-        .is_ok_and(|elapsed| elapsed >= STALE_TEMP_AGE)
+fn cleanup_temp_tile_artifacts(tif_path: &Path, gpkg_path: &Path) {
+    let _ = fs::remove_file(tif_path);
+    let _ = fs::remove_file(gpkg_path);
+    let _ = fs::remove_file(journal_path_for(gpkg_path));
+    let _ = fs::remove_file(wal_path_for(gpkg_path));
+    let _ = fs::remove_file(shm_path_for(gpkg_path));
 }
 
 fn journal_path_for(path: &Path) -> PathBuf {
@@ -582,8 +717,8 @@ fn shm_path_for(path: &Path) -> PathBuf {
     path.with_file_name(file_name)
 }
 
-fn pending_set() -> &'static Mutex<HashSet<PathBuf>> {
-    static PENDING: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+fn pending_set() -> &'static Mutex<HashSet<TileKey>> {
+    static PENDING: OnceLock<Mutex<HashSet<TileKey>>> = OnceLock::new();
     PENDING.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
@@ -597,9 +732,29 @@ fn shutdown_requested() -> &'static AtomicBool {
     SHUTDOWN.get_or_init(|| AtomicBool::new(false))
 }
 
-fn is_pending(path: &Path) -> bool {
+fn active_build_slots() -> &'static AtomicUsize {
+    static ACTIVE: OnceLock<AtomicUsize> = OnceLock::new();
+    ACTIVE.get_or_init(|| AtomicUsize::new(0))
+}
+
+fn try_acquire_build_slot() -> bool {
+    active_build_slots()
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+            (count < MAX_BACKGROUND_BUILDS).then_some(count + 1)
+        })
+        .is_ok()
+}
+
+fn release_build_slot() {
+    let current = active_build_slots().load(Ordering::SeqCst);
+    if current > 0 {
+        active_build_slots().fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn is_pending(tile: TileKey) -> bool {
     pending_set()
         .lock()
-        .map(|guard| guard.contains(path))
+        .map(|guard| guard.contains(&tile))
         .unwrap_or(false)
 }

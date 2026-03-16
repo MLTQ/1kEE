@@ -6,7 +6,7 @@ Renders the searchable city precompute and terrain-focus window. This file exist
 ## Components
 
 ### `render_terrain_library`
-- **Does**: Advances background precompute jobs, draws the library window, handles city search/selection/focus actions, and lists job progress
+- **Does**: Advances background precompute jobs, draws the library window, handles city search/selection/focus actions, renders region-qualified city labels, and lists job progress
 - **Interacts with**: `AppModel` in `model.rs`, `city_catalog.rs`, `terrain_precompute.rs`
 
 ### `draw_job_row`
@@ -23,3 +23,4 @@ Renders the searchable city precompute and terrain-focus window. This file exist
 ## Notes
 - The visual model is intentionally close to a lightweight downloads manager rather than a settings form.
 - The first pass now queries a local GeoNames-derived SQLite catalog and uses an additive precompute queue; the lazy terrain stream still handles anything not prewarmed.
+- Search rows now prefer region-qualified labels when the catalog can resolve them, which is especially important for repeated U.S. city/place names.

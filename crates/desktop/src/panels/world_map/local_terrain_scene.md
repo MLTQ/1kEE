@@ -38,5 +38,6 @@ Renders the high-zoom event terrain mode. This file exists to show one selected 
 - Plain drag pans the local viewport center, which causes the terrain cache to stream across the surrounding region while any selected event marker remains at its true map position.
 - The streamed neighborhood is intentionally wider again, so the local view keeps more surrounding landform context loaded around the viewport center before relying on panning and retention.
 - The local scene keys chunk retention to the current terrain focus location, so already visited terrain buckets stay visible while panning and only reset when the analyst selects a different event or manual city focus.
+- Those streamed buckets now come from one shared SQLite tile cache, so panning no longer depends on the filesystem acting like the cache index.
 - When the current streamed neighborhood is still being generated, the scene shows a bucket-level cache progress bar based on ready versus pending contour exports.
 - Zooming back out below the local-mode threshold hands control back to the globe view.

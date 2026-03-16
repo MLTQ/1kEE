@@ -31,4 +31,5 @@ Manages background city-oriented terrain precompute jobs on top of the existing 
 
 ## Notes
 - Precompute currently targets a fixed `25 mi` city radius across a shared local zoom ladder, using city rows resolved from the local GeoNames-derived catalog.
+- Job labels now use the same region-qualified city naming as the terrain library so repeated place names remain disambiguated while precompute is running.
 - Jobs are intentionally additive with lazy loading: precomputed buckets simply become instantly reusable at runtime.
