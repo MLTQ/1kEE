@@ -61,6 +61,8 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         Vec::new()
     };
 
+    draw_local_beam(painter, rect, &layout);
+
     if let Some(contours) = contours.as_deref() {
         draw_contour_stack(
             painter,
@@ -241,6 +243,64 @@ fn transition_layout(rect: egui::Rect, progress: f32) -> LocalLayout {
         height: target.height * scale,
         horizontal_scale: target.horizontal_scale * scale,
     }
+}
+
+/// Cherry-red targeting beam: a vertical line falling from the sky to the
+/// centre of the terrain view, showing exactly where the map is anchored.
+/// Dragging pans the terrain under this fixed reticle.
+fn draw_local_beam(painter: &egui::Painter, rect: egui::Rect, layout: &LocalLayout) {
+    let cherry = egui::Color32::from_rgb(210, 18, 50);
+    let ground = layout.focus_center;
+    let sky_top = egui::pos2(ground.x, rect.top() + 14.0);
+    // Mid-point: beam is more transparent higher up, brightens as it approaches ground
+    let mid = egui::pos2(ground.x, egui::lerp(sky_top.y..=ground.y, 0.45));
+
+    // Wide outer glow — faint, covers full height for soft atmospheric halo
+    painter.line_segment(
+        [sky_top, ground],
+        egui::Stroke::new(8.0, cherry.gamma_multiply(0.04)),
+    );
+
+    // Mid glow — starts from halfway down so the lower beam is brighter
+    painter.line_segment(
+        [mid, ground],
+        egui::Stroke::new(4.5, cherry.gamma_multiply(0.13)),
+    );
+
+    // Crisp beam — full height, low alpha at top to full alpha at bottom
+    // Approximated by layering: faint full-height + bright lower two-thirds
+    let lower = egui::pos2(ground.x, egui::lerp(sky_top.y..=ground.y, 0.28));
+    painter.line_segment(
+        [sky_top, ground],
+        egui::Stroke::new(1.1, cherry.gamma_multiply(0.30)),
+    );
+    painter.line_segment(
+        [lower, ground],
+        egui::Stroke::new(1.1, cherry.gamma_multiply(0.62)),
+    );
+
+    // Ground-strike: small horizontal tick where the beam hits the terrain
+    let tick = 9.0;
+    painter.line_segment(
+        [
+            egui::pos2(ground.x - tick, ground.y),
+            egui::pos2(ground.x + tick, ground.y),
+        ],
+        egui::Stroke::new(1.3, cherry.gamma_multiply(0.90)),
+    );
+
+    // Glow halo at the contact point
+    painter.circle_stroke(
+        ground,
+        6.5,
+        egui::Stroke::new(4.0, cherry.gamma_multiply(0.10)),
+    );
+    painter.circle_stroke(
+        ground,
+        5.0,
+        egui::Stroke::new(1.2, cherry.gamma_multiply(0.78)),
+    );
+    painter.circle_filled(ground, 1.8, cherry);
 }
 
 fn draw_frame(painter: &egui::Painter, rect: egui::Rect) {
