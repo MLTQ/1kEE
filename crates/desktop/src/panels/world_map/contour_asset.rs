@@ -111,20 +111,21 @@ pub fn load_srtm_region_for_view(
         guard.entries.clear();
     }
 
-    let mut seen = guard.retained_keys.iter().cloned().collect::<HashSet<_>>();
-    for asset in &assets {
-        let key = CacheKey {
+    // Build the render set from ONLY the current viewport's tiles.
+    // Do NOT accumulate across frames: as the globe orbits, viewport_center
+    // drifts through many positions and old tiles linger in `entries`, causing
+    // a continent-spanning patchwork of stale geometry.  The `entries` map
+    // still gives instant in-memory re-display if the user pans back.
+    let retained_keys: Vec<CacheKey> = assets
+        .iter()
+        .map(|asset| CacheKey {
             path: asset.path.clone(),
             lat_bucket: asset.lat_bucket,
             lon_bucket: asset.lon_bucket,
             zoom_bucket: asset.zoom_bucket,
-        };
-        if seen.insert(key.clone()) {
-            guard.retained_keys.push(key);
-        }
-    }
-
-    let retained_keys = guard.retained_keys.clone();
+        })
+        .collect();
+    guard.retained_keys = retained_keys.clone();
     let mut merged = Vec::new();
     for key in &retained_keys {
         let contours = if let Some(cached) = guard.entries.get(key) {
