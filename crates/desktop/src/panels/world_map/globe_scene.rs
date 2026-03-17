@@ -237,10 +237,10 @@ fn draw_global_topo(
     view: &GlobeViewState,
     selected_root: Option<&std::path::Path>,
 ) {
-    // Crossfade: full opacity at zoom ≤ 2.0, fade to zero by zoom 4.0.
-    // The SRTM focus layer fades *in* over the same range so there's a
-    // smooth handoff rather than an abrupt switch.
-    let alpha = (1.0 - (view.zoom - 2.0) / 2.0).clamp(0.0, 1.0);
+    // Crossfade: full opacity at zoom ≤ 3.0, fade to zero by zoom 5.0.
+    // SRTM globe tiles fade in from 1.5→3.0, so there is overlap in the
+    // 3–5× range where both layers contribute before SRTM dominates.
+    let alpha = (1.0 - (view.zoom - 3.0) / 2.0).clamp(0.0, 1.0);
     if alpha <= 0.01 {
         return;
     }
@@ -279,10 +279,13 @@ fn draw_srtm_on_globe(
     lod: &GlobeLod,
     selected_root: Option<&std::path::Path>,
 ) {
-    if view.zoom < 2.0 {
+    if view.zoom < 1.5 {
         return;
     }
-    let alpha = ((view.zoom - 2.0) / 2.0).clamp(0.0, 1.0);
+    // Fade in over 1.5→3.0x.  Tiles are fixed-size (zoom_bucket=1, ~2.2°
+    // half-extent) so they maintain constant apparent size on screen as the
+    // globe grows rather than shrinking with each zoom step.
+    let alpha = ((view.zoom - 1.5) / 1.5).clamp(0.0, 1.0);
 
     let Some(contours) = contour_asset::load_srtm_for_globe(
         selected_root,

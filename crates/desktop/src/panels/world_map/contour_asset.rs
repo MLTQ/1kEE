@@ -196,21 +196,27 @@ pub fn load_srtm_region_for_view(
 pub fn load_srtm_for_globe(
     selected_root: Option<&Path>,
     center: GeoPoint,
-    zoom: f32,
+    _zoom: f32,
 ) -> Option<Arc<Vec<ContourPath>>> {
-    const MAX_TILES: usize = 25;
+    const MAX_TILES: usize = 50;
+    // Use a fixed coarse zoom spec for globe-scale tiles (zoom_bucket=1,
+    // half_extent=2.2°, ~244 km per side).  This keeps tile geographic size
+    // constant as the actual view zoom changes — tiles don't shrink as the
+    // globe grows.  radius=2 gives a 5×5 grid covering ~8.4° across.
+    const GLOBE_TILE_ZOOM: f32 = 1.5;
 
     let assets =
-        srtm_focus_cache::ensure_focus_contour_region(selected_root, center, zoom, 1);
+        srtm_focus_cache::ensure_focus_contour_region(selected_root, center, GLOBE_TILE_ZOOM, 2);
 
     static CACHE: OnceLock<Mutex<GlobeRegionCache>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(GlobeRegionCache::default()));
     let mut guard = cache.lock().ok()?;
 
-    let zoom_bucket = srtm_focus_cache::zoom_bucket_for_zoom(zoom);
+    let zoom_bucket = srtm_focus_cache::zoom_bucket_for_zoom(GLOBE_TILE_ZOOM);
     let root = selected_root.map(Path::to_path_buf);
 
-    // Invalidate only on zoom-level or root change — not on position.
+    // Invalidate only on root change — zoom is now fixed so zoom_bucket never
+    // changes, and position changes should accumulate rather than clear.
     if guard.zoom_bucket != zoom_bucket || guard.root != root {
         guard.zoom_bucket = zoom_bucket;
         guard.root = root;
@@ -223,7 +229,7 @@ pub fn load_srtm_for_globe(
         return render_globe_tiles(&guard);
     }
 
-    let feature_budget = srtm_focus_cache::feature_budget_for_zoom(zoom);
+    let feature_budget = srtm_focus_cache::feature_budget_for_zoom(GLOBE_TILE_ZOOM);
     let per_asset_budget = (feature_budget / assets.len().max(1)).max(120);
 
     // Load newly-ready tiles into the in-memory cache.
@@ -248,7 +254,7 @@ pub fn load_srtm_for_globe(
 
     // Evict tiles furthest from centre when over the cap.
     if guard.tiles.len() > MAX_TILES {
-        let half_extent = srtm_focus_cache::half_extent_for_zoom(zoom);
+        let half_extent = srtm_focus_cache::half_extent_for_zoom(GLOBE_TILE_ZOOM);
         let bucket_step = half_extent * 0.45;
         let clat = (center.lat / bucket_step).round() as i32;
         let clon = (center.lon / bucket_step).round() as i32;
