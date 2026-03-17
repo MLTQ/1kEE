@@ -288,11 +288,9 @@ fn draw_srtm_on_globe(
     // globe grows rather than shrinking with each zoom step.
     let alpha = ((view.zoom - 1.5) / 1.5).clamp(0.0, 1.0);
 
-    let Some(contours) = contour_asset::load_srtm_for_globe(
-        selected_root,
-        view.local_center,
-        view.zoom,
-    ) else {
+    let Some(contours) =
+        contour_asset::load_srtm_for_globe(selected_root, view.local_center, view.zoom)
+    else {
         return;
     };
 
@@ -351,7 +349,10 @@ fn draw_zoom_crosshair(
     painter.circle_stroke(
         pos,
         bloom_r,
-        egui::Stroke::new(6.0, cherry.gamma_multiply(alpha * 0.07 * (0.6 + pulse * 0.4))),
+        egui::Stroke::new(
+            6.0,
+            cherry.gamma_multiply(alpha * 0.07 * (0.6 + pulse * 0.4)),
+        ),
     );
 
     // Secondary soft halo

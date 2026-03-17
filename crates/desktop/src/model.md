@@ -31,8 +31,8 @@ Defines the shared domain and UI state for the 1kEE desktop demo. This file hold
 - **Interacts with**: `AppModel::nearby_cameras`, `world_map.rs`, `camera_list.rs`
 
 ### `AppModel`
-- **Does**: Owns all shared demo state and handles live Factal event replacement, API-key UI state, manual city focus, terrain-library UI state, and simulated feed actions
-- **Interacts with**: `app.rs`, every renderer in `panels/`, `TerrainInventory` in `terrain_assets.rs`, `GlobeViewState`, `city_catalog.rs`, `settings_store.rs`, user-selected asset roots
+- **Does**: Owns all shared demo state and handles live Factal event replacement, API-key UI state, manual city focus, terrain-library UI state, OSM source/runtime status, and simulated feed actions
+- **Interacts with**: `app.rs`, every renderer in `panels/`, `TerrainInventory` in `terrain_assets.rs`, `OsmInventory` in `osm_ingest.rs`, `GlobeViewState`, `city_catalog.rs`, `settings_store.rs`, user-selected asset roots
 - **Rationale**: Keeps the current scaffold simple while preserving a clear seam for background workers like the Factal poller
 
 ### `AppModel::has_factal_api_key`
@@ -56,6 +56,7 @@ Defines the shared domain and UI state for the 1kEE desktop demo. This file hold
 | `camera_list.rs` | `nearby_cameras` returns distance-sorted items | Changing sort order or field names |
 | `world_map.rs` | `selected_event`, `nearby_cameras`, and `cameras` remain available | Renaming state accessors or moving map data out |
 | `header.rs` | `terrain_inventory` is available for top-level dataset status | Removing or relocating terrain status state |
+| `header.rs` | `osm_inventory` is available for top-level OSM source/runtime status | Removing or relocating OSM status state |
 | `world_map/camera.rs` | `globe_view` is available for persistent camera interaction | Removing or relocating globe state without replacing the contract |
 | `header.rs` | `selected_root` can be updated from the UI to re-resolve terrain assets | Removing or relocating root-selection state without replacing the contract |
 | `terrain_library.rs` | City focus, search text, and selected city ids live here and can be mutated from UI actions | Removing or relocating terrain-library state without replacing the contract |
@@ -71,3 +72,4 @@ Defines the shared domain and UI state for the 1kEE desktop demo. This file hold
 - Manual city focus labels now use region-qualified city names when the GeoNames catalog can resolve an admin1/state entry, so repeated place names are less ambiguous in the header, logs, and terrain library.
 - Factal API key persistence is intentionally lightweight for now: the key is loaded into the model at startup and the live poller swaps in fresh events once authenticated.
 - The globe now starts in manual mode instead of auto-spin so the app does not enter a continuous repaint loop before the analyst touches anything.
+- The model now initializes and tracks a separate OSM runtime store so the planet-scale roads/buildings pipeline can evolve independently from terrain caching.

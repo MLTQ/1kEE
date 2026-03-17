@@ -1,7 +1,7 @@
 use crate::model::GeoPoint;
 use crate::terrain_assets;
 use rusqlite::{Connection, params};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -353,10 +353,7 @@ pub fn load_global_coastlines(
     guard.as_ref().map(|cached| Arc::clone(&cached.contours))
 }
 
-pub fn load_global_topo(
-    selected_root: Option<&Path>,
-    zoom: f32,
-) -> Option<Arc<Vec<ContourPath>>> {
+pub fn load_global_topo(selected_root: Option<&Path>, zoom: f32) -> Option<Arc<Vec<ContourPath>>> {
     // Triggers a one-time background GDAL build from available SRTM tiles if
     // the file doesn't yet exist.  Returns None while the build is in progress.
     let path = srtm_focus_cache::ensure_global_land_overview(selected_root)?;
@@ -372,8 +369,7 @@ pub fn load_global_topo(
         .unwrap_or(true);
 
     if needs_reload {
-        let contours =
-            Arc::new(query_global_topo(&path, simplify_step, feature_budget).ok()?);
+        let contours = Arc::new(query_global_topo(&path, simplify_step, feature_budget).ok()?);
         *guard = Some(CachedGlobalContours {
             lod_bucket,
             path,
@@ -407,9 +403,8 @@ fn query_global_topo(
     // in Rust to keep geographically significant features (long ridges,
     // plateaus, continental edges) and drop short noise.
     let fetch_limit = (feature_budget * 8).max(3_000) as i64;
-    let mut statement = connection.prepare(
-        "SELECT geom, elevation_m FROM contour WHERE elevation_m > 0 LIMIT ?1",
-    )?;
+    let mut statement = connection
+        .prepare("SELECT geom, elevation_m FROM contour WHERE elevation_m > 0 LIMIT ?1")?;
     let rows = statement.query_map(params![fetch_limit], |row| {
         let geometry: Vec<u8> = row.get(0)?;
         let elevation_m: f32 = row.get(1)?;

@@ -1,4 +1,5 @@
 use crate::city_catalog;
+use crate::osm_ingest::{self, OsmInventory};
 use crate::settings_store;
 use crate::terrain_assets::{self, TerrainInventory};
 use std::collections::BTreeSet;
@@ -168,12 +169,15 @@ pub struct AppModel {
     pub factal_stream_status: String,
     pub camera_registry_status: String,
     pub terrain_inventory: TerrainInventory,
+    pub osm_inventory: OsmInventory,
 }
 
 impl AppModel {
     pub fn seed_demo() -> Self {
         let selected_root = std::env::current_dir().ok();
         let terrain_inventory = TerrainInventory::detect_from(selected_root.as_deref());
+        let osm_runtime_store = osm_ingest::ensure_runtime_store(selected_root.as_deref());
+        let osm_inventory = OsmInventory::detect_from(selected_root.as_deref());
         let factal_api_key = settings_store::load_factal_api_key().unwrap_or_default();
 
         let events = vec![
@@ -325,6 +329,13 @@ impl AppModel {
                     "Camera registry loaded from mock public-feed catalog.".into(),
                 ];
                 lines.extend(terrain_inventory.status_lines());
+                lines.extend(osm_inventory.status_lines());
+                if let Ok(runtime_store) = &osm_runtime_store {
+                    lines.push(format!(
+                        "OSM runtime store ready: {}",
+                        runtime_store.display()
+                    ));
+                }
                 lines
             },
             factal_stream_status: if factal_api_key.is_empty() {
@@ -334,6 +345,7 @@ impl AppModel {
             },
             camera_registry_status: "loaded".into(),
             terrain_inventory,
+            osm_inventory,
         };
 
         if let Some(camera) = model.nearby_cameras(250.0).first() {
@@ -350,6 +362,8 @@ impl AppModel {
     pub fn set_selected_root(&mut self, root: PathBuf) {
         self.selected_root = Some(root.clone());
         self.terrain_inventory = TerrainInventory::detect_from(Some(root.as_path()));
+        let osm_runtime_store = osm_ingest::ensure_runtime_store(Some(root.as_path()));
+        self.osm_inventory = OsmInventory::detect_from(Some(root.as_path()));
         self.push_log(format!("Asset root selected: {}", root.display()));
         if let Some(srtm_root) = terrain_assets::find_srtm_root(Some(root.as_path())) {
             self.push_log(format!("Detected SRTM root: {}", srtm_root.display()));
@@ -357,6 +371,19 @@ impl AppModel {
         self.push_log(format!(
             "Terrain refresh: {}",
             self.terrain_inventory.status_summary()
+        ));
+        if let Some(planet) = &self.osm_inventory.planet_path {
+            self.push_log(format!("Detected OSM planet source: {}", planet.display()));
+        }
+        if let Ok(runtime_store) = osm_runtime_store {
+            self.push_log(format!(
+                "OSM runtime store ready: {}",
+                runtime_store.display()
+            ));
+        }
+        self.push_log(format!(
+            "OSM refresh: {}",
+            self.osm_inventory.status_summary()
         ));
     }
 

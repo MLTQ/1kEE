@@ -114,7 +114,14 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         }
     } else {
         draw_empty_state(painter, rect, "Generating local terrain cache...");
-        draw_local_beam(painter, rect, &layout, &model.globe_view, viewport_center, None);
+        draw_local_beam(
+            painter,
+            rect,
+            &layout,
+            &model.globe_view,
+            viewport_center,
+            None,
+        );
         draw_legend(painter, rect, "LOCAL EVENT TERRAIN", render_zoom);
         if let Some(status) = cache_status {
             draw_cache_progress(painter, rect, status);

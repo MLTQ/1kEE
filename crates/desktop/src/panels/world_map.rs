@@ -19,9 +19,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
     panel_frame.show(ui, |ui| {
         if model.globe_view.auto_spin {
             ui.ctx().request_repaint();
-        } else if local_terrain_scene::has_pending_cache(model)
-            || globe_srtm_pending(model)
-        {
+        } else if local_terrain_scene::has_pending_cache(model) || globe_srtm_pending(model) {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(180));
         }

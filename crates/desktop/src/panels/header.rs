@@ -1,4 +1,5 @@
 use crate::model::AppModel;
+use crate::osm_ingest;
 use crate::terrain_assets;
 use crate::theme;
 
@@ -22,6 +23,7 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
                 metric_chip(ui, "Factal stream", &model.factal_stream_status);
                 metric_chip(ui, "Camera registry", &model.camera_registry_status);
                 metric_chip(ui, "Terrain", model.terrain_inventory.status_label());
+                metric_chip(ui, "OSM", model.osm_inventory.status_label());
                 metric_chip(ui, "Events", &model.events.len().to_string());
                 metric_chip(ui, "Cameras", &model.cameras.len().to_string());
 
@@ -58,8 +60,18 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
                     model.terrain_inventory.primary_runtime_source,
                 );
 
+                ui.separator();
+                ui.colored_label(
+                    theme::text_muted(),
+                    model.osm_inventory.primary_runtime_source,
+                );
+
                 if let Some(root) = terrain_assets::find_srtm_root(model.selected_root.as_deref()) {
                     ui.colored_label(theme::text_muted(), format!("SRTM {}", root.display()));
+                } else if let Some(planet) =
+                    osm_ingest::find_planet_pbf(model.selected_root.as_deref())
+                {
+                    ui.colored_label(theme::text_muted(), format!("OSM {}", planet.display()));
                 } else if let Some(root) = &model.selected_root {
                     ui.colored_label(theme::text_muted(), root.display().to_string());
                 }

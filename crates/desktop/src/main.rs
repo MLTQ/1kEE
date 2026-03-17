@@ -2,6 +2,7 @@ mod app;
 mod city_catalog;
 mod factal_stream;
 mod model;
+mod osm_ingest;
 mod panels;
 mod settings_store;
 mod terrain_assets;

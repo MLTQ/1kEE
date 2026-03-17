@@ -215,7 +215,13 @@ pub fn ensure_global_land_overview(selected_root: Option<&Path>) -> Option<PathB
         let tmp_tif = tmp_dir.join("global_overview.tmp.tif");
         let tmp_gpkg = tmp_dir.join("global_overview.tmp.gpkg");
         let out = cache_root_clone.join("global_land_overview.gpkg");
-        let _ = build_global_overview(source_vrt.as_deref(), &tiles_for_vrt, &tmp_tif, &tmp_gpkg, &out);
+        let _ = build_global_overview(
+            source_vrt.as_deref(),
+            &tiles_for_vrt,
+            &tmp_tif,
+            &tmp_gpkg,
+            &out,
+        );
         global_overview_building().store(false, Ordering::SeqCst);
     });
 
@@ -227,10 +233,7 @@ pub fn ensure_global_land_overview(selected_root: Option<&Path>) -> Option<PathB
 fn find_prebuilt_vrt(srtm_root: &Path) -> Option<PathBuf> {
     let parent = srtm_root.parent()?;
     // Try the canonical name first, then any .vrt in the parent directory.
-    let canonical = parent.join(format!(
-        "{}.vrt",
-        srtm_root.file_name()?.to_string_lossy()
-    ));
+    let canonical = parent.join(format!("{}.vrt", srtm_root.file_name()?.to_string_lossy()));
     if canonical.exists() {
         return Some(canonical);
     }
@@ -303,8 +306,12 @@ fn build_global_overview(
         cmd.args(["-q", "-input_file_list"]);
         cmd.arg(&tile_list_path);
         cmd.arg(&tmp_vrt);
-        run_command_with_timeout(cmd, "gdalbuildvrt (global overview)", Duration::from_secs(120))
-            .ok()?;
+        run_command_with_timeout(
+            cmd,
+            "gdalbuildvrt (global overview)",
+            Duration::from_secs(120),
+        )
+        .ok()?;
         let _ = fs::remove_file(&tile_list_path);
 
         if shutdown_requested().load(Ordering::Relaxed) {
@@ -356,8 +363,7 @@ fn build_global_overview(
     ]);
     cmd.arg(warp_source);
     cmd.arg(tmp_tif);
-    run_command_with_timeout(cmd, "gdalwarp (global overview)", Duration::from_secs(600))
-        .ok()?;
+    run_command_with_timeout(cmd, "gdalwarp (global overview)", Duration::from_secs(600)).ok()?;
     if let Some(ref vrt) = built_vrt {
         let _ = fs::remove_file(vrt);
     }
@@ -384,8 +390,12 @@ fn build_global_overview(
     ]);
     cmd.arg(tmp_tif);
     cmd.arg(tmp_gpkg);
-    run_command_with_timeout(cmd, "gdal_contour (global overview)", Duration::from_secs(300))
-        .ok()?;
+    run_command_with_timeout(
+        cmd,
+        "gdal_contour (global overview)",
+        Duration::from_secs(300),
+    )
+    .ok()?;
 
     // fs::rename fails across filesystems; fall back to copy+delete.
     if fs::rename(tmp_gpkg, output_path).is_err() {
@@ -861,7 +871,11 @@ fn run_command(command: Command, label: &str) -> std::io::Result<()> {
     run_command_with_timeout(command, label, BUILD_TIMEOUT)
 }
 
-fn run_command_with_timeout(mut command: Command, label: &str, timeout: Duration) -> std::io::Result<()> {
+fn run_command_with_timeout(
+    mut command: Command,
+    label: &str,
+    timeout: Duration,
+) -> std::io::Result<()> {
     if shutdown_requested().load(Ordering::Relaxed) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Interrupted,

@@ -1,12 +1,18 @@
 use crate::city_catalog;
 use crate::model::AppModel;
+use crate::osm_ingest;
 use crate::terrain_precompute::{self, PrecomputeJobState};
 use crate::theme;
 
 pub fn render_terrain_library(ctx: &egui::Context, model: &mut AppModel) {
     terrain_precompute::tick(model.selected_root.as_deref());
+    osm_ingest::tick(model.selected_root.as_deref());
+    model.osm_inventory =
+        crate::osm_ingest::OsmInventory::detect_from(model.selected_root.as_deref());
 
-    if terrain_precompute::has_active_jobs(model.selected_root.as_deref()) {
+    if terrain_precompute::has_active_jobs(model.selected_root.as_deref())
+        || osm_ingest::has_active_jobs(model.selected_root.as_deref())
+    {
         ctx.request_repaint_after(std::time::Duration::from_millis(350));
     }
 
@@ -123,6 +129,64 @@ pub fn render_terrain_library(ctx: &egui::Context, model: &mut AppModel) {
             ui.add_space(12.0);
             ui.separator();
             ui.add_space(8.0);
+            ui.heading("OSM");
+            ui.colored_label(
+                theme::text_muted(),
+                "Queue offline planet-derived layers into the shared SQLite tile store.",
+            );
+            ui.add_space(8.0);
+
+            ui.horizontal(|ui| {
+                if ui.button("Queue Global Roads").clicked() {
+                    match osm_ingest::queue_planet_roads_import(model.selected_root.as_deref()) {
+                        Ok(true) => {
+                            model.push_log(
+                                "Queued global road bootstrap from planet-latest.osm.pbf.".into(),
+                            );
+                            model.osm_inventory = crate::osm_ingest::OsmInventory::detect_from(
+                                model.selected_root.as_deref(),
+                            );
+                        }
+                        Ok(false) => {
+                            model.push_log(
+                                "Global road bootstrap was already queued or completed.".into(),
+                            );
+                        }
+                        Err(error) => {
+                            model.push_log(format!("OSM queue failed: {error}"));
+                        }
+                    }
+                }
+
+                match osm_ingest::supports_locations_on_ways(model.selected_root.as_deref()) {
+                    Ok(true) => {
+                        ui.colored_label(theme::topo_color(), "LocationsOnWays available");
+                    }
+                    Ok(false) => {
+                        ui.colored_label(
+                            theme::hot_color(),
+                            "Planet lacks LocationsOnWays; pure-Rust global roads bootstrap will fail on this source",
+                        );
+                    }
+                    Err(error) => {
+                        ui.colored_label(theme::text_muted(), error);
+                    }
+                }
+            });
+
+            let osm_jobs = osm_ingest::snapshots(model.selected_root.as_deref());
+            if !osm_jobs.is_empty() {
+                ui.add_space(8.0);
+                for job in osm_jobs {
+                    draw_osm_job_row(ui, &job);
+                }
+            } else {
+                ui.small("No OSM ingest jobs queued yet.");
+            }
+
+            ui.add_space(12.0);
+            ui.separator();
+            ui.add_space(8.0);
             ui.heading("Downloads");
 
             let snapshots = terrain_precompute::snapshots(model.selected_root.as_deref());
@@ -190,6 +254,24 @@ fn draw_job_row(ui: &mut egui::Ui, job: &terrain_precompute::PrecomputeJobSnapsh
                 "{} / {} buckets ready · {} pending",
                 job.ready_assets, job.total_assets, job.pending_assets
             ));
+        });
+    ui.add_space(6.0);
+}
+
+fn draw_osm_job_row(ui: &mut egui::Ui, job: &osm_ingest::OsmJobSnapshot) {
+    egui::Frame::group(ui.style())
+        .fill(egui::Color32::from_rgb(15, 22, 28))
+        .inner_margin(egui::Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.strong(job.label.as_str());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.colored_label(theme::text_muted(), job.state.as_str());
+                });
+            });
+            if !job.note.is_empty() {
+                ui.small(job.note.as_str());
+            }
         });
     ui.add_space(6.0);
 }
