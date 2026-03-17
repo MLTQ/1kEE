@@ -302,14 +302,18 @@ fn draw_srtm_on_globe(
         } else {
             egui::Color32::from_rgb(121, 212, 236)
         };
+        // Use the same altitude_scale as coastlines (0.022) so SRTM contours
+        // sit on the sphere surface and don't parallax against the coastline layer.
+        // lod.altitude_scale is designed for exaggerated local-terrain relief and
+        // would push these contours visibly above the globe radius.
         draw_geo_path(
             painter,
             layout,
             view,
             &contour.points,
-            lod.altitude_scale,
+            0.020,
             color.gamma_multiply(alpha),
-            lod.backface_alpha * 0.12,
+            0.08,
         );
     }
 }
