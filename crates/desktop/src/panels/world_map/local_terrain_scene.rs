@@ -9,7 +9,7 @@ use super::srtm_focus_cache;
 use super::srtm_stream;
 
 pub const LOCAL_TRANSITION_START_ZOOM: f32 = 4.0;
-pub const LOCAL_MODE_MIN_ZOOM: f32 = 10.0;
+pub const LOCAL_MODE_MIN_ZOOM: f32 = 30.0;
 const LOCAL_STREAM_RADIUS: i32 = 2;
 
 struct LocalLayout {
