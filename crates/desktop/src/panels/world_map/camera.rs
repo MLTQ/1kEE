@@ -77,7 +77,7 @@ fn pan_local_center(rect: egui::Rect, view: &mut GlobeViewState, delta: egui::Ve
     let vertical_scale = ground_vertical_scale.abs().max(18.0);
 
     let x_yaw_shift = -delta.x / horizontal_scale.max(1.0);
-    let y_yaw_shift = -delta.y / vertical_scale;
+    let y_yaw_shift = delta.y / vertical_scale; // positive: drag down → center moves north (toward top)
 
     let yaw_cos = view.local_yaw.cos();
     let yaw_sin = view.local_yaw.sin();

@@ -1,4 +1,5 @@
 use crate::model::{AppModel, EventRecord, GeoPoint, GlobeViewState, NearbyCamera};
+use crate::osm_ingest::{self, GeoBounds as OsmGeoBounds, RoadLayerKind};
 use crate::terrain_assets;
 use crate::theme;
 use std::path::Path;
@@ -70,6 +71,16 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             render_zoom,
             contours,
             1.0,
+        );
+        draw_roads(
+            painter,
+            &layout,
+            &model.globe_view,
+            model.selected_root.as_deref(),
+            viewport_center,
+            render_zoom,
+            model.show_major_roads,
+            model.show_minor_roads,
         );
         // Draw beam after terrain so it overlays the contour stack and visually
         // stops at the surface rather than being buried behind the geometry.
@@ -461,6 +472,106 @@ fn draw_contour_stack(
     }
 }
 
+fn draw_roads(
+    painter: &egui::Painter,
+    layout: &LocalLayout,
+    view: &GlobeViewState,
+    selected_root: Option<&Path>,
+    viewport_center: GeoPoint,
+    render_zoom: f32,
+    show_major_roads: bool,
+    show_minor_roads: bool,
+) {
+    if !show_major_roads && !show_minor_roads {
+        return;
+    }
+
+    let bounds = local_geo_bounds(viewport_center, view.zoom);
+    let tile_zoom = road_tile_zoom(render_zoom);
+    let half_extent_deg = visual_half_extent_for_zoom(view.zoom);
+    let km_per_deg_lat = 111.32f32;
+    let km_per_deg_lon = km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
+    let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
+    let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
+
+    if show_minor_roads {
+        let roads = osm_ingest::load_roads_for_bounds(
+            selected_root,
+            bounds,
+            tile_zoom,
+            RoadLayerKind::Minor,
+        );
+        draw_road_layer(
+            painter,
+            layout,
+            view,
+            selected_root,
+            viewport_center,
+            extent_x_km,
+            extent_y_km,
+            &roads,
+            egui::Stroke::new(0.8, egui::Color32::from_rgb(116, 132, 142)),
+        );
+    }
+
+    if show_major_roads {
+        let roads = osm_ingest::load_roads_for_bounds(
+            selected_root,
+            bounds,
+            tile_zoom,
+            RoadLayerKind::Major,
+        );
+        draw_road_layer(
+            painter,
+            layout,
+            view,
+            selected_root,
+            viewport_center,
+            extent_x_km,
+            extent_y_km,
+            &roads,
+            egui::Stroke::new(1.35, egui::Color32::from_rgb(255, 210, 92)),
+        );
+    }
+}
+
+fn draw_road_layer(
+    painter: &egui::Painter,
+    layout: &LocalLayout,
+    view: &GlobeViewState,
+    selected_root: Option<&Path>,
+    viewport_center: GeoPoint,
+    extent_x_km: f32,
+    extent_y_km: f32,
+    roads: &[osm_ingest::RoadPolyline],
+    stroke: egui::Stroke,
+) {
+    for road in roads {
+        let points: Vec<_> = road
+            .points
+            .iter()
+            .filter_map(|point| {
+                let elevation_m =
+                    srtm_stream::sample_elevation_m(selected_root, *point).unwrap_or(0.0) + 3.0;
+                project_local(
+                    layout,
+                    view,
+                    viewport_center,
+                    *point,
+                    elevation_m,
+                    extent_x_km,
+                    extent_y_km,
+                )
+                .map(|projected| projected.pos)
+            })
+            .collect();
+
+        if points.len() >= 2 {
+            painter.add(egui::Shape::line(points, stroke));
+        }
+    }
+}
+
 fn draw_markers(
     painter: &egui::Painter,
     layout: &LocalLayout,
@@ -675,6 +786,28 @@ fn marker_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> f32 {
     terrain_elevation_m + 18.0
 }
 
+fn local_geo_bounds(center: GeoPoint, view_zoom: f32) -> OsmGeoBounds {
+    let half_extent_deg = visual_half_extent_for_zoom(view_zoom);
+    OsmGeoBounds {
+        min_lat: (center.lat - half_extent_deg).clamp(-85.0511, 85.0511),
+        max_lat: (center.lat + half_extent_deg).clamp(-85.0511, 85.0511),
+        min_lon: (center.lon - half_extent_deg).clamp(-180.0, 180.0),
+        max_lon: (center.lon + half_extent_deg).clamp(-180.0, 180.0),
+    }
+}
+
+fn road_tile_zoom(render_zoom: f32) -> u8 {
+    if render_zoom >= 10.0 {
+        10
+    } else if render_zoom >= 6.0 {
+        8
+    } else if render_zoom >= 3.5 {
+        6
+    } else {
+        4
+    }
+}
+
 fn project_local(
     layout: &LocalLayout,
     view: &GlobeViewState,
@@ -685,7 +818,10 @@ fn project_local(
     extent_y_km: f32,
 ) -> Option<ProjectedLocalPoint> {
     let x_km = (point.lon - focus.lon) * 111.32 * focus.lat.to_radians().cos().abs().max(0.2);
-    let y_km = (point.lat - focus.lat) * 111.32;
+    // Negate y so north maps upward on screen (standard map orientation: north=up, east=right).
+    // Without this, positive y_km (north) added to focus_center.y goes *down*, which puts north
+    // at the bottom, south at the top, and makes east appear on the wrong side.
+    let y_km = (focus.lat - point.lat) * 111.32;
 
     let x = x_km / extent_x_km;
     let y = y_km / extent_y_km;
