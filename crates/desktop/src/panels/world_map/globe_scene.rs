@@ -38,6 +38,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     draw_global_topo(painter, &layout, &model.globe_view, selected_root);
 
     draw_srtm_on_globe(painter, &layout, &model.globe_view, &lod, selected_root);
+    draw_zoom_crosshair(painter, &layout, &model.globe_view, time);
 
     let selected_event_id = model.selected_event_id.as_deref();
     let selected_camera_id = model.selected_camera_id.as_deref();
@@ -314,6 +315,72 @@ fn draw_srtm_on_globe(
             0.020,
             color.gamma_multiply(alpha),
             0.08,
+        );
+    }
+}
+
+/// Red glowing crosshair pinned to `view.local_center` — the point the camera
+/// is centred on and will zoom into when transitioning to local terrain mode.
+/// Provides spatial context for where you are on the globe surface.
+fn draw_zoom_crosshair(
+    painter: &egui::Painter,
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    time: f64,
+) {
+    // Only visible once the user has zoomed in enough to care about local terrain
+    if view.zoom < 1.5 {
+        return;
+    }
+    let alpha = ((view.zoom - 1.5) / 1.5).clamp(0.0, 1.0);
+
+    let Some(projected) = project_geo(layout, view, view.local_center, 0.025) else {
+        return;
+    };
+
+    // Cherry red — distinct from the orange "hot" palette used elsewhere
+    let cherry = egui::Color32::from_rgb(210, 18, 50);
+    let pos = projected.pos;
+    let ring_r: f32 = 9.0;
+    let gap: f32 = 3.5;
+    let arm_len: f32 = 8.0;
+
+    // Outer pulsing bloom ring
+    let pulse = (time as f32 * 1.8).sin() * 0.5 + 0.5;
+    let bloom_r = ring_r + 5.0 + pulse * 3.5;
+    painter.circle_stroke(
+        pos,
+        bloom_r,
+        egui::Stroke::new(6.0, cherry.gamma_multiply(alpha * 0.07 * (0.6 + pulse * 0.4))),
+    );
+
+    // Secondary soft halo
+    painter.circle_stroke(
+        pos,
+        ring_r + 3.0,
+        egui::Stroke::new(3.5, cherry.gamma_multiply(alpha * 0.18)),
+    );
+
+    // Crisp main ring
+    painter.circle_stroke(
+        pos,
+        ring_r,
+        egui::Stroke::new(1.3, cherry.gamma_multiply(alpha * 0.92)),
+    );
+
+    // Centre dot
+    painter.circle_filled(pos, 2.0, cherry.gamma_multiply(alpha));
+
+    // Four tick arms extending outward from the ring with a small gap
+    let inner = ring_r + gap;
+    let outer = ring_r + gap + arm_len;
+    for &(dx, dy) in &[(1.0f32, 0.0f32), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+        painter.line_segment(
+            [
+                egui::pos2(pos.x + dx * inner, pos.y + dy * inner),
+                egui::pos2(pos.x + dx * outer, pos.y + dy * outer),
+            ],
+            egui::Stroke::new(1.3, cherry.gamma_multiply(alpha * 0.85)),
         );
     }
 }
