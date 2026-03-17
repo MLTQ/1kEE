@@ -79,7 +79,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             &layout,
             &model.globe_view,
             viewport_center,
-            model.selected_root.as_deref(),
+            Some(contours),
         );
         let (event_markers, camera_markers) = if let Some(event) = model.selected_event() {
             draw_markers(
@@ -114,14 +114,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         }
     } else {
         draw_empty_state(painter, rect, "Generating local terrain cache...");
-        draw_local_beam(
-            painter,
-            rect,
-            &layout,
-            &model.globe_view,
-            viewport_center,
-            model.selected_root.as_deref(),
-        );
+        draw_local_beam(painter, rect, &layout, &model.globe_view, viewport_center, None);
         draw_legend(painter, rect, "LOCAL EVENT TERRAIN", render_zoom);
         if let Some(status) = cache_status {
             draw_cache_progress(painter, rect, status);
@@ -287,14 +280,28 @@ fn draw_local_beam(
     layout: &LocalLayout,
     view: &GlobeViewState,
     viewport_center: GeoPoint,
-    selected_root: Option<&std::path::Path>,
+    contours: Option<&[contour_asset::ContourPath]>,
 ) {
     let cherry = egui::Color32::from_rgb(210, 18, 50);
 
-    // Sample actual terrain elevation at the crosshair so the beam tip
-    // lands on the surface rather than floating at a fixed screen point.
-    let elevation_m =
-        srtm_stream::sample_elevation_m(selected_root, viewport_center).unwrap_or(0.0);
+    // Derive terrain elevation at the crosshair from the loaded contour data —
+    // the same data used to draw the terrain, so it's always available and in sync.
+    // Find the highest-elevation contour that has a point within a tight radius
+    // of viewport_center; that contour passes through (or very near) center,
+    // so its elevation approximates the terrain surface there.
+    let half_extent_deg = visual_half_extent_for_zoom(view.zoom);
+    let search_radius_deg = (half_extent_deg * 0.08).max(0.004); // ~8% of viewport radius
+    let elevation_m = contours
+        .unwrap_or(&[])
+        .iter()
+        .filter(|c| {
+            c.points.iter().any(|p| {
+                (p.lat - viewport_center.lat).abs() < search_radius_deg
+                    && (p.lon - viewport_center.lon).abs() < search_radius_deg
+            })
+        })
+        .map(|c| c.elevation_m)
+        .fold(0.0f32, f32::max);
 
     let half_extent_deg = visual_half_extent_for_zoom(view.zoom);
     let km_per_deg_lat = 111.32f32;
