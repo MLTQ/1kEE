@@ -848,10 +848,14 @@ fn project_local(
             - elevation_z_offset * view.local_layer_spread * 24.0,
     );
 
-    (pos.x >= layout.center.x - layout.width * 0.58
-        && pos.x <= layout.center.x + layout.width * 0.58
-        && pos.y >= layout.center.y - layout.height * 0.62
-        && pos.y <= layout.center.y + layout.height * 0.58)
+    // Generous off-screen margin so contour lines from neighbouring tiles
+    // (loaded at radius=2) can project and be drawn right to the edge.
+    // egui's painter clip rect does the actual screen culling; points beyond
+    // the visible panel are discarded by the renderer, not here.
+    (pos.x >= layout.center.x - layout.width * 2.5
+        && pos.x <= layout.center.x + layout.width * 2.5
+        && pos.y >= layout.center.y - layout.height * 2.5
+        && pos.y <= layout.center.y + layout.height * 2.5)
         .then_some(ProjectedLocalPoint {
             pos,
             depth: (1.0 + z_pitch).clamp(0.0, 1.0),
