@@ -61,15 +61,6 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         Vec::new()
     };
 
-    draw_local_beam(
-        painter,
-        rect,
-        &layout,
-        &model.globe_view,
-        viewport_center,
-        model.selected_root.as_deref(),
-    );
-
     if let Some(contours) = contours.as_deref() {
         draw_contour_stack(
             painter,
@@ -79,6 +70,16 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             render_zoom,
             contours,
             1.0,
+        );
+        // Draw beam after terrain so it overlays the contour stack and visually
+        // stops at the surface rather than being buried behind the geometry.
+        draw_local_beam(
+            painter,
+            rect,
+            &layout,
+            &model.globe_view,
+            viewport_center,
+            model.selected_root.as_deref(),
         );
         let (event_markers, camera_markers) = if let Some(event) = model.selected_event() {
             draw_markers(
@@ -113,6 +114,14 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         }
     } else {
         draw_empty_state(painter, rect, "Generating local terrain cache...");
+        draw_local_beam(
+            painter,
+            rect,
+            &layout,
+            &model.globe_view,
+            viewport_center,
+            model.selected_root.as_deref(),
+        );
         draw_legend(painter, rect, "LOCAL EVENT TERRAIN", render_zoom);
         if let Some(status) = cache_status {
             draw_cache_progress(painter, rect, status);
@@ -212,12 +221,12 @@ pub fn visual_half_extent_for_zoom(view_zoom: f32) -> f32 {
         (20.0, 0.045),                       // 20.0 → ~5 km  (top of old tile range)
         // Local terrain mode proper: view.zoom ∈ [LOCAL_MODE_MIN_ZOOM=25, 60]
         // The 20→25 interpolation is unused in practice; only the entries below are hit.
-        (25.0, 1.80),                        // 25.0 → ~200 km (entry into local mode)
-        (30.0, 1.00),                        // 30.0 → ~111 km
-        (36.0, 0.55),                        // 36.0 → ~61 km
-        (43.0, 0.28),                        // 43.0 → ~31 km
-        (52.0, 0.12),                        // 52.0 → ~13 km
-        (60.0, 0.050),                       // 60.0 → ~5.5 km
+        (25.0, 1.80),  // 25.0 → ~200 km (entry into local mode)
+        (30.0, 1.00),  // 30.0 → ~111 km
+        (36.0, 0.55),  // 36.0 → ~61 km
+        (43.0, 0.28),  // 43.0 → ~31 km
+        (52.0, 0.12),  // 52.0 → ~13 km
+        (60.0, 0.050), // 60.0 → ~5.5 km
     ];
 
     let zoom = view_zoom.clamp(LOCAL_TRANSITION_START_ZOOM, 60.0);
@@ -289,8 +298,7 @@ fn draw_local_beam(
 
     let half_extent_deg = visual_half_extent_for_zoom(view.zoom);
     let km_per_deg_lat = 111.32f32;
-    let km_per_deg_lon =
-        km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
+    let km_per_deg_lon = km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
 
