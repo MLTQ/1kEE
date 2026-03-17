@@ -284,12 +284,10 @@ fn draw_srtm_on_globe(
     }
     let alpha = ((view.zoom - 2.0) / 2.0).clamp(0.0, 1.0);
 
-    let Some(contours) = contour_asset::load_srtm_region_for_view(
+    let Some(contours) = contour_asset::load_srtm_for_globe(
         selected_root,
-        view.local_center, // scene anchor (used for scene-key invalidation)
-        view.local_center, // viewport center (tile to load)
+        view.local_center,
         view.zoom,
-        0, // radius=0: single central tile; globe can't show more anyway
     ) else {
         return;
     };

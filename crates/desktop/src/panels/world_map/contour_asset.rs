@@ -32,6 +32,30 @@ struct CachedGlobalContours {
     contours: Arc<Vec<ContourPath>>,
 }
 
+/// Per-zoom-level cache for globe-mode SRTM tiles.
+/// Unlike `LocalRegionCache`, this accumulates tiles across orbit movements
+/// and only clears when the zoom bucket changes.  Eviction is by distance
+/// from the current center, so tiles stay visible while on screen.
+struct GlobeRegionCache {
+    zoom_bucket: i32,
+    root: Option<PathBuf>,
+    /// (lat_bucket, lon_bucket) → decoded contour paths
+    tiles: HashMap<(i32, i32), Arc<Vec<ContourPath>>>,
+    /// Insertion order for deterministic eviction among equal-distance ties
+    order: Vec<(i32, i32)>,
+}
+
+impl Default for GlobeRegionCache {
+    fn default() -> Self {
+        Self {
+            zoom_bucket: -1,
+            root: None,
+            tiles: HashMap::new(),
+            order: Vec::new(),
+        }
+    }
+}
+
 struct LocalRegionCache {
     scene_key: Option<SceneKey>,
     entries: HashMap<CacheKey, Arc<Vec<ContourPath>>>,
@@ -159,6 +183,100 @@ pub fn load_srtm_region_for_view(
     }
 
     Some(Arc::new(merged))
+}
+
+/// Load SRTM focus-tile contours for globe-mode rendering.
+///
+/// Differences from `load_srtm_region_for_view`:
+/// - Loads a 3×3 tile grid (radius=1) so neighbours are pre-fetched before
+///   they scroll into view, preventing pop-in.
+/// - Cache clears only on zoom-bucket change, not on position; tiles remain
+///   visible while they are near the current centre.
+/// - Evicts by distance from centre when the tile count exceeds `MAX_TILES`.
+pub fn load_srtm_for_globe(
+    selected_root: Option<&Path>,
+    center: GeoPoint,
+    zoom: f32,
+) -> Option<Arc<Vec<ContourPath>>> {
+    const MAX_TILES: usize = 25;
+
+    let assets =
+        srtm_focus_cache::ensure_focus_contour_region(selected_root, center, zoom, 1);
+
+    static CACHE: OnceLock<Mutex<GlobeRegionCache>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(GlobeRegionCache::default()));
+    let mut guard = cache.lock().ok()?;
+
+    let zoom_bucket = srtm_focus_cache::zoom_bucket_for_zoom(zoom);
+    let root = selected_root.map(Path::to_path_buf);
+
+    // Invalidate only on zoom-level or root change — not on position.
+    if guard.zoom_bucket != zoom_bucket || guard.root != root {
+        guard.zoom_bucket = zoom_bucket;
+        guard.root = root;
+        guard.tiles.clear();
+        guard.order.clear();
+    }
+
+    if assets.is_empty() {
+        // No SRTM root found; return whatever we already have.
+        return render_globe_tiles(&guard);
+    }
+
+    let feature_budget = srtm_focus_cache::feature_budget_for_zoom(zoom);
+    let per_asset_budget = (feature_budget / assets.len().max(1)).max(120);
+
+    // Load newly-ready tiles into the in-memory cache.
+    for asset in &assets {
+        let key = (asset.lat_bucket, asset.lon_bucket);
+        if !guard.tiles.contains_key(&key) {
+            if let Ok(contours) = query_local_contours(
+                &asset.path,
+                asset.zoom_bucket,
+                asset.lat_bucket,
+                asset.lon_bucket,
+                asset.simplify_step,
+                per_asset_budget,
+            ) {
+                if !contours.is_empty() {
+                    guard.tiles.insert(key, Arc::new(contours));
+                    guard.order.push(key);
+                }
+            }
+        }
+    }
+
+    // Evict tiles furthest from centre when over the cap.
+    if guard.tiles.len() > MAX_TILES {
+        let half_extent = srtm_focus_cache::half_extent_for_zoom(zoom);
+        let bucket_step = half_extent * 0.45;
+        let clat = (center.lat / bucket_step).round() as i32;
+        let clon = (center.lon / bucket_step).round() as i32;
+
+        // Sort order vec by distance ascending; keep the closest MAX_TILES.
+        guard
+            .order
+            .sort_by_key(|&(lat, lon)| (lat - clat).pow(2) + (lon - clon).pow(2));
+        let keep: std::collections::HashSet<(i32, i32)> =
+            guard.order[..MAX_TILES].iter().copied().collect();
+        guard.tiles.retain(|k, _| keep.contains(k));
+        guard.order.retain(|k| keep.contains(k));
+    }
+
+    render_globe_tiles(&guard)
+}
+
+fn render_globe_tiles(guard: &GlobeRegionCache) -> Option<Arc<Vec<ContourPath>>> {
+    let merged: Vec<ContourPath> = guard
+        .tiles
+        .values()
+        .flat_map(|v| v.iter().cloned())
+        .collect();
+    if merged.is_empty() {
+        None
+    } else {
+        Some(Arc::new(merged))
+    }
 }
 
 pub fn load_for_focus(

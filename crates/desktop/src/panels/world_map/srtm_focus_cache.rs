@@ -73,6 +73,10 @@ pub fn half_extent_for_zoom(zoom: f32) -> f32 {
     spec_for_zoom(zoom).half_extent_deg
 }
 
+pub fn zoom_bucket_for_zoom(zoom: f32) -> i32 {
+    spec_for_zoom(zoom).zoom_bucket
+}
+
 pub fn contour_interval_for_zoom(zoom: f32) -> i32 {
     spec_for_zoom(zoom).interval_m
 }
