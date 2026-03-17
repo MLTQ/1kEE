@@ -61,7 +61,14 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         Vec::new()
     };
 
-    draw_local_beam(painter, rect, &layout);
+    draw_local_beam(
+        painter,
+        rect,
+        &layout,
+        &model.globe_view,
+        viewport_center,
+        model.selected_root.as_deref(),
+    );
 
     if let Some(contours) = contours.as_deref() {
         draw_contour_stack(
@@ -262,11 +269,44 @@ fn transition_layout(rect: egui::Rect, progress: f32) -> LocalLayout {
 }
 
 /// Cherry-red targeting beam: a vertical line falling from the sky to the
-/// centre of the terrain view, showing exactly where the map is anchored.
-/// Dragging pans the terrain under this fixed reticle.
-fn draw_local_beam(painter: &egui::Painter, rect: egui::Rect, layout: &LocalLayout) {
+/// terrain surface at the viewport centre. The ground contact point is
+/// projected via `project_local` so it rises over hills and drops into
+/// valleys as the map is dragged beneath the fixed beam.
+fn draw_local_beam(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    layout: &LocalLayout,
+    view: &GlobeViewState,
+    viewport_center: GeoPoint,
+    selected_root: Option<&std::path::Path>,
+) {
     let cherry = egui::Color32::from_rgb(210, 18, 50);
-    let ground = layout.focus_center;
+
+    // Sample actual terrain elevation at the crosshair so the beam tip
+    // lands on the surface rather than floating at a fixed screen point.
+    let elevation_m =
+        srtm_stream::sample_elevation_m(selected_root, viewport_center).unwrap_or(0.0);
+
+    let half_extent_deg = visual_half_extent_for_zoom(view.zoom);
+    let km_per_deg_lat = 111.32f32;
+    let km_per_deg_lon =
+        km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
+    let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
+    let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
+
+    // Project the centre point at actual terrain elevation — x will always
+    // land at focus_center.x (centre of screen) since lat/lon offset is zero.
+    let ground = project_local(
+        layout,
+        view,
+        viewport_center,
+        viewport_center,
+        elevation_m,
+        extent_x_km,
+        extent_y_km,
+    )
+    .map(|p| p.pos)
+    .unwrap_or(layout.focus_center);
     let sky_top = egui::pos2(ground.x, rect.top() + 14.0);
     // Mid-point: beam is more transparent higher up, brightens as it approaches ground
     let mid = egui::pos2(ground.x, egui::lerp(sky_top.y..=ground.y, 0.45));
