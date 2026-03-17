@@ -8,8 +8,8 @@ use super::globe_scene::GlobeScene;
 use super::srtm_focus_cache;
 use super::srtm_stream;
 
-pub const LOCAL_TRANSITION_START_ZOOM: f32 = 2.2;
-pub const LOCAL_MODE_MIN_ZOOM: f32 = 4.0;
+pub const LOCAL_TRANSITION_START_ZOOM: f32 = 4.0;
+pub const LOCAL_MODE_MIN_ZOOM: f32 = 7.0;
 const LOCAL_STREAM_RADIUS: i32 = 2;
 
 struct LocalLayout {
@@ -186,14 +186,13 @@ pub fn local_render_zoom(view_zoom: f32) -> f32 {
 
 pub fn visual_half_extent_for_zoom(view_zoom: f32) -> f32 {
     const KNOTS: &[(f32, f32)] = &[
-        (LOCAL_TRANSITION_START_ZOOM, 1.55),
-        (3.0, 1.35),
-        (4.5, 0.95),
-        (6.5, 0.58),
-        (9.5, 0.31),
-        (12.0, 0.17),
-        (16.0, 0.09),
-        (20.0, 0.045),
+        (LOCAL_TRANSITION_START_ZOOM, 1.55), // 4.0 → ~173 km half-span (transition start)
+        (5.5, 0.90),                         // 5.5 → ~100 km
+        (7.0, 0.55),                         // 7.0 → ~61 km (local terrain fully active)
+        (9.5, 0.31),                         // 9.5 → ~35 km
+        (12.0, 0.17),                        // 12.0 → ~19 km
+        (16.0, 0.09),                        // 16.0 → ~10 km
+        (20.0, 0.045),                       // 20.0 → ~5 km
     ];
 
     let zoom = view_zoom.clamp(LOCAL_TRANSITION_START_ZOOM, 20.0);

@@ -110,7 +110,9 @@ fn globe_layout(rect: egui::Rect, view: &GlobeViewState) -> GlobeLayout {
     // Globe grows to nearly fill the panel as you zoom in, giving continuous spatial context
     // before the terrain view takes over. Base is sized to leave room for the HUD frame.
     let base_radius = (rect.width() * 0.21).min(rect.height() * 0.30);
-    let radius = base_radius * (1.0 + zoom_t * 0.72);
+    // Growth factor 1.0 → globe reaches 2× base radius by the local-terrain threshold,
+    // nearly filling the panel so the transition feels like landing rather than jumping.
+    let radius = base_radius * (1.0 + zoom_t * 1.0);
     GlobeLayout {
         center: egui::pos2(
             rect.center().x + rect.width() * 0.04,
@@ -167,7 +169,7 @@ fn draw_wireframe(
     view: &GlobeViewState,
     lod: &GlobeLod,
 ) {
-    if view.zoom >= 5.0 {
+    if view.zoom >= super::local_terrain_scene::LOCAL_MODE_MIN_ZOOM {
         return;
     }
 
