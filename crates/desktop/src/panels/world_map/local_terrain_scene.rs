@@ -818,10 +818,9 @@ fn project_local(
     extent_y_km: f32,
 ) -> Option<ProjectedLocalPoint> {
     let x_km = (point.lon - focus.lon) * 111.32 * focus.lat.to_radians().cos().abs().max(0.2);
-    // Negate y so north maps upward on screen (standard map orientation: north=up, east=right).
-    // Without this, positive y_km (north) added to focus_center.y goes *down*, which puts north
-    // at the bottom, south at the top, and makes east appear on the wrong side.
-    let y_km = (focus.lat - point.lat) * 111.32;
+    // Standard orientation: positive y_km = north.  North is mapped upward on screen by
+    // negating the ground_y_pitch / ground_z_pitch terms in the screen-y formula below.
+    let y_km = (point.lat - focus.lat) * 111.32;
 
     let x = x_km / extent_x_km;
     let y = y_km / extent_y_km;
@@ -842,20 +841,22 @@ fn project_local(
 
     let pos = egui::pos2(
         layout.focus_center.x + x_yaw * layout.horizontal_scale,
-        layout.focus_center.y + ground_y_pitch * layout.height * 0.55
-            - ground_z_pitch * 48.0
+        // Negate the ground terms so that positive y_yaw (north) moves upward on screen.
+        // Elevation terms are unchanged: positive elevation still lifts features upward.
+        layout.focus_center.y - ground_y_pitch * layout.height * 0.55
+            + ground_z_pitch * 48.0
             - elevation_y_offset * view.local_layer_spread * 56.0
             - elevation_z_offset * view.local_layer_spread * 24.0,
     );
 
-    // Generous off-screen margin so contour lines from neighbouring tiles
-    // (loaded at radius=2) can project and be drawn right to the edge.
-    // egui's painter clip rect does the actual screen culling; points beyond
-    // the visible panel are discarded by the renderer, not here.
-    (pos.x >= layout.center.x - layout.width * 2.5
-        && pos.x <= layout.center.x + layout.width * 2.5
-        && pos.y >= layout.center.y - layout.height * 2.5
-        && pos.y <= layout.center.y + layout.height * 2.5)
+    // Let egui's painter clip rect cull off-screen geometry; only reject points
+    // that are wildly out of range (NaN / extreme float blown projections).
+    (pos.x.is_finite()
+        && pos.y.is_finite()
+        && pos.x >= layout.center.x - layout.width * 4.0
+        && pos.x <= layout.center.x + layout.width * 4.0
+        && pos.y >= layout.center.y - layout.height * 4.0
+        && pos.y <= layout.center.y + layout.height * 4.0)
         .then_some(ProjectedLocalPoint {
             pos,
             depth: (1.0 + z_pitch).clamp(0.0, 1.0),
