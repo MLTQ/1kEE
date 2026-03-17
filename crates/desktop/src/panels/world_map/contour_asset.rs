@@ -233,11 +233,9 @@ pub fn load_global_topo(
     selected_root: Option<&Path>,
     zoom: f32,
 ) -> Option<Arc<Vec<ContourPath>>> {
-    let path = terrain_assets::find_derived_root(selected_root)?
-        .join("terrain/gebco_2025_contours_500m.gpkg");
-    if !path.exists() {
-        return None;
-    }
+    // Triggers a one-time background GDAL build from available SRTM tiles if
+    // the file doesn't yet exist.  Returns None while the build is in progress.
+    let path = srtm_focus_cache::ensure_global_land_overview(selected_root)?;
     let (lod_bucket, simplify_step, feature_budget) = global_topo_lod(zoom);
 
     static CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();

@@ -172,6 +172,141 @@ pub fn focus_contour_region_status(
     })
 }
 
+/// Returns the path to `global_land_overview.gpkg` once it's ready.
+/// On first call with no pre-existing file, spawns a one-time background
+/// build (gdalwarp over all available SRTM tiles → gdal_contour at 500 m).
+/// Returns `None` while building; the caller should try again next frame.
+pub fn ensure_global_land_overview(selected_root: Option<&Path>) -> Option<PathBuf> {
+    let srtm_root = terrain_assets::find_srtm_root(selected_root)?;
+    let cache_root = focus_cache_root(selected_root)?;
+    let output_path = cache_root.join("global_land_overview.gpkg");
+
+    if output_path.exists() {
+        return Some(output_path);
+    }
+
+    if global_overview_building().load(Ordering::Relaxed) {
+        return None;
+    }
+
+    let tiles = find_all_srtm_tiles(&srtm_root);
+    if tiles.is_empty() {
+        return None;
+    }
+
+    global_overview_building().store(true, Ordering::SeqCst);
+    let cache_root = cache_root.clone();
+
+    std::thread::spawn(move || {
+        let tmp_dir = cache_root.join(TEMP_DIR_NAME);
+        let tmp_tif = tmp_dir.join("global_overview.tmp.tif");
+        let tmp_gpkg = tmp_dir.join("global_overview.tmp.gpkg");
+        let out = cache_root.join("global_land_overview.gpkg");
+        let _ = build_global_overview(&tiles, &tmp_tif, &tmp_gpkg, &out);
+        global_overview_building().store(false, Ordering::SeqCst);
+    });
+
+    None
+}
+
+fn find_all_srtm_tiles(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().and_then(|e| e.to_str()) == Some("tif")
+                && p.file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| {
+                        // N/S + 2 digits + E/W + 3 digits, e.g. N35E034
+                        s.len() == 7
+                            && matches!(s.as_bytes()[0], b'N' | b'S')
+                            && s[1..3].bytes().all(|b| b.is_ascii_digit())
+                            && matches!(s.as_bytes()[3], b'E' | b'W')
+                            && s[4..7].bytes().all(|b| b.is_ascii_digit())
+                    })
+                    .unwrap_or(false)
+        })
+        .collect()
+}
+
+fn build_global_overview(
+    tiles: &[PathBuf],
+    tmp_tif: &Path,
+    tmp_gpkg: &Path,
+    output_path: &Path,
+) -> Option<()> {
+    if shutdown_requested().load(Ordering::Relaxed) {
+        return None;
+    }
+    if let Some(parent) = tmp_tif.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+
+    // Merge all tiles into a 0.2°/pixel (≈22 km) global mosaic.
+    // -dstnodata -32768 keeps ocean/gap areas from producing contours.
+    let mut cmd = Command::new(gdal_tool_path("gdalwarp"));
+    cmd.args([
+        "-q",
+        "-overwrite",
+        "-r",
+        "average",
+        "-tr",
+        "0.2",
+        "0.2",
+        "-te",
+        "-180",
+        "-60",
+        "180",
+        "84",
+        "-dstnodata",
+        "-32768",
+    ]);
+    for tile in tiles {
+        cmd.arg(tile);
+    }
+    cmd.arg(tmp_tif);
+    run_command_with_timeout(cmd, "gdalwarp (global overview)", Duration::from_secs(600))
+        .ok()?;
+
+    if shutdown_requested().load(Ordering::Relaxed) {
+        let _ = fs::remove_file(tmp_tif);
+        return None;
+    }
+
+    // Contour at 500 m interval; -snodata skips the nodata cells.
+    let mut cmd = Command::new(gdal_tool_path("gdal_contour"));
+    cmd.args([
+        "-q",
+        "-f",
+        "GPKG",
+        "-a",
+        "elevation_m",
+        "-i",
+        "500",
+        "-snodata",
+        "-32768",
+        "-nln",
+        "contour",
+    ]);
+    cmd.arg(tmp_tif);
+    cmd.arg(tmp_gpkg);
+    run_command_with_timeout(cmd, "gdal_contour (global overview)", Duration::from_secs(300))
+        .ok()?;
+
+    fs::rename(tmp_gpkg, output_path).ok()?;
+    let _ = fs::remove_file(tmp_tif);
+    Some(())
+}
+
+fn global_overview_building() -> &'static AtomicBool {
+    static BUILDING: OnceLock<AtomicBool> = OnceLock::new();
+    BUILDING.get_or_init(|| AtomicBool::new(false))
+}
+
 pub fn terminate_active_gdal_jobs() {
     shutdown_requested().store(true, Ordering::SeqCst);
 
@@ -628,7 +763,11 @@ fn gdal_tool_path(tool: &str) -> PathBuf {
     PathBuf::from(tool)
 }
 
-fn run_command(mut command: Command, label: &str) -> std::io::Result<()> {
+fn run_command(command: Command, label: &str) -> std::io::Result<()> {
+    run_command_with_timeout(command, label, BUILD_TIMEOUT)
+}
+
+fn run_command_with_timeout(mut command: Command, label: &str, timeout: Duration) -> std::io::Result<()> {
     if shutdown_requested().load(Ordering::Relaxed) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
@@ -669,7 +808,7 @@ fn run_command(mut command: Command, label: &str) -> std::io::Result<()> {
             ));
         }
 
-        if started.elapsed() >= BUILD_TIMEOUT {
+        if started.elapsed() >= timeout {
             let _ = child.kill();
             let _ = child.wait();
             if let Ok(mut guard) = active_children().lock() {
@@ -677,7 +816,7 @@ fn run_command(mut command: Command, label: &str) -> std::io::Result<()> {
             }
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                format!("{label} timed out after {:?}", BUILD_TIMEOUT),
+                format!("{label} timed out after {:?}", timeout),
             ));
         }
 
