@@ -48,7 +48,7 @@ pub fn apply_interaction(
     });
 
     if scroll_y.abs() > f32::EPSILON {
-        view.zoom = (view.zoom * (scroll_y * 0.0055).exp()).clamp(0.6, 20.0);
+        view.zoom = (view.zoom * (scroll_y * 0.0055).exp()).clamp(0.6, 60.0);
         view.auto_spin = false;
     }
 
