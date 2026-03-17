@@ -198,7 +198,7 @@ pub fn load_srtm_for_globe(
     center: GeoPoint,
     _zoom: f32,
 ) -> Option<Arc<Vec<ContourPath>>> {
-    const MAX_TILES: usize = 50;
+    const MAX_TILES: usize = 400;
     // Use a fixed coarse zoom spec for globe-scale tiles (zoom_bucket=1,
     // half_extent=2.2°, ~244 km per side).  This keeps tile geographic size
     // constant as the actual view zoom changes — tiles don't shrink as the
