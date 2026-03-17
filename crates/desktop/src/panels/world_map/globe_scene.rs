@@ -224,7 +224,6 @@ fn draw_global_coastlines(
             painter,
             layout,
             view,
-            selected_root,
             &coastline.points,
             0.022,
             egui::Color32::from_rgb(142, 234, 246),
@@ -460,7 +459,7 @@ fn project_geo(
 
     let perspective = (layout.radius * layout.focal_length) / depth;
     let pos = egui::pos2(
-        layout.center.x - x * perspective,
+        layout.center.x + x * perspective,
         layout.center.y - y * perspective,
     );
 
