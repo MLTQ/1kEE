@@ -27,7 +27,7 @@ pub fn apply_interaction(
         if view.zoom >= local_terrain_scene::LOCAL_MODE_MIN_ZOOM {
             let rotate_mode = ctx.input(|input| input.modifiers.ctrl || input.modifiers.shift);
             if rotate_mode {
-                view.local_yaw += delta.x * 0.0085;
+                view.local_yaw -= delta.x * 0.0085;
                 view.local_pitch = (view.local_pitch - delta.y * 0.006).clamp(0.35, 1.35);
             } else {
                 pan_local_center(response.rect, view, delta);
