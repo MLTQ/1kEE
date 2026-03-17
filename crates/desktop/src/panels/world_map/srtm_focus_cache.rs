@@ -313,10 +313,17 @@ fn build_global_overview(
 
     // Merge into a 0.2°/pixel (≈22 km) global mosaic.
     // -dstnodata -32768 keeps ocean/gap areas from producing contours.
+    // -multi + NUM_THREADS use all available cores; -wm gives the I/O
+    // pipeline 1 GB of working memory for bulk tile reads.
     let mut cmd = Command::new(gdal_tool_path("gdalwarp"));
     cmd.args([
         "-q",
         "-overwrite",
+        "-multi",
+        "-wo",
+        "NUM_THREADS=ALL_CPUS",
+        "-wm",
+        "1024",
         "-r",
         "average",
         "-tr",
@@ -331,6 +338,12 @@ fn build_global_overview(
         "-32768",
         "-co",
         "COMPRESS=LZW",
+        "-co",
+        "TILED=YES",
+        "-co",
+        "BLOCKXSIZE=512",
+        "-co",
+        "BLOCKYSIZE=512",
     ]);
     cmd.arg(warp_source);
     cmd.arg(tmp_tif);
