@@ -33,8 +33,8 @@ pub fn apply_interaction(
                 pan_local_center(response.rect, view, delta);
             }
         } else {
-            view.yaw += delta.x * 0.0055;
-            view.pitch = (view.pitch - delta.y * 0.004).clamp(-1.1, 1.1);
+            view.yaw -= delta.x * 0.0055;
+            view.pitch = (view.pitch + delta.y * 0.004).clamp(-1.1, 1.1);
         }
         view.auto_spin = false;
     }

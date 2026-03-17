@@ -34,6 +34,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     draw_backdrop(painter, rect, &layout);
     draw_hud_frame(painter, rect);
     draw_wireframe(painter, &layout, &model.globe_view, &lod);
+    draw_global_coastlines(painter, &layout, &model.globe_view, selected_root);
 
     let real_contours = model.selected_event().and_then(|event| {
         contour_asset::load_for_focus(selected_root, event.location, model.globe_view.zoom)
@@ -459,7 +460,7 @@ fn project_geo(
 
     let perspective = (layout.radius * layout.focal_length) / depth;
     let pos = egui::pos2(
-        layout.center.x + x * perspective,
+        layout.center.x - x * perspective,
         layout.center.y - y * perspective,
     );
 
