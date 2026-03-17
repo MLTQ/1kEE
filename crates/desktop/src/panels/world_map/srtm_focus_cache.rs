@@ -313,15 +313,20 @@ fn build_global_overview(
 
     // Merge into a 0.2°/pixel (≈22 km) global mosaic.
     // -dstnodata -32768 keeps ocean/gap areas from producing contours.
-    // -multi + NUM_THREADS use all available cores; -wm gives the I/O
-    // pipeline 1 GB of working memory for bulk tile reads.
+    // Use half the available cores so the machine stays responsive.
+    let half_cpus = (std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        / 2)
+    .max(1)
+    .to_string();
     let mut cmd = Command::new(gdal_tool_path("gdalwarp"));
     cmd.args([
         "-q",
         "-overwrite",
         "-multi",
         "-wo",
-        "NUM_THREADS=ALL_CPUS",
+        &format!("NUM_THREADS={half_cpus}"),
         "-wm",
         "1024",
         "-r",
