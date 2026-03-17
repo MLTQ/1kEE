@@ -183,21 +183,37 @@ pub fn has_pending_cache(model: &AppModel) -> bool {
 }
 
 pub fn local_render_zoom(view_zoom: f32) -> f32 {
-    view_zoom.clamp(LOCAL_TRANSITION_START_ZOOM, 20.0)
+    if view_zoom >= LOCAL_MODE_MIN_ZOOM {
+        // Local terrain mode proper: map view zoom [LOCAL_MODE_MIN_ZOOM, 60] → [2.0, 20.0]
+        // so tile resolution scales with how close we are to the surface.
+        let t = ((view_zoom - LOCAL_MODE_MIN_ZOOM) / (60.0 - LOCAL_MODE_MIN_ZOOM)).clamp(0.0, 1.0);
+        egui::lerp(2.0f32..=20.0f32, t)
+    } else {
+        view_zoom.clamp(LOCAL_TRANSITION_START_ZOOM, 20.0)
+    }
 }
 
 pub fn visual_half_extent_for_zoom(view_zoom: f32) -> f32 {
     const KNOTS: &[(f32, f32)] = &[
-        (LOCAL_TRANSITION_START_ZOOM, 1.55), // 4.0 → ~173 km half-span (transition start)
-        (5.5, 0.90),                         // 5.5 → ~100 km
-        (7.0, 0.55),                         // 7.0 → ~61 km (local terrain fully active)
-        (9.5, 0.31),                         // 9.5 → ~35 km
+        // Globe→local transition preview (render_zoom via local_render_zoom, range 4–20)
+        (LOCAL_TRANSITION_START_ZOOM, 1.55), // 4.0  → ~173 km
+        (5.5, 0.90),                         // 5.5  → ~100 km
+        (7.0, 0.55),                         // 7.0  → ~61 km
+        (9.5, 0.31),                         // 9.5  → ~35 km
         (12.0, 0.17),                        // 12.0 → ~19 km
         (16.0, 0.09),                        // 16.0 → ~10 km
-        (20.0, 0.045),                       // 20.0 → ~5 km
+        (20.0, 0.045),                       // 20.0 → ~5 km  (top of old tile range)
+        // Local terrain mode proper: view.zoom ∈ [LOCAL_MODE_MIN_ZOOM=25, 60]
+        // The 20→25 interpolation is unused in practice; only the entries below are hit.
+        (25.0, 1.80),                        // 25.0 → ~200 km (entry into local mode)
+        (30.0, 1.00),                        // 30.0 → ~111 km
+        (36.0, 0.55),                        // 36.0 → ~61 km
+        (43.0, 0.28),                        // 43.0 → ~31 km
+        (52.0, 0.12),                        // 52.0 → ~13 km
+        (60.0, 0.050),                       // 60.0 → ~5.5 km
     ];
 
-    let zoom = view_zoom.clamp(LOCAL_TRANSITION_START_ZOOM, 20.0);
+    let zoom = view_zoom.clamp(LOCAL_TRANSITION_START_ZOOM, 60.0);
     for window in KNOTS.windows(2) {
         let (start_zoom, start_extent) = window[0];
         let (end_zoom, end_extent) = window[1];
