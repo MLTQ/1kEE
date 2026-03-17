@@ -26,6 +26,12 @@ struct CachedContours {
     contours: Arc<Vec<ContourPath>>,
 }
 
+struct CachedGlobalContours {
+    lod_bucket: i32,
+    path: PathBuf,
+    contours: Arc<Vec<ContourPath>>,
+}
+
 struct LocalRegionCache {
     scene_key: Option<SceneKey>,
     entries: HashMap<CacheKey, Arc<Vec<ContourPath>>>,
@@ -189,6 +195,39 @@ pub fn load_for_focus(
     guard.as_ref().map(|cached| Arc::clone(&cached.contours))
 }
 
+pub fn load_global_coastlines(
+    selected_root: Option<&Path>,
+    zoom: f32,
+) -> Option<Arc<Vec<ContourPath>>> {
+    let path = terrain_assets::find_derived_root(selected_root)?
+        .join("terrain/gebco_2025_coastline_0m.gpkg");
+    if !path.exists() {
+        return None;
+    }
+    let (lod_bucket, simplify_step, feature_budget) = global_coastline_lod(zoom);
+
+    static CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cache.lock().ok()?;
+
+    let needs_reload = guard
+        .as_ref()
+        .map(|cached| cached.path.as_path() != path.as_path() || cached.lod_bucket != lod_bucket)
+        .unwrap_or(true);
+
+    if needs_reload {
+        let contours =
+            Arc::new(query_global_coastlines(&path, simplify_step, feature_budget).ok()?);
+        *guard = Some(CachedGlobalContours {
+            lod_bucket,
+            path,
+            contours,
+        });
+    }
+
+    guard.as_ref().map(|cached| Arc::clone(&cached.contours))
+}
+
 fn contour_path(selected_root: Option<&Path>, zoom: f32) -> Option<PathBuf> {
     let derived_root = terrain_assets::find_derived_root(selected_root)?;
     let file = if zoom >= 4.0 {
@@ -199,6 +238,55 @@ fn contour_path(selected_root: Option<&Path>, zoom: f32) -> Option<PathBuf> {
 
     let path = derived_root.join(file);
     path.exists().then_some(path)
+}
+
+fn global_coastline_lod(zoom: f32) -> (i32, usize, usize) {
+    if zoom < 0.95 {
+        (0, 14, 700)
+    } else if zoom < 1.8 {
+        (1, 9, 1_300)
+    } else {
+        (2, 6, 2_400)
+    }
+}
+
+fn query_global_coastlines(
+    path: &Path,
+    simplify_step: usize,
+    feature_budget: usize,
+) -> rusqlite::Result<Vec<ContourPath>> {
+    let connection = Connection::open(path)?;
+    let mut statement = connection.prepare("SELECT geom, elevation_m FROM contour ORDER BY fid")?;
+    let rows = statement.query_map([], |row| {
+        let geometry: Vec<u8> = row.get(0)?;
+        let elevation_m: f32 = row.get(1)?;
+        Ok((geometry, elevation_m))
+    })?;
+
+    let mut contours = Vec::new();
+    for row in rows {
+        let (geometry, elevation_m) = row?;
+        for line in parse_gpkg_lines(&geometry) {
+            if line.len() < 2 {
+                continue;
+            }
+            let simplified = simplify_line(line, simplify_step);
+            if simplified.len() < 2 {
+                continue;
+            }
+            contours.push(ContourPath {
+                elevation_m,
+                points: simplified,
+            });
+        }
+    }
+
+    if contours.len() > feature_budget {
+        contours.sort_by(|left, right| right.points.len().cmp(&left.points.len()));
+        contours.truncate(feature_budget);
+    }
+
+    Ok(contours)
 }
 
 fn query_gebco_contours(

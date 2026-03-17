@@ -1,6 +1,7 @@
 use crate::model::{AppModel, EventRecord, GeoPoint, GlobeViewState, NearbyCamera};
 use crate::terrain_assets;
 use crate::theme;
+use std::path::Path;
 
 use super::contour_asset;
 use super::globe_scene::GlobeScene;
@@ -75,6 +76,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 painter,
                 &layout,
                 &model.globe_view,
+                model.selected_root.as_deref(),
                 viewport_center,
                 render_zoom,
                 event,
@@ -160,6 +162,22 @@ pub fn is_active(model: &AppModel) -> bool {
 pub fn transition_progress(zoom: f32) -> f32 {
     ((zoom - LOCAL_TRANSITION_START_ZOOM) / (LOCAL_MODE_MIN_ZOOM - LOCAL_TRANSITION_START_ZOOM))
         .clamp(0.0, 1.0)
+}
+
+pub fn has_pending_cache(model: &AppModel) -> bool {
+    let Some(_) = model.terrain_focus_location() else {
+        return false;
+    };
+
+    let render_zoom = local_render_zoom(model.globe_view.zoom);
+    srtm_focus_cache::focus_contour_region_status(
+        model.selected_root.as_deref(),
+        model.globe_view.local_center,
+        render_zoom,
+        LOCAL_STREAM_RADIUS,
+    )
+    .map(|status| status.pending_assets > 0 && status.ready_assets < status.total_assets)
+    .unwrap_or(false)
 }
 
 pub fn local_render_zoom(view_zoom: f32) -> f32 {
@@ -310,6 +328,7 @@ fn draw_markers(
     painter: &egui::Painter,
     layout: &LocalLayout,
     view: &GlobeViewState,
+    selected_root: Option<&Path>,
     viewport_center: GeoPoint,
     _render_zoom: f32,
     event: &EventRecord,
@@ -329,7 +348,7 @@ fn draw_markers(
         view,
         viewport_center,
         event.location,
-        marker_elevation_m(model.selected_root.as_deref(), event.location),
+        marker_elevation_m(selected_root, event.location),
         extent_x_km,
         extent_y_km,
     );
@@ -351,7 +370,7 @@ fn draw_markers(
                 view,
                 viewport_center,
                 camera.location,
-                marker_elevation_m(model.selected_root.as_deref(), camera.location),
+                marker_elevation_m(selected_root, camera.location),
                 extent_x_km,
                 extent_y_km,
             )
@@ -514,7 +533,7 @@ fn draw_empty_state(painter: &egui::Painter, rect: egui::Rect, label: &str) {
     );
 }
 
-fn marker_elevation_m(selected_root: Option<&std::path::Path>, point: GeoPoint) -> f32 {
+fn marker_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> f32 {
     let terrain_elevation_m = srtm_stream::sample_elevation_m(selected_root, point).unwrap_or(0.0);
     terrain_elevation_m + 18.0
 }

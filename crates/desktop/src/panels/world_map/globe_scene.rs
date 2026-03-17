@@ -34,6 +34,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 
     draw_backdrop(painter, rect, &layout);
     draw_hud_frame(painter, rect);
+    draw_global_coastlines(painter, &layout, &model.globe_view, selected_root);
     draw_wireframe(painter, &layout, &model.globe_view, &lod, selected_root);
 
     let real_contours = model.selected_event().and_then(|event| {
@@ -211,6 +212,30 @@ fn draw_wireframe(
             lod.altitude_scale,
             theme::grid_color(),
             lod.backface_alpha * 0.32,
+        );
+    }
+}
+
+fn draw_global_coastlines(
+    painter: &egui::Painter,
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    selected_root: Option<&std::path::Path>,
+) {
+    let Some(coastlines) = contour_asset::load_global_coastlines(selected_root, view.zoom) else {
+        return;
+    };
+
+    for coastline in coastlines.iter() {
+        draw_geo_path(
+            painter,
+            layout,
+            view,
+            selected_root,
+            &coastline.points,
+            0.022,
+            egui::Color32::from_rgb(142, 234, 246),
+            0.16,
         );
     }
 }
@@ -447,7 +472,7 @@ fn project_geo(
 
     let perspective = (layout.radius * layout.focal_length) / depth;
     let pos = egui::pos2(
-        layout.center.x + x * perspective,
+        layout.center.x - x * perspective,
         layout.center.y - y * perspective,
     );
 

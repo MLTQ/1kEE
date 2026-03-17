@@ -33,6 +33,11 @@ Renders the high-zoom event terrain mode. This file exists to show one selected 
 - **Does**: Maps the shared zoom state onto the globe-to-local overlap band as a normalized `0..1` blend factor
 - **Interacts with**: `world_map.rs`
 
+### `has_pending_cache`
+- **Does**: Reports whether the current streamed local terrain neighborhood still has pending contour-cache buckets
+- **Interacts with**: `world_map.rs`, `srtm_focus_cache.rs`
+- **Rationale**: Lets the map panel request idle repaints only while terrain work is actively progressing instead of redrawing forever in manual mode
+
 ### `project_local`
 - **Does**: Projects local east/north/elevation coordinates into an analyst-controlled oblique screen view
 - **Interacts with**: `GlobeViewState` in `model.rs`, contour rendering, marker placement

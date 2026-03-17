@@ -32,7 +32,7 @@ impl GlobeViewState {
             local_pitch: 0.98,
             local_layer_spread: 0.85,
             zoom: 1.0,
-            auto_spin: true,
+            auto_spin: false,
         };
         state.focus_on(point);
         state

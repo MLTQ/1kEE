@@ -48,16 +48,88 @@ impl TerrainRaster {
     }
 }
 
-pub fn sample_normalized(selected_root: Option<&Path>, point: GeoPoint) -> Option<f32> {
-    if let Some(value) = srtm_stream::sample_normalized(selected_root, point) {
+pub fn sample_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> Option<f32> {
+    if let Some(value) = srtm_stream::sample_elevation_m(selected_root, point) {
         return Some(value);
     }
 
+    sample_global_elevation_m(selected_root, point)
+}
+
+pub fn sample_global_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> Option<f32> {
     let path = terrain_assets::find_derived_root(selected_root)?
         .join("terrain/gebco_2025_preview_4096.png");
+    sample_cached_raster(
+        &HEIGHT_CACHE,
+        path,
+        point,
+        TerrainRaster::sample_elevation_m,
+    )
+}
 
-    static CACHE: OnceLock<Mutex<Option<CachedRaster>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(None));
+pub fn sample_normalized(selected_root: Option<&Path>, point: GeoPoint) -> Option<f32> {
+    Some(
+        sample_elevation_m(selected_root, point)?
+            .mul_add(
+                1.0 / (MAX_ELEVATION_M - MIN_ELEVATION_M),
+                -MIN_ELEVATION_M / (MAX_ELEVATION_M - MIN_ELEVATION_M),
+            )
+            .clamp(0.0, 1.0),
+    )
+}
+
+pub fn sample_visual_intensity(selected_root: Option<&Path>, point: GeoPoint) -> Option<f32> {
+    sample_global_visual_intensity(selected_root, point)
+}
+
+pub fn sample_global_visual_intensity(
+    selected_root: Option<&Path>,
+    point: GeoPoint,
+) -> Option<f32> {
+    let derived_root = terrain_assets::find_derived_root(selected_root)?;
+    let path = [
+        derived_root.join("terrain/natural_earth_relief_4096.png"),
+        derived_root.join("terrain/gebco_2025_preview_4096.png"),
+    ]
+    .into_iter()
+    .find(|path| path.exists())?;
+
+    sample_cached_raster(
+        &VISUAL_CACHE,
+        path,
+        point,
+        TerrainRaster::sample_pixel_normalized,
+    )
+}
+
+impl TerrainRaster {
+    fn sample_pixel_normalized(&self, point: GeoPoint) -> f32 {
+        let u = ((point.lon + 180.0) / 360.0).rem_euclid(1.0);
+        let v = ((90.0 - point.lat) / 180.0).clamp(0.0, 1.0);
+
+        let x = u * (self.width.saturating_sub(1)) as f32;
+        let y = v * (self.height.saturating_sub(1)) as f32;
+
+        let x0 = x.floor() as u32;
+        let y0 = y.floor() as u32;
+        let x1 = (x0 + 1).min(self.width.saturating_sub(1));
+        let y1 = (y0 + 1).min(self.height.saturating_sub(1));
+        let tx = x - x0 as f32;
+        let ty = y - y0 as f32;
+
+        let top = lerp(sample_pixel(self, x0, y0), sample_pixel(self, x1, y0), tx);
+        let bottom = lerp(sample_pixel(self, x0, y1), sample_pixel(self, x1, y1), tx);
+        lerp(top, bottom, ty)
+    }
+}
+
+fn sample_cached_raster<T>(
+    cache: &'static OnceLock<Mutex<Option<CachedRaster>>>,
+    path: PathBuf,
+    point: GeoPoint,
+    sampler: fn(&TerrainRaster, GeoPoint) -> T,
+) -> Option<T> {
+    let cache = cache.get_or_init(|| Mutex::new(None));
     let mut guard = cache.lock().ok()?;
 
     if guard
@@ -69,9 +141,7 @@ pub fn sample_normalized(selected_root: Option<&Path>, point: GeoPoint) -> Optio
         *guard = Some(CachedRaster { path, raster });
     }
 
-    guard
-        .as_ref()
-        .map(|cached| cached.raster.sample_normalized(point))
+    guard.as_ref().map(|cached| sampler(&cached.raster, point))
 }
 
 fn load_raster(path: PathBuf) -> Option<TerrainRaster> {
@@ -98,3 +168,6 @@ fn sample_pixel(raster: &TerrainRaster, x: u32, y: u32) -> f32 {
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
+
+static HEIGHT_CACHE: OnceLock<Mutex<Option<CachedRaster>>> = OnceLock::new();
+static VISUAL_CACHE: OnceLock<Mutex<Option<CachedRaster>>> = OnceLock::new();

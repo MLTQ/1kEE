@@ -24,6 +24,11 @@ Provides the globe renderer with local contour overlays around the selected focu
 - **Interacts with**: `terrain_assets.rs`, `globe_scene.rs`
 - **Rationale**: Preserves a low-resolution global fallback when SRTM tiles are missing or the focus point is outside land coverage
 
+### `load_global_coastlines`
+- **Does**: Loads a precomputed coarse `0m` global coastline layer from the derived GEBCO cache and serves a zoom-banded simplified version for low-zoom globe rendering
+- **Interacts with**: `terrain_assets.rs`, `globe_scene.rs`
+- **Rationale**: Gives the zoomed-out globe recognizable land/ocean boundaries without depending on blurry raster relief alone
+
 ### `query_local_contours`
 - **Does**: Reads one locally cached focus tile from the shared SQLite contour cache and applies feature thinning / point simplification
 - **Interacts with**: `srtm_focus_cache.rs`, `rusqlite`
@@ -51,5 +56,7 @@ Provides the globe renderer with local contour overlays around the selected focu
 - The local-scene SRTM loader retains previously visited bucket keys per selected-event scene, so panning expands the streamed map instead of replacing it every time the viewport center moves.
 - Scene retention is now keyed to the actual contour-cache zoom bucket instead of raw fractional zoom, which avoids unnecessary resets while the analyst is still within the same underlying terrain LOD band.
 - The shared SQLite cache means all visited tiles live in one indexable file, which is a much better stepping stone toward global terrain streaming than the old directory of tiny GeoPackages.
+- The zoomed-out globe now also depends on a precomputed `Derived/terrain/gebco_2025_coastline_0m.gpkg` asset generated once from the downsampled GEBCO preview, and that layer is further simplified into a few zoom-banded LODs at runtime so the whole-globe view does not draw unnecessary detail every frame.
+- The global coastline LOD now keeps the longest simplified features first instead of thinning by feature index, which avoids pathological cases where whole continents disappear while tiny islands survive.
 - The GEBCO loader stays on `500 m` contours until closer zoom, then switches to `200 m` for fallback detail.
 - Query extent, feature cap, clipping, and point simplification all tighten as zoom increases to keep interaction responsive.
