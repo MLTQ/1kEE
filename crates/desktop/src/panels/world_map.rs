@@ -19,7 +19,9 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
     panel_frame.show(ui, |ui| {
         if model.globe_view.auto_spin {
             ui.ctx().request_repaint();
-        } else if local_terrain_scene::has_pending_cache(model) {
+        } else if local_terrain_scene::has_pending_cache(model)
+            || globe_srtm_pending(model)
+        {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(180));
         }
@@ -45,21 +47,10 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         let rect = response.rect;
 
         camera::apply_interaction(ui.ctx(), &response, &mut model.globe_view);
-        let transition_progress = local_terrain_scene::transition_progress(model.globe_view.zoom);
         let scene = if local_terrain_mode {
             local_terrain_scene::paint(&painter, rect, model, ui.ctx().input(|input| input.time))
         } else {
-            let scene =
-                globe_scene::paint(&painter, rect, model, ui.ctx().input(|input| input.time));
-            if transition_progress > 0.0 {
-                local_terrain_scene::paint_transition_overlay(
-                    &painter,
-                    rect,
-                    model,
-                    transition_progress,
-                );
-            }
-            scene
+            globe_scene::paint(&painter, rect, model, ui.ctx().input(|input| input.time))
         };
 
         if model.terrain_focus_location().is_some() {
@@ -124,6 +115,23 @@ fn draw_focus_card(ui: &mut egui::Ui, model: &AppModel, local_terrain_mode: bool
                     });
                 });
         });
+}
+
+/// True while SRTM focus tiles for the globe viewport are still being built.
+/// Drives repaint so the sphere updates as soon as the background build finishes.
+fn globe_srtm_pending(model: &AppModel) -> bool {
+    let zoom = model.globe_view.zoom;
+    if zoom < 2.0 || zoom >= local_terrain_scene::LOCAL_MODE_MIN_ZOOM {
+        return false;
+    }
+    srtm_focus_cache::focus_contour_region_status(
+        model.selected_root.as_deref(),
+        model.globe_view.local_center,
+        zoom,
+        0,
+    )
+    .map(|s| s.pending_assets > 0 || s.ready_assets < s.total_assets)
+    .unwrap_or(false)
 }
 
 fn draw_local_footer(ui: &mut egui::Ui, model: &mut AppModel) {

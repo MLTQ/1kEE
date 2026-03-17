@@ -37,12 +37,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     draw_global_coastlines(painter, &layout, &model.globe_view, selected_root);
     draw_global_topo(painter, &layout, &model.globe_view, selected_root);
 
-    let real_contours = model.selected_event().and_then(|event| {
-        contour_asset::load_for_focus(selected_root, event.location, model.globe_view.zoom)
-    });
-    if let Some(contours) = real_contours.as_deref() {
-        draw_real_contours(painter, &layout, &model.globe_view, &lod, contours);
-    }
+    draw_srtm_on_globe(painter, &layout, &model.globe_view, &lod, selected_root);
 
     let selected_event_id = model.selected_event_id.as_deref();
     let selected_camera_id = model.selected_camera_id.as_deref();
@@ -242,20 +237,79 @@ fn draw_global_topo(
     view: &GlobeViewState,
     selected_root: Option<&std::path::Path>,
 ) {
+    // Crossfade: full opacity at zoom ≤ 2.0, fade to zero by zoom 4.0.
+    // The SRTM focus layer fades *in* over the same range so there's a
+    // smooth handoff rather than an abrupt switch.
+    let alpha = (1.0 - (view.zoom - 2.0) / 2.0).clamp(0.0, 1.0);
+    if alpha <= 0.01 {
+        return;
+    }
+
     let Some(topo) = contour_asset::load_global_topo(selected_root, view.zoom) else {
         return;
     };
 
     for contour in topo.iter() {
-        // Match the local-terrain color language: orange for major ridges,
-        // muted cyan for general terrain, so the globe reads as the same world.
         let major = (contour.elevation_m.round() as i32).rem_euclid(2_000) == 0;
         let color = if major {
             egui::Color32::from_rgb(210, 95, 45)
         } else {
             egui::Color32::from_rgb(115, 185, 210)
         };
-        draw_geo_path(painter, layout, view, &contour.points, 0.015, color, 0.05);
+        draw_geo_path(
+            painter,
+            layout,
+            view,
+            &contour.points,
+            0.015,
+            color.gamma_multiply(alpha),
+            0.05 * alpha,
+        );
+    }
+}
+
+/// Draw SRTM focus-tile contours directly on the sphere surface.
+/// Fades in from zoom 2.0 → 4.0, crossfading with the coarser global topo.
+/// Because these go through `draw_geo_path` / `project_geo` they are
+/// sphere-projected and rotate with the globe — no floating flat overlay.
+fn draw_srtm_on_globe(
+    painter: &egui::Painter,
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    lod: &GlobeLod,
+    selected_root: Option<&std::path::Path>,
+) {
+    if view.zoom < 2.0 {
+        return;
+    }
+    let alpha = ((view.zoom - 2.0) / 2.0).clamp(0.0, 1.0);
+
+    let Some(contours) = contour_asset::load_srtm_region_for_view(
+        selected_root,
+        view.local_center, // scene anchor (used for scene-key invalidation)
+        view.local_center, // viewport center (tile to load)
+        view.zoom,
+        0, // radius=0: single central tile; globe can't show more anyway
+    ) else {
+        return;
+    };
+
+    for contour in contours.iter() {
+        let major = (contour.elevation_m.round() as i32).rem_euclid(50) == 0;
+        let color = if major {
+            egui::Color32::from_rgb(244, 123, 61)
+        } else {
+            egui::Color32::from_rgb(121, 212, 236)
+        };
+        draw_geo_path(
+            painter,
+            layout,
+            view,
+            &contour.points,
+            lod.altitude_scale,
+            color.gamma_multiply(alpha),
+            lod.backface_alpha * 0.12,
+        );
     }
 }
 
