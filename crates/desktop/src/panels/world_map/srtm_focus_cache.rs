@@ -1,7 +1,7 @@
 use crate::model::GeoPoint;
 use crate::terrain_assets;
 use rusqlite::{Connection, OptionalExtension, params};
-use std::collections::HashSet;
+use std::collections::HashSet; // used by pending_set()
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -189,24 +189,51 @@ pub fn ensure_global_land_overview(selected_root: Option<&Path>) -> Option<PathB
         return None;
     }
 
-    let tiles = find_all_srtm_tiles(&srtm_root);
-    if tiles.is_empty() {
-        return None;
-    }
+    // Prefer a pre-existing VRT in the parent of the SRTM tile directory
+    // (many distributions ship one, e.g. SRTM_GL1_srtm.vrt alongside
+    // SRTM_GL1_srtm/).  Failing that, scan for tiles and build our own.
+    let source_vrt = find_prebuilt_vrt(&srtm_root);
+    let tiles_for_vrt = if source_vrt.is_none() {
+        let t = find_all_srtm_tiles(&srtm_root);
+        if t.is_empty() {
+            return None;
+        }
+        t
+    } else {
+        Vec::new()
+    };
 
     global_overview_building().store(true, Ordering::SeqCst);
-    let cache_root = cache_root.clone();
+    let cache_root_clone = cache_root.clone();
 
     std::thread::spawn(move || {
-        let tmp_dir = cache_root.join(TEMP_DIR_NAME);
+        let tmp_dir = cache_root_clone.join(TEMP_DIR_NAME);
         let tmp_tif = tmp_dir.join("global_overview.tmp.tif");
         let tmp_gpkg = tmp_dir.join("global_overview.tmp.gpkg");
-        let out = cache_root.join("global_land_overview.gpkg");
-        let _ = build_global_overview(&tiles, &tmp_tif, &tmp_gpkg, &out);
+        let out = cache_root_clone.join("global_land_overview.gpkg");
+        let _ = build_global_overview(source_vrt.as_deref(), &tiles_for_vrt, &tmp_tif, &tmp_gpkg, &out);
         global_overview_building().store(false, Ordering::SeqCst);
     });
 
     None
+}
+
+/// Look for a `.vrt` file adjacent to the SRTM tile directory that covers
+/// the full dataset, e.g. `…/srtm_gl1/SRTM_GL1_srtm.vrt`.
+fn find_prebuilt_vrt(srtm_root: &Path) -> Option<PathBuf> {
+    let parent = srtm_root.parent()?;
+    // Try the canonical name first, then any .vrt in the parent directory.
+    let canonical = parent.join(format!(
+        "{}.vrt",
+        srtm_root.file_name()?.to_string_lossy()
+    ));
+    if canonical.exists() {
+        return Some(canonical);
+    }
+    std::fs::read_dir(parent).ok()?.find_map(|e| {
+        let p = e.ok()?.path();
+        (p.extension()?.to_str() == Some("vrt")).then_some(p)
+    })
 }
 
 fn find_all_srtm_tiles(root: &Path) -> Vec<PathBuf> {
@@ -233,7 +260,11 @@ fn find_all_srtm_tiles(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Build the global land overview from either a pre-existing VRT or a list
+/// of individual SRTM tiles.  Exactly one of `prebuilt_vrt` / `tiles` must
+/// be non-empty/non-None.
 fn build_global_overview(
+    prebuilt_vrt: Option<&Path>,
     tiles: &[PathBuf],
     tmp_tif: &Path,
     tmp_gpkg: &Path,
@@ -242,11 +273,45 @@ fn build_global_overview(
     if shutdown_requested().load(Ordering::Relaxed) {
         return None;
     }
-    if let Some(parent) = tmp_tif.parent() {
-        fs::create_dir_all(parent).ok()?;
-    }
+    let tmp_dir = tmp_tif.parent()?;
+    fs::create_dir_all(tmp_dir).ok()?;
 
-    // Merge all tiles into a 0.2°/pixel (≈22 km) global mosaic.
+    // Resolve the VRT to warp from: either the pre-built one or one we
+    // construct from the tile list.
+    let built_vrt: Option<PathBuf>;
+    let warp_source: &Path = if let Some(vrt) = prebuilt_vrt {
+        built_vrt = None;
+        vrt
+    } else {
+        // Write tile paths to a text file to avoid ARG_MAX limits and the
+        // "too many open files" error gdalwarp hits with thousands of args.
+        let tile_list_path = tmp_dir.join("global_tile_list.txt");
+        {
+            use std::io::Write as _;
+            let mut f = fs::File::create(&tile_list_path).ok()?;
+            for tile in tiles {
+                writeln!(f, "{}", tile.display()).ok()?;
+            }
+        }
+
+        let tmp_vrt = tmp_dir.join("global_overview.tmp.vrt");
+        let mut cmd = Command::new(gdal_tool_path("gdalbuildvrt"));
+        cmd.args(["-q", "-input_file_list"]);
+        cmd.arg(&tile_list_path);
+        cmd.arg(&tmp_vrt);
+        run_command_with_timeout(cmd, "gdalbuildvrt (global overview)", Duration::from_secs(120))
+            .ok()?;
+        let _ = fs::remove_file(&tile_list_path);
+
+        if shutdown_requested().load(Ordering::Relaxed) {
+            let _ = fs::remove_file(&tmp_vrt);
+            return None;
+        }
+        built_vrt = Some(tmp_vrt);
+        built_vrt.as_deref().unwrap()
+    };
+
+    // Merge into a 0.2°/pixel (≈22 km) global mosaic.
     // -dstnodata -32768 keeps ocean/gap areas from producing contours.
     let mut cmd = Command::new(gdal_tool_path("gdalwarp"));
     cmd.args([
@@ -264,13 +329,16 @@ fn build_global_overview(
         "84",
         "-dstnodata",
         "-32768",
+        "-co",
+        "COMPRESS=LZW",
     ]);
-    for tile in tiles {
-        cmd.arg(tile);
-    }
+    cmd.arg(warp_source);
     cmd.arg(tmp_tif);
     run_command_with_timeout(cmd, "gdalwarp (global overview)", Duration::from_secs(600))
         .ok()?;
+    if let Some(ref vrt) = built_vrt {
+        let _ = fs::remove_file(vrt);
+    }
 
     if shutdown_requested().load(Ordering::Relaxed) {
         let _ = fs::remove_file(tmp_tif);
@@ -297,7 +365,11 @@ fn build_global_overview(
     run_command_with_timeout(cmd, "gdal_contour (global overview)", Duration::from_secs(300))
         .ok()?;
 
-    fs::rename(tmp_gpkg, output_path).ok()?;
+    // fs::rename fails across filesystems; fall back to copy+delete.
+    if fs::rename(tmp_gpkg, output_path).is_err() {
+        fs::copy(tmp_gpkg, output_path).ok()?;
+        let _ = fs::remove_file(tmp_gpkg);
+    }
     let _ = fs::remove_file(tmp_tif);
     Some(())
 }
