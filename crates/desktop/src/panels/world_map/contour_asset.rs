@@ -229,6 +229,96 @@ pub fn load_global_coastlines(
     guard.as_ref().map(|cached| Arc::clone(&cached.contours))
 }
 
+pub fn load_global_topo(
+    selected_root: Option<&Path>,
+    zoom: f32,
+) -> Option<Arc<Vec<ContourPath>>> {
+    let path = terrain_assets::find_derived_root(selected_root)?
+        .join("terrain/gebco_2025_contours_500m.gpkg");
+    if !path.exists() {
+        return None;
+    }
+    let (lod_bucket, simplify_step, feature_budget) = global_topo_lod(zoom);
+
+    static CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cache.lock().ok()?;
+
+    let needs_reload = guard
+        .as_ref()
+        .map(|cached| cached.path.as_path() != path.as_path() || cached.lod_bucket != lod_bucket)
+        .unwrap_or(true);
+
+    if needs_reload {
+        let contours =
+            Arc::new(query_global_topo(&path, simplify_step, feature_budget).ok()?);
+        *guard = Some(CachedGlobalContours {
+            lod_bucket,
+            path,
+            contours,
+        });
+    }
+
+    guard.as_ref().map(|cached| Arc::clone(&cached.contours))
+}
+
+fn global_topo_lod(zoom: f32) -> (i32, usize, usize) {
+    if zoom < 1.5 {
+        (0, 18, 400)
+    } else if zoom < 3.0 {
+        (1, 12, 650)
+    } else {
+        (2, 7, 1_000)
+    }
+}
+
+fn query_global_topo(
+    path: &Path,
+    simplify_step: usize,
+    feature_budget: usize,
+) -> rusqlite::Result<Vec<ContourPath>> {
+    let connection = Connection::open(path)?;
+    // Land-positive contours only — skips ocean bathymetry which is visually
+    // cluttered and tactically irrelevant at globe scale.
+    // No ORDER BY: a bare LIMIT on the sequential scan is much faster than
+    // sorting millions of rows in SQLite.  We sort by simplified line length
+    // in Rust to keep geographically significant features (long ridges,
+    // plateaus, continental edges) and drop short noise.
+    let fetch_limit = (feature_budget * 8).max(3_000) as i64;
+    let mut statement = connection.prepare(
+        "SELECT geom, elevation_m FROM contour WHERE elevation_m > 0 LIMIT ?1",
+    )?;
+    let rows = statement.query_map(params![fetch_limit], |row| {
+        let geometry: Vec<u8> = row.get(0)?;
+        let elevation_m: f32 = row.get(1)?;
+        Ok((geometry, elevation_m))
+    })?;
+
+    let mut contours = Vec::new();
+    for row in rows {
+        let (geometry, elevation_m) = row?;
+        for line in parse_gpkg_lines(&geometry) {
+            if line.len() < 2 {
+                continue;
+            }
+            let simplified = simplify_line(line, simplify_step);
+            if simplified.len() < 2 {
+                continue;
+            }
+            contours.push(ContourPath {
+                elevation_m,
+                points: simplified,
+            });
+        }
+    }
+
+    // Longest simplified lines are the most geographically prominent at globe scale.
+    contours.sort_unstable_by(|a, b| b.points.len().cmp(&a.points.len()));
+    contours.truncate(feature_budget);
+
+    Ok(contours)
+}
+
 fn contour_path(selected_root: Option<&Path>, zoom: f32) -> Option<PathBuf> {
     let derived_root = terrain_assets::find_derived_root(selected_root)?;
     let file = if zoom >= 4.0 {

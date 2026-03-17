@@ -35,6 +35,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     draw_hud_frame(painter, rect);
     draw_wireframe(painter, &layout, &model.globe_view, &lod);
     draw_global_coastlines(painter, &layout, &model.globe_view, selected_root);
+    draw_global_topo(painter, &layout, &model.globe_view, selected_root);
 
     let real_contours = model.selected_event().and_then(|event| {
         contour_asset::load_for_focus(selected_root, event.location, model.globe_view.zoom)
@@ -232,6 +233,29 @@ fn draw_global_coastlines(
             egui::Color32::from_rgb(142, 234, 246),
             0.16,
         );
+    }
+}
+
+fn draw_global_topo(
+    painter: &egui::Painter,
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    selected_root: Option<&std::path::Path>,
+) {
+    let Some(topo) = contour_asset::load_global_topo(selected_root, view.zoom) else {
+        return;
+    };
+
+    for contour in topo.iter() {
+        // Match the local-terrain color language: orange for major ridges,
+        // muted cyan for general terrain, so the globe reads as the same world.
+        let major = (contour.elevation_m.round() as i32).rem_euclid(2_000) == 0;
+        let color = if major {
+            egui::Color32::from_rgb(210, 95, 45)
+        } else {
+            egui::Color32::from_rgb(115, 185, 210)
+        };
+        draw_geo_path(painter, layout, view, &contour.points, 0.015, color, 0.05);
     }
 }
 
