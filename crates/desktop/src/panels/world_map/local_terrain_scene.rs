@@ -82,6 +82,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 model.selected_event_id.as_deref(),
                 model.selected_camera_id.as_deref(),
                 time,
+                model.selected_root.as_deref(),
             )
         } else {
             (Vec::new(), Vec::new())
@@ -317,6 +318,7 @@ fn draw_markers(
     selected_event_id: Option<&str>,
     selected_camera_id: Option<&str>,
     time: f64,
+    selected_root: Option<&std::path::Path>,
 ) -> (Vec<(String, egui::Pos2)>, Vec<(String, egui::Pos2)>) {
     let half_extent_deg = visual_half_extent_for_zoom(view.zoom);
     let km_per_deg_lat = 111.32f32;
@@ -329,7 +331,7 @@ fn draw_markers(
         view,
         viewport_center,
         event.location,
-        marker_elevation_m(model.selected_root.as_deref(), event.location),
+        marker_elevation_m(selected_root, event.location),
         extent_x_km,
         extent_y_km,
     );
@@ -351,7 +353,7 @@ fn draw_markers(
                 view,
                 viewport_center,
                 camera.location,
-                marker_elevation_m(model.selected_root.as_deref(), camera.location),
+                marker_elevation_m(selected_root, camera.location),
                 extent_x_km,
                 extent_y_km,
             )

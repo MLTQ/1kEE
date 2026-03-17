@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 pub struct TerrainInventory {
     pub gebco_topography_tiles: usize,
@@ -126,6 +127,28 @@ pub fn find_derived_root(selected_root: Option<&Path>) -> Option<PathBuf> {
 }
 
 pub fn find_srtm_root(selected_root: Option<&Path>) -> Option<PathBuf> {
+    // Cache the last (selected_root, resolved) pair — this function is called per-frame
+    // from is_active() and was doing full filesystem traversal every call.
+    static CACHE: OnceLock<Mutex<(Option<PathBuf>, Option<PathBuf>)>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new((None, None)));
+    let key = selected_root.map(Path::to_path_buf);
+
+    if let Ok(guard) = cache.lock() {
+        if guard.0 == key {
+            return guard.1.clone();
+        }
+    }
+
+    let result = find_srtm_root_uncached(selected_root);
+
+    if let Ok(mut guard) = cache.lock() {
+        *guard = (key, result.clone());
+    }
+
+    result
+}
+
+fn find_srtm_root_uncached(selected_root: Option<&Path>) -> Option<PathBuf> {
     if let Some(root) = selected_root {
         if let Some(candidate) = find_srtm_root_from(root) {
             return Some(candidate);

@@ -17,7 +17,13 @@ pub fn apply_interaction(
     view: &mut GlobeViewState,
 ) {
     if response.dragged() {
-        let delta = ctx.input(|input| input.pointer.delta());
+        let raw_delta = ctx.input(|input| input.pointer.delta());
+        // Clamp per-frame delta to prevent huge jumps during lag recovery.
+        // At 60fps a full-screen drag is ~16px/frame; cap at 32 for headroom.
+        let delta = egui::Vec2::new(
+            raw_delta.x.clamp(-32.0, 32.0),
+            raw_delta.y.clamp(-32.0, 32.0),
+        );
         if view.zoom >= local_terrain_scene::LOCAL_MODE_MIN_ZOOM {
             let rotate_mode = ctx.input(|input| input.modifiers.ctrl || input.modifiers.shift);
             if rotate_mode {

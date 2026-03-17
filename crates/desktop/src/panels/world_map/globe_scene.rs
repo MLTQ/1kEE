@@ -4,7 +4,6 @@ use crate::theme;
 use super::camera::{self, GlobeLod};
 use super::contour_asset;
 use super::terrain_field;
-use super::terrain_raster;
 
 pub struct GlobeScene {
     pub event_markers: Vec<(String, egui::Pos2)>,
@@ -34,20 +33,13 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 
     draw_backdrop(painter, rect, &layout);
     draw_hud_frame(painter, rect);
-    draw_wireframe(painter, &layout, &model.globe_view, &lod, selected_root);
+    draw_wireframe(painter, &layout, &model.globe_view, &lod);
 
     let real_contours = model.selected_event().and_then(|event| {
         contour_asset::load_for_focus(selected_root, event.location, model.globe_view.zoom)
     });
     if let Some(contours) = real_contours.as_deref() {
-        draw_real_contours(
-            painter,
-            &layout,
-            &model.globe_view,
-            &lod,
-            selected_root,
-            contours,
-        );
+        draw_real_contours(painter, &layout, &model.globe_view, &lod, contours);
     }
 
     let selected_event_id = model.selected_event_id.as_deref();
@@ -61,7 +53,6 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             project_geo(
                 &layout,
                 &model.globe_view,
-                selected_root,
                 event.location,
                 lod.altitude_scale * 0.7,
             )
@@ -84,7 +75,6 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             project_geo(
                 &layout,
                 &model.globe_view,
-                selected_root,
                 camera.location,
                 lod.altitude_scale * 0.35,
             )
@@ -112,13 +102,20 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 }
 
 fn globe_layout(rect: egui::Rect, view: &GlobeViewState) -> GlobeLayout {
-    let zoom_t = ((view.zoom.ln() - 0.6f32.ln()) / (8.0f32.ln() - 0.6f32.ln())).clamp(0.0, 1.0);
+    // zoom_t: 0 at minimum globe zoom, 1 at the local-terrain transition threshold
+    let zoom_t = ((view.zoom.ln() - 0.6f32.ln())
+        / (super::local_terrain_scene::LOCAL_MODE_MIN_ZOOM.ln() - 0.6f32.ln()))
+    .clamp(0.0, 1.0);
+    // Globe grows to nearly fill the panel as you zoom in, giving continuous spatial context
+    // before the terrain view takes over. Base is sized to leave room for the HUD frame.
+    let base_radius = (rect.width() * 0.21).min(rect.height() * 0.30);
+    let radius = base_radius * (1.0 + zoom_t * 0.72);
     GlobeLayout {
         center: egui::pos2(
             rect.center().x + rect.width() * 0.04,
             rect.center().y + rect.height() * 0.01,
         ),
-        radius: (rect.width() * 0.24).min(rect.height() * 0.34),
+        radius,
         focal_length: 2.05 + zoom_t * 0.3,
         camera_distance: 3.15 - zoom_t * 1.05,
     }
@@ -168,7 +165,6 @@ fn draw_wireframe(
     layout: &GlobeLayout,
     view: &GlobeViewState,
     lod: &GlobeLod,
-    selected_root: Option<&std::path::Path>,
 ) {
     if view.zoom >= 5.0 {
         return;
@@ -186,7 +182,6 @@ fn draw_wireframe(
             painter,
             layout,
             view,
-            selected_root,
             &path,
             lod.altitude_scale,
             theme::contour_color(),
@@ -206,7 +201,6 @@ fn draw_wireframe(
             painter,
             layout,
             view,
-            selected_root,
             &path,
             lod.altitude_scale,
             theme::grid_color(),
@@ -220,7 +214,6 @@ fn draw_real_contours(
     layout: &GlobeLayout,
     view: &GlobeViewState,
     lod: &GlobeLod,
-    selected_root: Option<&std::path::Path>,
     contours: &[contour_asset::ContourPath],
 ) {
     for contour in contours {
@@ -229,7 +222,6 @@ fn draw_real_contours(
             painter,
             layout,
             view,
-            selected_root,
             &contour.points,
             lod.altitude_scale,
             if emphasis {
@@ -333,7 +325,6 @@ fn draw_geo_path(
     painter: &egui::Painter,
     layout: &GlobeLayout,
     view: &GlobeViewState,
-    selected_root: Option<&std::path::Path>,
     path: &[GeoPoint],
     altitude_scale: f32,
     front_color: egui::Color32,
@@ -343,7 +334,7 @@ fn draw_geo_path(
     let mut back_segment = Vec::new();
 
     for point in path {
-        if let Some(projected) = project_geo(layout, view, selected_root, *point, altitude_scale) {
+        if let Some(projected) = project_geo(layout, view, *point, altitude_scale) {
             if projected.front_facing {
                 if back_segment.len() >= 2 {
                     painter.add(egui::Shape::line(
@@ -410,14 +401,12 @@ fn flush_segments(
 fn project_geo(
     layout: &GlobeLayout,
     view: &GlobeViewState,
-    selected_root: Option<&std::path::Path>,
     point: GeoPoint,
     altitude_scale: f32,
 ) -> Option<ProjectedPoint> {
     let lat = point.lat.to_radians();
     let lon = point.lon.to_radians();
-    let elevation_signal = terrain_raster::sample_normalized(selected_root, point)
-        .unwrap_or_else(|| terrain_field::elevation(point) / 1.6);
+    let elevation_signal = terrain_field::elevation(point) / 1.6;
     let signed_elevation = elevation_signal.mul_add(2.0, -1.0);
     let elevation = signed_elevation * altitude_scale;
     let radius = (1.0 + elevation).max(0.82);
