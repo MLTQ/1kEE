@@ -54,7 +54,13 @@ pub fn apply_interaction(
 
     if view.auto_spin && !response.hovered() {
         let dt = ctx.input(|input| input.stable_dt).max(1.0 / 120.0);
-        view.yaw += dt * 0.18;
+        view.yaw -= dt * 0.18;
+    }
+
+    // Keep local_center in sync with the globe viewport so that entering local
+    // mode renders the area the user is actually looking at, not a stale location.
+    if view.zoom < local_terrain_scene::LOCAL_MODE_MIN_ZOOM {
+        view.local_center = view.globe_center_latlon();
     }
 }
 

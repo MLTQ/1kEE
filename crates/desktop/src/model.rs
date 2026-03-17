@@ -49,6 +49,16 @@ impl GlobeViewState {
         self.local_yaw = -0.65;
         self.local_pitch = 0.98;
     }
+
+    /// Returns the lat/lon at the center of the current globe viewport.
+    /// This is the inverse of `focus_on`: yaw = lon - π/2, pitch = lat.
+    pub fn globe_center_latlon(&self) -> GeoPoint {
+        let lat = self.pitch.to_degrees().clamp(-85.0, 85.0);
+        let lon_rad = self.yaw + std::f32::consts::FRAC_PI_2;
+        let lon_deg = lon_rad.to_degrees();
+        let lon = ((lon_deg + 180.0).rem_euclid(360.0)) - 180.0;
+        GeoPoint { lat, lon }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
