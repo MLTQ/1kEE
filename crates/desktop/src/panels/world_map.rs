@@ -8,6 +8,7 @@ mod terrain_field;
 mod terrain_raster;
 
 use crate::model::AppModel;
+use crate::osm_ingest;
 use crate::theme;
 
 pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
@@ -19,23 +20,26 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
     panel_frame.show(ui, |ui| {
         if model.globe_view.auto_spin {
             ui.ctx().request_repaint();
-        } else if local_terrain_scene::has_pending_cache(model) || globe_srtm_pending(model) {
+        } else if local_terrain_scene::has_pending_cache(model) {
+            // Faster repaint while tile pulse animation is running (~30 fps)
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(33));
+        } else if globe_srtm_pending(model)
+            || (model.show_coastlines
+                && contour_asset::global_coastlines_pending(model.selected_root.as_deref()))
+            || ((model.show_major_roads || model.show_minor_roads)
+                && osm_ingest::has_active_jobs(model.selected_root.as_deref()))
+        {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(180));
         }
 
-        ui.horizontal(|ui| {
-            ui.heading("Operations Globe");
-            ui.separator();
-            ui.colored_label(
-                theme::text_muted(),
-                "3D-first tactical globe with drag orbit, wheel zoom, and contour-driven LOD.",
-            );
-        });
+        let local_terrain_mode = local_terrain_scene::is_active(model);
+        ensure_visible_road_layers(model, local_terrain_mode);
+        draw_layer_bar(ui, model);
 
         ui.add_space(8.0);
 
-        let local_terrain_mode = local_terrain_scene::is_active(model);
         let footer_height = if local_terrain_mode { 72.0 } else { 0.0 };
         let desired = egui::vec2(
             ui.available_width().max(480.0),
@@ -56,7 +60,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         }
         if local_terrain_mode {
             ui.add_space(10.0);
-            draw_local_footer(ui, model);
+            draw_local_footer(ui, model, scene.beam_elevation_m);
         }
 
         if response.clicked() && response.drag_delta().length_sq() < 4.0 {
@@ -77,6 +81,125 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
             }
         }
     });
+}
+
+fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
+    egui::Frame::new()
+        .fill(egui::Color32::from_rgba_premultiplied(7, 18, 24, 216))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(24, 63, 79)))
+        .corner_radius(10.0)
+        .inner_margin(egui::Margin::symmetric(12, 10))
+        .show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.heading("Operations Globe");
+                ui.separator();
+
+                // GLOBE / LOCAL mode toggle
+                let active_fill = egui::Color32::from_rgb(24, 63, 79);
+                let inactive_fill = egui::Color32::TRANSPARENT;
+                let active_text = egui::Color32::from_rgb(142, 234, 246);
+                let inactive_text = theme::text_muted();
+
+                let globe_fill = if !model.globe_view.local_mode {
+                    active_fill
+                } else {
+                    inactive_fill
+                };
+                let local_fill = if model.globe_view.local_mode {
+                    active_fill
+                } else {
+                    inactive_fill
+                };
+                let globe_text = if !model.globe_view.local_mode {
+                    active_text
+                } else {
+                    inactive_text
+                };
+                let local_text = if model.globe_view.local_mode {
+                    active_text
+                } else {
+                    inactive_text
+                };
+
+                let globe_btn =
+                    egui::Button::new(egui::RichText::new("GLOBE").color(globe_text).small())
+                        .fill(globe_fill)
+                        .corner_radius(4.0);
+                let local_btn =
+                    egui::Button::new(egui::RichText::new("LOCAL").color(local_text).small())
+                        .fill(local_fill)
+                        .corner_radius(4.0);
+
+                if ui.add(globe_btn).clicked() && model.globe_view.local_mode {
+                    model.globe_view.local_mode = false;
+                }
+                if ui.add(local_btn).clicked() && !model.globe_view.local_mode {
+                    // Snap local_center to whatever the globe is centered on.
+                    model.globe_view.local_center = model.globe_view.globe_center_latlon();
+                    model.globe_view.local_mode = true;
+                }
+
+                ui.separator();
+                ui.colored_label(theme::text_muted(), "Layers");
+
+                ui.checkbox(&mut model.show_coastlines, "Coastline");
+                let major_changed = ui
+                    .checkbox(&mut model.show_major_roads, "Major roads")
+                    .changed();
+                let minor_changed = ui
+                    .checkbox(&mut model.show_minor_roads, "Minor roads")
+                    .changed();
+
+                if (major_changed || minor_changed)
+                    && (model.show_major_roads || model.show_minor_roads)
+                {
+                    queue_road_focus_import(
+                        model,
+                        model.globe_view.local_center,
+                        "active map viewport",
+                    );
+                }
+
+                ui.separator();
+                ui.small(model.terrain_focus_location_name());
+            });
+        });
+}
+
+fn ensure_visible_road_layers(model: &mut AppModel, local_terrain_mode: bool) {
+    if !local_terrain_mode || (!model.show_major_roads && !model.show_minor_roads) {
+        return;
+    }
+    if osm_ingest::has_active_jobs(model.selected_root.as_deref()) {
+        return;
+    }
+
+    if let Some(focus) = model.terrain_focus_location() {
+        queue_road_focus_import(model, focus, "terrain focus");
+    }
+
+    let center = model.globe_view.local_center;
+    if model
+        .terrain_focus_location()
+        .map(|focus| (focus.lat - center.lat).abs() > 0.15 || (focus.lon - center.lon).abs() > 0.15)
+        .unwrap_or(true)
+    {
+        queue_road_focus_import(model, center, "map viewport");
+    }
+}
+
+fn queue_road_focus_import(model: &mut AppModel, point: crate::model::GeoPoint, label: &str) {
+    match osm_ingest::queue_focus_roads_import(model.selected_root.as_deref(), point) {
+        Ok(true) => {
+            model.push_log(format!("Queued focused road import for the {label}."));
+            model.osm_inventory =
+                osm_ingest::OsmInventory::detect_from(model.selected_root.as_deref());
+        }
+        Ok(false) => {}
+        Err(error) => {
+            model.push_log(format!("Focused road import failed: {error}"));
+        }
+    }
 }
 
 fn draw_focus_card(ui: &mut egui::Ui, model: &AppModel, local_terrain_mode: bool) {
@@ -119,7 +242,7 @@ fn draw_focus_card(ui: &mut egui::Ui, model: &AppModel, local_terrain_mode: bool
 /// Drives repaint so the sphere updates as soon as the background build finishes.
 fn globe_srtm_pending(model: &AppModel) -> bool {
     let zoom = model.globe_view.zoom;
-    if zoom < 2.0 || zoom >= local_terrain_scene::LOCAL_MODE_MIN_ZOOM {
+    if zoom < 2.0 || model.globe_view.local_mode {
         return false;
     }
     srtm_focus_cache::focus_contour_region_status(
@@ -132,7 +255,7 @@ fn globe_srtm_pending(model: &AppModel) -> bool {
     .unwrap_or(false)
 }
 
-fn draw_local_footer(ui: &mut egui::Ui, model: &mut AppModel) {
+fn draw_local_footer(ui: &mut egui::Ui, model: &mut AppModel, beam_elevation_m: Option<f32>) {
     egui::Frame::new()
         .fill(egui::Color32::from_rgba_premultiplied(7, 18, 24, 216))
         .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(24, 63, 79)))
@@ -149,6 +272,16 @@ fn draw_local_footer(ui: &mut egui::Ui, model: &mut AppModel) {
                 );
 
                 ui.separator();
+
+                // Beam toggle + elevation readout
+                ui.checkbox(&mut model.show_beam, "BEAM");
+                if let Some(elev) = beam_elevation_m {
+                    let cherry = egui::Color32::from_rgb(210, 18, 50);
+                    let elev_ft = elev * 3.280_84;
+                    ui.colored_label(cherry, format!("{:.0} m / {:.0} ft", elev, elev_ft));
+                }
+
+                ui.separator();
                 ui.colored_label(theme::hot_color(), "ORANGE");
                 ui.label("major contours (50m)");
 
@@ -156,9 +289,23 @@ fn draw_local_footer(ui: &mut egui::Ui, model: &mut AppModel) {
                 ui.colored_label(theme::topo_color(), "BLUE");
                 ui.label("minor contours");
 
+                if model.show_coastlines {
+                    ui.separator();
+                    ui.colored_label(egui::Color32::from_rgb(142, 234, 246), "CYAN");
+                    ui.label("coastline");
+                }
+
+                ui.separator();
+                ui.colored_label(egui::Color32::from_rgb(255, 210, 92), "YELLOW");
+                ui.label("major roads");
+
+                ui.separator();
+                ui.colored_label(egui::Color32::from_rgb(116, 132, 142), "SLATE");
+                ui.label("minor roads");
+
                 if local_terrain_scene::is_active(model) {
                     ui.separator();
-                    ui.label(format!("Terrain zoom {:.1}x", model.globe_view.zoom));
+                    ui.label(format!("Terrain zoom {:.1}x", model.globe_view.local_zoom));
                 }
             });
         });

@@ -1,3 +1,4 @@
+use crate::settings_store;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -15,9 +16,16 @@ pub struct TerrainInventory {
 
 impl TerrainInventory {
     pub fn detect_from(selected_root: Option<&Path>) -> Self {
-        let data_root = find_data_root(selected_root).unwrap_or_else(|| PathBuf::from("data"));
-        let derived_root =
-            find_derived_root(selected_root).unwrap_or_else(|| PathBuf::from("Derived"));
+        let data_root = find_data_root(selected_root).unwrap_or_else(|| {
+            settings_store::effective_asset_root()
+                .unwrap_or_default()
+                .join("Data")
+        });
+        let derived_root = find_derived_root(selected_root).unwrap_or_else(|| {
+            settings_store::effective_asset_root()
+                .unwrap_or_default()
+                .join("Derived")
+        });
         let srtm_root = find_srtm_root(selected_root);
         let gebco_topography_tiles = count_tifs(
             data_root.join("GEBCO/gebco_2025_sub_ice_topo_geotiff"),
@@ -119,10 +127,20 @@ impl TerrainInventory {
 }
 
 pub fn find_data_root(selected_root: Option<&Path>) -> Option<PathBuf> {
+    if let Some(configured) = settings_store::configured_data_root() {
+        if let Some(normalized) = normalize_named_root(&configured, &["Data", "data"]) {
+            return Some(normalized);
+        }
+    }
     find_named_root(selected_root, &["Data", "data"])
 }
 
 pub fn find_derived_root(selected_root: Option<&Path>) -> Option<PathBuf> {
+    if let Some(configured) = settings_store::configured_derived_root() {
+        if let Some(normalized) = normalize_named_root(&configured, &["Derived", "derived"]) {
+            return Some(normalized);
+        }
+    }
     find_named_root(selected_root, &["Derived", "derived"])
 }
 
@@ -149,70 +167,43 @@ pub fn find_srtm_root(selected_root: Option<&Path>) -> Option<PathBuf> {
 }
 
 fn find_srtm_root_uncached(selected_root: Option<&Path>) -> Option<PathBuf> {
+    if let Some(configured) = settings_store::configured_srtm_root() {
+        if let Some(normalized) = find_srtm_root_from(&configured) {
+            return Some(normalized);
+        }
+    }
+
     if let Some(root) = selected_root {
         if let Some(candidate) = find_srtm_root_from(root) {
             return Some(candidate);
         }
     }
 
-    if let Ok(cwd) = std::env::current_dir() {
-        if let Some(candidate) = find_srtm_root_from(&cwd) {
+    if let Some(asset_root) = settings_store::effective_asset_root() {
+        if let Some(candidate) = find_srtm_root_from(&asset_root) {
             return Some(candidate);
         }
     }
 
-    [
-        PathBuf::from("/Volumes/Hilbert/Data/srtm_gl1/SRTM_GL1_srtm"),
-        PathBuf::from("/Volumes/Hilbert/Data/srtm_gl1"),
-    ]
-    .into_iter()
-    .find_map(|candidate| normalize_srtm_root(candidate.as_path()))
+    None
 }
 
 fn find_named_root(selected_root: Option<&Path>, names: &[&str]) -> Option<PathBuf> {
     if let Some(root) = selected_root {
-        if root.exists() {
-            if let Some(name) = root.file_name().and_then(|name| name.to_str()) {
-                if names.iter().any(|candidate| candidate == &name) {
-                    return Some(root.to_path_buf());
-                }
-            }
+        if let Some(candidate) = normalize_named_root(root, names) {
+            return Some(candidate);
+        }
 
-            if let Some(candidate) = names
-                .iter()
-                .map(|name| root.join(name))
-                .find(|candidate| candidate.exists())
-            {
-                return Some(candidate);
-            }
-
-            if let Some(candidate) = root.ancestors().find_map(|ancestor| {
-                names
-                    .iter()
-                    .map(|name| ancestor.join(name))
-                    .find(|candidate| candidate.exists())
-            }) {
-                return Some(candidate);
-            }
+        if let Some(candidate) = root
+            .ancestors()
+            .find_map(|ancestor| normalize_named_root(ancestor, names))
+        {
+            return Some(candidate);
         }
     }
 
-    let cwd = std::env::current_dir().ok()?;
-    cwd.ancestors()
-        .find_map(|ancestor| {
-            names
-                .iter()
-                .map(|name| ancestor.join(name))
-                .find(|candidate| candidate.exists())
-        })
-        .or_else(|| {
-            workspace_root().and_then(|root| {
-                names
-                    .iter()
-                    .map(|name| root.join(name))
-                    .find(|candidate| candidate.exists())
-            })
-        })
+    let asset_root = settings_store::effective_asset_root()?;
+    normalize_named_root(&asset_root, names)
 }
 
 fn find_srtm_root_from(root: &Path) -> Option<PathBuf> {
@@ -246,12 +237,36 @@ fn normalize_srtm_root(path: &Path) -> Option<PathBuf> {
     }
 
     let nested = path.join("SRTM_GL1_srtm");
-    nested.exists().then_some(nested)
+    if nested.exists() {
+        return Some(nested);
+    }
+
+    [
+        path.join("srtm_gl1").join("SRTM_GL1_srtm"),
+        path.join("Data").join("srtm_gl1").join("SRTM_GL1_srtm"),
+        path.join("data").join("srtm_gl1").join("SRTM_GL1_srtm"),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.exists())
 }
 
-fn workspace_root() -> Option<PathBuf> {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir.ancestors().nth(2).map(Path::to_path_buf)
+fn normalize_named_root(path: &Path, names: &[&str]) -> Option<PathBuf> {
+    if !path.exists() {
+        return None;
+    }
+
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| names.iter().any(|candidate| candidate == &name))
+    {
+        return Some(path.to_path_buf());
+    }
+
+    names
+        .iter()
+        .map(|name| path.join(name))
+        .find(|candidate| candidate.exists())
 }
 
 fn count_tifs(root: PathBuf, prefix: &str) -> usize {

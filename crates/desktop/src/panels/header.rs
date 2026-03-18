@@ -1,5 +1,6 @@
 use crate::model::AppModel;
 use crate::osm_ingest;
+use crate::settings_store;
 use crate::terrain_assets;
 use crate::theme;
 
@@ -27,17 +28,18 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
                 metric_chip(ui, "Events", &model.events.len().to_string());
                 metric_chip(ui, "Cameras", &model.cameras.len().to_string());
 
-                if ui.button("Factal API").clicked() {
+                if ui.button("Settings").clicked() {
                     model.factal_settings_open = true;
                 }
 
-                if ui.button("Pick Data Root").clicked() {
+                if ui.button("Pick Asset Root").clicked() {
                     if let Some(path) = rfd::FileDialog::new()
                         .set_directory(
                             model
                                 .selected_root
                                 .clone()
-                                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
+                                .or_else(settings_store::effective_asset_root)
+                                .unwrap_or_default(),
                         )
                         .pick_folder()
                     {

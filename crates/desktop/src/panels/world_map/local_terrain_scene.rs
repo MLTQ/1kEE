@@ -37,11 +37,12 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         return GlobeScene {
             event_markers: Vec::new(),
             camera_markers: Vec::new(),
+            beam_elevation_m: None,
         };
     };
 
     let viewport_center = model.globe_view.local_center;
-    let render_zoom = local_render_zoom(model.globe_view.zoom);
+    let render_zoom = local_render_zoom(model.globe_view.local_zoom);
     let contours = contour_asset::load_srtm_region_for_view(
         model.selected_root.as_deref(),
         focus,
@@ -62,14 +63,38 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         Vec::new()
     };
 
-    if let Some(contours) = contours.as_deref() {
+    // Pulsing tile-grid glow: only draw cells that are NOT yet ready in the cache.
+    let still_loading = cache_status
+        .map(|s| s.ready_assets < s.total_assets)
+        .unwrap_or(contours.is_none());
+    if still_loading {
+        let ready_buckets = srtm_focus_cache::ready_tile_buckets(
+            model.selected_root.as_deref(),
+            viewport_center,
+            render_zoom,
+            LOCAL_STREAM_RADIUS,
+        );
+        draw_tile_pulse_grid(
+            painter,
+            &layout,
+            &model.globe_view,
+            viewport_center,
+            render_zoom,
+            LOCAL_STREAM_RADIUS,
+            time,
+            &ready_buckets,
+        );
+    }
+
+    let contours_slice = contours.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+    if !contours_slice.is_empty() {
         draw_contour_stack(
             painter,
             &layout,
             &model.globe_view,
             viewport_center,
             render_zoom,
-            contours,
+            contours_slice,
             1.0,
         );
         draw_roads(
@@ -82,17 +107,20 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             model.show_major_roads,
             model.show_minor_roads,
         );
-        // Draw beam after terrain so it overlays the contour stack and visually
-        // stops at the surface rather than being buried behind the geometry.
-        draw_local_beam(
-            painter,
-            rect,
-            &layout,
-            &model.globe_view,
-            viewport_center,
-            Some(contours),
-        );
-        let (event_markers, camera_markers) = if let Some(event) = model.selected_event() {
+    }
+
+    // Beam, markers, legend and progress bar always render regardless of load state.
+    let beam_elevation_m = draw_local_beam(
+        painter,
+        rect,
+        &layout,
+        &model.globe_view,
+        viewport_center,
+        contours.as_ref().map(|v| v.as_slice()),
+        model.show_beam,
+    );
+    let (event_markers, camera_markers) = if !contours_slice.is_empty() {
+        if let Some(event) = model.selected_event() {
             draw_markers(
                 painter,
                 &layout,
@@ -108,39 +136,24 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             )
         } else {
             (Vec::new(), Vec::new())
-        };
-        draw_camera_links(
-            painter,
-            event_markers.first().map(|(_, pos)| *pos),
-            &camera_markers,
-        );
-        draw_legend(painter, rect, "LOCAL EVENT TERRAIN", render_zoom);
-        if let Some(status) = cache_status {
-            draw_cache_progress(painter, rect, status);
-        }
-
-        GlobeScene {
-            event_markers,
-            camera_markers,
         }
     } else {
-        draw_empty_state(painter, rect, "Generating local terrain cache...");
-        draw_local_beam(
-            painter,
-            rect,
-            &layout,
-            &model.globe_view,
-            viewport_center,
-            None,
-        );
-        draw_legend(painter, rect, "LOCAL EVENT TERRAIN", render_zoom);
-        if let Some(status) = cache_status {
-            draw_cache_progress(painter, rect, status);
-        }
-        GlobeScene {
-            event_markers: Vec::new(),
-            camera_markers: Vec::new(),
-        }
+        (Vec::new(), Vec::new())
+    };
+    draw_camera_links(
+        painter,
+        event_markers.first().map(|(_, pos)| *pos),
+        &camera_markers,
+    );
+    draw_legend(painter, rect, "LOCAL EVENT TERRAIN", render_zoom);
+    if let Some(status) = cache_status {
+        draw_cache_progress(painter, rect, status);
+    }
+
+    GlobeScene {
+        event_markers,
+        camera_markers,
+        beam_elevation_m: Some(beam_elevation_m),
     }
 }
 
@@ -159,7 +172,7 @@ pub fn paint_transition_overlay(
     };
 
     let viewport_center = model.globe_view.local_center;
-    let render_zoom = local_render_zoom(model.globe_view.zoom);
+    let render_zoom = local_render_zoom(model.globe_view.local_zoom);
     let Some(contours) = contour_asset::load_srtm_region_for_view(
         model.selected_root.as_deref(),
         focus,
@@ -183,7 +196,7 @@ pub fn paint_transition_overlay(
 }
 
 pub fn is_active(model: &AppModel) -> bool {
-    model.globe_view.zoom >= LOCAL_MODE_MIN_ZOOM
+    model.globe_view.local_mode
         && model.terrain_focus_location().is_some()
         && terrain_assets::find_srtm_root(model.selected_root.as_deref()).is_some()
 }
@@ -198,49 +211,50 @@ pub fn has_pending_cache(model: &AppModel) -> bool {
         return false;
     };
 
-    let render_zoom = local_render_zoom(model.globe_view.zoom);
+    let render_zoom = local_render_zoom(model.globe_view.local_zoom);
     srtm_focus_cache::focus_contour_region_status(
         model.selected_root.as_deref(),
         model.globe_view.local_center,
         render_zoom,
         LOCAL_STREAM_RADIUS,
     )
-    .map(|status| status.pending_assets > 0 && status.ready_assets < status.total_assets)
-    .unwrap_or(false)
+    .map(|status| status.ready_assets < status.total_assets)
+    // None means the cache DB doesn't exist yet — tiles are definitely not loaded.
+    .unwrap_or(true)
 }
 
-pub fn local_render_zoom(view_zoom: f32) -> f32 {
-    if view_zoom >= LOCAL_MODE_MIN_ZOOM {
-        // Local terrain mode proper: map view zoom [LOCAL_MODE_MIN_ZOOM, 60] → [2.0, 20.0]
-        // so tile resolution scales with how close we are to the surface.
-        let t = ((view_zoom - LOCAL_MODE_MIN_ZOOM) / (60.0 - LOCAL_MODE_MIN_ZOOM)).clamp(0.0, 1.0);
-        egui::lerp(2.0f32..=20.0f32, t)
-    } else {
-        view_zoom.clamp(LOCAL_TRANSITION_START_ZOOM, 20.0)
-    }
+// Minimum local zoom value — allows zooming out to ~500 km half-span.
+pub const LOCAL_ZOOM_MIN: f32 = 1.0;
+
+pub fn local_render_zoom(local_zoom: f32) -> f32 {
+    // local_zoom lives in [LOCAL_ZOOM_MIN, 60].
+    // Tile-spec resolution is capped at 20 (finest bucket); above 20 only
+    // the visual scale continues to change.  Below ~4 the coarsest bucket
+    // (zoom_bucket=0, half_extent=3.6°) handles the wide-area view.
+    local_zoom.clamp(LOCAL_ZOOM_MIN, 20.0)
 }
 
 pub fn visual_half_extent_for_zoom(view_zoom: f32) -> f32 {
+    // Continuous logarithmic progression from widest (~500 km) to narrowest (~0.6 km).
+    // local_zoom ∈ [1, 20] also shifts the tile-spec bucket; above 20 only
+    // the visual scale changes (finest tiles stay loaded).
     const KNOTS: &[(f32, f32)] = &[
-        // Globe→local transition preview (render_zoom via local_render_zoom, range 4–20)
-        (LOCAL_TRANSITION_START_ZOOM, 1.55), // 4.0  → ~173 km
-        (5.5, 0.90),                         // 5.5  → ~100 km
-        (7.0, 0.55),                         // 7.0  → ~61 km
-        (9.5, 0.31),                         // 9.5  → ~35 km
-        (12.0, 0.17),                        // 12.0 → ~19 km
-        (16.0, 0.09),                        // 16.0 → ~10 km
-        (20.0, 0.045),                       // 20.0 → ~5 km  (top of old tile range)
-        // Local terrain mode proper: view.zoom ∈ [LOCAL_MODE_MIN_ZOOM=25, 60]
-        // The 20→25 interpolation is unused in practice; only the entries below are hit.
-        (25.0, 1.80),  // 25.0 → ~200 km (entry into local mode)
-        (30.0, 1.00),  // 30.0 → ~111 km
-        (36.0, 0.55),  // 36.0 → ~61 km
-        (43.0, 0.28),  // 43.0 → ~31 km
-        (52.0, 0.12),  // 52.0 → ~13 km
-        (60.0, 0.050), // 60.0 → ~5.5 km
+        (1.0, 4.50),   // ~500 km
+        (2.0, 2.80),   // ~311 km
+        (3.0, 1.95),   // ~217 km
+        (4.0, 1.55),   // ~173 km
+        (5.5, 0.90),   // ~100 km
+        (7.0, 0.55),   // ~61 km
+        (9.5, 0.31),   // ~35 km
+        (12.0, 0.17),  // ~19 km
+        (16.0, 0.09),  // ~10 km
+        (20.0, 0.050), // ~5.5 km
+        (28.0, 0.025), // ~2.8 km
+        (40.0, 0.012), // ~1.3 km
+        (60.0, 0.005), // ~0.6 km
     ];
 
-    let zoom = view_zoom.clamp(LOCAL_TRANSITION_START_ZOOM, 60.0);
+    let zoom = view_zoom.clamp(LOCAL_ZOOM_MIN, 60.0);
     for window in KNOTS.windows(2) {
         let (start_zoom, start_extent) = window[0];
         let (end_zoom, end_extent) = window[1];
@@ -292,6 +306,7 @@ fn transition_layout(rect: egui::Rect, progress: f32) -> LocalLayout {
 /// terrain surface at the viewport centre. The ground contact point is
 /// projected via `project_local` so it rises over hills and drops into
 /// valleys as the map is dragged beneath the fixed beam.
+/// Always returns the computed terrain elevation (metres) even when `show` is false.
 fn draw_local_beam(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -299,7 +314,8 @@ fn draw_local_beam(
     view: &GlobeViewState,
     viewport_center: GeoPoint,
     contours: Option<&[contour_asset::ContourPath]>,
-) {
+    show: bool,
+) -> f32 {
     let cherry = egui::Color32::from_rgb(210, 18, 50);
 
     // Derive terrain elevation at the crosshair from the loaded contour data —
@@ -307,7 +323,7 @@ fn draw_local_beam(
     // Find the highest-elevation contour that has a point within a tight radius
     // of viewport_center; that contour passes through (or very near) center,
     // so its elevation approximates the terrain surface there.
-    let half_extent_deg = visual_half_extent_for_zoom(view.zoom);
+    let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
     let search_radius_deg = (half_extent_deg * 0.08).max(0.004); // ~8% of viewport radius
     let elevation_m = contours
         .unwrap_or(&[])
@@ -321,7 +337,11 @@ fn draw_local_beam(
         .map(|c| c.elevation_m)
         .fold(0.0f32, f32::max);
 
-    let half_extent_deg = visual_half_extent_for_zoom(view.zoom);
+    if !show {
+        return elevation_m;
+    }
+
+    let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
     let km_per_deg_lat = 111.32f32;
     let km_per_deg_lon = km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
@@ -390,6 +410,8 @@ fn draw_local_beam(
         egui::Stroke::new(1.2, cherry.gamma_multiply(0.78)),
     );
     painter.circle_filled(ground, 1.8, cherry);
+
+    elevation_m
 }
 
 fn draw_frame(painter: &egui::Painter, rect: egui::Rect) {
@@ -417,6 +439,124 @@ fn draw_frame(painter: &egui::Painter, rect: egui::Rect) {
     }
 }
 
+/// Draws a pulsing glow over every tile footprint in the expected load grid.
+/// Each tile is projected as a quadrilateral matching its actual geo-extent so
+/// the placeholder fills exactly the area that will be covered by contour lines
+/// once the tile finishes building.  Tiles with loaded geometry naturally cover
+/// their pulse; pending tiles keep glowing until data arrives.
+fn draw_tile_pulse_grid(
+    painter: &egui::Painter,
+    layout: &LocalLayout,
+    view: &GlobeViewState,
+    viewport_center: GeoPoint,
+    render_zoom: f32,
+    radius: i32,
+    time: f64,
+    ready_buckets: &std::collections::HashSet<(i32, i32)>,
+) {
+    let half_extent = srtm_focus_cache::half_extent_for_zoom(render_zoom);
+    let bucket_step = half_extent * 0.45;
+    let visual_half = visual_half_extent_for_zoom(view.local_zoom);
+    let km_per_deg_lat = 111.32f32;
+    let km_per_deg_lon = km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
+    let extent_x_km = (visual_half * km_per_deg_lon).max(1.0);
+    let extent_y_km = (visual_half * km_per_deg_lat).max(1.0);
+
+    let center_lat_b = (viewport_center.lat / bucket_step).round() as i32;
+    let center_lon_b = (viewport_center.lon / bucket_step).round() as i32;
+
+    // Each tile's rendered footprint extends `half_extent` in every direction from
+    // its bucket centre (see srtm_focus_cache::ensure_bucket_asset / GeoBounds::around).
+    // bucket_step is the *spacing* between centres (half_extent * 0.45), so tiles
+    // heavily overlap — but the correct polygon size is `half_extent`, not `bucket_step/2`.
+    let half = half_extent;
+    // Muted teal — clearly visible but not garish
+    let fill_rgb = (18u8, 75u8, 90u8);
+    let edge_rgb = (40u8, 140u8, 165u8);
+
+    for dlat in -radius..=radius {
+        for dlon in -radius..=radius {
+            let lat_b = center_lat_b + dlat;
+            let lon_b = center_lon_b + dlon;
+
+            // Skip tiles that are already built — their contour lines will render on top.
+            if ready_buckets.contains(&(lat_b, lon_b)) {
+                continue;
+            }
+
+            let tile_lat = (lat_b as f32 * bucket_step).clamp(-89.9, 89.9);
+            let tile_lon = lon_b as f32 * bucket_step;
+
+            // Project the four corners of this tile footprint at ground level.
+            // Order: NW → NE → SE → SW (clockwise in screen space) so egui's
+            // convex_polygon winding is satisfied under the oblique projection.
+            let geo_corners = [
+                GeoPoint {
+                    lat: tile_lat + half,
+                    lon: tile_lon - half,
+                },
+                GeoPoint {
+                    lat: tile_lat + half,
+                    lon: tile_lon + half,
+                },
+                GeoPoint {
+                    lat: tile_lat - half,
+                    lon: tile_lon + half,
+                },
+                GeoPoint {
+                    lat: tile_lat - half,
+                    lon: tile_lon - half,
+                },
+            ];
+            let screen_corners: Vec<egui::Pos2> = geo_corners
+                .iter()
+                .filter_map(|&c| {
+                    project_local(
+                        layout,
+                        view,
+                        viewport_center,
+                        c,
+                        0.0,
+                        extent_x_km,
+                        extent_y_km,
+                    )
+                })
+                .map(|p| p.pos)
+                .collect();
+
+            if screen_corners.len() < 4 {
+                continue;
+            }
+
+            // Slow collective throb: ~4 s cycle, all cells in phase.
+            // sin ∈ [-1, 1] → remap to [0, 1].  Keep a floor so it never
+            // fully disappears; keep a ceiling so it stays subtle.
+            let phase =
+                ((time as f32 * std::f32::consts::TAU / 4.0).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+            let breath = 0.20 + phase * 0.65; // 0.20 … 0.85
+
+            painter.add(egui::Shape::convex_polygon(
+                screen_corners,
+                egui::Color32::from_rgba_premultiplied(
+                    fill_rgb.0,
+                    fill_rgb.1,
+                    fill_rgb.2,
+                    (breath * 28.0) as u8, // 6 … 24
+                ),
+                egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgba_premultiplied(
+                        edge_rgb.0,
+                        edge_rgb.1,
+                        edge_rgb.2,
+                        (breath * 110.0) as u8, // 22 … 94
+                    ),
+                ),
+            ));
+        }
+    }
+}
+
 fn draw_contour_stack(
     painter: &egui::Painter,
     layout: &LocalLayout,
@@ -426,7 +566,7 @@ fn draw_contour_stack(
     contours: &[contour_asset::ContourPath],
     alpha: f32,
 ) {
-    let half_extent_deg = visual_half_extent_for_zoom(view.zoom);
+    let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
     let km_per_deg_lat = 111.32f32;
     let km_per_deg_lon = km_per_deg_lat * focus.lat.to_radians().cos().abs().max(0.2);
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
@@ -486,9 +626,9 @@ fn draw_roads(
         return;
     }
 
-    let bounds = local_geo_bounds(viewport_center, view.zoom);
+    let bounds = local_geo_bounds(viewport_center, view.local_zoom);
     let tile_zoom = road_tile_zoom(render_zoom);
-    let half_extent_deg = visual_half_extent_for_zoom(view.zoom);
+    let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
     let km_per_deg_lat = 111.32f32;
     let km_per_deg_lon = km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
@@ -585,7 +725,7 @@ fn draw_markers(
     selected_camera_id: Option<&str>,
     time: f64,
 ) -> (Vec<(String, egui::Pos2)>, Vec<(String, egui::Pos2)>) {
-    let half_extent_deg = visual_half_extent_for_zoom(view.zoom);
+    let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
     let km_per_deg_lat = 111.32f32;
     let km_per_deg_lon = km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
@@ -843,8 +983,7 @@ fn project_local(
         layout.focus_center.x + x_yaw * layout.horizontal_scale,
         // Negate the ground terms so that positive y_yaw (north) moves upward on screen.
         // Elevation terms are unchanged: positive elevation still lifts features upward.
-        layout.focus_center.y - ground_y_pitch * layout.height * 0.55
-            + ground_z_pitch * 48.0
+        layout.focus_center.y - ground_y_pitch * layout.height * 0.55 + ground_z_pitch * 48.0
             - elevation_y_offset * view.local_layer_spread * 56.0
             - elevation_z_offset * view.local_layer_spread * 24.0,
     );

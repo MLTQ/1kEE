@@ -29,3 +29,5 @@ Renders the searchable city precompute and terrain-focus window. This file exist
 - The first pass now queries a local GeoNames-derived SQLite catalog and uses an additive precompute queue; the lazy terrain stream still handles anything not prewarmed.
 - Search rows now prefer region-qualified labels when the catalog can resolve them, which is especially important for repeated U.S. city/place names.
 - The same window now also surfaces explicit OSM bootstrap actions because planet-scale road/building extraction is heavyweight enough that it should be operator-controlled and visible.
+- `Queue Focus Roads` is the preferred first action because it targets the current terrain focus and is scheduled ahead of the slower global backfill.
+- The OSM capability note is still important: `LocationsOnWays` controls whether the pure-Rust full-planet roads bootstrap can run, but focused road imports can fall back to a bounded `ogr2ogr` extraction.

@@ -6,7 +6,7 @@ Implements the main geographic canvas for the demo. The current version wraps an
 ## Components
 
 ### `render_world_map`
-- **Does**: Draws the globe panel, applies pointer interaction to the persistent camera state, delegates rendering to `globe_scene.rs`, and handles click-based selection
+ - **Does**: Draws the globe panel, renders the top layer bar, applies pointer interaction to the persistent camera state, delegates rendering to `globe_scene.rs`, and handles click-based selection
 - **Interacts with**: `AppModel` in `model.rs`, `apply_interaction` in `camera.rs`, `paint` in `globe_scene.rs`, theme helpers in `theme.rs`
 - **Rationale**: Centralizes repaint policy so the globe does not redraw at full speed when the scene is idle
 
@@ -24,6 +24,8 @@ Implements the main geographic canvas for the demo. The current version wraps an
 
 ## Notes
 - The panel now uses a persistent 3D camera and zoom-dependent LOD.
+- The old descriptive text band at the top of the map has been replaced by a layer bar that owns coastline and major/minor road toggles and uses those road toggles to kick off focused OSM ingest.
+- If the low-zoom globe coastline cache is missing, enabling coastlines now kicks off a background GEBCO-derived bootstrap instead of leaving the globe permanently blank on a fresh machine.
 - The terrain path now prefers streamed SRTM land tiles, and contour overlays are generated into a shared SQLite-backed GDAL focus cache off the UI thread instead of one file per streamed bucket.
 - The globe now has a zoom overlap band where local terrain fades/scales in before the full local scene takes over, which makes the globe-to-local handoff much less abrupt.
 - Manual globe mode no longer forces a steady repaint loop. The panel only free-runs when auto-spin is on or when local terrain cache work is still pending.
@@ -31,5 +33,7 @@ Implements the main geographic canvas for the demo. The current version wraps an
 - At high zoom the panel can also follow a manual city focus from the terrain library, which is useful for terrain inspection and precompute validation away from the seeded event list.
 - In local terrain mode, plain drag now pans the streamed viewport and `Ctrl`/`Shift` drag rotates the terrain camera independently from the globe orbit state.
 - Local terrain mode now uses a footer control strip below the map for layer spread, terrain zoom readout, and a contour color legend instead of placing those controls over the rendered scene.
+- The same footer now also explains the road overlay palette so enabling road layers does not introduce unexplained linework.
+- While a road layer is enabled, the panel now keeps repainting during active OSM jobs and re-queues focused road imports around the current terrain focus / local viewport instead of leaving the renderer pointed at a stale older region.
 - Mock geography has been removed; if the terrain pipeline has no real data to show for a view, the globe stays minimal.
 - Preserve the same event-selection and nearby-camera interaction semantics if the renderer is upgraded again.

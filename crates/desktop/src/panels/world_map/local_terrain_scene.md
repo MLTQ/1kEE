@@ -6,7 +6,7 @@ Renders the high-zoom event terrain mode. This file exists to show one selected 
 ## Components
 
 ### `paint`
-- **Does**: Draws the local terrain frame, loads the streamed SRTM contour neighborhood around the current local viewport center, retains previously visited chunk geometry for the current terrain focus, renders height-separated contour slices, and returns marker positions for event/camera selection
+ - **Does**: Draws the local terrain frame, loads the streamed SRTM contour neighborhood around the current local viewport center, retains previously visited chunk geometry for the current terrain focus, renders height-separated contour slices, optionally drapes focused OSM road polylines over that terrain, and returns marker positions for event/camera selection
 - **Interacts with**: `AppModel` in `model.rs`, `contour_asset.rs`, `srtm_focus_cache.rs`, `globe_scene.rs`
 - **Rationale**: Keeps local terrain rendering isolated from the globe renderer so both views can evolve independently
 
@@ -65,6 +65,7 @@ Renders the high-zoom event terrain mode. This file exists to show one selected 
 - The streamed neighborhood is intentionally wider again, so the local view keeps more surrounding landform context loaded around the viewport center before relying on panning and retention.
 - The local scene keys chunk retention to the current terrain focus location, so already visited terrain buckets stay visible while panning and only reset when the analyst selects a different event or manual city focus.
 - Those streamed buckets now come from one shared SQLite tile cache, so panning no longer depends on the filesystem acting like the cache index.
+- Major and minor roads now render only in local terrain mode, using the shared `osm_runtime.sqlite` tile store and the same viewport-center projection as the contour stack.
 - When the current streamed neighborhood is still being generated, the scene shows a bucket-level cache progress bar based on ready versus pending contour exports.
 - Zooming back out below the local-mode threshold hands control back to the globe view, but the overlap band keeps a faint terrain overlay visible for a while so that retreat is visually continuous.
 - Event and camera markers now sample the same SRTM terrain source and float slightly above the local surface so live Factal points do not disappear under high-relief contour stacks.

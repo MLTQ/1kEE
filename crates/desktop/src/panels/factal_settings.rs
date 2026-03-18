@@ -1,6 +1,5 @@
 use crate::factal_stream;
 use crate::model::AppModel;
-use crate::settings_store;
 use crate::theme;
 
 pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
@@ -13,16 +12,17 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
     let mut clear_requested = false;
     let mut poll_requested = false;
 
-    egui::Window::new("Factal API")
+    egui::Window::new("Settings")
         .open(&mut open)
-        .default_size(egui::vec2(480.0, 220.0))
-        .min_size(egui::vec2(420.0, 200.0))
+        .default_size(egui::vec2(620.0, 520.0))
+        .min_size(egui::vec2(540.0, 420.0))
         .frame(
             egui::Frame::window(&ctx.style())
                 .fill(egui::Color32::from_rgb(14, 18, 23))
                 .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(43, 49, 58))),
         )
         .show(ctx, |ui| {
+            ui.heading("Factal");
             ui.colored_label(
                 theme::text_muted(),
                 "Configure the private Factal token used for live event polling every minute.",
@@ -38,12 +38,30 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
             );
 
             ui.add_space(8.0);
-            ui.small("Stored locally in the workspace root for this demo build.");
+            ui.small("Stored locally in the executable directory settings file for this demo build.");
             ui.small(format!("Stream status: {}", model.factal_stream_status));
+
+            ui.add_space(14.0);
+            ui.separator();
+            ui.add_space(10.0);
+
+            ui.heading("Paths");
+            ui.colored_label(
+                theme::text_muted(),
+                "Leave Data/Derived/SRTM/Planet/GDAL blank to use the executable-folder defaults and PATH-based GDAL discovery.",
+            );
+            ui.add_space(8.0);
+
+            path_row(ui, "Asset Root", &mut model.settings_asset_root, true, false);
+            path_row(ui, "Data Root", &mut model.settings_data_root, true, true);
+            path_row(ui, "Derived Root", &mut model.settings_derived_root, true, true);
+            path_row(ui, "SRTM Root", &mut model.settings_srtm_root, true, true);
+            path_row(ui, "Planet PBF", &mut model.settings_planet_path, false, true);
+            path_row(ui, "GDAL Bin Dir", &mut model.settings_gdal_bin_dir, true, true);
 
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                if ui.button("Save Key").clicked() {
+                if ui.button("Save Settings").clicked() {
                     save_requested = true;
                 }
 
@@ -58,10 +76,12 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
         });
 
     if save_requested {
+        let had_key = model.has_factal_api_key();
         let trimmed = model.factal_api_key.trim().to_owned();
-        match settings_store::save_factal_api_key(&trimmed) {
+        model.factal_api_key = trimmed;
+        match model.save_settings() {
             Ok(()) => {
-                model.factal_api_key = trimmed;
+                model.apply_saved_settings();
                 model.factal_stream_status = if model.has_factal_api_key() {
                     "configured".into()
                 } else {
@@ -69,16 +89,18 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
                 };
                 if model.has_factal_api_key() {
                     model.push_log(
-                        "Factal API key saved locally; live polling will start automatically."
+                        "Settings saved locally; path resolution and live polling will refresh automatically."
                             .into(),
                     );
-                    factal_stream::invalidate();
-                } else {
+                    if !had_key || model.has_factal_api_key() {
+                        factal_stream::invalidate();
+                    }
+                } else if had_key {
                     model.push_log("Factal API key cleared; stream returned to demo mode.".into());
                 }
             }
             Err(error) => {
-                model.push_log(format!("Factal API key save failed: {}", error));
+                model.push_log(format!("Settings save failed: {}", error));
             }
         }
     }
@@ -94,9 +116,9 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
     }
 
     if clear_requested {
-        match settings_store::save_factal_api_key("") {
+        model.factal_api_key.clear();
+        match model.save_settings() {
             Ok(()) => {
-                model.factal_api_key.clear();
                 model.factal_stream_status = "demo".into();
                 factal_stream::invalidate();
                 model.push_log("Factal API key cleared; stream returned to demo mode.".into());
@@ -108,4 +130,28 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
     }
 
     model.factal_settings_open = open;
+}
+
+fn path_row(ui: &mut egui::Ui, label: &str, value: &mut String, folder: bool, allow_clear: bool) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.add_sized(
+            [ui.available_width() - 140.0, 28.0],
+            egui::TextEdit::singleline(value).hint_text("Default / auto-detect"),
+        );
+
+        if ui.button("Browse").clicked() {
+            if folder {
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    *value = path.display().to_string();
+                }
+            } else if let Some(path) = rfd::FileDialog::new().pick_file() {
+                *value = path.display().to_string();
+            }
+        }
+
+        if allow_clear && ui.button("Clear").clicked() {
+            value.clear();
+        }
+    });
 }

@@ -8,6 +8,8 @@ use super::terrain_field;
 pub struct GlobeScene {
     pub event_markers: Vec<(String, egui::Pos2)>,
     pub camera_markers: Vec<(String, egui::Pos2)>,
+    /// Terrain elevation (metres) at the beam contact point, if available.
+    pub beam_elevation_m: Option<f32>,
 }
 
 struct GlobeLayout {
@@ -34,7 +36,9 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     draw_backdrop(painter, rect, &layout);
     draw_hud_frame(painter, rect);
     draw_wireframe(painter, &layout, &model.globe_view, &lod);
-    draw_global_coastlines(painter, &layout, &model.globe_view, selected_root);
+    if model.show_coastlines {
+        draw_global_coastlines(painter, &layout, &model.globe_view, selected_root);
+    }
     draw_global_topo(painter, &layout, &model.globe_view, selected_root);
 
     draw_srtm_on_globe(painter, &layout, &model.globe_view, &lod, selected_root);
@@ -96,28 +100,31 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     GlobeScene {
         event_markers,
         camera_markers,
+        beam_elevation_m: None,
     }
 }
 
 fn globe_layout(rect: egui::Rect, view: &GlobeViewState) -> GlobeLayout {
-    // zoom_t: 0 at minimum globe zoom, 1 at the local-terrain transition threshold
-    let zoom_t = ((view.zoom.ln() - 0.6f32.ln())
-        / (super::local_terrain_scene::LOCAL_MODE_MIN_ZOOM.ln() - 0.6f32.ln()))
-    .clamp(0.0, 1.0);
-    // Globe grows to nearly fill the panel as you zoom in, giving continuous spatial context
-    // before the terrain view takes over. Base is sized to leave room for the HUD frame.
+    // zoom_t: 0 at zoom=0.6, 1 at zoom=50.  Logarithmic so each scroll notch
+    // gives equal perceived zoom step.
+    let zoom_t = ((view.zoom.ln() - 0.6f32.ln()) / (50.0f32.ln() - 0.6f32.ln())).clamp(0.0, 1.0);
     let base_radius = (rect.width() * 0.21).min(rect.height() * 0.30);
-    // Growth factor 1.0 → globe reaches 2× base radius by the local-terrain threshold,
-    // nearly filling the panel so the transition feels like landing rather than jumping.
-    let radius = base_radius * (1.0 + zoom_t * 1.0);
+    // At zoom_t=0 the globe is a small sphere; at zoom_t=1 it is 9× larger,
+    // filling and greatly exceeding the viewport so only a country-scale
+    // surface patch is visible.
+    let radius = base_radius * (1.0 + zoom_t * 8.0);
     GlobeLayout {
         center: egui::pos2(
             rect.center().x + rect.width() * 0.04,
             rect.center().y + rect.height() * 0.01,
         ),
         radius,
-        focal_length: 2.05 + zoom_t * 0.3,
-        camera_distance: 3.15 - zoom_t * 1.05,
+        // Narrower FOV (higher focal_length) as we zoom in for a flatter,
+        // more map-like perspective at high zoom.
+        focal_length: 2.05 + zoom_t * 1.0,
+        // Camera moves closer to the sphere surface at high zoom.
+        // Keep at least 2.0 so the front pole stays visible (depth > 0).
+        camera_distance: 3.15 - zoom_t * 1.15,
     }
 }
 
@@ -166,7 +173,7 @@ fn draw_wireframe(
     view: &GlobeViewState,
     lod: &GlobeLod,
 ) {
-    if view.zoom >= super::local_terrain_scene::LOCAL_MODE_MIN_ZOOM {
+    if view.local_mode {
         return;
     }
 

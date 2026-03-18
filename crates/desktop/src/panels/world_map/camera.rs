@@ -24,7 +24,7 @@ pub fn apply_interaction(
             raw_delta.x.clamp(-32.0, 32.0),
             raw_delta.y.clamp(-32.0, 32.0),
         );
-        if view.zoom >= local_terrain_scene::LOCAL_MODE_MIN_ZOOM {
+        if view.local_mode {
             let rotate_mode = ctx.input(|input| input.modifiers.ctrl || input.modifiers.shift);
             if rotate_mode {
                 view.local_yaw -= delta.x * 0.0085;
@@ -48,7 +48,12 @@ pub fn apply_interaction(
     });
 
     if scroll_y.abs() > f32::EPSILON {
-        view.zoom = (view.zoom * (scroll_y * 0.0055).exp()).clamp(0.6, 60.0);
+        if view.local_mode {
+            view.local_zoom = (view.local_zoom * (scroll_y * 0.0055).exp())
+                .clamp(local_terrain_scene::LOCAL_ZOOM_MIN, 60.0);
+        } else {
+            view.zoom = (view.zoom * (scroll_y * 0.0055).exp()).clamp(0.6, 50.0);
+        }
         view.auto_spin = false;
     }
 
@@ -57,16 +62,16 @@ pub fn apply_interaction(
         view.yaw -= dt * 0.18;
     }
 
-    // Keep local_center in sync with the globe viewport so that entering local
-    // mode renders the area the user is actually looking at, not a stale location.
-    if view.zoom < local_terrain_scene::LOCAL_MODE_MIN_ZOOM {
+    // Keep local_center in sync with the globe viewport while in globe mode,
+    // so switching to local renders the area the user is looking at.
+    if !view.local_mode {
         view.local_center = view.globe_center_latlon();
     }
 }
 
 fn pan_local_center(rect: egui::Rect, view: &mut GlobeViewState, delta: egui::Vec2) {
-    let render_zoom = local_terrain_scene::local_render_zoom(view.zoom);
-    let half_extent_deg = local_terrain_scene::visual_half_extent_for_zoom(render_zoom);
+    let render_zoom = local_terrain_scene::local_render_zoom(view.local_zoom);
+    let half_extent_deg = local_terrain_scene::visual_half_extent_for_zoom(view.local_zoom);
     let km_per_deg_lat = 111.32f32;
     let km_per_deg_lon = km_per_deg_lat * view.local_center.lat.to_radians().cos().abs().max(0.2);
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);

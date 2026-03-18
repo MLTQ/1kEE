@@ -42,6 +42,7 @@ Owns the interactive 3D globe rendering for the map panel. It projects geographi
 
 ## Notes
 - The zoomed-out globe is now coastline-first again: it relies on a cached coarse `0m` boundary layer for recognizable geography and does not draw the blurred raster surface fill anymore.
+- That coastline layer is now explicitly operator-controlled through the layer bar rather than being permanently on.
 - The whole-globe coastline overlay now downshifts to a much coarser simplified feature set at low zoom, which trades away unnecessary fine shoreline detail in exchange for smoother interaction.
 - The globe renderer is intentionally not responsible for high-zoom terrain analysis anymore; that handoff now belongs to `local_terrain_scene.rs`.
 - GEBCO contour fallback remains globe-only context.

@@ -15,19 +15,16 @@ Detects the locally available terrain datasets for the app, including repository
 - **Rationale**: Keeps asset discovery lightweight until a preprocessing pipeline produces app-specific runtime assets
 
 ### `find_data_root`
-- **Does**: Walks up from the current working directory until it finds the repository `Data/` directory
-- **Interacts with**: process current directory, filesystem
-- **Rationale**: The desktop app may be launched from the workspace root or the crate directory, so detection cannot assume a fixed cwd or a single directory-case convention
+- **Does**: Resolves the terrain data root from explicit app settings first and otherwise falls back to `Data/` or `data/` under the selected asset root / executable directory
+- **Interacts with**: `settings_store.rs`, filesystem
 
 ### `find_derived_root`
-- **Does**: Walks up from the current working directory until it finds the repository `Derived/` directory
-- **Interacts with**: process current directory, filesystem
-- **Rationale**: Runtime readiness should reflect generated terrain assets, not just raw source downloads
+- **Does**: Resolves the derived-asset root from explicit app settings first and otherwise falls back to `Derived/` under the selected asset root / executable directory
+- **Interacts with**: `settings_store.rs`, filesystem
 
 ### `find_srtm_root`
-- **Does**: Resolves an SRTM GL1 tile root from the selected folder, its ancestors, or known external-drive locations
-- **Interacts with**: process current directory, filesystem, external mounted volumes
-- **Rationale**: The high-resolution land dataset lives outside the repo and should still be usable without manual copying
+- **Does**: Resolves an SRTM GL1 tile root from explicit app settings first and otherwise searches the selected asset root / executable directory
+- **Interacts with**: `settings_store.rs`, filesystem
 
 ### Status helpers
 - **Does**: Produce compact status labels and user-facing summary lines
@@ -43,4 +40,6 @@ Detects the locally available terrain datasets for the app, including repository
 ## Notes
 - This module intentionally stops at inventory. Real terrain ingestion should consume preprocessed outputs rather than opening the raw source rasters directly from the UI thread.
 - The current preferred runtime path is streamed SRTM land tiles with GEBCO fallback for everywhere else.
-- Repository-local `Data/` and `Derived/` assets are also resolved from the compiled workspace root so launching the app from a different cwd does not hide them.
+- The executable directory is now the default asset root, and the app will create `Data/` and `Derived/` there if they do not already exist.
+- External-drive assumptions have been removed from automatic discovery; anything outside the asset root should now be configured explicitly in the app settings UI.
+- Configured path overrides are now forgiving: if the operator points `Data Root` or `Derived Root` at a parent folder, discovery will still prefer the nested `Data/` or `Derived/` child when present, and SRTM root resolution now searches for `srtm_gl1/SRTM_GL1_srtm` under that configured folder instead of treating the parent as the tile root itself.

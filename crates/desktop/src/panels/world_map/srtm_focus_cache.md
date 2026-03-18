@@ -34,6 +34,11 @@ Builds and caches local SRTM contour assets for the currently focused event usin
 - **Interacts with**: local SRTM GeoTIFF tiles, `gdalwarp`, `gdal_contour`, `rusqlite`, app teardown in `app.rs`
 - **Rationale**: Uses the same validated source tooling that successfully reads the external SRTM mirror on this machine while avoiding the runtime cost of managing one SQLite file per contour tile
 
+### `ensure_global_coastline_cache`
+- **Does**: Ensures `Derived/terrain/gebco_2025_coastline_0m.gpkg` exists, building it once in the background from raw GEBCO tiles when needed
+- **Interacts with**: `terrain_assets.rs`, `contour_asset.rs`, `gdalbuildvrt`, `gdal_contour`
+- **Rationale**: Lets a fresh machine with only raw GEBCO data still render a recognizable low-zoom globe without requiring a copied derived cache
+
 ## Contracts
 
 | Dependent | Expects | Breaking changes |
@@ -48,9 +53,11 @@ Builds and caches local SRTM contour assets for the currently focused event usin
 - Each tile import writes contour rows into `contour_tiles` plus a manifest row in `contour_tile_manifest`, so the filesystem no longer has to act as the tile index.
 - The zoom ladder is intentionally denser in local terrain mode than it was initially, so analysts can continue zooming through multiple contour extents instead of landing on one fixed terrain scene.
 - Temporary GDAL outputs are now scratch files under `Derived/terrain/srtm_focus_tmp`; they are cleaned after import instead of becoming the persistent cache format.
+- `gdalwarp` / `gdal_contour` are now resolved from the app-configured GDAL bin directory or the ambient `PATH`; the cache builder no longer assumes a specific Postgres.app install.
 - SQLite is opened in WAL mode with an extended busy timeout, which is a much better fit for overlapping background tile writes than a directory of thousands of small standalone databases.
 - Background GDAL generation is now slot-limited instead of unbounded, so panning no longer tries to spawn a full neighborhood of contour workers at once.
 - GDAL subprocesses now have a bounded timeout so a wedged export does not leave a bucket pending forever.
 - App shutdown now flips the cache module into a shutdown state, stops new bucket builds from spawning, and terminates any tracked GDAL child processes so closing the app does not leave orphaned contour jobs behind.
 - Feature budgets are intentionally capped per zoom bucket because the close-focus renderer now magnifies these contours substantially; oversupplying vectors just adds lag.
 - Region generation uses overlapping bucket centers so local panning can stitch neighboring contour windows together without visible hard resets.
+- The same GDAL supervision path now also covers the coarse global coastline bootstrap, so low-zoom globe setup is consistent with the rest of the terrain cache behavior.

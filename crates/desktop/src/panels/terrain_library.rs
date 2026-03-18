@@ -137,6 +137,39 @@ pub fn render_terrain_library(ctx: &egui::Context, model: &mut AppModel) {
             ui.add_space(8.0);
 
             ui.horizontal(|ui| {
+                if ui.button("Queue Focus Roads").clicked() {
+                    match model.terrain_focus_location() {
+                        Some(focus) => match osm_ingest::queue_focus_roads_import(
+                            model.selected_root.as_deref(),
+                            focus,
+                        ) {
+                            Ok(true) => {
+                                model.push_log(
+                                    "Queued focused road import for the current terrain focus."
+                                        .into(),
+                                );
+                                model.osm_inventory = crate::osm_ingest::OsmInventory::detect_from(
+                                    model.selected_root.as_deref(),
+                                );
+                            }
+                            Ok(false) => {
+                                model.push_log(
+                                    "Focused road import was already queued or completed.".into(),
+                                );
+                            }
+                            Err(error) => {
+                                model.push_log(format!("Focused OSM queue failed: {error}"));
+                            }
+                        },
+                        None => {
+                            model.push_log(
+                                "Focused road import requires either a selected event or manual city focus."
+                                    .into(),
+                            );
+                        }
+                    }
+                }
+
                 if ui.button("Queue Global Roads").clicked() {
                     match osm_ingest::queue_planet_roads_import(model.selected_root.as_deref()) {
                         Ok(true) => {
@@ -157,6 +190,9 @@ pub fn render_terrain_library(ctx: &egui::Context, model: &mut AppModel) {
                         }
                     }
                 }
+
+                ui.separator();
+                ui.small(format!("Focus: {}", model.terrain_focus_location_name()));
 
                 match osm_ingest::supports_locations_on_ways(model.selected_root.as_deref()) {
                     Ok(true) => {

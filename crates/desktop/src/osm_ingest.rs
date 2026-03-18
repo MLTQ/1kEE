@@ -1,9 +1,12 @@
 use crate::model::GeoPoint;
+use crate::settings_store;
 use osmpbf::{BlobDecode, BlobReader, Element, ElementReader};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,8 +14,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const PLANET_PBF_NAME: &str = "planet-latest.osm.pbf";
 const RUNTIME_DB_NAME: &str = "osm_runtime.sqlite";
 const PLANET_ROADS_NOTE: &str = "planet_roads_bootstrap_v1";
+const FOCUS_ROADS_NOTE_PREFIX: &str = "focus_roads_v1";
 const ROAD_TILE_ZOOMS: &[u8] = &[4, 6, 8, 10];
 const PROGRESS_FLUSH_INTERVAL: usize = 25_000;
+const FOCUS_SCAN_PROGRESS_INTERVAL: usize = 2_000_000;
+const FOCUS_NODE_MARGIN_DEGREES: f32 = 0.08;
+const DEFAULT_FOCUS_RADIUS_MILES: f32 = 20.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OsmFeatureKind {
@@ -46,6 +53,20 @@ pub struct OsmInventory {
     pub road_tiles: usize,
     pub building_tiles: usize,
     pub primary_runtime_source: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoadLayerKind {
+    Major,
+    Minor,
+}
+
+#[derive(Clone, Debug)]
+pub struct RoadPolyline {
+    pub way_id: i64,
+    pub road_class: String,
+    pub name: Option<String>,
+    pub points: Vec<GeoPoint>,
 }
 
 #[derive(Clone)]
@@ -176,6 +197,7 @@ pub fn queue_region_job(
     selected_root: Option<&Path>,
     feature_kind: OsmFeatureKind,
     bounds: GeoBounds,
+    priority: i64,
     note: Option<&str>,
 ) -> Result<(), String> {
     let source_path = find_planet_pbf(selected_root)
@@ -201,9 +223,9 @@ pub fn queue_region_job(
         .execute(
             "INSERT INTO osm_ingest_jobs (
                 feature_kind, state, source_path,
-                min_lat, max_lat, min_lon, max_lon,
+                min_lat, max_lat, min_lon, max_lon, priority,
                 requested_at_unix, updated_at_unix, note
-             ) VALUES (?1, 'queued', ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8)",
+             ) VALUES (?1, 'queued', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9)",
             params![
                 feature_kind.as_str(),
                 source_path.display().to_string(),
@@ -211,6 +233,7 @@ pub fn queue_region_job(
                 bounds.max_lat,
                 bounds.min_lon,
                 bounds.max_lon,
+                priority,
                 now,
                 job_note,
             ],
@@ -234,7 +257,32 @@ pub fn queue_planet_roads_import(selected_root: Option<&Path>) -> Result<bool, S
             min_lon: -180.0,
             max_lon: 180.0,
         },
+        10,
         Some(PLANET_ROADS_NOTE),
+    )?;
+    Ok(true)
+}
+
+pub fn queue_focus_roads_import(
+    selected_root: Option<&Path>,
+    focus: GeoPoint,
+) -> Result<bool, String> {
+    let bounds = focus_bounds(focus, DEFAULT_FOCUS_RADIUS_MILES);
+    let note = format!(
+        "{FOCUS_ROADS_NOTE_PREFIX}_{:.3}_{:.3}_{:.1}",
+        focus.lat, focus.lon, DEFAULT_FOCUS_RADIUS_MILES
+    );
+    let queued_before = has_job_note(selected_root, &note)?;
+    if queued_before {
+        return Ok(false);
+    }
+
+    queue_region_job(
+        selected_root,
+        OsmFeatureKind::Roads,
+        bounds,
+        100,
+        Some(&note),
     )?;
     Ok(true)
 }
@@ -260,6 +308,7 @@ pub fn tick(selected_root: Option<&Path>) {
         }
     } else {
         drop(guard);
+        let _ = recover_orphaned_running_jobs(&db_path);
     }
 
     let connection = match open_runtime_db(&db_path) {
@@ -322,6 +371,9 @@ pub fn snapshots(selected_root: Option<&Path>) -> Vec<OsmJobSnapshot> {
         Ok(OsmJobSnapshot {
             label: match feature_kind.as_str() {
                 "roads" if note == PLANET_ROADS_NOTE => "Global roads bootstrap".to_owned(),
+                "roads" if note.starts_with(FOCUS_ROADS_NOTE_PREFIX) => {
+                    "Focused roads import".to_owned()
+                }
                 "roads" => "Road region import".to_owned(),
                 "buildings" => "Building import".to_owned(),
                 _ => "OSM ingest job".to_owned(),
@@ -338,24 +390,25 @@ pub fn snapshots(selected_root: Option<&Path>) -> Vec<OsmJobSnapshot> {
 }
 
 pub fn find_planet_pbf(selected_root: Option<&Path>) -> Option<PathBuf> {
+    if let Some(configured) = settings_store::configured_planet_path() {
+        if configured.exists() {
+            return Some(configured);
+        }
+    }
+
     if let Some(root) = selected_root {
         if let Some(path) = find_planet_from(root) {
             return Some(path);
         }
     }
 
-    if let Ok(cwd) = std::env::current_dir() {
-        if let Some(path) = find_planet_from(&cwd) {
+    if let Some(asset_root) = settings_store::effective_asset_root() {
+        if let Some(path) = find_planet_from(&asset_root) {
             return Some(path);
         }
     }
 
-    [
-        PathBuf::from("/Volumes/Hilbert/Data/planet-latest.osm.pbf"),
-        PathBuf::from("/Volumes/Hilbert/Data").join(PLANET_PBF_NAME),
-    ]
-    .into_iter()
-    .find(|candidate| candidate.exists())
+    None
 }
 
 pub fn validate_reader(selected_root: Option<&Path>) -> Result<(), String> {
@@ -368,6 +421,80 @@ pub fn validate_reader(selected_root: Option<&Path>) -> Result<(), String> {
         )
     })?;
     Ok(())
+}
+
+pub fn load_roads_for_bounds(
+    selected_root: Option<&Path>,
+    bounds: GeoBounds,
+    tile_zoom: u8,
+    layer_kind: RoadLayerKind,
+) -> Vec<RoadPolyline> {
+    let Some(db_path) = runtime_db_path(selected_root) else {
+        return Vec::new();
+    };
+    if !db_path.exists() {
+        return Vec::new();
+    }
+
+    let Ok(connection) = open_runtime_db(&db_path) else {
+        return Vec::new();
+    };
+    let (min_x, min_y) = lat_lon_to_tile(bounds.max_lat, bounds.min_lon, tile_zoom);
+    let (max_x, max_y) = lat_lon_to_tile(bounds.min_lat, bounds.max_lon, tile_zoom);
+    let Ok(mut statement) = connection.prepare(
+        "SELECT way_id, class, name, geom_wkb
+         FROM road_tiles
+         WHERE zoom = ?1
+           AND tile_x BETWEEN ?2 AND ?3
+           AND tile_y BETWEEN ?4 AND ?5",
+    ) else {
+        return Vec::new();
+    };
+
+    let rows = match statement.query_map(
+        params![
+            i64::from(tile_zoom),
+            i64::from(min_x.min(max_x)),
+            i64::from(min_x.max(max_x)),
+            i64::from(min_y.min(max_y)),
+            i64::from(min_y.max(max_y)),
+        ],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+            ))
+        },
+    ) {
+        Ok(rows) => rows,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut seen_way_ids = HashSet::new();
+    let mut roads = Vec::new();
+    for row in rows.filter_map(Result::ok) {
+        let (way_id, road_class, name, geom_wkb) = row;
+        if !road_class_matches(&road_class, layer_kind) || !seen_way_ids.insert(way_id) {
+            continue;
+        }
+        let Some(points) = decode_linestring_wkb(&geom_wkb) else {
+            continue;
+        };
+        let road_bounds = polyline_bounds(&points);
+        if !bounds_intersect(road_bounds, bounds) {
+            continue;
+        }
+        roads.push(RoadPolyline {
+            way_id,
+            road_class,
+            name: if name.is_empty() { None } else { Some(name) },
+            points,
+        });
+    }
+
+    roads
 }
 
 pub fn supports_locations_on_ways(selected_root: Option<&Path>) -> Result<bool, String> {
@@ -461,6 +588,7 @@ fn ensure_runtime_schema(connection: &Connection) -> rusqlite::Result<()> {
             max_lat REAL NOT NULL,
             min_lon REAL NOT NULL,
             max_lon REAL NOT NULL,
+            priority INTEGER NOT NULL DEFAULT 0,
             requested_at_unix INTEGER NOT NULL,
             updated_at_unix INTEGER NOT NULL,
             note TEXT NOT NULL DEFAULT ''
@@ -516,6 +644,10 @@ fn ensure_runtime_schema(connection: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_building_tiles_lookup
             ON building_tiles(zoom, tile_x, tile_y);",
     )?;
+    let _ = connection.execute(
+        "ALTER TABLE osm_ingest_jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     Ok(())
 }
 
@@ -542,7 +674,7 @@ fn fetch_next_job(connection: &Connection) -> rusqlite::Result<Option<OsmJob>> {
         "SELECT id, feature_kind, source_path, min_lat, max_lat, min_lon, max_lon, note
          FROM osm_ingest_jobs
          WHERE state = 'queued'
-         ORDER BY requested_at_unix ASC
+         ORDER BY priority DESC, requested_at_unix ASC
          LIMIT 1",
     )?;
 
@@ -621,6 +753,18 @@ fn update_job_note(db_path: &Path, job_id: i64, note: &str) -> Result<(), String
 }
 
 fn import_planet_roads(db_path: &Path, job: &OsmJob) -> Result<String, String> {
+    if job.note.starts_with(FOCUS_ROADS_NOTE_PREFIX) {
+        return import_focus_roads_via_stream_scan(db_path, job).or_else(|scan_error| {
+            let _ = update_job_note(
+                db_path,
+                job.id,
+                "Focused Rust scan failed; falling back to ogr2ogr extraction...",
+            );
+            import_focus_roads_via_ogr2ogr(db_path, job)
+                .map_err(|ogr_error| format!("{scan_error}; fallback failed: {ogr_error}"))
+        });
+    }
+
     if !supports_locations_on_ways_for_path(&job.source_path)? {
         return Err(
             "Planet source does not advertise LocationsOnWays; pure-Rust global road bootstrap is not available on this file yet.".to_owned(),
@@ -722,6 +866,275 @@ fn import_planet_roads(db_path: &Path, job: &OsmJob) -> Result<String, String> {
     ))
 }
 
+fn import_focus_roads_via_stream_scan(db_path: &Path, job: &OsmJob) -> Result<String, String> {
+    update_job_note(
+        db_path,
+        job.id,
+        "Scanning focused road geometry from the planet source...",
+    )?;
+
+    let expanded_bounds = expand_bounds(job.bounds, FOCUS_NODE_MARGIN_DEGREES);
+    let connection = open_runtime_db(db_path).map_err(|error| error.to_string())?;
+    connection
+        .execute_batch("BEGIN IMMEDIATE;")
+        .map_err(|error| error.to_string())?;
+    let mut writer = RoadTileWriter::new(connection);
+
+    let reader = ElementReader::from_path(&job.source_path).map_err(|error| {
+        format!(
+            "Failed to open OSM planet source {}: {error}",
+            job.source_path.display()
+        )
+    })?;
+
+    let mut candidate_nodes: HashMap<i64, GeoPoint> = HashMap::new();
+    let mut seen_way_ids = HashSet::new();
+    let mut scanned_nodes = 0usize;
+    let mut scanned_ways = 0usize;
+    let mut imported_roads = 0usize;
+    let mut import_error: Option<String> = None;
+
+    reader
+        .for_each(|element| {
+            if import_error.is_some() {
+                return;
+            }
+
+            match element {
+                Element::Node(node) => {
+                    scanned_nodes += 1;
+                    let point = GeoPoint {
+                        lat: node.lat() as f32,
+                        lon: node.lon() as f32,
+                    };
+                    if point_in_bounds(point, expanded_bounds) {
+                        candidate_nodes.insert(node.id(), point);
+                    }
+                }
+                Element::DenseNode(node) => {
+                    scanned_nodes += 1;
+                    let point = GeoPoint {
+                        lat: node.lat() as f32,
+                        lon: node.lon() as f32,
+                    };
+                    if point_in_bounds(point, expanded_bounds) {
+                        candidate_nodes.insert(node.id(), point);
+                    }
+                }
+                Element::Way(way) => {
+                    scanned_ways += 1;
+
+                    let mut highway_class = None;
+                    let mut road_name = None;
+                    for (key, value) in way.tags() {
+                        if key == "highway" {
+                            highway_class = canonical_road_class(value);
+                        } else if key == "name" && road_name.is_none() {
+                            road_name = Some(value.to_owned());
+                        }
+                    }
+                    let Some(road_class) = highway_class else {
+                        return;
+                    };
+                    if !seen_way_ids.insert(way.id()) {
+                        return;
+                    }
+
+                    let points: Vec<_> = way
+                        .refs()
+                        .filter_map(|node_id| candidate_nodes.get(&node_id).copied())
+                        .collect();
+                    if points.len() < 2 {
+                        return;
+                    }
+
+                    let bounds = polyline_bounds(&points);
+                    if !bounds_intersect(bounds, job.bounds) {
+                        return;
+                    }
+
+                    imported_roads += 1;
+                    if let Err(error) =
+                        writer.insert_road(way.id(), road_class, road_name.as_deref(), &points)
+                    {
+                        import_error = Some(error);
+                        return;
+                    }
+
+                    if imported_roads % PROGRESS_FLUSH_INTERVAL == 0 {
+                        let _ = writer.flush_progress();
+                    }
+                }
+                Element::Relation(_) => {}
+            }
+
+            let processed = scanned_nodes.saturating_add(scanned_ways);
+            if processed > 0 && processed % FOCUS_SCAN_PROGRESS_INTERVAL == 0 {
+                let _ = update_job_note(
+                    db_path,
+                    job.id,
+                    &format!(
+                        "Scanned {} nodes, {} ways · kept {} candidate nodes · imported {} roads",
+                        scanned_nodes,
+                        scanned_ways,
+                        candidate_nodes.len(),
+                        imported_roads
+                    ),
+                );
+            }
+        })
+        .map_err(|error| error.to_string())?;
+
+    if let Some(error) = import_error {
+        let _ = writer.rollback();
+        return Err(error);
+    }
+
+    let inserted_features = writer.inserted_features;
+    writer.finish().map_err(|error| error.to_string())?;
+    Ok(format!(
+        "Imported {} focused roads from {} kept nodes into {} tile features",
+        imported_roads,
+        candidate_nodes.len(),
+        inserted_features
+    ))
+}
+
+fn import_focus_roads_via_ogr2ogr(db_path: &Path, job: &OsmJob) -> Result<String, String> {
+    let output_dir = db_path
+        .parent()
+        .ok_or_else(|| "OSM runtime DB is missing a parent directory.".to_owned())?
+        .join("tmp");
+    fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
+    let output_path = output_dir.join(format!("osm_focus_job_{}.geojson", job.id));
+    if output_path.exists() {
+        let _ = fs::remove_file(&output_path);
+    }
+
+    update_job_note(
+        db_path,
+        job.id,
+        "Extracting focused road geometry from the planet source...",
+    )?;
+
+    let status = Command::new(settings_store::resolve_gdal_tool("ogr2ogr"))
+        .arg("-f")
+        .arg("GeoJSON")
+        .arg(&output_path)
+        .arg(&job.source_path)
+        .arg("lines")
+        .arg("-spat")
+        .arg(job.bounds.min_lon.to_string())
+        .arg(job.bounds.min_lat.to_string())
+        .arg(job.bounds.max_lon.to_string())
+        .arg(job.bounds.max_lat.to_string())
+        .arg("-where")
+        .arg("highway IS NOT NULL")
+        .status()
+        .map_err(|error| format!("Failed to launch ogr2ogr focused-road import: {error}"))?;
+
+    if !status.success() {
+        return Err(format!(
+            "ogr2ogr focused-road import failed with status {}",
+            status
+        ));
+    }
+
+    update_job_note(
+        db_path,
+        job.id,
+        "Parsing focused road geometry into the shared tile store...",
+    )?;
+
+    let geojson_text = fs::read_to_string(&output_path)
+        .map_err(|error| format!("Failed to read {}: {error}", output_path.display()))?;
+    let geojson: Value =
+        serde_json::from_str(&geojson_text).map_err(|error| format!("Invalid GeoJSON: {error}"))?;
+
+    let connection = open_runtime_db(db_path).map_err(|error| error.to_string())?;
+    connection
+        .execute_batch("BEGIN IMMEDIATE;")
+        .map_err(|error| error.to_string())?;
+
+    let mut writer = RoadTileWriter::new(connection);
+    let mut synthetic_way_id = -1_i64;
+    let mut imported_roads = 0usize;
+    let mut import_error: Option<String> = None;
+
+    if let Some(features) = geojson.get("features").and_then(Value::as_array) {
+        for feature in features {
+            if import_error.is_some() {
+                break;
+            }
+
+            let geometry = feature.get("geometry").unwrap_or(&Value::Null);
+            let properties = feature.get("properties").unwrap_or(&Value::Null);
+            let highway = properties
+                .get("highway")
+                .and_then(Value::as_str)
+                .and_then(canonical_road_class);
+            let Some(road_class) = highway else {
+                continue;
+            };
+            let road_name = properties.get("name").and_then(Value::as_str);
+            let way_id = properties
+                .get("osm_id")
+                .and_then(Value::as_i64)
+                .unwrap_or_else(|| {
+                    let next = synthetic_way_id;
+                    synthetic_way_id -= 1;
+                    next
+                });
+
+            match geometry.get("type").and_then(Value::as_str) {
+                Some("LineString") => {
+                    if let Some(points) = parse_geojson_linestring(geometry) {
+                        if points.len() >= 2 {
+                            imported_roads += 1;
+                            if let Err(error) =
+                                writer.insert_road(way_id, road_class, road_name, &points)
+                            {
+                                import_error = Some(error);
+                            }
+                        }
+                    }
+                }
+                Some("MultiLineString") => {
+                    if let Some(lines) = parse_geojson_multilinestring(geometry) {
+                        for points in lines {
+                            if points.len() < 2 {
+                                continue;
+                            }
+                            imported_roads += 1;
+                            if let Err(error) =
+                                writer.insert_road(way_id, road_class, road_name, &points)
+                            {
+                                import_error = Some(error);
+                                break;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let _ = fs::remove_file(&output_path);
+
+    if let Some(error) = import_error {
+        let _ = writer.rollback();
+        return Err(error);
+    }
+
+    let inserted_features = writer.inserted_features;
+    writer.finish().map_err(|error| error.to_string())?;
+    Ok(format!(
+        "Imported {} focused road geometries into {} tile features",
+        imported_roads, inserted_features
+    ))
+}
+
 fn supports_locations_on_ways_for_path(path: &Path) -> Result<bool, String> {
     let mut reader = BlobReader::from_path(path).map_err(|error| error.to_string())?;
     let Some(blob) = reader.next() else {
@@ -742,6 +1155,21 @@ fn supports_locations_on_ways_for_path(path: &Path) -> Result<bool, String> {
         .optional_features()
         .iter()
         .any(|feature| feature == "LocationsOnWays"))
+}
+
+fn recover_orphaned_running_jobs(db_path: &Path) -> Result<(), String> {
+    let connection = open_runtime_db(db_path).map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "UPDATE osm_ingest_jobs
+             SET state = 'failed',
+                 updated_at_unix = ?1,
+                 note = 'Recovered orphaned running job; requeue required'
+             WHERE state = 'running'",
+            params![unix_timestamp()],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 struct RoadTileWriter {
@@ -816,6 +1244,12 @@ impl RoadTileWriter {
     fn finish(mut self) -> rusqlite::Result<()> {
         let built_at = unix_timestamp();
         for ((zoom, tile_x, tile_y), feature_count) in self.manifest_counts.drain() {
+            let live_count: i64 = self.connection.query_row(
+                "SELECT COUNT(*) FROM road_tiles
+                 WHERE zoom = ?1 AND tile_x = ?2 AND tile_y = ?3",
+                params![i64::from(zoom), i64::from(tile_x), i64::from(tile_y)],
+                |row| row.get(0),
+            )?;
             self.connection.execute(
                 "INSERT OR REPLACE INTO road_tile_manifest (
                     zoom, tile_x, tile_y, feature_count, built_at_unix
@@ -824,7 +1258,7 @@ impl RoadTileWriter {
                     i64::from(zoom),
                     i64::from(tile_x),
                     i64::from(tile_y),
-                    feature_count as i64,
+                    live_count.max(feature_count as i64),
                     built_at,
                 ],
             )?;
@@ -853,6 +1287,15 @@ fn canonical_road_class(value: &str) -> Option<&'static str> {
     }
 }
 
+fn road_class_matches(road_class: &str, layer_kind: RoadLayerKind) -> bool {
+    match layer_kind {
+        RoadLayerKind::Major => {
+            matches!(road_class, "motorway" | "trunk" | "primary" | "secondary")
+        }
+        RoadLayerKind::Minor => matches!(road_class, "tertiary" | "residential" | "service"),
+    }
+}
+
 fn polyline_bounds(points: &[GeoPoint]) -> GeoBounds {
     let mut bounds = GeoBounds {
         min_lat: f32::INFINITY,
@@ -874,6 +1317,22 @@ fn bounds_intersect(left: GeoBounds, right: GeoBounds) -> bool {
         && left.min_lat <= right.max_lat
         && left.max_lon >= right.min_lon
         && left.min_lon <= right.max_lon
+}
+
+fn point_in_bounds(point: GeoPoint, bounds: GeoBounds) -> bool {
+    point.lat >= bounds.min_lat
+        && point.lat <= bounds.max_lat
+        && point.lon >= bounds.min_lon
+        && point.lon <= bounds.max_lon
+}
+
+fn expand_bounds(bounds: GeoBounds, margin_degrees: f32) -> GeoBounds {
+    GeoBounds {
+        min_lat: (bounds.min_lat - margin_degrees).clamp(-85.0511, 85.0511),
+        max_lat: (bounds.max_lat + margin_degrees).clamp(-85.0511, 85.0511),
+        min_lon: (bounds.min_lon - margin_degrees).clamp(-180.0, 180.0),
+        max_lon: (bounds.max_lon + margin_degrees).clamp(-180.0, 180.0),
+    }
 }
 
 fn lat_lon_to_tile(lat: f32, lon: f32, zoom: u8) -> (u32, u32) {
@@ -901,6 +1360,84 @@ fn encode_linestring_wkb(points: &[GeoPoint]) -> Vec<u8> {
         bytes.extend_from_slice(&(point.lat as f64).to_le_bytes());
     }
     bytes
+}
+
+fn decode_linestring_wkb(bytes: &[u8]) -> Option<Vec<GeoPoint>> {
+    if bytes.len() < 9 {
+        return None;
+    }
+    if *bytes.first()? != 1 {
+        return None;
+    }
+    let geometry_type = u32::from_le_bytes(bytes.get(1..5)?.try_into().ok()?);
+    if geometry_type != 2 {
+        return None;
+    }
+    let point_count = u32::from_le_bytes(bytes.get(5..9)?.try_into().ok()?) as usize;
+    if bytes.len() < 9 + point_count * 16 {
+        return None;
+    }
+
+    let mut points = Vec::with_capacity(point_count);
+    let mut cursor = 9;
+    for _ in 0..point_count {
+        let lon = f64::from_le_bytes(bytes.get(cursor..cursor + 8)?.try_into().ok()?);
+        let lat = f64::from_le_bytes(bytes.get(cursor + 8..cursor + 16)?.try_into().ok()?);
+        cursor += 16;
+        points.push(GeoPoint {
+            lat: lat as f32,
+            lon: lon as f32,
+        });
+    }
+    Some(points)
+}
+
+fn parse_geojson_linestring(geometry: &Value) -> Option<Vec<GeoPoint>> {
+    let coordinates = geometry.get("coordinates")?.as_array()?;
+    let mut points = Vec::with_capacity(coordinates.len());
+    for coordinate in coordinates {
+        let pair = coordinate.as_array()?;
+        let lon = pair.first()?.as_f64()?;
+        let lat = pair.get(1)?.as_f64()?;
+        points.push(GeoPoint {
+            lat: lat as f32,
+            lon: lon as f32,
+        });
+    }
+    Some(points)
+}
+
+fn parse_geojson_multilinestring(geometry: &Value) -> Option<Vec<Vec<GeoPoint>>> {
+    let coordinates = geometry.get("coordinates")?.as_array()?;
+    let mut lines = Vec::with_capacity(coordinates.len());
+    for line in coordinates {
+        let mut points = Vec::new();
+        for coordinate in line.as_array()? {
+            let pair = coordinate.as_array()?;
+            let lon = pair.first()?.as_f64()?;
+            let lat = pair.get(1)?.as_f64()?;
+            points.push(GeoPoint {
+                lat: lat as f32,
+                lon: lon as f32,
+            });
+        }
+        lines.push(points);
+    }
+    Some(lines)
+}
+
+fn focus_bounds(focus: GeoPoint, radius_miles: f32) -> GeoBounds {
+    let radius_km = radius_miles.max(1.0) * 1.60934;
+    let lat_delta = radius_km / 111.32;
+    let lon_scale = (focus.lat.to_radians().cos()).abs().max(0.15);
+    let lon_delta = radius_km / (111.32 * lon_scale);
+
+    GeoBounds {
+        min_lat: (focus.lat - lat_delta).clamp(-85.0511, 85.0511),
+        max_lat: (focus.lat + lat_delta).clamp(-85.0511, 85.0511),
+        min_lon: (focus.lon - lon_delta).clamp(-180.0, 180.0),
+        max_lon: (focus.lon + lon_delta).clamp(-180.0, 180.0),
+    }
 }
 
 fn register_planet_source(connection: &Connection, path: &Path) -> rusqlite::Result<()> {

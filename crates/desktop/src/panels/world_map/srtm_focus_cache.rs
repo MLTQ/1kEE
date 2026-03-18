@@ -1,4 +1,5 @@
 use crate::model::GeoPoint;
+use crate::settings_store;
 use crate::terrain_assets;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashSet; // used by pending_set()
@@ -137,6 +138,41 @@ pub fn ensure_focus_contour_region(
     assets
 }
 
+/// Returns the set of `(lat_bucket, lon_bucket)` pairs that are already built
+/// in the cache DB for the given zoom level.  Used by the pulse-grid renderer
+/// to skip drawing placeholder rectangles over tiles that are already ready.
+pub fn ready_tile_buckets(
+    selected_root: Option<&Path>,
+    focus: GeoPoint,
+    zoom: f32,
+    radius: i32,
+) -> HashSet<(i32, i32)> {
+    let mut set = HashSet::new();
+    let Some(cache_db_path) = focus_cache_db_path(selected_root) else {
+        return set;
+    };
+    let Ok(connection) = open_cache_db(&cache_db_path) else {
+        return set;
+    };
+    let spec = spec_for_zoom(zoom);
+    let bucket_step = spec.half_extent_deg * 0.45;
+    let center_lat_bucket = (focus.lat / bucket_step).round() as i32;
+    let center_lon_bucket = (focus.lon / bucket_step).round() as i32;
+    for lat_bucket in (center_lat_bucket - radius)..=(center_lat_bucket + radius) {
+        for lon_bucket in (center_lon_bucket - radius)..=(center_lon_bucket + radius) {
+            let tile = TileKey {
+                zoom_bucket: spec.zoom_bucket,
+                lat_bucket,
+                lon_bucket,
+            };
+            if tile_exists(&connection, tile).unwrap_or(false) {
+                set.insert((lat_bucket, lon_bucket));
+            }
+        }
+    }
+    set
+}
+
 pub fn focus_contour_region_status(
     selected_root: Option<&Path>,
     focus: GeoPoint,
@@ -228,6 +264,38 @@ pub fn ensure_global_land_overview(selected_root: Option<&Path>) -> Option<PathB
     None
 }
 
+pub fn ensure_global_coastline_cache(selected_root: Option<&Path>) -> Option<PathBuf> {
+    let data_root = terrain_assets::find_data_root(selected_root)?;
+    let cache_root = focus_cache_root(selected_root)?;
+    let output_path = cache_root.join("gebco_2025_coastline_0m.gpkg");
+
+    if output_path.exists() {
+        return Some(output_path);
+    }
+
+    if global_coastline_building().load(Ordering::Relaxed) {
+        return None;
+    }
+
+    let tiles = find_gebco_topography_tiles(&data_root);
+    if tiles.is_empty() {
+        return None;
+    }
+
+    global_coastline_building().store(true, Ordering::SeqCst);
+    let cache_root_clone = cache_root.clone();
+    std::thread::spawn(move || {
+        let tmp_dir = cache_root_clone.join(TEMP_DIR_NAME);
+        let tmp_vrt = tmp_dir.join("global_coastline.tmp.vrt");
+        let tmp_gpkg = tmp_dir.join("global_coastline.tmp.gpkg");
+        let out = cache_root_clone.join("gebco_2025_coastline_0m.gpkg");
+        let _ = build_global_coastline(&tiles, &tmp_vrt, &tmp_gpkg, &out);
+        global_coastline_building().store(false, Ordering::SeqCst);
+    });
+
+    None
+}
+
 /// Look for a `.vrt` file adjacent to the SRTM tile directory that covers
 /// the full dataset, e.g. `…/srtm_gl1/SRTM_GL1_srtm.vrt`.
 fn find_prebuilt_vrt(srtm_root: &Path) -> Option<PathBuf> {
@@ -241,6 +309,27 @@ fn find_prebuilt_vrt(srtm_root: &Path) -> Option<PathBuf> {
         let p = e.ok()?.path();
         (p.extension()?.to_str() == Some("vrt")).then_some(p)
     })
+}
+
+fn find_gebco_topography_tiles(data_root: &Path) -> Vec<PathBuf> {
+    let root = data_root
+        .join("GEBCO")
+        .join("gebco_2025_sub_ice_topo_geotiff");
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut tiles: Vec<_> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().and_then(|e| e.to_str()) == Some("tif")
+                && p.file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.starts_with("gebco_2025_sub_ice_"))
+        })
+        .collect();
+    tiles.sort();
+    tiles
 }
 
 fn find_all_srtm_tiles(root: &Path) -> Vec<PathBuf> {
@@ -403,6 +492,75 @@ fn build_global_overview(
         let _ = fs::remove_file(tmp_gpkg);
     }
     let _ = fs::remove_file(tmp_tif);
+    Some(())
+}
+
+fn build_global_coastline(
+    tiles: &[PathBuf],
+    tmp_vrt: &Path,
+    tmp_gpkg: &Path,
+    output_path: &Path,
+) -> Option<()> {
+    if shutdown_requested().load(Ordering::Relaxed) {
+        return None;
+    }
+
+    let tmp_dir = tmp_vrt.parent()?;
+    fs::create_dir_all(tmp_dir).ok()?;
+    let _ = fs::remove_file(tmp_vrt);
+    let _ = fs::remove_file(tmp_gpkg);
+    let _ = fs::remove_file(output_path);
+
+    let mut buildvrt = Command::new(gdal_tool_path("gdalbuildvrt"));
+    buildvrt.arg("-q");
+    buildvrt.arg(tmp_vrt);
+    for tile in tiles {
+        buildvrt.arg(tile);
+    }
+    run_command_with_timeout(
+        buildvrt,
+        "gdalbuildvrt (global coastline)",
+        Duration::from_secs(180),
+    )
+    .ok()?;
+
+    if shutdown_requested().load(Ordering::Relaxed) {
+        let _ = fs::remove_file(tmp_vrt);
+        return None;
+    }
+
+    let mut contour = Command::new(gdal_tool_path("gdal_contour"));
+    contour.args([
+        "-q",
+        "-f",
+        "GPKG",
+        "-a",
+        "elevation_m",
+        "-fl",
+        "0",
+        "-nln",
+        "contour",
+    ]);
+    contour.arg(tmp_vrt);
+    contour.arg(tmp_gpkg);
+    run_command_with_timeout(
+        contour,
+        "gdal_contour (global coastline)",
+        Duration::from_secs(180),
+    )
+    .ok()?;
+
+    if shutdown_requested().load(Ordering::Relaxed) {
+        let _ = fs::remove_file(tmp_vrt);
+        let _ = fs::remove_file(tmp_gpkg);
+        return None;
+    }
+
+    fs::rename(tmp_gpkg, output_path).ok()?;
+    let _ = fs::remove_file(tmp_vrt);
+    let _ = fs::remove_file(journal_path_for(output_path));
+    let _ = fs::remove_file(wal_path_for(output_path));
+    let _ = fs::remove_file(shm_path_for(output_path));
     Some(())
 }
 
@@ -852,19 +1010,7 @@ fn run_gdal_contour(input_path: &Path, output_path: &Path, interval_m: i32) -> s
 }
 
 fn gdal_tool_path(tool: &str) -> PathBuf {
-    let postgres_app = PathBuf::from(format!(
-        "/Applications/Postgres.app/Contents/Versions/latest/bin/{tool}"
-    ));
-    if postgres_app.exists() {
-        return postgres_app;
-    }
-
-    let homebrew = PathBuf::from(format!("/opt/homebrew/bin/{tool}"));
-    if homebrew.exists() {
-        return homebrew;
-    }
-
-    PathBuf::from(tool)
+    settings_store::resolve_gdal_tool(tool)
 }
 
 fn run_command(command: Command, label: &str) -> std::io::Result<()> {
@@ -977,6 +1123,15 @@ fn active_children() -> &'static Mutex<HashSet<u32>> {
 fn shutdown_requested() -> &'static AtomicBool {
     static SHUTDOWN: OnceLock<AtomicBool> = OnceLock::new();
     SHUTDOWN.get_or_init(|| AtomicBool::new(false))
+}
+
+fn global_coastline_building() -> &'static AtomicBool {
+    static BUILDING: OnceLock<AtomicBool> = OnceLock::new();
+    BUILDING.get_or_init(|| AtomicBool::new(false))
+}
+
+pub fn is_global_coastline_building() -> bool {
+    global_coastline_building().load(Ordering::Relaxed)
 }
 
 fn active_build_slots() -> &'static AtomicUsize {

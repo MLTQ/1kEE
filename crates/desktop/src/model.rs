@@ -20,6 +20,11 @@ pub struct GlobeViewState {
     pub local_pitch: f32,
     pub local_layer_spread: f32,
     pub zoom: f32,
+    /// Zoom level used inside local terrain mode ([4, 60]).
+    /// Independent of `zoom` so each mode keeps its own level.
+    pub local_zoom: f32,
+    /// Explicit GLOBE / LOCAL mode switch (not derived from zoom).
+    pub local_mode: bool,
     pub auto_spin: bool,
 }
 
@@ -33,6 +38,8 @@ impl GlobeViewState {
             local_pitch: 0.98,
             local_layer_spread: 0.85,
             zoom: 1.0,
+            local_zoom: 25.0,
+            local_mode: false,
             auto_spin: false,
         };
         state.focus_on(point);
@@ -159,9 +166,19 @@ pub struct AppModel {
     pub selected_camera_id: Option<String>,
     pub globe_view: GlobeViewState,
     pub focused_city_id: Option<String>,
+    pub show_coastlines: bool,
+    pub show_major_roads: bool,
+    pub show_minor_roads: bool,
+    pub show_beam: bool,
     pub selected_root: Option<PathBuf>,
     pub factal_settings_open: bool,
     pub factal_api_key: String,
+    pub settings_asset_root: String,
+    pub settings_data_root: String,
+    pub settings_derived_root: String,
+    pub settings_srtm_root: String,
+    pub settings_planet_path: String,
+    pub settings_gdal_bin_dir: String,
     pub terrain_library_open: bool,
     pub city_filter: String,
     pub selected_city_ids: BTreeSet<String>,
@@ -174,11 +191,13 @@ pub struct AppModel {
 
 impl AppModel {
     pub fn seed_demo() -> Self {
-        let selected_root = std::env::current_dir().ok();
+        let _ = settings_store::ensure_default_asset_layout();
+        let app_settings = settings_store::load_app_settings();
+        let selected_root = settings_store::effective_asset_root();
         let terrain_inventory = TerrainInventory::detect_from(selected_root.as_deref());
         let osm_runtime_store = osm_ingest::ensure_runtime_store(selected_root.as_deref());
         let osm_inventory = OsmInventory::detect_from(selected_root.as_deref());
-        let factal_api_key = settings_store::load_factal_api_key().unwrap_or_default();
+        let factal_api_key = app_settings.factal_api_key.trim().to_owned();
 
         let events = vec![
             EventRecord {
@@ -313,9 +332,21 @@ impl AppModel {
                 lon: -122.4477,
             }),
             focused_city_id: None,
+            show_coastlines: true,
+            show_major_roads: false,
+            show_minor_roads: false,
+            show_beam: true,
             selected_root,
             factal_settings_open: false,
             factal_api_key: factal_api_key.clone(),
+            settings_asset_root: settings_store::effective_asset_root()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default(),
+            settings_data_root: app_settings.data_root.unwrap_or_default(),
+            settings_derived_root: app_settings.derived_root.unwrap_or_default(),
+            settings_srtm_root: app_settings.srtm_root.unwrap_or_default(),
+            settings_planet_path: app_settings.planet_path.unwrap_or_default(),
+            settings_gdal_bin_dir: app_settings.gdal_bin_dir.unwrap_or_default(),
             terrain_library_open: false,
             city_filter: String::new(),
             selected_city_ids: BTreeSet::new(),
@@ -361,6 +392,9 @@ impl AppModel {
 
     pub fn set_selected_root(&mut self, root: PathBuf) {
         self.selected_root = Some(root.clone());
+        self.settings_asset_root = root.display().to_string();
+        let _ = self.save_settings();
+        let _ = settings_store::ensure_default_asset_layout();
         self.terrain_inventory = TerrainInventory::detect_from(Some(root.as_path()));
         let osm_runtime_store = osm_ingest::ensure_runtime_store(Some(root.as_path()));
         self.osm_inventory = OsmInventory::detect_from(Some(root.as_path()));
@@ -381,6 +415,66 @@ impl AppModel {
                 runtime_store.display()
             ));
         }
+        self.push_log(format!(
+            "OSM refresh: {}",
+            self.osm_inventory.status_summary()
+        ));
+    }
+
+    pub fn save_settings(&mut self) -> std::io::Result<()> {
+        let settings = settings_store::AppSettings {
+            factal_api_key: self.factal_api_key.trim().to_owned(),
+            asset_root: optional_path_field(&self.settings_asset_root),
+            data_root: optional_path_field(&self.settings_data_root),
+            derived_root: optional_path_field(&self.settings_derived_root),
+            srtm_root: optional_path_field(&self.settings_srtm_root),
+            planet_path: optional_path_field(&self.settings_planet_path),
+            gdal_bin_dir: optional_path_field(&self.settings_gdal_bin_dir),
+        };
+        settings_store::save_app_settings(&settings)
+    }
+
+    pub fn apply_saved_settings(&mut self) {
+        let _ = settings_store::ensure_default_asset_layout();
+        let settings = settings_store::load_app_settings();
+        self.selected_root = settings_store::effective_asset_root();
+        self.settings_asset_root = self
+            .selected_root
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        self.settings_data_root = settings.data_root.unwrap_or_default();
+        self.settings_derived_root = settings.derived_root.unwrap_or_default();
+        self.settings_srtm_root = settings.srtm_root.unwrap_or_default();
+        self.settings_planet_path = settings.planet_path.unwrap_or_default();
+        self.settings_gdal_bin_dir = settings.gdal_bin_dir.unwrap_or_default();
+
+        self.terrain_inventory = TerrainInventory::detect_from(self.selected_root.as_deref());
+        let osm_runtime_store = osm_ingest::ensure_runtime_store(self.selected_root.as_deref());
+        self.osm_inventory = OsmInventory::detect_from(self.selected_root.as_deref());
+
+        if let Some(root) = self.selected_root.clone() {
+            self.push_log(format!(
+                "Settings applied with asset root: {}",
+                root.display()
+            ));
+            if let Some(srtm_root) = terrain_assets::find_srtm_root(Some(root.as_path())) {
+                self.push_log(format!("Detected SRTM root: {}", srtm_root.display()));
+            }
+        }
+        if let Some(planet) = &self.osm_inventory.planet_path {
+            self.push_log(format!("Detected OSM planet source: {}", planet.display()));
+        }
+        if let Ok(runtime_store) = osm_runtime_store {
+            self.push_log(format!(
+                "OSM runtime store ready: {}",
+                runtime_store.display()
+            ));
+        }
+        self.push_log(format!(
+            "Terrain refresh: {}",
+            self.terrain_inventory.status_summary()
+        ));
         self.push_log(format!(
             "OSM refresh: {}",
             self.osm_inventory.status_summary()
@@ -599,4 +693,9 @@ pub fn haversine_km(a: GeoPoint, b: GeoPoint) -> f32 {
     let arc = 2.0 * inner.sqrt().atan2((1.0 - inner).sqrt());
 
     earth_radius_km * arc
+}
+
+fn optional_path_field(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }

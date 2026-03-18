@@ -59,7 +59,6 @@ impl Default for GlobeRegionCache {
 struct LocalRegionCache {
     scene_key: Option<SceneKey>,
     entries: HashMap<CacheKey, Arc<Vec<ContourPath>>>,
-    retained_keys: Vec<CacheKey>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -108,12 +107,16 @@ pub fn load_srtm_region_for_view(
         return None;
     }
 
+    // Maximum number of tiles to keep in the local-terrain cache.
+    // Each tile holds up to ~120 contour paths, so 200 tiles ≈ 24 000 paths
+    // — well within real-time render budget.
+    const MAX_LOCAL_TILES: usize = 200;
+
     static CACHE: OnceLock<Mutex<LocalRegionCache>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| {
         Mutex::new(LocalRegionCache {
             scene_key: None,
             entries: HashMap::new(),
-            retained_keys: Vec::new(),
         })
     });
     let mut guard = cache.lock().ok()?;
@@ -131,50 +134,56 @@ pub fn load_srtm_region_for_view(
 
     if guard.scene_key.as_ref() != Some(&scene_key) {
         guard.scene_key = Some(scene_key);
-        guard.retained_keys.clear();
         guard.entries.clear();
     }
 
-    // Build the render set from ONLY the current viewport's tiles.
-    // Do NOT accumulate across frames: as the globe orbits, viewport_center
-    // drifts through many positions and old tiles linger in `entries`, causing
-    // a continent-spanning patchwork of stale geometry.  The `entries` map
-    // still gives instant in-memory re-display if the user pans back.
-    let retained_keys: Vec<CacheKey> = assets
-        .iter()
-        .map(|asset| CacheKey {
+    // Load any newly-ready tiles from the current viewport into the cache.
+    // Tiles already in `entries` are left as-is (no re-query).
+    for asset in &assets {
+        let key = CacheKey {
             path: asset.path.clone(),
             lat_bucket: asset.lat_bucket,
             lon_bucket: asset.lon_bucket,
             zoom_bucket: asset.zoom_bucket,
-        })
-        .collect();
-    guard.retained_keys = retained_keys.clone();
-    let mut merged = Vec::new();
-    for key in &retained_keys {
-        let contours = if let Some(cached) = guard.entries.get(key) {
-            Arc::clone(cached)
-        } else {
-            let asset = assets.iter().find(|asset| {
-                asset.path == key.path
-                    && asset.zoom_bucket == key.zoom_bucket
-                    && asset.lat_bucket == key.lat_bucket
-                    && asset.lon_bucket == key.lon_bucket
-            })?;
-            let contours = Arc::new(
-                query_local_contours(
-                    &key.path,
-                    key.zoom_bucket,
-                    key.lat_bucket,
-                    key.lon_bucket,
-                    asset.simplify_step,
-                    per_asset_budget,
-                )
-                .ok()?,
-            );
-            guard.entries.insert(key.clone(), Arc::clone(&contours));
-            contours
         };
+        if !guard.entries.contains_key(&key) {
+            if let Ok(contours) = query_local_contours(
+                &key.path,
+                key.zoom_bucket,
+                key.lat_bucket,
+                key.lon_bucket,
+                asset.simplify_step,
+                per_asset_budget,
+            ) {
+                if !contours.is_empty() {
+                    guard.entries.insert(key, Arc::new(contours));
+                }
+            }
+        }
+    }
+
+    // Evict tiles furthest from viewport_center when over the cap.
+    if guard.entries.len() > MAX_LOCAL_TILES {
+        let bucket_step = srtm_focus_cache::half_extent_for_zoom(zoom) * 0.45;
+        let clat = (viewport_center.lat / bucket_step).round() as i32;
+        let clon = (viewport_center.lon / bucket_step).round() as i32;
+
+        let mut keys: Vec<CacheKey> = guard.entries.keys().cloned().collect();
+        // Sort furthest-first so we can truncate from the back.
+        keys.sort_unstable_by_key(|k| {
+            let dlat = k.lat_bucket - clat;
+            let dlon = k.lon_bucket - clon;
+            -(dlat * dlat + dlon * dlon)
+        });
+        let excess = guard.entries.len() - MAX_LOCAL_TILES;
+        for k in keys.into_iter().take(excess) {
+            guard.entries.remove(&k);
+        }
+    }
+
+    // Render ALL accumulated tiles, not just the current viewport grid.
+    let mut merged = Vec::new();
+    for contours in guard.entries.values() {
         merged.extend(contours.iter().cloned());
     }
 
@@ -324,11 +333,11 @@ pub fn load_global_coastlines(
     selected_root: Option<&Path>,
     zoom: f32,
 ) -> Option<Arc<Vec<ContourPath>>> {
-    let path = terrain_assets::find_derived_root(selected_root)?
-        .join("terrain/gebco_2025_coastline_0m.gpkg");
-    if !path.exists() {
-        return None;
-    }
+    let path = srtm_focus_cache::ensure_global_coastline_cache(selected_root).or_else(|| {
+        let path = terrain_assets::find_derived_root(selected_root)?
+            .join("terrain/gebco_2025_coastline_0m.gpkg");
+        path.exists().then_some(path)
+    })?;
     let (lod_bucket, simplify_step, feature_budget) = global_coastline_lod(zoom);
 
     static CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();
@@ -351,6 +360,10 @@ pub fn load_global_coastlines(
     }
 
     guard.as_ref().map(|cached| Arc::clone(&cached.contours))
+}
+
+pub fn global_coastlines_pending(_selected_root: Option<&Path>) -> bool {
+    srtm_focus_cache::is_global_coastline_building()
 }
 
 pub fn load_global_topo(selected_root: Option<&Path>, zoom: f32) -> Option<Arc<Vec<ContourPath>>> {

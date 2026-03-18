@@ -31,7 +31,7 @@ Defines the shared domain and UI state for the 1kEE desktop demo. This file hold
 - **Interacts with**: `AppModel::nearby_cameras`, `world_map.rs`, `camera_list.rs`
 
 ### `AppModel`
-- **Does**: Owns all shared demo state and handles live Factal event replacement, API-key UI state, manual city focus, terrain-library UI state, OSM source/runtime status, and simulated feed actions
+- **Does**: Owns all shared demo state and handles live Factal event replacement, settings-window UI state, manual city focus, terrain-library UI state, road-layer visibility state, OSM source/runtime status, and simulated feed actions
 - **Interacts with**: `app.rs`, every renderer in `panels/`, `TerrainInventory` in `terrain_assets.rs`, `OsmInventory` in `osm_ingest.rs`, `GlobeViewState`, `city_catalog.rs`, `settings_store.rs`, user-selected asset roots
 - **Rationale**: Keeps the current scaffold simple while preserving a clear seam for background workers like the Factal poller
 
@@ -60,7 +60,7 @@ Defines the shared domain and UI state for the 1kEE desktop demo. This file hold
 | `world_map/camera.rs` | `globe_view` is available for persistent camera interaction | Removing or relocating globe state without replacing the contract |
 | `header.rs` | `selected_root` can be updated from the UI to re-resolve terrain assets | Removing or relocating root-selection state without replacing the contract |
 | `terrain_library.rs` | City focus, search text, and selected city ids live here and can be mutated from UI actions | Removing or relocating terrain-library state without replacing the contract |
-| `factal_settings.rs` | Factal key text and window-open state live here and can be mutated from UI actions | Removing or relocating Factal settings state without replacing the contract |
+| `factal_settings.rs` | Factal key text, path override text, and window-open state live here and can be mutated from UI actions | Removing or relocating settings state without replacing the contract |
 | `factal_stream.rs` | `replace_factal_events` swaps in fresh event lists without destroying other app state | Removing the method or changing its selection-retention semantics |
 
 ## Notes
@@ -73,3 +73,5 @@ Defines the shared domain and UI state for the 1kEE desktop demo. This file hold
 - Factal API key persistence is intentionally lightweight for now: the key is loaded into the model at startup and the live poller swaps in fresh events once authenticated.
 - The globe now starts in manual mode instead of auto-spin so the app does not enter a continuous repaint loop before the analyst touches anything.
 - The model now initializes and tracks a separate OSM runtime store so the planet-scale roads/buildings pipeline can evolve independently from terrain caching.
+- Coastline and major/minor road layer toggles now live in the model because both the map UI and the renderers need the same persistent visibility state.
+- Path settings now persist through the shared settings store and default to the executable directory rather than the process working directory.
