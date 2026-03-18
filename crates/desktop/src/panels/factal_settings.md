@@ -21,5 +21,5 @@ Renders the app settings window for the desktop app. This file is the user-facin
 ## Notes
 - The key is masked in the UI but still stored as plain text because this is still a local demo build.
 - 511NY and Windy Webcams keys are intentionally optional; leaving them blank keeps the camera registry in demo mode.
-- No-key public camera sources can also be declared in `Data/camera_sources/public_sources.json` under the asset root, which lets the app ingest curated public endpoints without adding more hardcoded provider logic.
+- No-key public camera sources can be declared in `Data/camera_sources/public_sources.json`, and curated scraped webcam-directory seeds can be declared in `Data/camera_sources/scrape_sources.json` under the asset root.
 - Asset/data/derived/SRTM/planet/GDAL overrides are intentionally optional; leaving them blank means “use the executable folder defaults and PATH-based GDAL tools.”

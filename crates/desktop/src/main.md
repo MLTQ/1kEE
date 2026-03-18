@@ -7,7 +7,7 @@ Entrypoint for the desktop demo. It owns native window setup and hands control t
 
 ### `main`
 - **Does**: Configures the `eframe` native window, compiles the desktop support modules, and launches the app
-- **Interacts with**: `DashboardApp` in `app.rs`, module declarations for terrain, OSM ingest, city catalog, settings persistence, live Factal polling, live camera-registry polling, and public camera-source catalog loading
+- **Interacts with**: `DashboardApp` in `app.rs`, module declarations for terrain, OSM ingest, city catalog, settings persistence, live Factal polling, live camera-registry polling, and both declarative camera-source catalogs (structured public feeds plus curated scrape seeds)
 - **Rationale**: Keeps platform/bootstrap concerns separate from UI state and rendering
 
 ## Contracts

@@ -1,5 +1,6 @@
 mod app;
 mod camera_registry;
+mod camera_scrape_catalog;
 mod camera_source_catalog;
 mod city_catalog;
 mod factal_stream;

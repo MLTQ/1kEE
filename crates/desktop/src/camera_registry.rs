@@ -1,3 +1,4 @@
+use crate::camera_scrape_catalog::{self, ScrapedCameraSource, ScrapedCameraSourceKind};
 use crate::camera_source_catalog::{self, PublicCameraSource, PublicCameraSourceKind};
 use crate::model::{AppModel, CameraConnectionState, CameraFeed, GeoPoint};
 use reqwest::blocking::Client;
@@ -70,7 +71,8 @@ pub fn tick(model: &mut AppModel) {
     }
 
     let public_sources = camera_source_catalog::load_public_sources(model.selected_root.as_deref());
-    if !model.has_camera_source_keys() && public_sources.is_empty() {
+    let scrape_sources = camera_scrape_catalog::load_scrape_sources(model.selected_root.as_deref());
+    if !model.has_camera_source_keys() && public_sources.is_empty() && scrape_sources.is_empty() {
         if model.camera_registry_status != "demo" {
             model.camera_registry_status = "demo".into();
         }
@@ -96,9 +98,16 @@ pub fn tick(model: &mut AppModel) {
         let ny511_key = model.ny511_api_key.trim().to_owned();
         let focus = model.terrain_focus_location();
         let public_sources = public_sources;
+        let scrape_sources = scrape_sources;
 
         let handle = thread::spawn(move || {
-            fetch_camera_registry(&windy_key, &ny511_key, focus, &public_sources)
+            fetch_camera_registry(
+                &windy_key,
+                &ny511_key,
+                focus,
+                &public_sources,
+                &scrape_sources,
+            )
         });
 
         let mut manager = manager().lock().unwrap();
@@ -158,11 +167,14 @@ fn poll_signature(model: &AppModel) -> String {
         .terrain_focus_location()
         .map(|point| format!("{:.2}:{:.2}", point.lat, point.lon))
         .unwrap_or_else(|| "nofocus".into());
+    let public_sources = camera_source_catalog::load_public_sources(model.selected_root.as_deref());
+    let scrape_sources = camera_scrape_catalog::load_scrape_sources(model.selected_root.as_deref());
     format!(
-        "windy:{}|511ny:{}|public:{}|focus:{}",
+        "windy:{}|511ny:{}|public:{}|scrape:{}|focus:{}",
         !model.windy_webcams_api_key.trim().is_empty(),
         !model.ny511_api_key.trim().is_empty(),
-        camera_source_catalog::load_public_sources(model.selected_root.as_deref()).len(),
+        source_signature(&public_sources),
+        scrape_source_signature(&scrape_sources),
         focus
     )
 }
@@ -172,6 +184,7 @@ fn fetch_camera_registry(
     ny511_key: &str,
     focus: Option<GeoPoint>,
     public_sources: &[PublicCameraSource],
+    scrape_sources: &[ScrapedCameraSource],
 ) -> PollOutcome {
     let client = match Client::builder().timeout(REQUEST_TIMEOUT).build() {
         Ok(client) => client,
@@ -224,6 +237,23 @@ fn fetch_camera_registry(
         }
     }
 
+    for source in scrape_sources {
+        match fetch_scraped_source(&client, source) {
+            Ok(mut fetched) => {
+                if !fetched.is_empty() {
+                    source_parts.push(source.name.clone());
+                    cameras.append(&mut fetched);
+                }
+            }
+            Err(error) => {
+                return PollOutcome::Error(format!(
+                    "Scraped source '{}' failed: {error}",
+                    source.name
+                ));
+            }
+        }
+    }
+
     dedupe_cameras(&mut cameras);
 
     PollOutcome::Success {
@@ -245,6 +275,45 @@ fn fetch_public_source(
         PublicCameraSourceKind::GeoJson => fetch_public_geojson_source(client, source),
         PublicCameraSourceKind::ArcGisFeatureService => fetch_public_arcgis_source(client, source),
     }
+}
+
+fn fetch_scraped_source(
+    client: &Client,
+    source: &ScrapedCameraSource,
+) -> Result<Vec<CameraFeed>, String> {
+    let response = client
+        .get(&source.page_url)
+        .send()
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("unexpected status {}", response.status()));
+    }
+
+    let body = response.text().map_err(|error| error.to_string())?;
+    let label = source
+        .label_override
+        .clone()
+        .or_else(|| extract_scraped_label(source, &body))
+        .unwrap_or_else(|| source.name.clone());
+    let stream_url = source
+        .stream_url_override
+        .clone()
+        .or_else(|| extract_scraped_stream_url(source, &body))
+        .unwrap_or_else(|| source.page_url.clone());
+
+    Ok(vec![CameraFeed {
+        id: format!("{}-{}", slugify(&source.provider), slugify(&source.name)),
+        label,
+        provider: source.provider.clone(),
+        kind: source.kind_value.clone().unwrap_or_else(|| "webcam".into()),
+        location: GeoPoint {
+            lat: source.latitude,
+            lon: source.longitude,
+        },
+        stream_url,
+        last_seen: "scraped directory".into(),
+        status: CameraConnectionState::Idle,
+    }])
 }
 
 fn fetch_public_json_array_source(
@@ -633,6 +702,22 @@ fn dedupe_cameras(cameras: &mut Vec<CameraFeed>) {
     *cameras = deduped;
 }
 
+fn source_signature(sources: &[PublicCameraSource]) -> String {
+    sources
+        .iter()
+        .map(|source| format!("{}@{}", source.name, source.endpoint))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn scrape_source_signature(sources: &[ScrapedCameraSource]) -> String {
+    sources
+        .iter()
+        .map(|source| format!("{}@{}", source.name, source.page_url))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn value_as_string(value: &Value) -> Option<String> {
     if let Some(value) = value.as_str() {
         Some(value.to_owned())
@@ -647,6 +732,97 @@ fn value_as_string(value: &Value) -> Option<String> {
 
 fn value_as_string_ref(value: &Value) -> Option<String> {
     value_as_string(value)
+}
+
+fn extract_scraped_label(source: &ScrapedCameraSource, html: &str) -> Option<String> {
+    match source.kind {
+        ScrapedCameraSourceKind::GenericHtml
+        | ScrapedCameraSourceKind::Opentopia
+        | ScrapedCameraSourceKind::Webcamera24
+        | ScrapedCameraSourceKind::SkylineWebcams
+        | ScrapedCameraSourceKind::Webcamtaxi => extract_meta_content(html, "og:title")
+            .or_else(|| extract_meta_content(html, "twitter:title"))
+            .or_else(|| extract_title_text(html)),
+    }
+    .map(|label| clean_text(&label))
+    .filter(|label| !label.is_empty())
+}
+
+fn extract_scraped_stream_url(source: &ScrapedCameraSource, html: &str) -> Option<String> {
+    match source.kind {
+        ScrapedCameraSourceKind::GenericHtml
+        | ScrapedCameraSourceKind::Webcamera24
+        | ScrapedCameraSourceKind::SkylineWebcams
+        | ScrapedCameraSourceKind::Webcamtaxi => extract_meta_content(html, "og:video")
+            .or_else(|| extract_meta_content(html, "og:video:url"))
+            .or_else(|| extract_first_tag_attribute(html, "iframe", "src"))
+            .or_else(|| extract_first_tag_attribute(html, "source", "src"))
+            .or_else(|| extract_first_tag_attribute(html, "video", "src")),
+        ScrapedCameraSourceKind::Opentopia => extract_first_tag_attribute(html, "iframe", "src")
+            .or_else(|| extract_first_tag_attribute(html, "img", "src"))
+            .or_else(|| extract_meta_content(html, "og:image")),
+    }
+}
+
+fn extract_meta_content(html: &str, property: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let property_lower = property.to_ascii_lowercase();
+    for attr in ["property", "name"] {
+        let marker = format!(r#"{attr}="{property_lower}""#);
+        if let Some(index) = lower.find(&marker) {
+            let fragment = html_fragment(html, index)?;
+            if let Some(content) = extract_attribute_value(fragment, "content") {
+                return Some(content);
+            }
+        }
+    }
+    None
+}
+
+fn extract_title_text(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let start = lower.find("<title")?;
+    let open_end = lower[start..].find('>')? + start + 1;
+    let end = lower[open_end..].find("</title>")? + open_end;
+    Some(html[open_end..end].to_owned())
+}
+
+fn extract_first_tag_attribute(html: &str, tag: &str, attr: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let marker = format!("<{}", tag.to_ascii_lowercase());
+    let mut search_start = 0;
+    while let Some(relative) = lower[search_start..].find(&marker) {
+        let index = search_start + relative;
+        let fragment = html_fragment(html, index)?;
+        if let Some(value) = extract_attribute_value(fragment, attr) {
+            return Some(value);
+        }
+        search_start = index + marker.len();
+    }
+    None
+}
+
+fn html_fragment(html: &str, index: usize) -> Option<&str> {
+    let end = html[index..].find('>')? + index + 1;
+    Some(&html[index..end])
+}
+
+fn extract_attribute_value(fragment: &str, attr: &str) -> Option<String> {
+    let lower = fragment.to_ascii_lowercase();
+    let attr_lower = attr.to_ascii_lowercase();
+    for quote in ['"', '\''] {
+        let marker = format!(r#"{attr_lower}={quote}"#);
+        if let Some(start) = lower.find(&marker) {
+            let value_start = start + marker.len();
+            let value_end = fragment[value_start..].find(quote)? + value_start;
+            return Some(fragment[value_start..value_end].to_owned());
+        }
+    }
+    None
+}
+
+fn clean_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn value_as_f32(value: &Value) -> Option<f32> {

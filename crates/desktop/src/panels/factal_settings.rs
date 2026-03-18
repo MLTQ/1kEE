@@ -76,7 +76,7 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
                 model.camera_registry_status
             ));
             ui.small(
-                "Optional no-key public sources can be declared in Data/camera_sources/public_sources.json under the asset root.",
+                "Optional no-key sources can be declared in Data/camera_sources/public_sources.json and Data/camera_sources/scrape_sources.json under the asset root.",
             );
 
             ui.add_space(14.0);

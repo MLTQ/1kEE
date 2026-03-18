@@ -1,0 +1,29 @@
+[
+  {
+    "name": "Example volcano cam",
+    "provider": "webcamera24",
+    "kind": "webcamera24",
+    "page_url": "https://webcamera24.com/pt/camera/usa/kilauea-volcano-webcam/",
+    "latitude": 19.421,
+    "longitude": -155.287,
+    "enabled": false
+  },
+  {
+    "name": "Example city cam",
+    "provider": "SkylineWebcams",
+    "kind": "skyline-webcams",
+    "page_url": "https://www.skylinewebcams.com/en/webcam.html",
+    "latitude": 41.9028,
+    "longitude": 12.4964,
+    "enabled": false
+  },
+  {
+    "name": "Example coord page",
+    "provider": "Opentopia",
+    "kind": "opentopia",
+    "page_url": "http://www.opentopia.com/webcam/16926",
+    "latitude": 39.733,
+    "longitude": -105.317,
+    "enabled": false
+  }
+]
