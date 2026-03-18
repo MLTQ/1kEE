@@ -36,7 +36,7 @@ impl GlobeViewState {
             local_center: point,
             local_yaw: -0.65,
             local_pitch: 0.98,
-            local_layer_spread: 0.85,
+            local_layer_spread: 1.0,
             zoom: 1.0,
             local_zoom: 25.0,
             local_mode: false,
@@ -95,6 +95,19 @@ impl EventSeverity {
 }
 
 #[derive(Clone, Debug)]
+pub struct FactalBrief {
+    pub factal_id: String,
+    pub severity_value: Option<i64>,
+    pub occurred_at_raw: Option<String>,
+    pub point_wkt: Option<String>,
+    pub vertical: Option<String>,
+    pub subvertical: Option<String>,
+    pub topics: Vec<String>,
+    pub content: Option<String>,
+    pub raw_json_pretty: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct EventRecord {
     pub id: String,
     pub title: String,
@@ -104,6 +117,7 @@ pub struct EventRecord {
     pub location: GeoPoint,
     pub source: String,
     pub occurred_at: String,
+    pub factal_brief: Option<FactalBrief>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,6 +186,7 @@ pub struct AppModel {
     pub show_beam: bool,
     pub selected_root: Option<PathBuf>,
     pub factal_settings_open: bool,
+    pub factal_brief_open: bool,
     pub factal_api_key: String,
     pub settings_asset_root: String,
     pub settings_data_root: String,
@@ -212,6 +227,7 @@ impl AppModel {
                 },
                 source: "Factal stream".into(),
                 occurred_at: "2026-03-15 05:42 UTC".into(),
+                factal_brief: None,
             },
             EventRecord {
                 id: "evt-nyc".into(),
@@ -225,6 +241,7 @@ impl AppModel {
                 },
                 source: "Factal stream".into(),
                 occurred_at: "2026-03-15 05:50 UTC".into(),
+                factal_brief: None,
             },
             EventRecord {
                 id: "evt-tokyo".into(),
@@ -238,6 +255,7 @@ impl AppModel {
                 },
                 source: "Factal stream".into(),
                 occurred_at: "2026-03-15 05:57 UTC".into(),
+                factal_brief: None,
             },
         ];
 
@@ -338,6 +356,7 @@ impl AppModel {
             show_beam: true,
             selected_root,
             factal_settings_open: false,
+            factal_brief_open: false,
             factal_api_key: factal_api_key.clone(),
             settings_asset_root: settings_store::effective_asset_root()
                 .map(|path| path.display().to_string())
@@ -484,6 +503,12 @@ impl AppModel {
     pub fn selected_event(&self) -> Option<&EventRecord> {
         let selected_id = self.selected_event_id.as_deref()?;
         self.events.iter().find(|event| event.id == selected_id)
+    }
+
+    pub fn selected_event_has_factal_brief(&self) -> bool {
+        self.selected_event()
+            .and_then(|event| event.factal_brief.as_ref())
+            .is_some()
     }
 
     pub fn focused_city(&self) -> Option<city_catalog::CityEntry> {

@@ -24,7 +24,7 @@ Runs the live Factal event polling loop for the desktop app. This file translate
 - **Rationale**: Uses only fields proven by the attached legacy Python collector instead of guessing undocumented API behavior
 
 ### `parse_event`
-- **Does**: Maps one raw Factal item into a normalized `EventRecord`
+- **Does**: Maps one raw Factal item into a normalized `EventRecord` while preserving a richer Factal-only payload for brief/detail inspection
 - **Interacts with**: `EventRecord`, `EventSeverity`, `GeoPoint` in `model.rs`
 
 ## Contracts
@@ -38,3 +38,4 @@ Runs the live Factal event polling loop for the desktop app. This file translate
 ## Notes
 - This first pass only consumes the latest page of events because that is the lowest-risk interpretation of the private API and keeps polling lightweight.
 - The app ignores stale results when the key changes while a request is still in flight.
+- In addition to headline/summary/location fields, the parser now preserves the raw pretty-printed JSON item, vertical/subvertical topic tags, topic names, point WKT, and numeric severity when Factal provides them.

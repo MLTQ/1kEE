@@ -33,6 +33,7 @@ impl eframe::App for DashboardApp {
         }
 
         panels::render_header(ctx, &mut self.model);
+        panels::render_factal_brief(ctx, &mut self.model);
         panels::render_factal_settings(ctx, &mut self.model);
         panels::render_terrain_library(ctx, &mut self.model);
         panels::render_status_log(ctx, &self.model);

@@ -80,6 +80,8 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
                 }
             }
         }
+
+        draw_event_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
     });
 }
 
@@ -160,9 +162,55 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                     );
                 }
 
+                if model.selected_event_has_factal_brief() {
+                    ui.separator();
+                    if ui.button("Brief").clicked() {
+                        model.factal_brief_open = true;
+                    }
+                }
+
                 ui.separator();
                 ui.small(model.terrain_focus_location_name());
             });
+        });
+}
+
+fn draw_event_hover_tooltip(
+    ctx: &egui::Context,
+    model: &AppModel,
+    scene: &globe_scene::GlobeScene,
+    hover_pos: Option<egui::Pos2>,
+) {
+    let Some(pointer) = hover_pos else {
+        return;
+    };
+
+    let Some((event_id, marker_pos)) = scene
+        .event_markers
+        .iter()
+        .find(|(_, marker)| marker.distance(pointer) <= 12.0)
+    else {
+        return;
+    };
+
+    let Some(event) = model.events.iter().find(|event| event.id == *event_id) else {
+        return;
+    };
+
+    egui::Area::new("event_hover_tooltip".into())
+        .fixed_pos(*marker_pos + egui::vec2(14.0, -8.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(egui::Color32::from_rgba_premultiplied(7, 18, 24, 238))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(24, 63, 79)))
+                .corner_radius(8.0)
+                .inner_margin(egui::Margin::same(8))
+                .show(ui, |ui| {
+                    ui.colored_label(event.severity.color(), event.severity.label());
+                    ui.strong(event.title.as_str());
+                    ui.small(event.location_name.as_str());
+                });
         });
 }
 
@@ -266,7 +314,7 @@ fn draw_local_footer(ui: &mut egui::Ui, model: &mut AppModel, beam_elevation_m: 
                 ui.colored_label(theme::topo_color(), "LAYER SPREAD");
                 ui.add_sized(
                     [220.0, 18.0],
-                    egui::Slider::new(&mut model.globe_view.local_layer_spread, 0.15..=1.6)
+                    egui::Slider::new(&mut model.globe_view.local_layer_spread, 0.15..=100.0)
                         .text("Compress / expand")
                         .show_value(true),
                 );

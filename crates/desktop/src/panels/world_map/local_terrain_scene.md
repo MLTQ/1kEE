@@ -61,6 +61,9 @@ Renders the high-zoom event terrain mode. This file exists to show one selected 
 - Before full local mode activates, the same shared cache is used to fade and scale a local terrain overlay in over the globe across a zoom overlap band instead of jumping directly between unrelated views.
 - Drag-driven camera rotation comes from `GlobeViewState`.
 - Vertical contour separation now comes from the user-controlled `local_layer_spread` value in `GlobeViewState`, and that control only affects elevation offset, not the base terrain-plane tilt.
+- The operator-facing spread control is intentionally allowed to reach very large values for dramatic sci-fi exaggeration, even though the default remains at the neutral `1.0` baseline.
+- Elevation is now normalized against the current local terrain span before projection, so relief exaggeration stays much more stable across zoom levels instead of mountains changing aspect ratio just because the camera zoom changed.
+- Because that normalization made the default view more physically believable, the operator-facing spread control is now intentionally allowed to go much higher so dramatic sci-fi exaggeration remains available when desired.
 - Plain drag pans the local viewport center, which causes the terrain cache to stream across the surrounding region while any selected event marker remains at its true map position.
 - The streamed neighborhood is intentionally wider again, so the local view keeps more surrounding landform context loaded around the viewport center before relying on panning and retention.
 - The local scene keys chunk retention to the current terrain focus location, so already visited terrain buckets stay visible while panning and only reset when the analyst selects a different event or manual city focus.

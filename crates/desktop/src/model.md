@@ -22,6 +22,10 @@ Defines the shared domain and UI state for the 1kEE desktop demo. This file hold
 - **Does**: Represents one curated event shown in the analyst UI, whether seeded locally or synced from Factal
 - **Interacts with**: `AppModel`, `event_list.rs`, `factal_stream.rs`
 
+### `FactalBrief`
+- **Does**: Stores the richer Factal-only payload preserved for inspection, including severity value, vertical/subvertical tags, point WKT, topic names, and the pretty-printed raw JSON item
+- **Interacts with**: `factal_stream.rs`, `factal_brief.rs`, `world_map.rs`
+
 ### `CameraConnectionState`
 - **Does**: Tracks the current feed reachability/attempt state for a camera
 - **Interacts with**: `camera_list.rs`, `status_log.rs`
@@ -71,7 +75,9 @@ Defines the shared domain and UI state for the 1kEE desktop demo. This file hold
 - Manual city focus now coexists with the event demo: selecting a city re-centers terrain without destroying the seeded event list, and selecting an event clears the manual city focus again.
 - Manual city focus labels now use region-qualified city names when the GeoNames catalog can resolve an admin1/state entry, so repeated place names are less ambiguous in the header, logs, and terrain library.
 - Factal API key persistence is intentionally lightweight for now: the key is loaded into the model at startup and the live poller swaps in fresh events once authenticated.
+- Factal-backed events now preserve an optional raw-detail payload so the operator can inspect the original API item from a brief window without bloating the normalized event list UI.
 - The globe now starts in manual mode instead of auto-spin so the app does not enter a continuous repaint loop before the analyst touches anything.
 - The model now initializes and tracks a separate OSM runtime store so the planet-scale roads/buildings pipeline can evolve independently from terrain caching.
 - Coastline and major/minor road layer toggles now live in the model because both the map UI and the renderers need the same persistent visibility state.
+- Local terrain now defaults `local_layer_spread` to `1.0`, which is the neutral baseline after the projection fix; operators can still push exaggeration far beyond that from the footer control, now up to `100.0`.
 - Path settings now persist through the shared settings store and default to the executable directory rather than the process working directory.

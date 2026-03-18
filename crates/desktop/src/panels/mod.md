@@ -6,7 +6,7 @@ Exports the panel renderers used by the desktop shell. This module is the compos
 ## Components
 
 ### Re-exports
-- **Does**: Exposes `render_header`, `render_factal_settings`, `render_terrain_library`, `render_status_log`, `render_event_list`, `render_camera_list`, and `render_world_map`
+- **Does**: Exposes `render_header`, `render_factal_brief`, `render_factal_settings`, `render_terrain_library`, `render_status_log`, `render_event_list`, `render_camera_list`, and `render_world_map`
 - **Interacts with**: `app.rs`
 
 ## Contracts

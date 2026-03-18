@@ -12,6 +12,7 @@ use super::srtm_stream;
 pub const LOCAL_TRANSITION_START_ZOOM: f32 = 4.0;
 pub const LOCAL_MODE_MIN_ZOOM: f32 = 25.0;
 const LOCAL_STREAM_RADIUS: i32 = 2;
+const BASE_VERTICAL_EXAGGERATION: f32 = 2.1;
 
 struct LocalLayout {
     center: egui::Pos2,
@@ -964,7 +965,13 @@ fn project_local(
 
     let x = x_km / extent_x_km;
     let y = y_km / extent_y_km;
-    let z = elevation_m / 1000.0;
+    // Normalize elevation against the current terrain span so vertical relief
+    // scales with zoom instead of being added as a fixed screen-space offset.
+    // Without this, horizontal distances expand/contract with zoom while
+    // elevation stays effectively constant in pixels, which makes mountains
+    // look wildly taller or flatter depending on zoom.
+    let reference_span_km = ((extent_x_km + extent_y_km) * 0.5).max(1.0);
+    let z = (elevation_m / 1000.0) * BASE_VERTICAL_EXAGGERATION / reference_span_km;
 
     let yaw_cos = view.local_yaw.cos();
     let yaw_sin = view.local_yaw.sin();
@@ -979,13 +986,19 @@ fn project_local(
     let elevation_z_offset = z * pitch_cos;
     let z_pitch = ground_z_pitch + elevation_z_offset;
 
+    let ground_pitch_scale = layout.height * 0.55;
+    let ground_depth_scale = layout.height * 0.10;
+    let elevation_pitch_scale = layout.height * 0.55 * view.local_layer_spread;
+    let elevation_depth_scale = layout.height * 0.24 * view.local_layer_spread;
+
     let pos = egui::pos2(
         layout.focus_center.x + x_yaw * layout.horizontal_scale,
         // Negate the ground terms so that positive y_yaw (north) moves upward on screen.
         // Elevation terms are unchanged: positive elevation still lifts features upward.
-        layout.focus_center.y - ground_y_pitch * layout.height * 0.55 + ground_z_pitch * 48.0
-            - elevation_y_offset * view.local_layer_spread * 56.0
-            - elevation_z_offset * view.local_layer_spread * 24.0,
+        layout.focus_center.y - ground_y_pitch * ground_pitch_scale
+            + ground_z_pitch * ground_depth_scale
+            - elevation_y_offset * elevation_pitch_scale
+            - elevation_z_offset * elevation_depth_scale,
     );
 
     // Let egui's painter clip rect cull off-screen geometry; only reject points

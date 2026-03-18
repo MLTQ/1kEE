@@ -1,5 +1,6 @@
 mod camera_list;
 mod event_list;
+mod factal_brief;
 mod factal_settings;
 mod header;
 mod status_log;
@@ -8,6 +9,7 @@ pub(crate) mod world_map;
 
 pub use camera_list::render_camera_list;
 pub use event_list::render_event_list;
+pub use factal_brief::render_factal_brief;
 pub use factal_settings::render_factal_settings;
 pub use header::render_header;
 pub use status_log::render_status_log;

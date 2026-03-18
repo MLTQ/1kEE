@@ -19,7 +19,7 @@ Coordinates the desktop app at the highest level. It owns the root `AppModel`, i
 - **Rationale**: Prevents terrain or live-event background work from continuing unsupervised during shutdown
 
 ### `eframe::App::update`
-- **Does**: Advances the live Factal poll loop and lays out the shell around header, Factal settings, terrain-library window, sidebars, status log, and map canvas
+- **Does**: Advances the live Factal poll loop and lays out the shell around header, Factal brief window, Factal settings, terrain-library window, sidebars, status log, and map canvas
 - **Interacts with**: `tick` in `factal_stream.rs`, `render_*` functions in `panels/mod.rs`
 - **Rationale**: Keeps app composition separate from the details of each view
 
