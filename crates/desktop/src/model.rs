@@ -5,6 +5,8 @@ use crate::terrain_assets::{self, TerrainInventory};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+const GLOBE_PITCH_LIMIT_RAD: f32 = 1.53;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GeoPoint {
     pub lat: f32,
@@ -48,7 +50,10 @@ impl GlobeViewState {
 
     pub fn focus_on(&mut self, point: GeoPoint) {
         self.yaw = point.lon.to_radians() - std::f32::consts::FRAC_PI_2;
-        self.pitch = point.lat.to_radians().clamp(-1.1, 1.1);
+        self.pitch = point
+            .lat
+            .to_radians()
+            .clamp(-GLOBE_PITCH_LIMIT_RAD, GLOBE_PITCH_LIMIT_RAD);
         self.local_center = point;
         self.reset_local_camera();
     }
@@ -61,7 +66,10 @@ impl GlobeViewState {
     /// Returns the lat/lon at the center of the current globe viewport.
     /// This is the inverse of `focus_on`: yaw = lon - π/2, pitch = lat.
     pub fn globe_center_latlon(&self) -> GeoPoint {
-        let lat = self.pitch.to_degrees().clamp(-85.0, 85.0);
+        let lat = self.pitch.to_degrees().clamp(
+            -GLOBE_PITCH_LIMIT_RAD.to_degrees(),
+            GLOBE_PITCH_LIMIT_RAD.to_degrees(),
+        );
         let lon_rad = self.yaw + std::f32::consts::FRAC_PI_2;
         let lon_deg = lon_rad.to_degrees();
         let lon = ((lon_deg + 180.0).rem_euclid(360.0)) - 180.0;

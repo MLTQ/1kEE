@@ -31,3 +31,4 @@ Handles direct globe interaction and chooses level-of-detail settings from the c
 - High zoom intentionally reduces global latitude/longitude line density so real terrain contours can dominate the scene.
 - Local terrain mode uses its own yaw/pitch pair so analysts can rotate the contour stack without disturbing the globe camera.
 - Local terrain mode also maintains its own viewport center, which is updated by plain drag using the current terrain half-extent so contour cache requests can stream across the wider region at any local zoom level.
+- Globe mode now allows near-polar orbiting up to about `±87.7°` latitude instead of stopping around `±63°`, so analysts can inspect Greenland, Iceland, Antarctica, and the high Arctic directly.

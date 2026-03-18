@@ -2,6 +2,8 @@ use crate::model::GlobeViewState;
 
 use super::local_terrain_scene;
 
+const GLOBE_PITCH_LIMIT_RAD: f32 = 1.53;
+
 pub struct GlobeLod {
     pub lat_line_step: usize,
     pub lon_line_step: usize,
@@ -34,7 +36,8 @@ pub fn apply_interaction(
             }
         } else {
             view.yaw -= delta.x * 0.0055;
-            view.pitch = (view.pitch + delta.y * 0.004).clamp(-1.1, 1.1);
+            view.pitch =
+                (view.pitch + delta.y * 0.004).clamp(-GLOBE_PITCH_LIMIT_RAD, GLOBE_PITCH_LIMIT_RAD);
         }
         view.auto_spin = false;
     }
