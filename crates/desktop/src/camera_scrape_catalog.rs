@@ -8,6 +8,7 @@ pub enum ScrapedCameraSourceKind {
     GenericHtml,
     Opentopia,
     Webcamera24,
+    WorldcamsTv,
     SkylineWebcams,
     Webcamtaxi,
 }
@@ -18,8 +19,10 @@ pub struct ScrapedCameraSource {
     pub provider: String,
     pub kind: ScrapedCameraSourceKind,
     pub page_url: String,
-    pub latitude: f32,
-    pub longitude: f32,
+    #[serde(default)]
+    pub latitude: Option<f32>,
+    #[serde(default)]
+    pub longitude: Option<f32>,
     #[serde(default)]
     pub label_override: Option<String>,
     #[serde(default)]

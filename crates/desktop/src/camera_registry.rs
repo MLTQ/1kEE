@@ -300,16 +300,18 @@ fn fetch_scraped_source(
         .clone()
         .or_else(|| extract_scraped_stream_url(source, &body))
         .unwrap_or_else(|| source.page_url.clone());
+    let (lat, lon) = source
+        .latitude
+        .zip(source.longitude)
+        .or_else(|| extract_scraped_point(source, &body))
+        .ok_or_else(|| "no coordinates were provided or found in page markup".to_owned())?;
 
     Ok(vec![CameraFeed {
         id: format!("{}-{}", slugify(&source.provider), slugify(&source.name)),
         label,
         provider: source.provider.clone(),
         kind: source.kind_value.clone().unwrap_or_else(|| "webcam".into()),
-        location: GeoPoint {
-            lat: source.latitude,
-            lon: source.longitude,
-        },
+        location: GeoPoint { lat, lon },
         stream_url,
         last_seen: "scraped directory".into(),
         status: CameraConnectionState::Idle,
@@ -739,6 +741,7 @@ fn extract_scraped_label(source: &ScrapedCameraSource, html: &str) -> Option<Str
         ScrapedCameraSourceKind::GenericHtml
         | ScrapedCameraSourceKind::Opentopia
         | ScrapedCameraSourceKind::Webcamera24
+        | ScrapedCameraSourceKind::WorldcamsTv
         | ScrapedCameraSourceKind::SkylineWebcams
         | ScrapedCameraSourceKind::Webcamtaxi => extract_meta_content(html, "og:title")
             .or_else(|| extract_meta_content(html, "twitter:title"))
@@ -752,6 +755,7 @@ fn extract_scraped_stream_url(source: &ScrapedCameraSource, html: &str) -> Optio
     match source.kind {
         ScrapedCameraSourceKind::GenericHtml
         | ScrapedCameraSourceKind::Webcamera24
+        | ScrapedCameraSourceKind::WorldcamsTv
         | ScrapedCameraSourceKind::SkylineWebcams
         | ScrapedCameraSourceKind::Webcamtaxi => extract_meta_content(html, "og:video")
             .or_else(|| extract_meta_content(html, "og:video:url"))
@@ -761,6 +765,17 @@ fn extract_scraped_stream_url(source: &ScrapedCameraSource, html: &str) -> Optio
         ScrapedCameraSourceKind::Opentopia => extract_first_tag_attribute(html, "iframe", "src")
             .or_else(|| extract_first_tag_attribute(html, "img", "src"))
             .or_else(|| extract_meta_content(html, "og:image")),
+    }
+}
+
+fn extract_scraped_point(source: &ScrapedCameraSource, html: &str) -> Option<(f32, f32)> {
+    match source.kind {
+        ScrapedCameraSourceKind::GenericHtml
+        | ScrapedCameraSourceKind::Webcamera24
+        | ScrapedCameraSourceKind::WorldcamsTv
+        | ScrapedCameraSourceKind::SkylineWebcams
+        | ScrapedCameraSourceKind::Webcamtaxi
+        | ScrapedCameraSourceKind::Opentopia => extract_coordinate_pair_from_html(html),
     }
 }
 
@@ -823,6 +838,59 @@ fn extract_attribute_value(fragment: &str, attr: &str) -> Option<String> {
 
 fn clean_text(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn extract_coordinate_pair_from_html(html: &str) -> Option<(f32, f32)> {
+    let patterns = ["@", "ll=", "center=", "q=", "lat=", "latitude="];
+    patterns
+        .iter()
+        .find_map(|pattern| extract_coordinate_pair_after(html, pattern))
+}
+
+fn extract_coordinate_pair_after(text: &str, pattern: &str) -> Option<(f32, f32)> {
+    let lower = text.to_ascii_lowercase();
+    let pattern_lower = pattern.to_ascii_lowercase();
+    let mut search_start = 0;
+    while let Some(relative) = lower[search_start..].find(&pattern_lower) {
+        let start = search_start + relative + pattern_lower.len();
+        let tail = &text[start..];
+        if let Some((lat, lon, consumed)) = parse_coordinate_pair_prefix(tail) {
+            let preceding = lower[..start].chars().rev().take(24).collect::<String>();
+            if pattern_lower == "@" || preceding.contains("google") || preceding.contains("map") {
+                return Some((lat, lon));
+            }
+            search_start = start + consumed;
+            continue;
+        }
+        search_start = start;
+    }
+    None
+}
+
+fn parse_coordinate_pair_prefix(text: &str) -> Option<(f32, f32, usize)> {
+    let trimmed = text.trim_start_matches(|ch: char| ch.is_whitespace() || ch == '"' || ch == '\'');
+    let offset = text.len().saturating_sub(trimmed.len());
+    let (lat, lat_len) = parse_leading_float(trimmed)?;
+    let remainder = &trimmed[lat_len..];
+    let remainder = remainder.strip_prefix(',')?;
+    let (lon, lon_len) = parse_leading_float(remainder)?;
+    Some((lat, lon, offset + lat_len + 1 + lon_len))
+}
+
+fn parse_leading_float(text: &str) -> Option<(f32, usize)> {
+    let mut end = 0;
+    for (index, ch) in text.char_indices() {
+        if ch.is_ascii_digit() || ch == '-' || ch == '+' || ch == '.' {
+            end = index + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if end == 0 {
+        return None;
+    }
+    let value = text[..end].parse::<f32>().ok()?;
+    Some((value, end))
 }
 
 fn value_as_f32(value: &Value) -> Option<f32> {

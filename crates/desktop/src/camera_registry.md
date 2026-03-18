@@ -37,6 +37,6 @@ Runs the live camera registry polling loop for the desktop app. This module owns
 - The registry now also supports declarative no-key public sources loaded from `Data/camera_sources/public_sources.json` under the asset root.
 - The registry also supports curated scraped webcam-directory seeds loaded from `Data/camera_sources/scrape_sources.json` under the asset root.
 - Generic no-key adapters currently support three shapes: plain JSON arrays, GeoJSON feature collections, and ArcGIS feature service query responses.
-- Curated scrape adapters intentionally rely on operator-supplied coordinates and only do lightweight HTML extraction for titles and embed/page URLs.
+- Curated scrape adapters still prefer operator-supplied coordinates, but they can now fall back to lightweight embedded-map coordinate extraction for pages that expose stable map URLs.
 - The app stays in demo camera mode until at least one camera-source key is configured.
 - This is intentionally a metadata registry sync, not a live video probe; stream URLs are passed through for later connection attempts.

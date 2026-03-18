@@ -25,5 +25,12 @@
     "latitude": 39.733,
     "longitude": -105.317,
     "enabled": false
+  },
+  {
+    "name": "Temple Bar street cam",
+    "provider": "worldcams.tv",
+    "kind": "worldcams-tv",
+    "page_url": "https://worldcams.tv/ireland/dublin/temple-bar",
+    "enabled": false
   }
 ]
