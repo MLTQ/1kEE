@@ -1,13 +1,13 @@
 # settings_store.rs
 
 ## Purpose
-Persists the desktop app's local configuration so it survives restarts. That now includes the Factal API key plus path overrides for the asset root, data roots, and GDAL tool discovery.
+Persists the desktop app's local configuration so it survives restarts. That now includes the Factal API key, live camera-source keys, and path overrides for the asset root, data roots, and GDAL tool discovery.
 
 ## Components
 
 ### `AppSettings`
-- **Does**: Holds the app-managed settings payload for Factal and filesystem/tool paths
-- **Interacts with**: `model.rs`, `terrain_assets.rs`, `osm_ingest.rs`, `srtm_focus_cache.rs`, `factal_settings.rs`
+- **Does**: Holds the app-managed settings payload for Factal, live camera sources, and filesystem/tool paths
+- **Interacts with**: `model.rs`, `terrain_assets.rs`, `osm_ingest.rs`, `srtm_focus_cache.rs`, `factal_settings.rs`, `camera_registry.rs`
 
 ### `load_app_settings` / `save_app_settings`
 - **Does**: Reads and writes the full settings JSON from the executable directory
@@ -34,7 +34,7 @@ Persists the desktop app's local configuration so it survives restarts. That now
 
 ## Notes
 - The settings file now lives beside the executable so moving the app bundle/worktree to another machine keeps the local path model coherent by default.
-- The Factal key is still stored as plain text because this is a local demo, not a hardened credential store.
+- The Factal key and camera-source keys are still stored as plain text because this is a local demo, not a hardened credential store.
 - GDAL discovery now prefers the app-configured bin directory and otherwise relies on `PATH`; it no longer assumes Postgres.app.
 - Path settings are now normalized on save/load so operators can point at a parent folder like `/Volumes/Hilbert/Data` and still have the app infer nested `Data/`, `Derived/`, or `srtm_gl1/SRTM_GL1_srtm` subpaths when those exist.
 - If `Asset Root` is accidentally pointed at a `Data/` or `Derived/` folder, it is normalized back to the parent asset root to avoid silently creating `Data/Data` or `Data/Derived` layouts.

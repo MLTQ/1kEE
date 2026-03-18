@@ -188,6 +188,8 @@ pub struct AppModel {
     pub factal_settings_open: bool,
     pub factal_brief_open: bool,
     pub factal_api_key: String,
+    pub windy_webcams_api_key: String,
+    pub ny511_api_key: String,
     pub settings_asset_root: String,
     pub settings_data_root: String,
     pub settings_derived_root: String,
@@ -213,6 +215,8 @@ impl AppModel {
         let osm_runtime_store = osm_ingest::ensure_runtime_store(selected_root.as_deref());
         let osm_inventory = OsmInventory::detect_from(selected_root.as_deref());
         let factal_api_key = app_settings.factal_api_key.trim().to_owned();
+        let windy_webcams_api_key = app_settings.windy_webcams_api_key.trim().to_owned();
+        let ny511_api_key = app_settings.ny511_api_key.trim().to_owned();
 
         let events = vec![
             EventRecord {
@@ -358,6 +362,8 @@ impl AppModel {
             factal_settings_open: false,
             factal_brief_open: false,
             factal_api_key: factal_api_key.clone(),
+            windy_webcams_api_key: windy_webcams_api_key.clone(),
+            ny511_api_key: ny511_api_key.clone(),
             settings_asset_root: settings_store::effective_asset_root()
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
@@ -376,7 +382,12 @@ impl AppModel {
                     } else {
                         "Factal API key loaded from local settings; live polling is ready.".into()
                     },
-                    "Camera registry loaded from mock public-feed catalog.".into(),
+                    if windy_webcams_api_key.is_empty() && ny511_api_key.is_empty() {
+                        "Camera registry is in demo mode until a live source key is configured."
+                            .into()
+                    } else {
+                        "Camera registry keys loaded; live camera sync is ready.".into()
+                    },
                 ];
                 lines.extend(terrain_inventory.status_lines());
                 lines.extend(osm_inventory.status_lines());
@@ -393,7 +404,12 @@ impl AppModel {
             } else {
                 "configured".into()
             },
-            camera_registry_status: "loaded".into(),
+            camera_registry_status: if windy_webcams_api_key.is_empty() && ny511_api_key.is_empty()
+            {
+                "demo".into()
+            } else {
+                "configured".into()
+            },
             terrain_inventory,
             osm_inventory,
         };
@@ -407,6 +423,10 @@ impl AppModel {
 
     pub fn has_factal_api_key(&self) -> bool {
         !self.factal_api_key.trim().is_empty()
+    }
+
+    pub fn has_camera_source_keys(&self) -> bool {
+        !self.windy_webcams_api_key.trim().is_empty() || !self.ny511_api_key.trim().is_empty()
     }
 
     pub fn set_selected_root(&mut self, root: PathBuf) {
@@ -443,6 +463,8 @@ impl AppModel {
     pub fn save_settings(&mut self) -> std::io::Result<()> {
         let settings = settings_store::AppSettings {
             factal_api_key: self.factal_api_key.trim().to_owned(),
+            windy_webcams_api_key: self.windy_webcams_api_key.trim().to_owned(),
+            ny511_api_key: self.ny511_api_key.trim().to_owned(),
             asset_root: optional_path_field(&self.settings_asset_root),
             data_root: optional_path_field(&self.settings_data_root),
             derived_root: optional_path_field(&self.settings_derived_root),
@@ -467,10 +489,17 @@ impl AppModel {
         self.settings_srtm_root = settings.srtm_root.unwrap_or_default();
         self.settings_planet_path = settings.planet_path.unwrap_or_default();
         self.settings_gdal_bin_dir = settings.gdal_bin_dir.unwrap_or_default();
+        self.windy_webcams_api_key = settings.windy_webcams_api_key.trim().to_owned();
+        self.ny511_api_key = settings.ny511_api_key.trim().to_owned();
 
         self.terrain_inventory = TerrainInventory::detect_from(self.selected_root.as_deref());
         let osm_runtime_store = osm_ingest::ensure_runtime_store(self.selected_root.as_deref());
         self.osm_inventory = OsmInventory::detect_from(self.selected_root.as_deref());
+        self.camera_registry_status = if self.has_camera_source_keys() {
+            "configured".into()
+        } else {
+            "demo".into()
+        };
 
         if let Some(root) = self.selected_root.clone() {
             self.push_log(format!(
@@ -625,6 +654,37 @@ impl AppModel {
             .nearby_cameras(250.0)
             .first()
             .map(|camera| camera.id.clone());
+    }
+
+    pub fn replace_camera_registry(&mut self, cameras: Vec<CameraFeed>, source_label: &str) {
+        let previous_selected = self.selected_camera_id.clone();
+        self.cameras = cameras;
+
+        if self.cameras.is_empty() {
+            self.selected_camera_id = None;
+            self.camera_registry_status = "empty".into();
+            self.push_log(format!(
+                "Camera registry sync from {source_label} returned no cameras."
+            ));
+            return;
+        }
+
+        let retained_selection = previous_selected
+            .as_deref()
+            .filter(|selected_id| self.cameras.iter().any(|camera| camera.id == *selected_id))
+            .map(str::to_owned);
+
+        self.selected_camera_id = retained_selection.or_else(|| {
+            self.nearby_cameras(250.0)
+                .first()
+                .map(|camera| camera.id.clone())
+                .or_else(|| self.cameras.first().map(|camera| camera.id.clone()))
+        });
+        self.camera_registry_status = "live".into();
+        self.push_log(format!(
+            "Camera registry sync loaded {} camera(s) from {source_label}.",
+            self.cameras.len()
+        ));
     }
 
     pub fn select_camera(&mut self, camera_id: &str) {

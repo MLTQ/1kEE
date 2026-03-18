@@ -1,3 +1,4 @@
+use crate::camera_registry;
 use crate::factal_stream;
 use crate::model::AppModel;
 use crate::panels;
@@ -21,6 +22,7 @@ impl DashboardApp {
 impl Drop for DashboardApp {
     fn drop(&mut self) {
         factal_stream::shutdown();
+        camera_registry::shutdown();
         panels::world_map::srtm_focus_cache::terminate_active_gdal_jobs();
     }
 }
@@ -28,7 +30,8 @@ impl Drop for DashboardApp {
 impl eframe::App for DashboardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         factal_stream::tick(&mut self.model);
-        if self.model.has_factal_api_key() {
+        camera_registry::tick(&mut self.model);
+        if self.model.has_factal_api_key() || self.model.has_camera_source_keys() {
             ctx.request_repaint_after(Duration::from_secs(1));
         }
 

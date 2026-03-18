@@ -31,11 +31,11 @@ Defines the shared domain and UI state for the 1kEE desktop demo. This file hold
 - **Interacts with**: `camera_list.rs`, `status_log.rs`
 
 ### `CameraFeed` / `NearbyCamera`
-- **Does**: Store registry data and precomputed nearby-camera views for the selected event
-- **Interacts with**: `AppModel::nearby_cameras`, `world_map.rs`, `camera_list.rs`
+- **Does**: Store normalized registry data and precomputed nearby-camera views for the selected event
+- **Interacts with**: `AppModel::nearby_cameras`, `AppModel::replace_camera_registry`, `world_map.rs`, `camera_list.rs`, `camera_registry.rs`
 
 ### `AppModel`
-- **Does**: Owns all shared demo state and handles live Factal event replacement, settings-window UI state, manual city focus, terrain-library UI state, road-layer visibility state, OSM source/runtime status, and simulated feed actions
+- **Does**: Owns all shared demo state and handles live Factal event replacement, live camera-registry replacement, settings-window UI state, manual city focus, terrain-library UI state, road-layer visibility state, OSM source/runtime status, and simulated feed actions
 - **Interacts with**: `app.rs`, every renderer in `panels/`, `TerrainInventory` in `terrain_assets.rs`, `OsmInventory` in `osm_ingest.rs`, `GlobeViewState`, `city_catalog.rs`, `settings_store.rs`, user-selected asset roots
 - **Rationale**: Keeps the current scaffold simple while preserving a clear seam for background workers like the Factal poller
 
@@ -47,6 +47,11 @@ Defines the shared domain and UI state for the 1kEE desktop demo. This file hold
 - **Does**: Swaps in a fresh live event list while retaining the current selection when possible
 - **Interacts with**: `factal_stream.rs`, `event_list.rs`, `world_map.rs`
 - **Rationale**: Lets the live poller refresh the operational picture without resetting the whole UI on every minute tick
+
+### `AppModel::replace_camera_registry`
+- **Does**: Swaps in a fresh live camera registry while retaining the current camera selection when possible
+- **Interacts with**: `camera_registry.rs`, `camera_list.rs`, `world_map.rs`
+- **Rationale**: Lets live camera-source sync replace the mock/demo catalog without resetting the operator’s current context
 
 ### `haversine_km`
 - **Does**: Computes distance between two coordinates
@@ -76,6 +81,7 @@ Defines the shared domain and UI state for the 1kEE desktop demo. This file hold
 - Manual city focus labels now use region-qualified city names when the GeoNames catalog can resolve an admin1/state entry, so repeated place names are less ambiguous in the header, logs, and terrain library.
 - Factal API key persistence is intentionally lightweight for now: the key is loaded into the model at startup and the live poller swaps in fresh events once authenticated.
 - Factal-backed events now preserve an optional raw-detail payload so the operator can inspect the original API item from a brief window without bloating the normalized event list UI.
+- Live camera-source keys now also persist in the model/settings path, and the camera registry status is explicit about `demo` vs `configured` vs `live` instead of treating mock cameras as a loaded source.
 - The globe now starts in manual mode instead of auto-spin so the app does not enter a continuous repaint loop before the analyst touches anything.
 - The model now initializes and tracks a separate OSM runtime store so the planet-scale roads/buildings pipeline can evolve independently from terrain caching.
 - Coastline and major/minor road layer toggles now live in the model because both the map UI and the renderers need the same persistent visibility state.

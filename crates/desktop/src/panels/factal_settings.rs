@@ -1,3 +1,4 @@
+use crate::camera_registry;
 use crate::factal_stream;
 use crate::model::AppModel;
 use crate::theme;
@@ -45,6 +46,43 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
             ui.separator();
             ui.add_space(10.0);
 
+            ui.heading("Camera APIs");
+            ui.colored_label(
+                theme::text_muted(),
+                "Configure live camera-source adapters. 511NY is the first high-confidence traffic-camera source; Windy Webcams adds broader regional webcam coverage around the current focus.",
+            );
+            ui.add_space(8.0);
+
+            ui.label("511NY API Key");
+            ui.add_sized(
+                [ui.available_width(), 30.0],
+                egui::TextEdit::singleline(&mut model.ny511_api_key)
+                    .password(true)
+                    .hint_text("511NY developer key"),
+            );
+
+            ui.add_space(6.0);
+            ui.label("Windy Webcams API Key");
+            ui.add_sized(
+                [ui.available_width(), 30.0],
+                egui::TextEdit::singleline(&mut model.windy_webcams_api_key)
+                    .password(true)
+                    .hint_text("Windy Webcams API key"),
+            );
+
+            ui.add_space(6.0);
+            ui.small(format!(
+                "Camera registry status: {}",
+                model.camera_registry_status
+            ));
+            ui.small(
+                "Optional no-key public sources can be declared in Data/camera_sources/public_sources.json under the asset root.",
+            );
+
+            ui.add_space(14.0);
+            ui.separator();
+            ui.add_space(10.0);
+
             ui.heading("Paths");
             ui.colored_label(
                 theme::text_muted(),
@@ -79,6 +117,8 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
         let had_key = model.has_factal_api_key();
         let trimmed = model.factal_api_key.trim().to_owned();
         model.factal_api_key = trimmed;
+        model.ny511_api_key = model.ny511_api_key.trim().to_owned();
+        model.windy_webcams_api_key = model.windy_webcams_api_key.trim().to_owned();
         match model.save_settings() {
             Ok(()) => {
                 model.apply_saved_settings();
@@ -98,6 +138,7 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
                 } else if had_key {
                     model.push_log("Factal API key cleared; stream returned to demo mode.".into());
                 }
+                camera_registry::invalidate();
             }
             Err(error) => {
                 model.push_log(format!("Settings save failed: {}", error));
@@ -117,10 +158,14 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
 
     if clear_requested {
         model.factal_api_key.clear();
+        model.ny511_api_key.clear();
+        model.windy_webcams_api_key.clear();
         match model.save_settings() {
             Ok(()) => {
                 model.factal_stream_status = "demo".into();
+                model.camera_registry_status = "demo".into();
                 factal_stream::invalidate();
+                camera_registry::invalidate();
                 model.push_log("Factal API key cleared; stream returned to demo mode.".into());
             }
             Err(error) => {
