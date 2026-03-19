@@ -1,5 +1,5 @@
 use crate::model::{AppModel, EventRecord, GeoPoint, GlobeViewState, NearbyCamera};
-use crate::osm_ingest::{self, GeoBounds as OsmGeoBounds, RoadLayerKind, WaterPolyline};
+use crate::osm_ingest::{self, GeoBounds as OsmGeoBounds, RoadLayerKind, RoadPolyline, WaterPolyline};
 use crate::terrain_assets;
 use crate::theme;
 use std::path::Path;
@@ -809,8 +809,13 @@ struct RoadCache {
     road_gen: u64,
     had_major: bool,
     had_minor: bool,
-    major: Vec<ElevatedRoad>,
-    minor: Vec<ElevatedRoad>,
+    /// Raw geometry from SQLite — built in a background thread (no SRTM I/O).
+    major_polys: Vec<RoadPolyline>,
+    minor_polys: Vec<RoadPolyline>,
+    /// Elevation-enriched roads, populated lazily on first render so that SRTM
+    /// tiles are guaranteed to be in the hot tile-LRU when we sample them.
+    major_elevated: Option<Vec<ElevatedRoad>>,
+    minor_elevated: Option<Vec<ElevatedRoad>>,
 }
 
 struct RoadCacheStore {
@@ -877,22 +882,18 @@ fn draw_roads(
             store.building = true;
             drop(store); // release lock before spawning
 
+            // No SRTM I/O in the background thread — geometry only.
+            // Elevation is sampled lazily on the first render call so that the
+            // SRTM tile LRU is guaranteed warm (contours have already loaded tiles).
             let root_buf = selected_root.map(|p| p.to_path_buf());
             std::thread::spawn(move || {
                 let root_ref = root_buf.as_deref();
                 let major_polys = if show_major_roads {
                     osm_ingest::load_roads_for_bounds(root_ref, bounds, tile_zoom, RoadLayerKind::Major)
                 } else { Vec::new() };
-                let major: Vec<ElevatedRoad> = major_polys.iter()
-                    .map(|p| ElevatedRoad::from_polyline(p, root_ref, 1))
-                    .collect();
-
                 let minor_polys = if show_minor_roads {
                     osm_ingest::load_roads_for_bounds(root_ref, bounds, tile_zoom, RoadLayerKind::Minor)
                 } else { Vec::new() };
-                let minor: Vec<ElevatedRoad> = minor_polys.iter()
-                    .map(|p| ElevatedRoad::from_polyline(p, root_ref, 5))
-                    .collect();
 
                 if let Ok(mut store) = road_cache().lock() {
                     store.cache = Some(RoadCache {
@@ -902,8 +903,10 @@ fn draw_roads(
                         road_gen: current_gen,
                         had_major: show_major_roads,
                         had_minor: show_minor_roads,
-                        major,
-                        minor,
+                        major_polys,
+                        minor_polys,
+                        major_elevated: None,
+                        minor_elevated: None,
                     });
                     store.building = false;
                 }
@@ -914,21 +917,44 @@ fn draw_roads(
     }
 
     // ── Render from whatever cache is currently ready ───────────────────
-    let store = match road_cache().lock() {
+    // Lazily build elevation-enriched roads on first render after a cache
+    // update.  By now the SRTM tile LRU is warm (contour rendering already
+    // loaded the tiles), so every sample_elevation_m call hits the in-memory
+    // tile cache instead of disk.
+    let mut store = match road_cache().lock() {
         Ok(g) => g,
         Err(_) => return,
     };
-    let Some(cache) = &store.cache else { return };
+    let Some(cache) = &mut store.cache else { return };
+
+    if show_major_roads && cache.major_elevated.is_none() {
+        cache.major_elevated = Some(
+            cache.major_polys.iter()
+                .map(|p| ElevatedRoad::from_polyline(p, selected_root, 1))
+                .collect(),
+        );
+    }
+    if show_minor_roads && cache.minor_elevated.is_none() {
+        cache.minor_elevated = Some(
+            cache.minor_polys.iter()
+                .map(|p| ElevatedRoad::from_polyline(p, selected_root, 5))
+                .collect(),
+        );
+    }
 
     if show_minor_roads {
-        draw_road_layer(painter, layout, view, viewport_center,
-            extent_x_km, extent_y_km, &cache.minor,
-            egui::Stroke::new(0.8, egui::Color32::from_rgb(116, 132, 142)));
+        if let Some(minor) = &cache.minor_elevated {
+            draw_road_layer(painter, layout, view, viewport_center,
+                extent_x_km, extent_y_km, minor,
+                egui::Stroke::new(0.8, egui::Color32::from_rgb(116, 132, 142)));
+        }
     }
     if show_major_roads {
-        draw_road_layer(painter, layout, view, viewport_center,
-            extent_x_km, extent_y_km, &cache.major,
-            egui::Stroke::new(1.35, egui::Color32::from_rgb(255, 210, 92)));
+        if let Some(major) = &cache.major_elevated {
+            draw_road_layer(painter, layout, view, viewport_center,
+                extent_x_km, extent_y_km, major,
+                egui::Stroke::new(1.35, egui::Color32::from_rgb(255, 210, 92)));
+        }
     }
 }
 
@@ -1012,7 +1038,10 @@ struct WaterCache {
     tile_y_min: u32,
     tile_y_max: u32,
     water_gen: u64,
-    features: Vec<ElevatedWater>,
+    /// Raw geometry from SQLite — built in a background thread (no SRTM I/O).
+    polys: Vec<WaterPolyline>,
+    /// Elevation-enriched features, populated lazily on first render.
+    features_elevated: Option<Vec<ElevatedWater>>,
 }
 
 struct WaterCacheStore {
@@ -1087,13 +1116,11 @@ fn draw_water(
             store.building = true;
             drop(store);
 
+            // No SRTM I/O in the background thread — geometry only.
             let root_buf = selected_root.map(|p| p.to_path_buf());
             std::thread::spawn(move || {
                 let root_ref = root_buf.as_deref();
                 let polys = osm_ingest::load_water_for_bounds(root_ref, bounds, tile_zoom);
-                let features: Vec<ElevatedWater> = polys.iter()
-                    .map(|p| ElevatedWater::from_polyline(p, root_ref))
-                    .collect();
 
                 if let Ok(mut store) = water_cache().lock() {
                     store.cache = Some(WaterCache {
@@ -1101,7 +1128,8 @@ fn draw_water(
                         tile_x_min: lxmin, tile_x_max: lxmax,
                         tile_y_min: lymin, tile_y_max: lymax,
                         water_gen: current_gen,
-                        features,
+                        polys,
+                        features_elevated: None,
                     });
                     store.building = false;
                 }
@@ -1111,16 +1139,26 @@ fn draw_water(
     }
 
     // ── Render from whatever cache is currently ready ───────────────────
-    let store = match water_cache().lock() {
+    // Lazily enrich with SRTM elevation on first render after a cache update.
+    let mut store = match water_cache().lock() {
         Ok(g) => g,
         Err(_) => return,
     };
-    let Some(cache) = &store.cache else { return };
+    let Some(cache) = &mut store.cache else { return };
+
+    if cache.features_elevated.is_none() {
+        cache.features_elevated = Some(
+            cache.polys.iter()
+                .map(|p| ElevatedWater::from_polyline(p, selected_root))
+                .collect(),
+        );
+    }
+    let Some(features) = &cache.features_elevated else { return };
 
     let water_col = crate::theme::water_color();
     let line_stroke = egui::Stroke::new(1.2, water_col);
 
-    for feat in &cache.features {
+    for feat in features {
         let mut pts: Vec<_> = feat
             .points
             .iter()
