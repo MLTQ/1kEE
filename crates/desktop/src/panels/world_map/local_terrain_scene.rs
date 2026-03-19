@@ -715,6 +715,10 @@ struct RoadCache {
     tile_x_max: u32,
     tile_y_min: u32,
     tile_y_max: u32,
+    /// Snapshot of `osm_ingest::road_data_generation()` at load time.
+    /// When the counter advances (a new import completed) this cache entry
+    /// is considered stale and reloaded from SQLite automatically.
+    road_gen: u64,
     major: Vec<RoadPolyline>,
     minor: Vec<RoadPolyline>,
 }
@@ -759,12 +763,15 @@ fn draw_roads(
         Err(_) => return,
     };
 
-    // Stale only when zoom changes OR the viewport extends outside the loaded
-    // tile range.  A 1-tile margin is loaded on each side so small pans never
-    // trigger a reload.
+    // Stale when: zoom changes, a new road import just completed (road_gen
+    // advanced), or the viewport has panned outside the loaded tile range.
+    // A 1-tile margin is loaded on each side so ordinary panning never
+    // triggers a reload.
     const MARGIN: u32 = 1;
+    let current_gen = osm_ingest::road_data_generation();
     let stale = cache_guard.as_ref().map_or(true, |c| {
         c.tile_zoom != tile_zoom
+            || c.road_gen != current_gen
             || c.tile_x_min > txmin
             || c.tile_x_max < txmax
             || c.tile_y_min > tymin
@@ -789,6 +796,7 @@ fn draw_roads(
             tile_zoom,
             tile_x_min: lxmin, tile_x_max: lxmax,
             tile_y_min: lymin, tile_y_max: lymax,
+            road_gen: current_gen,
             major, minor,
         });
     }

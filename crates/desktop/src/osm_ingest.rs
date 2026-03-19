@@ -84,6 +84,19 @@ pub fn active_job_note() -> Option<String> {
     current_job_note_store().lock().ok()?.clone()
 }
 
+/// Monotonically increasing counter bumped every time a road import job
+/// completes.  The road tile cache stores this value and considers itself
+/// stale whenever the counter has advanced — ensuring newly imported data
+/// is always picked up without requiring a manual toggle.
+fn road_data_gen() -> &'static std::sync::atomic::AtomicU64 {
+    static GEN: OnceLock<std::sync::atomic::AtomicU64> = OnceLock::new();
+    GEN.get_or_init(|| std::sync::atomic::AtomicU64::new(0))
+}
+
+pub fn road_data_generation() -> u64 {
+    road_data_gen().load(Ordering::Relaxed)
+}
+
 const PLANET_PBF_NAME: &str = "planet-latest.osm.pbf";
 const RUNTIME_DB_NAME: &str = "osm_runtime.sqlite";
 const PLANET_ROADS_NOTE: &str = "planet_roads_bootstrap_v1";
@@ -506,6 +519,11 @@ pub fn tick(selected_root: Option<&Path>) {
         match result {
             Ok(summary) => {
                 let _ = mark_job_completed(&db_path, job.id, &summary);
+                // Bump the generation counter so the road tile cache knows
+                // to reload from SQLite on the next frame.
+                if job.feature_kind == OsmFeatureKind::Roads {
+                    road_data_gen().fetch_add(1, Ordering::Relaxed);
+                }
             }
             Err(error) => {
                 let _ = mark_job_failed(&db_path, job.id, &error);
