@@ -1,5 +1,5 @@
 use crate::model::{AppModel, EventRecord, GeoPoint, GlobeViewState, NearbyCamera};
-use crate::osm_ingest::{self, GeoBounds as OsmGeoBounds, RoadLayerKind, RoadPolyline};
+use crate::osm_ingest::{self, GeoBounds as OsmGeoBounds, RoadLayerKind, WaterPolyline};
 use crate::terrain_assets;
 use crate::theme;
 use std::path::Path;
@@ -110,6 +110,15 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             render_zoom,
             model.show_major_roads,
             model.show_minor_roads,
+        );
+        draw_water(
+            painter,
+            &layout,
+            &model.globe_view,
+            model.selected_root.as_deref(),
+            viewport_center,
+            render_zoom,
+            model.show_water,
         );
     }
 
@@ -921,6 +930,169 @@ fn draw_road_layer(
 
         if points.len() >= 2 {
             painter.add(egui::Shape::line(points, stroke));
+        }
+    }
+}
+
+// ── Water layer ────────────────────────────────────────────────────────────────
+//
+// Mirrors the road layer architecture: a static WaterCache holds pre-projected
+// vertices so that `draw_water` is pure painter calls on every frame.
+
+/// A water feature with elevation pre-sampled at every vertex.
+struct ElevatedWater {
+    points: Vec<(GeoPoint, f32)>, // (position, elevation_m)
+    is_area: bool,
+}
+
+impl ElevatedWater {
+    fn from_polyline(poly: &WaterPolyline, selected_root: Option<&Path>) -> Self {
+        let pts = &poly.points;
+        let n = pts.len();
+        if n == 0 {
+            return Self { points: Vec::new(), is_area: poly.is_area };
+        }
+        // Sample every 4th vertex for water (large polygons can be huge).
+        let step = 4usize;
+        let mut sampled: Vec<(usize, f32)> = (0..n)
+            .step_by(step)
+            .map(|i| {
+                let e = srtm_stream::sample_elevation_m(selected_root, pts[i]).unwrap_or(0.0) + 1.5;
+                (i, e)
+            })
+            .collect();
+        if sampled.last().map(|&(i, _)| i) != Some(n - 1) {
+            let e = srtm_stream::sample_elevation_m(selected_root, pts[n - 1]).unwrap_or(0.0) + 1.5;
+            sampled.push((n - 1, e));
+        }
+        let mut elevations = vec![0.0f32; n];
+        for w in sampled.windows(2) {
+            let (i0, e0) = w[0];
+            let (i1, e1) = w[1];
+            for i in i0..=i1 {
+                let t = if i1 > i0 { (i - i0) as f32 / (i1 - i0) as f32 } else { 0.0 };
+                elevations[i] = e0 + (e1 - e0) * t;
+            }
+        }
+        let points = pts.iter().zip(elevations).map(|(&pt, e)| (pt, e)).collect();
+        Self { points, is_area: poly.is_area }
+    }
+}
+
+struct WaterCache {
+    tile_zoom: u8,
+    tile_x_min: u32,
+    tile_x_max: u32,
+    tile_y_min: u32,
+    tile_y_max: u32,
+    water_gen: u64,
+    features: Vec<ElevatedWater>,
+}
+
+fn water_cache() -> &'static Mutex<Option<WaterCache>> {
+    static CACHE: OnceLock<Mutex<Option<WaterCache>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Clear the water tile cache so the next draw reloads from SQLite.
+pub fn invalidate_water_cache() {
+    if let Ok(mut g) = water_cache().lock() {
+        *g = None;
+    }
+}
+
+fn draw_water(
+    painter: &egui::Painter,
+    layout: &LocalLayout,
+    view: &GlobeViewState,
+    selected_root: Option<&Path>,
+    viewport_center: GeoPoint,
+    render_zoom: f32,
+    show_water: bool,
+) {
+    if !show_water {
+        if let Ok(mut g) = water_cache().lock() { *g = None; }
+        return;
+    }
+
+    let bounds = local_geo_bounds(viewport_center, view.local_zoom);
+    let tile_zoom = road_tile_zoom(render_zoom);
+    let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
+    let km_per_deg_lat = 111.32f32;
+    let km_per_deg_lon = km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
+    let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
+    let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
+
+    let (x0, y0) = osm_ingest::lat_lon_to_tile(bounds.max_lat, bounds.min_lon, tile_zoom);
+    let (x1, y1) = osm_ingest::lat_lon_to_tile(bounds.min_lat, bounds.max_lon, tile_zoom);
+    let (txmin, txmax) = (x0.min(x1), x0.max(x1));
+    let (tymin, tymax) = (y0.min(y1), y0.max(y1));
+
+    let mut cache_guard = match water_cache().lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+
+    const MARGIN: u32 = 1;
+    let current_gen = osm_ingest::water_data_generation();
+    let stale = cache_guard.as_ref().map_or(true, |c| {
+        c.tile_zoom != tile_zoom
+            || c.water_gen != current_gen
+            || c.tile_x_min > txmin
+            || c.tile_x_max < txmax
+            || c.tile_y_min > tymin
+            || c.tile_y_max < tymax
+    });
+
+    if stale {
+        let (lxmin, lxmax) = (txmin.saturating_sub(MARGIN), txmax + MARGIN);
+        let (lymin, lymax) = (tymin.saturating_sub(MARGIN), tymax + MARGIN);
+
+        let features = osm_ingest::load_water_for_bounds(selected_root, bounds, tile_zoom)
+            .iter()
+            .map(|p| ElevatedWater::from_polyline(p, selected_root))
+            .collect();
+
+        *cache_guard = Some(WaterCache {
+            tile_zoom,
+            tile_x_min: lxmin, tile_x_max: lxmax,
+            tile_y_min: lymin, tile_y_max: lymax,
+            water_gen: current_gen,
+            features,
+        });
+    }
+
+    let cache = cache_guard.as_ref().unwrap();
+    let water_col = crate::theme::water_color();
+    let area_fill = egui::Color32::from_rgba_unmultiplied(
+        water_col.r(), water_col.g(), water_col.b(), 35,
+    );
+    let line_stroke = egui::Stroke::new(1.2, water_col);
+
+    for feat in &cache.features {
+        let projected: Vec<_> = feat
+            .points
+            .iter()
+            .filter_map(|&(pt, elev)| {
+                project_local(layout, view, viewport_center, pt, elev,
+                              extent_x_km, extent_y_km)
+                    .map(|p| p.pos)
+            })
+            .collect();
+
+        if projected.len() < 2 {
+            continue;
+        }
+
+        if feat.is_area && projected.len() >= 3 {
+            // Draw a filled polygon outline for lakes/reservoirs.
+            painter.add(egui::Shape::convex_polygon(
+                projected.clone(),
+                area_fill,
+                line_stroke,
+            ));
+        } else {
+            painter.add(egui::Shape::line(projected, line_stroke));
         }
     }
 }

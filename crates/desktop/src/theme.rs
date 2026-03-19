@@ -365,3 +365,15 @@ pub fn marker_camera_ring() -> egui::Color32 {
         MapTheme::Akira    => egui::Color32::from_rgb(180, 245, 255),
     }
 }
+
+/// Water features (rivers, lakes, streams).  Always blue-family but tuned
+/// per theme so it reads clearly against each background palette.
+pub fn water_color() -> egui::Color32 {
+    match current() {
+        MapTheme::Topo     => egui::Color32::from_rgb(60,  145, 210),
+        MapTheme::Phosphor => egui::Color32::from_rgb(50,  200, 160),
+        MapTheme::Thermal  => egui::Color32::from_rgb(90,  170, 255),
+        MapTheme::Ghost    => egui::Color32::from_rgb(120, 175, 220),
+        MapTheme::Akira    => egui::Color32::from_rgb(0,   185, 220),
+    }
+}
