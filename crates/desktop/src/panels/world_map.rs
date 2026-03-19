@@ -147,6 +147,9 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                 ui.checkbox(&mut model.show_event_markers, "Events");
                 ui.checkbox(&mut model.show_coastlines, "Coastline");
                 ui.checkbox(&mut model.show_graticule, "Graticule");
+                if !model.globe_view.local_mode {
+                    ui.checkbox(&mut model.show_reticle, "Reticle");
+                }
                 let major_changed = ui
                     .checkbox(&mut model.show_major_roads, "Major roads")
                     .changed();

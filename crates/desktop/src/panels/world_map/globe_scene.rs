@@ -34,7 +34,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let selected_root = model.selected_root.as_deref();
 
     draw_backdrop(painter, rect, &layout);
-    if !model.cinematic_mode {
+    if !model.cinematic_mode && model.show_reticle {
         draw_hud_frame(painter, rect);
     }
     if model.show_graticule {
