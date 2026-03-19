@@ -281,11 +281,10 @@ pub fn queue_focus_roads_import(
         return Ok(false);
     }
 
-    // Prefer a local planet file if available; otherwise fall back to the
-    // Overpass API (no local data required).
-    let source_path = find_planet_pbf(selected_root)
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| OVERPASS_SOURCE.to_owned());
+    // Focus-area imports always use the Overpass API — scanning the full
+    // planet file (~80 GB) for a small bounding box saturates the disk and
+    // kills frame rate.  The planet file is reserved for global bootstrap.
+    let source_path = OVERPASS_SOURCE.to_owned();
 
     let db_path = ensure_runtime_store(selected_root)?;
     let connection = open_runtime_db(&db_path).map_err(|e| e.to_string())?;
