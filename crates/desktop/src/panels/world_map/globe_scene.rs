@@ -46,7 +46,9 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     draw_global_topo(painter, &layout, &model.globe_view, selected_root);
 
     draw_srtm_on_globe(painter, &layout, &model.globe_view, &lod, selected_root);
-    draw_zoom_crosshair(painter, &layout, &model.globe_view, time);
+    if !model.cinematic_mode && model.show_reticle {
+        draw_zoom_crosshair(painter, &layout, &model.globe_view, time);
+    }
 
     let selected_event_id = model.selected_event_id.as_deref();
     let selected_camera_id = model.selected_camera_id.as_deref();
