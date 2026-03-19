@@ -28,6 +28,17 @@ pub struct GlobeViewState {
     /// Explicit GLOBE / LOCAL mode switch (not derived from zoom).
     pub local_mode: bool,
     pub auto_spin: bool,
+
+    // ── Momentum velocities ────────────────────────────────────────────────
+    /// Globe rotation velocity (rad/s).
+    pub vel_yaw: f32,
+    pub vel_pitch: f32,
+    /// Local-mode pan velocity (deg/s in lat/lon space).
+    pub vel_local_lat: f32,
+    pub vel_local_lon: f32,
+    /// Local-mode camera-angle rotation velocity (rad/s).
+    pub vel_local_yaw: f32,
+    pub vel_local_pitch: f32,
 }
 
 impl GlobeViewState {
@@ -43,6 +54,12 @@ impl GlobeViewState {
             local_zoom: 25.0,
             local_mode: false,
             auto_spin: false,
+            vel_yaw: 0.0,
+            vel_pitch: 0.0,
+            vel_local_lat: 0.0,
+            vel_local_lon: 0.0,
+            vel_local_yaw: 0.0,
+            vel_local_pitch: 0.0,
         };
         state.focus_on(point);
         state
@@ -189,6 +206,8 @@ pub struct AppModel {
     pub globe_view: GlobeViewState,
     pub focused_city_id: Option<String>,
     pub cinematic_mode: bool,
+    pub map_theme: crate::theme::MapTheme,
+    pub show_event_markers: bool,
     pub show_coastlines: bool,
     pub show_graticule: bool,
     pub show_major_roads: bool,
@@ -365,6 +384,8 @@ impl AppModel {
             }),
             focused_city_id: None,
             cinematic_mode: false,
+            map_theme: crate::theme::MapTheme::Topo,
+            show_event_markers: true,
             show_coastlines: true,
             show_graticule: true,
             show_major_roads: false,
