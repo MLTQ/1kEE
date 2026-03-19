@@ -25,6 +25,14 @@ pub struct AppSettings {
     pub planet_path: Option<String>,
     #[serde(default)]
     pub gdal_bin_dir: Option<String>,
+    /// Optional directory containing the `osmium` binary.  When absent the
+    /// app searches common Homebrew / system paths automatically.
+    #[serde(default)]
+    pub osmium_bin_dir: Option<String>,
+    /// When true, always use the Overpass API for road/feature imports even
+    /// if osmium + a local planet file are both available.
+    #[serde(default)]
+    pub prefer_overpass: bool,
 }
 
 pub fn load_app_settings() -> AppSettings {
@@ -122,6 +130,40 @@ pub fn resolve_gdal_tool(tool: &str) -> PathBuf {
     }
 
     PathBuf::from(tool)
+}
+
+pub fn configured_osmium_bin_dir() -> Option<PathBuf> {
+    load_app_settings()
+        .osmium_bin_dir
+        .as_deref()
+        .and_then(path_from_optional)
+}
+
+pub fn prefer_overpass() -> bool {
+    load_app_settings().prefer_overpass
+}
+
+/// Resolve the `osmium` binary path.  Search order:
+/// 1. Configured osmium_bin_dir in settings
+/// 2. Common Homebrew prefix paths (Apple Silicon + Intel)
+/// 3. Plain "osmium" on $PATH
+pub fn resolve_osmium() -> PathBuf {
+    if let Some(bin_dir) = configured_osmium_bin_dir() {
+        let candidate = bin_dir.join("osmium");
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+
+    // Homebrew on Apple Silicon and Intel Mac
+    for prefix in &["/opt/homebrew/bin/osmium", "/usr/local/bin/osmium"] {
+        let p = PathBuf::from(prefix);
+        if p.exists() {
+            return p;
+        }
+    }
+
+    PathBuf::from("osmium")
 }
 
 pub fn ensure_default_asset_layout() -> std::io::Result<()> {

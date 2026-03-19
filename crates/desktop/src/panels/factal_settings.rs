@@ -135,6 +135,14 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
             path_row(ui, "SRTM Root", &mut model.settings_srtm_root, true, true);
             path_row(ui, "Planet PBF", &mut model.settings_planet_path, false, true);
             path_row(ui, "GDAL Bin Dir", &mut model.settings_gdal_bin_dir, true, true);
+            path_row(ui, "Osmium Bin Dir", &mut model.settings_osmium_bin_dir, true, true);
+            ui.add_space(4.0);
+            ui.checkbox(&mut model.settings_prefer_overpass, "Prefer Overpass API")
+                .on_hover_text(
+                    "When checked, road imports always use the Overpass API even if osmium \
+                     and a local planet file are available.  Faster for explored areas; \
+                     requires internet."
+                );
 
             ui.add_space(12.0);
             ui.horizontal(|ui| {

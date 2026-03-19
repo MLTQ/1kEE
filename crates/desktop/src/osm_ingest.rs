@@ -80,6 +80,7 @@ pub struct OsmJobSnapshot {
     pub note: String,
 }
 
+#[derive(Clone)]
 struct OsmJob {
     id: i64,
     feature_kind: OsmFeatureKind,
@@ -794,20 +795,32 @@ fn update_job_note(db_path: &Path, job_id: i64, note: &str) -> Result<(), String
 
 fn import_planet_roads(db_path: &Path, job: &OsmJob) -> Result<String, String> {
     if job.note.starts_with(FOCUS_ROADS_NOTE_PREFIX) {
-        // Overpass path: no local planet file available.
+        // Overpass: either explicitly requested or no planet file.
         if job.source_path == std::path::Path::new(OVERPASS_SOURCE) {
             return import_focus_roads_via_overpass(db_path, job);
         }
-        // Planet-file path: stream scan with ogr2ogr fallback.
-        return import_focus_roads_via_stream_scan(db_path, job).or_else(|scan_error| {
-            let _ = update_job_note(
-                db_path,
-                job.id,
-                "Focused Rust scan failed; falling back to ogr2ogr extraction...",
-            );
-            import_focus_roads_via_ogr2ogr(db_path, job)
-                .map_err(|ogr_error| format!("{scan_error}; fallback failed: {ogr_error}"))
-        });
+
+        // Planet file available.  Prefer Overpass when the user has opted in,
+        // otherwise try osmium extract → stream scan → ogr2ogr → Overpass.
+        if settings_store::prefer_overpass() {
+            return import_focus_roads_via_overpass(db_path, job);
+        }
+
+        return import_focus_roads_via_osmium(db_path, job)
+            .or_else(|osmium_err| {
+                let _ = update_job_note(
+                    db_path, job.id,
+                    &format!("osmium unavailable ({osmium_err}); trying stream scan…"),
+                );
+                import_focus_roads_via_stream_scan(db_path, job)
+            })
+            .or_else(|scan_err| {
+                let _ = update_job_note(
+                    db_path, job.id,
+                    &format!("Stream scan failed ({scan_err}); falling back to Overpass…"),
+                );
+                import_focus_roads_via_overpass(db_path, job)
+            });
     }
 
     if !supports_locations_on_ways_for_path(&job.source_path)? {
@@ -916,6 +929,70 @@ fn import_planet_roads(db_path: &Path, job: &OsmJob) -> Result<String, String> {
 /// Fetch roads for `job.bounds` from the Overpass API and insert them into
 /// the local SQLite cache using the same `RoadTileWriter` machinery as the
 /// planet-file path.  No local OSM data is required.
+/// Extract a 1°×1° cell from the planet file with `osmium extract`, cache
+/// the resulting small .osm.pbf, then hand it to the stream scanner.
+/// Subsequent visits to the same cell skip the osmium step entirely.
+fn import_focus_roads_via_osmium(db_path: &Path, job: &OsmJob) -> Result<String, String> {
+    // Verify osmium is reachable before we commit to this path.
+    let osmium = settings_store::resolve_osmium();
+    let probe = Command::new(&osmium).arg("--version").output();
+    if probe.is_err() {
+        return Err(format!("osmium not found at {}", osmium.display()));
+    }
+
+    // Quantise the focus centre to a 1°×1° cell so nearby queries share
+    // a single extract and we never re-extract the same cell.
+    let lat_cell = job.bounds.min_lat.floor() as i32;
+    let lon_cell = job.bounds.min_lon.floor() as i32;
+
+    let extract_dir = db_path
+        .parent()
+        .ok_or("OSM runtime DB has no parent directory")?
+        .join("osm_extracts");
+    fs::create_dir_all(&extract_dir).map_err(|e| e.to_string())?;
+
+    let extract_path = extract_dir
+        .join(format!("cell_{:+04}_{:+05}.osm.pbf", lat_cell, lon_cell));
+
+    if !extract_path.exists() {
+        // osmium bbox order: lon_min,lat_min,lon_max,lat_max
+        let bbox = format!("{},{},{},{}", lon_cell, lat_cell, lon_cell + 1, lat_cell + 1);
+        update_job_note(
+            db_path,
+            job.id,
+            &format!(
+                "Extracting cell ({lat_cell}°, {lon_cell}°) from planet file with osmium \
+                 (one-time per cell, ~2-5 min)…"
+            ),
+        )?;
+
+        let status = Command::new(&osmium)
+            .arg("extract")
+            .arg("-b").arg(&bbox)
+            .arg(&job.source_path)
+            .arg("-o").arg(&extract_path)
+            .arg("--overwrite")
+            .status()
+            .map_err(|e| format!("Failed to launch osmium: {e}"))?;
+
+        if !status.success() {
+            let _ = fs::remove_file(&extract_path); // clean up partial output
+            return Err(format!("osmium extract exited with status {status}"));
+        }
+    } else {
+        update_job_note(
+            db_path,
+            job.id,
+            &format!("Using cached osmium extract for cell ({lat_cell}°, {lon_cell}°)"),
+        )?;
+    }
+
+    // Run the fast stream scan on the small regional file.
+    let mut scan_job = job.clone();
+    scan_job.source_path = extract_path;
+    import_focus_roads_via_stream_scan(db_path, &scan_job)
+}
+
 fn import_focus_roads_via_overpass(db_path: &Path, job: &OsmJob) -> Result<String, String> {
     update_job_note(db_path, job.id, "Querying Overpass API for road geometry…")?;
 

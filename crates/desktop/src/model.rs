@@ -230,6 +230,8 @@ pub struct AppModel {
     pub settings_srtm_root: String,
     pub settings_planet_path: String,
     pub settings_gdal_bin_dir: String,
+    pub settings_osmium_bin_dir: String,
+    pub settings_prefer_overpass: bool,
     pub terrain_library_open: bool,
     pub city_filter: String,
     pub selected_city_ids: BTreeSet<String>,
@@ -411,6 +413,8 @@ impl AppModel {
             settings_srtm_root: app_settings.srtm_root.unwrap_or_default(),
             settings_planet_path: app_settings.planet_path.unwrap_or_default(),
             settings_gdal_bin_dir: app_settings.gdal_bin_dir.unwrap_or_default(),
+            settings_osmium_bin_dir: app_settings.osmium_bin_dir.unwrap_or_default(),
+            settings_prefer_overpass: app_settings.prefer_overpass,
             terrain_library_open: false,
             city_filter: String::new(),
             selected_city_ids: BTreeSet::new(),
@@ -510,6 +514,8 @@ impl AppModel {
             srtm_root: optional_path_field(&self.settings_srtm_root),
             planet_path: optional_path_field(&self.settings_planet_path),
             gdal_bin_dir: optional_path_field(&self.settings_gdal_bin_dir),
+            osmium_bin_dir: optional_path_field(&self.settings_osmium_bin_dir),
+            prefer_overpass: self.settings_prefer_overpass,
         };
         settings_store::save_app_settings(&settings)
     }
@@ -528,6 +534,8 @@ impl AppModel {
         self.settings_srtm_root = settings.srtm_root.unwrap_or_default();
         self.settings_planet_path = settings.planet_path.unwrap_or_default();
         self.settings_gdal_bin_dir = settings.gdal_bin_dir.unwrap_or_default();
+        self.settings_osmium_bin_dir = settings.osmium_bin_dir.unwrap_or_default();
+        self.settings_prefer_overpass = settings.prefer_overpass;
         self.windy_webcams_api_key = settings.windy_webcams_api_key.trim().to_owned();
         self.ny511_api_key = settings.ny511_api_key.trim().to_owned();
 
