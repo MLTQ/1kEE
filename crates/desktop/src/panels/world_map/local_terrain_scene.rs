@@ -709,6 +709,31 @@ fn draw_contour_stack(
 // actually changes.  Opening a DB connection + running a query on every
 // frame was the source of the 2-5 FPS regression.
 
+/// A road polyline with elevation pre-sampled for every vertex.
+/// Elevation is computed once at cache-load time so `draw_road_layer`
+/// only has to do fast projection math on each frame.
+struct ElevatedRoad {
+    points: Vec<(GeoPoint, f32)>, // (position, elevation_m above ground)
+}
+
+impl ElevatedRoad {
+    fn from_polyline(
+        poly: &osm_ingest::RoadPolyline,
+        selected_root: Option<&Path>,
+    ) -> Self {
+        let points = poly
+            .points
+            .iter()
+            .map(|&pt| {
+                let elev =
+                    srtm_stream::sample_elevation_m(selected_root, pt).unwrap_or(0.0) + 3.0;
+                (pt, elev)
+            })
+            .collect();
+        Self { points }
+    }
+}
+
 struct RoadCache {
     tile_zoom: u8,
     tile_x_min: u32,
@@ -716,11 +741,12 @@ struct RoadCache {
     tile_y_min: u32,
     tile_y_max: u32,
     /// Snapshot of `osm_ingest::road_data_generation()` at load time.
-    /// When the counter advances (a new import completed) this cache entry
-    /// is considered stale and reloaded from SQLite automatically.
     road_gen: u64,
-    major: Vec<RoadPolyline>,
-    minor: Vec<RoadPolyline>,
+    /// Which layers were loaded — used to detect checkbox changes.
+    had_major: bool,
+    had_minor: bool,
+    major: Vec<ElevatedRoad>,
+    minor: Vec<ElevatedRoad>,
 }
 
 fn road_cache() -> &'static Mutex<Option<RoadCache>> {
@@ -763,15 +789,16 @@ fn draw_roads(
         Err(_) => return,
     };
 
-    // Stale when: zoom changes, a new road import just completed (road_gen
-    // advanced), or the viewport has panned outside the loaded tile range.
-    // A 1-tile margin is loaded on each side so ordinary panning never
-    // triggers a reload.
+    // Stale when: zoom changes, show-flags changed (layer enabled/disabled),
+    // a new road import completed (road_gen advanced), or the viewport panned
+    // outside the loaded tile range.  1-tile margin so small pans don't reload.
     const MARGIN: u32 = 1;
     let current_gen = osm_ingest::road_data_generation();
     let stale = cache_guard.as_ref().map_or(true, |c| {
         c.tile_zoom != tile_zoom
             || c.road_gen != current_gen
+            || c.had_major != show_major_roads
+            || c.had_minor != show_minor_roads
             || c.tile_x_min > txmin
             || c.tile_x_max < txmax
             || c.tile_y_min > tymin
@@ -779,66 +806,78 @@ fn draw_roads(
     });
 
     if stale {
-        // Load with margin so panning doesn't immediately go out-of-range.
         let (lxmin, lxmax) = (txmin.saturating_sub(MARGIN), txmax + MARGIN);
         let (lymin, lymax) = (tymin.saturating_sub(MARGIN), tymax + MARGIN);
+
+        // Load raw polylines from SQLite, then pre-sample elevation once per
+        // vertex.  This moves the expensive srtm_stream mutex work here (on
+        // a cache miss) instead of repeating it on every frame.
         let major = if show_major_roads {
-            osm_ingest::load_roads_for_bounds(selected_root, bounds, tile_zoom, RoadLayerKind::Major)
+            osm_ingest::load_roads_for_bounds(
+                selected_root, bounds, tile_zoom, RoadLayerKind::Major,
+            )
+            .iter()
+            .map(|p| ElevatedRoad::from_polyline(p, selected_root))
+            .collect()
         } else {
             Vec::new()
         };
         let minor = if show_minor_roads {
-            osm_ingest::load_roads_for_bounds(selected_root, bounds, tile_zoom, RoadLayerKind::Minor)
+            osm_ingest::load_roads_for_bounds(
+                selected_root, bounds, tile_zoom, RoadLayerKind::Minor,
+            )
+            .iter()
+            .map(|p| ElevatedRoad::from_polyline(p, selected_root))
+            .collect()
         } else {
             Vec::new()
         };
+
         *cache_guard = Some(RoadCache {
             tile_zoom,
             tile_x_min: lxmin, tile_x_max: lxmax,
             tile_y_min: lymin, tile_y_max: lymax,
             road_gen: current_gen,
-            major, minor,
+            had_major: show_major_roads,
+            had_minor: show_minor_roads,
+            major,
+            minor,
         });
     }
 
     let cache = cache_guard.as_ref().unwrap();
 
-    draw_road_layer(painter, layout, view, selected_root, viewport_center,
-        extent_x_km, extent_y_km, &cache.minor,
-        egui::Stroke::new(0.8, egui::Color32::from_rgb(116, 132, 142)));
-    draw_road_layer(painter, layout, view, selected_root, viewport_center,
-        extent_x_km, extent_y_km, &cache.major,
-        egui::Stroke::new(1.35, egui::Color32::from_rgb(255, 210, 92)));
+    if show_minor_roads {
+        draw_road_layer(painter, layout, view, viewport_center,
+            extent_x_km, extent_y_km, &cache.minor,
+            egui::Stroke::new(0.8, egui::Color32::from_rgb(116, 132, 142)));
+    }
+    if show_major_roads {
+        draw_road_layer(painter, layout, view, viewport_center,
+            extent_x_km, extent_y_km, &cache.major,
+            egui::Stroke::new(1.35, egui::Color32::from_rgb(255, 210, 92)));
+    }
 }
 
 fn draw_road_layer(
     painter: &egui::Painter,
     layout: &LocalLayout,
     view: &GlobeViewState,
-    selected_root: Option<&Path>,
     viewport_center: GeoPoint,
     extent_x_km: f32,
     extent_y_km: f32,
-    roads: &[osm_ingest::RoadPolyline],
+    roads: &[ElevatedRoad],
     stroke: egui::Stroke,
 ) {
     for road in roads {
         let points: Vec<_> = road
             .points
             .iter()
-            .filter_map(|point| {
-                let elevation_m =
-                    srtm_stream::sample_elevation_m(selected_root, *point).unwrap_or(0.0) + 3.0;
-                project_local(
-                    layout,
-                    view,
-                    viewport_center,
-                    *point,
-                    elevation_m,
-                    extent_x_km,
-                    extent_y_km,
-                )
-                .map(|projected| projected.pos)
+            .filter_map(|&(pt, elev)| {
+                // Elevation is already pre-sampled — this is pure projection math.
+                project_local(layout, view, viewport_center, pt, elev,
+                              extent_x_km, extent_y_km)
+                    .map(|p| p.pos)
             })
             .collect();
 
