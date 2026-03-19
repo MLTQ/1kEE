@@ -360,11 +360,15 @@ pub fn queue_planet_roads_import(selected_root: Option<&Path>) -> Result<bool, S
 pub fn queue_focus_roads_import(
     selected_root: Option<&Path>,
     focus: GeoPoint,
+    radius_miles: f32,
 ) -> Result<bool, String> {
-    let bounds = focus_bounds(focus, DEFAULT_FOCUS_RADIUS_MILES);
+    let radius_miles = radius_miles.clamp(5.0, 150.0);
+    let bounds = focus_bounds(focus, radius_miles);
+    // Quantise radius to the nearest 5 miles so nearby zoom levels share jobs.
+    let radius_bucket = ((radius_miles / 5.0).ceil() as u32) * 5;
     let note = format!(
-        "{FOCUS_ROADS_NOTE_PREFIX}_{:.3}_{:.3}_{:.1}",
-        focus.lat, focus.lon, DEFAULT_FOCUS_RADIUS_MILES
+        "{FOCUS_ROADS_NOTE_PREFIX}_{:.3}_{:.3}_r{}",
+        focus.lat, focus.lon, radius_bucket
     );
 
     // Fast in-memory check — avoids opening SQLite on every frame for

@@ -159,14 +159,22 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                     .checkbox(&mut model.show_minor_roads, "Minor roads")
                     .changed();
 
-                if (major_changed || minor_changed)
-                    && (model.show_major_roads || model.show_minor_roads)
-                {
-                    queue_road_focus_import(
-                        model,
-                        model.globe_view.local_center,
-                        "active map viewport",
-                    );
+                if major_changed || minor_changed {
+                    // Always clear so the next draw_roads reloads from SQLite
+                    // with the correct show-flags, not stale cached geometry.
+                    local_terrain_scene::invalidate_road_cache();
+                    if model.show_major_roads || model.show_minor_roads {
+                        let half_deg = local_terrain_scene::visual_half_extent_for_zoom(
+                            model.globe_view.local_zoom,
+                        );
+                        let r = (half_deg * 69.0 * 1.25).clamp(10.0, 150.0);
+                        queue_road_focus_import(
+                            model,
+                            model.globe_view.local_center,
+                            r,
+                            "active map viewport",
+                        );
+                    }
                 }
 
                 // Show a compact status note while a road import is running.
@@ -274,8 +282,13 @@ fn ensure_visible_road_layers(model: &mut AppModel, local_terrain_mode: bool) {
         return;
     }
 
+    // Radius = viewport half-extent in miles, so the import always covers
+    // the full visible area regardless of zoom level.
+    let half_deg = local_terrain_scene::visual_half_extent_for_zoom(model.globe_view.local_zoom);
+    let radius_miles = (half_deg * 69.0 * 1.25).clamp(10.0, 150.0);
+
     if let Some(focus) = model.terrain_focus_location() {
-        queue_road_focus_import(model, focus, "terrain focus");
+        queue_road_focus_import(model, focus, radius_miles, "terrain focus");
     }
 
     let center = model.globe_view.local_center;
@@ -284,12 +297,12 @@ fn ensure_visible_road_layers(model: &mut AppModel, local_terrain_mode: bool) {
         .map(|focus| (focus.lat - center.lat).abs() > 0.15 || (focus.lon - center.lon).abs() > 0.15)
         .unwrap_or(true)
     {
-        queue_road_focus_import(model, center, "map viewport");
+        queue_road_focus_import(model, center, radius_miles, "map viewport");
     }
 }
 
-fn queue_road_focus_import(model: &mut AppModel, point: crate::model::GeoPoint, label: &str) {
-    match osm_ingest::queue_focus_roads_import(model.selected_root.as_deref(), point) {
+fn queue_road_focus_import(model: &mut AppModel, point: crate::model::GeoPoint, radius_miles: f32, label: &str) {
+    match osm_ingest::queue_focus_roads_import(model.selected_root.as_deref(), point, radius_miles) {
         Ok(true) => {
             model.push_log(format!("Queued focused road import for the {label}."));
             model.osm_inventory =

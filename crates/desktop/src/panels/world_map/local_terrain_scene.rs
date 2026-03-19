@@ -717,20 +717,56 @@ struct ElevatedRoad {
 }
 
 impl ElevatedRoad {
+    /// Build an elevated road, sampling SRTM elevation at every `elev_step`-th
+    /// vertex and linearly interpolating the rest.  Use `elev_step = 1` for
+    /// major roads (full fidelity) and a larger value for minor roads to cap
+    /// the number of expensive per-point SRTM lookups.
     fn from_polyline(
         poly: &osm_ingest::RoadPolyline,
         selected_root: Option<&Path>,
+        elev_step: usize,
     ) -> Self {
-        let points = poly
-            .points
-            .iter()
-            .map(|&pt| {
-                let elev =
-                    srtm_stream::sample_elevation_m(selected_root, pt).unwrap_or(0.0) + 3.0;
-                (pt, elev)
+        let pts = &poly.points;
+        let n = pts.len();
+        if n == 0 {
+            return Self { points: Vec::new() };
+        }
+        let step = elev_step.max(1);
+
+        // Sample elevation at every `step`-th index (always including last).
+        let mut sampled: Vec<(usize, f32)> = (0..n)
+            .step_by(step)
+            .map(|i| {
+                let e = srtm_stream::sample_elevation_m(selected_root, pts[i]).unwrap_or(0.0) + 3.0;
+                (i, e)
             })
             .collect();
+        if sampled.last().map(|&(i, _)| i) != Some(n - 1) {
+            let e = srtm_stream::sample_elevation_m(selected_root, pts[n - 1]).unwrap_or(0.0) + 3.0;
+            sampled.push((n - 1, e));
+        }
+
+        // Linearly interpolate elevations for skipped vertices.
+        let mut elevations = vec![0.0f32; n];
+        for w in sampled.windows(2) {
+            let (i0, e0) = w[0];
+            let (i1, e1) = w[1];
+            for i in i0..=i1 {
+                let t = if i1 > i0 { (i - i0) as f32 / (i1 - i0) as f32 } else { 0.0 };
+                elevations[i] = e0 + (e1 - e0) * t;
+            }
+        }
+
+        let points = pts.iter().zip(elevations).map(|(&pt, e)| (pt, e)).collect();
         Self { points }
+    }
+}
+
+/// Clear the road tile cache so the next draw reloads from SQLite.
+/// Call this whenever the road layer checkboxes change.
+pub fn invalidate_road_cache() {
+    if let Ok(mut g) = road_cache().lock() {
+        *g = None;
     }
 }
 
@@ -812,12 +848,14 @@ fn draw_roads(
         // Load raw polylines from SQLite, then pre-sample elevation once per
         // vertex.  This moves the expensive srtm_stream mutex work here (on
         // a cache miss) instead of repeating it on every frame.
+        // Minor roads use elev_step=5 to reduce SRTM lookups by 5× — they
+        // still follow terrain via linear interpolation between sample points.
         let major = if show_major_roads {
             osm_ingest::load_roads_for_bounds(
                 selected_root, bounds, tile_zoom, RoadLayerKind::Major,
             )
             .iter()
-            .map(|p| ElevatedRoad::from_polyline(p, selected_root))
+            .map(|p| ElevatedRoad::from_polyline(p, selected_root, 1))
             .collect()
         } else {
             Vec::new()
@@ -827,7 +865,7 @@ fn draw_roads(
                 selected_root, bounds, tile_zoom, RoadLayerKind::Minor,
             )
             .iter()
-            .map(|p| ElevatedRoad::from_polyline(p, selected_root))
+            .map(|p| ElevatedRoad::from_polyline(p, selected_root, 5))
             .collect()
         } else {
             Vec::new()

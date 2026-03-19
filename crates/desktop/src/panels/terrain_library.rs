@@ -142,6 +142,7 @@ pub fn render_terrain_library(ctx: &egui::Context, model: &mut AppModel) {
                         Some(focus) => match osm_ingest::queue_focus_roads_import(
                             model.selected_root.as_deref(),
                             focus,
+                            20.0,
                         ) {
                             Ok(true) => {
                                 model.push_log(
