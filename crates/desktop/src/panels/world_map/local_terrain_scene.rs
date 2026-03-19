@@ -531,7 +531,7 @@ fn draw_tile_pulse_grid(
 
             for row in 0..GRID {
                 for col in 0..GRID {
-                    let threshold = cell_rand(seed, row * GRID + col);
+                    let threshold = cell_rand(seed, row, col);
                     if threshold < cursor {
                         continue; // this cell has dissolved
                     }
@@ -621,13 +621,20 @@ fn tile_hash(lat_b: i32, lon_b: i32) -> u64 {
         .wrapping_mul(6_364_136_223_846_793_005)
 }
 
-/// Deterministic float in [0, 1) for a given seed + cell index.
+/// Deterministic float in [0, 1) for a given tile seed + (row, col).
+///
+/// Uses a splitmix64-style finalizer: row and col are mixed into the seed
+/// with different primes *before* the avalanche pass, so adjacent cells
+/// produce completely uncorrelated values rather than an arithmetic sequence.
 #[inline]
-fn cell_rand(seed: u64, idx: usize) -> f32 {
-    let x = seed
-        .wrapping_add(idx as u64)
-        .wrapping_mul(6_364_136_223_846_793_005)
-        .wrapping_add(1_442_695_040_888_963_407);
+fn cell_rand(seed: u64, row: usize, col: usize) -> f32 {
+    let mut x = seed
+        .wrapping_add((row as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
+        .wrapping_add((col as u64).wrapping_mul(0x6c62_272e_07bb_0142));
+    // splitmix64 avalanche
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^= x >> 31;
     (x >> 40) as f32 / (1u64 << 24) as f32
 }
 
