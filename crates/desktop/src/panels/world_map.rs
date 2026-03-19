@@ -10,6 +10,8 @@ mod terrain_raster;
 use crate::model::AppModel;
 use crate::osm_ingest;
 use crate::theme;
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
     let panel_frame = egui::Frame::new()
@@ -167,6 +169,15 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                     );
                 }
 
+                // Show a compact status note while a road import is running.
+                if let Some(note) = osm_ingest::active_job_note() {
+                    let short = if note.len() > 42 { &note[..42] } else { &note };
+                    ui.colored_label(
+                        theme::text_muted(),
+                        egui::RichText::new(format!("⟳ {short}…")).small(),
+                    );
+                }
+
                 if model.selected_event_has_factal_brief() {
                     ui.separator();
                     if ui.button("Brief").clicked() {
@@ -242,6 +253,23 @@ fn ensure_visible_road_layers(model: &mut AppModel, local_terrain_mode: bool) {
     if !local_terrain_mode || (!model.show_major_roads && !model.show_minor_roads) {
         return;
     }
+
+    // Rate-limit: only attempt queue checks twice per second.  The actual
+    // queue check is now O(1) thanks to in-memory caches, but calling
+    // ensure_runtime_store (which opens SQLite) on every frame is still
+    // wasteful when nothing has changed.
+    static LAST_CHECK: OnceLock<Mutex<Instant>> = OnceLock::new();
+    {
+        let mut last = LAST_CHECK
+            .get_or_init(|| Mutex::new(Instant::now() - std::time::Duration::from_secs(10)))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if last.elapsed() < std::time::Duration::from_millis(500) {
+            return;
+        }
+        *last = Instant::now();
+    }
+
     if osm_ingest::has_active_jobs(model.selected_root.as_deref()) {
         return;
     }

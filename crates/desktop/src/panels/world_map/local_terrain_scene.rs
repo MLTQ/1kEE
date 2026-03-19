@@ -759,14 +759,22 @@ fn draw_roads(
         Err(_) => return,
     };
 
-    // Re-query only when tile coverage or zoom changes.
+    // Stale only when zoom changes OR the viewport extends outside the loaded
+    // tile range.  A 1-tile margin is loaded on each side so small pans never
+    // trigger a reload.
+    const MARGIN: u32 = 1;
     let stale = cache_guard.as_ref().map_or(true, |c| {
         c.tile_zoom != tile_zoom
-            || c.tile_x_min != txmin || c.tile_x_max != txmax
-            || c.tile_y_min != tymin || c.tile_y_max != tymax
+            || c.tile_x_min > txmin
+            || c.tile_x_max < txmax
+            || c.tile_y_min > tymin
+            || c.tile_y_max < tymax
     });
 
     if stale {
+        // Load with margin so panning doesn't immediately go out-of-range.
+        let (lxmin, lxmax) = (txmin.saturating_sub(MARGIN), txmax + MARGIN);
+        let (lymin, lymax) = (tymin.saturating_sub(MARGIN), tymax + MARGIN);
         let major = if show_major_roads {
             osm_ingest::load_roads_for_bounds(selected_root, bounds, tile_zoom, RoadLayerKind::Major)
         } else {
@@ -777,7 +785,12 @@ fn draw_roads(
         } else {
             Vec::new()
         };
-        *cache_guard = Some(RoadCache { tile_zoom, tile_x_min: txmin, tile_x_max: txmax, tile_y_min: tymin, tile_y_max: tymax, major, minor });
+        *cache_guard = Some(RoadCache {
+            tile_zoom,
+            tile_x_min: lxmin, tile_x_max: lxmax,
+            tile_y_min: lymin, tile_y_max: lymax,
+            major, minor,
+        });
     }
 
     let cache = cache_guard.as_ref().unwrap();

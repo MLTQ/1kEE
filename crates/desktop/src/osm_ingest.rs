@@ -7,9 +7,82 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+// ---------------------------------------------------------------------------
+// In-memory caches — eliminate per-frame SQLite hits on the render thread
+// ---------------------------------------------------------------------------
+
+/// Notes of every job that has ever been queued/completed, loaded once from
+/// the DB at startup and updated in-process.  `has_job_note` checks here
+/// first so the hot path never opens SQLite.
+fn known_notes() -> &'static Mutex<HashSet<String>> {
+    static CACHE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// True while at least one job is in 'queued' or 'running' state.
+/// Updated in-process; eliminates the per-frame `snapshots()` call in
+/// `has_active_jobs`.
+fn active_jobs_flag() -> &'static AtomicBool {
+    static FLAG: OnceLock<AtomicBool> = OnceLock::new();
+    FLAG.get_or_init(|| AtomicBool::new(false))
+}
+
+/// Human-readable note for the currently running job (shown in the UI).
+fn current_job_note_store() -> &'static Mutex<Option<String>> {
+    static STORE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    STORE.get_or_init(|| Mutex::new(None))
+}
+
+/// Whether the in-memory caches have been hydrated from the DB yet.
+fn caches_initialized() -> &'static AtomicBool {
+    static INIT: OnceLock<AtomicBool> = OnceLock::new();
+    INIT.get_or_init(|| AtomicBool::new(false))
+}
+
+/// Load known notes and active-job flag from the DB once at startup.
+fn initialize_caches(db_path: &Path) {
+    if caches_initialized().swap(true, Ordering::SeqCst) {
+        return; // already done
+    }
+    let Ok(connection) = open_runtime_db(db_path) else { return };
+
+    // Populate known_notes with every note that was ever queued/completed.
+    if let Ok(mut stmt) = connection.prepare(
+        "SELECT note FROM osm_ingest_jobs \
+         WHERE state IN ('queued','running','completed') AND note != ''",
+    ) {
+        let notes: Vec<String> = stmt
+            .query_map([], |r| r.get(0))
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .collect();
+        if let Ok(mut guard) = known_notes().lock() {
+            guard.extend(notes);
+        }
+    }
+
+    // Set active_jobs_flag if any jobs are still queued/running.
+    let active: usize = connection
+        .query_row(
+            "SELECT COUNT(*) FROM osm_ingest_jobs \
+             WHERE state IN ('queued','running')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    active_jobs_flag().store(active > 0, Ordering::Relaxed);
+}
+
+/// Returns the human-readable note for the currently running job, if any.
+pub fn active_job_note() -> Option<String> {
+    current_job_note_store().lock().ok()?.clone()
+}
 
 const PLANET_PBF_NAME: &str = "planet-latest.osm.pbf";
 const RUNTIME_DB_NAME: &str = "osm_runtime.sqlite";
@@ -195,6 +268,9 @@ pub fn ensure_runtime_store(selected_root: Option<&Path>) -> Result<PathBuf, Str
         register_planet_source(&connection, &planet_path).map_err(|error| error.to_string())?;
     }
 
+    // Hydrate in-memory caches from the DB (no-op after first call).
+    initialize_caches(&db_path);
+
     Ok(db_path)
 }
 
@@ -277,15 +353,28 @@ pub fn queue_focus_roads_import(
         "{FOCUS_ROADS_NOTE_PREFIX}_{:.3}_{:.3}_{:.1}",
         focus.lat, focus.lon, DEFAULT_FOCUS_RADIUS_MILES
     );
-    let queued_before = has_job_note(selected_root, &note)?;
-    if queued_before {
+
+    // Fast in-memory check — avoids opening SQLite on every frame for
+    // areas that have already been loaded.
+    if known_notes()
+        .lock()
+        .map(|g| g.contains(&note))
+        .unwrap_or(false)
+    {
         return Ok(false);
     }
 
-    // Focus-area imports always use the Overpass API — scanning the full
-    // planet file (~80 GB) for a small bounding box saturates the disk and
-    // kills frame rate.  The planet file is reserved for global bootstrap.
-    let source_path = OVERPASS_SOURCE.to_owned();
+    // Use osmium + planet file when available, otherwise Overpass.
+    let source_path = if find_planet_pbf(selected_root).is_some()
+        && !settings_store::prefer_overpass()
+    {
+        find_planet_pbf(selected_root)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        OVERPASS_SOURCE.to_owned()
+    };
 
     let db_path = ensure_runtime_store(selected_root)?;
     let connection = open_runtime_db(&db_path).map_err(|e| e.to_string())?;
@@ -300,6 +389,11 @@ pub fn queue_focus_roads_import(
         )
         .map_err(|e| e.to_string())?;
     if existing_count > 0 {
+        // Job exists in DB but wasn't in our in-memory cache (e.g. loaded from
+        // a previous session).  Add it so future checks are free.
+        if let Ok(mut notes) = known_notes().lock() {
+            notes.insert(note.clone());
+        }
         return Ok(false);
     }
 
@@ -325,41 +419,81 @@ pub fn queue_focus_roads_import(
         )
         .map_err(|e| e.to_string())?;
 
+    // Update in-memory caches so tick() and future calls are fast.
+    if let Ok(mut notes) = known_notes().lock() {
+        notes.insert(note);
+    }
+    active_jobs_flag().store(true, Ordering::Relaxed);
+
     Ok(true)
 }
 
 pub fn tick(selected_root: Option<&Path>) {
-    let Ok(db_path) = ensure_runtime_store(selected_root) else {
-        return;
-    };
-
     let worker = worker();
     let mut guard = match worker.lock() {
-        Ok(guard) => guard,
+        Ok(g) => g,
         Err(_) => return,
     };
 
     if let Some(active) = guard.as_ref() {
         if active.handle.is_finished() {
+            // Worker finished — join it and fall through to check for the next job.
             let active = guard.take().expect("finished worker present");
             drop(guard);
             let _ = active.handle.join();
+            if let Ok(mut note) = current_job_note_store().lock() {
+                *note = None;
+            }
         } else {
-            return;
+            return; // worker still running — nothing to do
         }
     } else {
         drop(guard);
-        let _ = recover_orphaned_running_jobs(&db_path);
+        // Fast path: if no jobs are queued, skip SQLite entirely.
+        if !active_jobs_flag().load(Ordering::Relaxed) {
+            return;
+        }
+    }
+
+    // Reach here only when: (a) a worker just finished, or (b) the flag says
+    // there are queued jobs.  Now open the DB to find the next job.
+    let Ok(db_path) = ensure_runtime_store(selected_root) else {
+        return;
+    };
+
+    // Recover orphaned 'running' rows once, rate-limited to avoid hammering
+    // the DB on every tick when there's nothing to do.
+    static LAST_RECOVERY: OnceLock<Mutex<Instant>> = OnceLock::new();
+    {
+        let mut last = LAST_RECOVERY
+            .get_or_init(|| Mutex::new(Instant::now() - Duration::from_secs(60)))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if last.elapsed() > Duration::from_secs(30) {
+            *last = Instant::now();
+            drop(last);
+            let _ = recover_orphaned_running_jobs(&db_path);
+        }
     }
 
     let connection = match open_runtime_db(&db_path) {
-        Ok(connection) => connection,
+        Ok(c) => c,
         Err(_) => return,
     };
     let Some(job) = fetch_next_job(&connection).ok().flatten() else {
+        // No queued jobs — clear the flag so future ticks are free.
+        active_jobs_flag().store(false, Ordering::Relaxed);
+        if let Ok(mut note) = current_job_note_store().lock() {
+            *note = None;
+        }
         return;
     };
     drop(connection);
+
+    // Store the job note for the progress bar.
+    if let Ok(mut note) = current_job_note_store().lock() {
+        *note = Some(job.note.clone());
+    }
 
     let handle = thread::spawn(move || {
         let result = match job.feature_kind {
@@ -377,6 +511,10 @@ pub fn tick(selected_root: Option<&Path>) {
                 let _ = mark_job_failed(&db_path, job.id, &error);
             }
         }
+
+        // Signal that this worker is done; tick() will clear the flag if no
+        // more jobs are queued.
+        crate::app::request_repaint();
     });
 
     if let Ok(mut guard) = worker.lock() {
@@ -384,10 +522,9 @@ pub fn tick(selected_root: Option<&Path>) {
     }
 }
 
-pub fn has_active_jobs(selected_root: Option<&Path>) -> bool {
-    snapshots(selected_root)
-        .iter()
-        .any(|job| matches!(job.state.as_str(), "queued" | "running"))
+/// O(1) — reads an in-memory AtomicBool, never touches SQLite.
+pub fn has_active_jobs(_selected_root: Option<&Path>) -> bool {
+    active_jobs_flag().load(Ordering::Relaxed)
 }
 
 pub fn snapshots(selected_root: Option<&Path>) -> Vec<OsmJobSnapshot> {
