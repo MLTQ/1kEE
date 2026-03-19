@@ -199,20 +199,13 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                     }
                 }
 
-                // Show status note + progress bar while an import is running.
+                // Show a brief note while an import is running; the full
+                // progress bar lives in the map canvas (bottom-right overlay).
                 if let Some(note) = osm_ingest::active_job_note() {
                     ui.colored_label(
                         egui::Color32::from_rgb(180, 160, 80),
                         egui::RichText::new(format!("⟳ {note}")).small(),
                     );
-                    if let Some((done, total)) = osm_ingest::osmium_cell_progress() {
-                        let frac = if total > 0 { done as f32 / total as f32 } else { 0.0 };
-                        ui.add(
-                            egui::ProgressBar::new(frac)
-                                .text(format!("cell {done}/{total}"))
-                                .desired_width(180.0),
-                        );
-                    }
                 }
 
                 if model.selected_event_has_factal_brief() {

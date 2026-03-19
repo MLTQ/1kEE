@@ -158,10 +158,24 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         event_markers.first().map(|(_, pos)| *pos),
         &camera_markers,
     );
-    draw_legend(painter, rect, "LOCAL EVENT TERRAIN", render_zoom);
-    if let Some(status) = cache_status {
-        draw_cache_progress(painter, rect, status);
+    if model.show_coastlines {
+        draw_coastlines_local(
+            painter,
+            &layout,
+            &model.globe_view,
+            viewport_center,
+            render_zoom,
+            model.selected_root.as_deref(),
+        );
     }
+    draw_legend(painter, rect, "LOCAL EVENT TERRAIN", render_zoom);
+    draw_progress_overlay(
+        painter,
+        rect,
+        cache_status,
+        osm_ingest::osmium_cell_progress(),
+        osm_ingest::active_job_note().as_deref(),
+    );
 
     GlobeScene {
         event_markers,
@@ -1267,56 +1281,178 @@ fn draw_legend(painter: &egui::Painter, rect: egui::Rect, title: &str, render_zo
     );
 }
 
-fn draw_cache_progress(
+/// Draw the bottom-right progress overlay.  Handles SRTM cache progress and
+/// osmium cell-extraction progress as stacked cards; each card is only shown
+/// when its data is available so they coexist without gaps when both are active.
+fn draw_progress_overlay(
     painter: &egui::Painter,
     rect: egui::Rect,
-    status: srtm_focus_cache::FocusContourRegionStatus,
+    cache_status: Option<srtm_focus_cache::FocusContourRegionStatus>,
+    osmium_progress: Option<(u32, u32)>,
+    job_note: Option<&str>,
 ) {
-    if status.total_assets == 0 || status.ready_assets >= status.total_assets {
+    const CARD_W: f32 = 200.0;
+    const CARD_H: f32 = 36.0;
+    const GAP: f32 = 4.0;
+    const RIGHT_MARGIN: f32 = 12.0;
+    const BOTTOM_MARGIN: f32 = 12.0;
+
+    let cache_active = cache_status
+        .map(|s| s.total_assets > 0 && s.ready_assets < s.total_assets)
+        .unwrap_or(false);
+    let osmium_active = osmium_progress.is_some();
+
+    if !cache_active && !osmium_active {
         return;
     }
 
-    let frame_rect = egui::Rect::from_min_size(
-        egui::pos2(rect.right() - 232.0, rect.bottom() - 88.0),
-        egui::vec2(184.0, 36.0),
-    );
-    let bar_rect = egui::Rect::from_min_size(
-        frame_rect.left_bottom() + egui::vec2(0.0, -12.0),
-        egui::vec2(frame_rect.width(), 8.0),
-    );
-    let progress = (status.ready_assets as f32 / status.total_assets as f32).clamp(0.0, 1.0);
+    // Cards stack upward from the bottom.  Cache bar is always on bottom when both visible.
+    let mut bottom_y = rect.bottom() - BOTTOM_MARGIN;
 
-    painter.rect_filled(frame_rect, 6.0, theme::panel_fill(208));
+    // ── SRTM cache card ────────────────────────────────────────────────────
+    if cache_active {
+        let status = cache_status.unwrap();
+        let progress = (status.ready_assets as f32 / status.total_assets as f32).clamp(0.0, 1.0);
+        let frame = egui::Rect::from_min_size(
+            egui::pos2(rect.right() - RIGHT_MARGIN - CARD_W, bottom_y - CARD_H),
+            egui::vec2(CARD_W, CARD_H),
+        );
+        let bar = egui::Rect::from_min_size(
+            frame.left_bottom() + egui::vec2(0.0, -10.0),
+            egui::vec2(frame.width(), 6.0),
+        );
+        draw_progress_card(
+            painter,
+            frame,
+            bar,
+            &format!(
+                "CACHE {} / {}  ·  {} PENDING",
+                status.ready_assets, status.total_assets, status.pending_assets
+            ),
+            progress,
+            theme::topo_color(),
+        );
+        bottom_y = frame.top() - GAP;
+    }
+
+    // ── Osmium cell-extraction card ────────────────────────────────────────
+    if osmium_active {
+        let (done, total) = osmium_progress.unwrap();
+        let progress = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+        // Truncate job note to fit in card width (≈26 chars at monospace 11)
+        let label = if let Some(note) = job_note {
+            let trimmed = note.trim_end_matches('…').trim_end_matches("...");
+            if trimmed.len() > 28 { format!("{}…", &trimmed[..28]) } else { trimmed.to_owned() }
+        } else {
+            format!("OSMIUM {done}/{total} cells")
+        };
+        let frame = egui::Rect::from_min_size(
+            egui::pos2(rect.right() - RIGHT_MARGIN - CARD_W, bottom_y - CARD_H),
+            egui::vec2(CARD_W, CARD_H),
+        );
+        let bar = egui::Rect::from_min_size(
+            frame.left_bottom() + egui::vec2(0.0, -10.0),
+            egui::vec2(frame.width(), 6.0),
+        );
+        draw_progress_card(
+            painter,
+            frame,
+            bar,
+            &label,
+            progress,
+            egui::Color32::from_rgb(160, 130, 50),
+        );
+    }
+}
+
+fn draw_progress_card(
+    painter: &egui::Painter,
+    frame: egui::Rect,
+    bar: egui::Rect,
+    label: &str,
+    progress: f32,
+    fill_color: egui::Color32,
+) {
+    painter.rect_filled(frame, 6.0, theme::panel_fill(208));
     painter.rect_stroke(
-        frame_rect,
+        frame,
         6.0,
         egui::Stroke::new(1.0, theme::panel_stroke()),
         egui::StrokeKind::Outside,
     );
     painter.text(
-        frame_rect.left_top() + egui::vec2(8.0, 6.0),
+        frame.left_top() + egui::vec2(8.0, 6.0),
         egui::Align2::LEFT_TOP,
-        format!(
-            "CACHE {} / {}  ·  {} PENDING",
-            status.ready_assets, status.total_assets, status.pending_assets
-        ),
-        egui::FontId::monospace(11.0),
+        label,
+        egui::FontId::monospace(10.5),
         theme::text_muted(),
     );
-    painter.rect_filled(
-        bar_rect,
-        4.0,
-        theme::panel_fill(230).gamma_multiply(2.5),
-    );
+    painter.rect_filled(bar, 3.0, theme::panel_fill(230).gamma_multiply(2.5));
     if progress > 0.0 {
-        let fill_rect = egui::Rect::from_min_max(
-            bar_rect.min,
-            egui::pos2(
-                bar_rect.left() + bar_rect.width() * progress,
-                bar_rect.bottom(),
-            ),
+        let filled = egui::Rect::from_min_max(
+            bar.min,
+            egui::pos2(bar.left() + bar.width() * progress, bar.bottom()),
         );
-        painter.rect_filled(fill_rect, 4.0, theme::topo_color());
+        painter.rect_filled(filled, 3.0, fill_color);
+    }
+}
+
+/// Draw global coastlines projected into the local oblique view.
+/// Filters to only the polyline segments that overlap the current viewport.
+fn draw_coastlines_local(
+    painter: &egui::Painter,
+    layout: &LocalLayout,
+    view: &GlobeViewState,
+    focus: GeoPoint,
+    _render_zoom: f32,
+    selected_root: Option<&Path>,
+) {
+    // Re-use the same global coastline data as the globe view, clamping zoom
+    // so we always get a reasonably detailed LOD.
+    let coastline_zoom = view.local_zoom.clamp(1.0, 8.0);
+    let Some(coastlines) = contour_asset::load_global_coastlines(selected_root, coastline_zoom)
+    else {
+        return;
+    };
+
+    let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
+    let km_per_deg_lat = 111.32f32;
+    let km_per_deg_lon =
+        km_per_deg_lat * focus.lat.to_radians().cos().abs().max(0.2);
+    let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
+    let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
+
+    // Expand viewport bounds by 20% to catch lines that start just outside
+    // but cross into the visible area.
+    let margin = half_extent_deg * 1.2;
+    let min_lat = focus.lat - margin;
+    let max_lat = focus.lat + margin;
+    let min_lon = focus.lon - margin;
+    let max_lon = focus.lon + margin;
+
+    let stroke = egui::Stroke::new(1.4, egui::Color32::from_rgba_premultiplied(45, 130, 195, 200));
+
+    for coast in coastlines.iter() {
+        // Quick bounding-box rejection before projecting any points.
+        let in_view = coast.points.iter().any(|p| {
+            p.lat >= min_lat && p.lat <= max_lat && p.lon >= min_lon && p.lon <= max_lon
+        });
+        if !in_view {
+            continue;
+        }
+
+        let points: Vec<_> = coast
+            .points
+            .iter()
+            .filter_map(|p| {
+                project_local(layout, view, focus, *p, 0.0, extent_x_km, extent_y_km)
+                    .map(|pp| pp.pos)
+            })
+            .collect();
+
+        if points.len() >= 2 {
+            painter.add(egui::Shape::line(points, stroke));
+        }
     }
 }
 
