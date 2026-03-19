@@ -604,9 +604,9 @@ fn draw_contour_stack(
         let stroke = egui::Stroke::new(
             if major { 1.35 } else { 0.7 } * (0.72 + alpha * 0.28),
             if major {
-                egui::Color32::from_rgb(244, 123, 61)
+                theme::hot_color()
             } else {
-                egui::Color32::from_rgb(121, 212, 236)
+                theme::contour_color()
             }
             .gamma_multiply((if major { 1.0 } else { 0.78 }) * alpha),
         );
@@ -814,10 +814,7 @@ fn draw_event_marker(
         painter.circle_stroke(
             marker.pos,
             pulse,
-            egui::Stroke::new(
-                1.3,
-                egui::Color32::from_rgba_premultiplied(255, 241, 212, 170),
-            ),
+            egui::Stroke::new(1.3, theme::marker_glow_warm()),
         );
     }
 
@@ -831,11 +828,7 @@ fn draw_event_marker(
 
 fn draw_camera_marker(painter: &egui::Painter, marker: ProjectedLocalPoint, is_selected: bool) {
     let radius = 3.4 + marker.depth;
-    let color = if is_selected {
-        egui::Color32::from_rgb(215, 245, 252)
-    } else {
-        theme::camera_color()
-    };
+    let color = if is_selected { theme::marker_camera_ring() } else { theme::camera_color() };
 
     painter.circle_filled(marker.pos, radius, color);
     if is_selected {
@@ -876,15 +869,11 @@ fn draw_cache_progress(
     );
     let progress = (status.ready_assets as f32 / status.total_assets as f32).clamp(0.0, 1.0);
 
-    painter.rect_filled(
-        frame_rect,
-        6.0,
-        egui::Color32::from_rgba_premultiplied(7, 18, 24, 208),
-    );
+    painter.rect_filled(frame_rect, 6.0, theme::panel_fill(208));
     painter.rect_stroke(
         frame_rect,
         6.0,
-        egui::Stroke::new(1.0, egui::Color32::from_rgb(24, 63, 79)),
+        egui::Stroke::new(1.0, theme::panel_stroke()),
         egui::StrokeKind::Outside,
     );
     painter.text(
@@ -900,7 +889,7 @@ fn draw_cache_progress(
     painter.rect_filled(
         bar_rect,
         4.0,
-        egui::Color32::from_rgba_premultiplied(15, 40, 49, 230),
+        theme::panel_fill(230).gamma_multiply(2.5),
     );
     if progress > 0.0 {
         let fill_rect = egui::Rect::from_min_max(

@@ -15,14 +15,53 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
 
     egui::Window::new("Settings")
         .open(&mut open)
-        .default_size(egui::vec2(620.0, 520.0))
+        .default_size(egui::vec2(620.0, 620.0))
         .min_size(egui::vec2(540.0, 420.0))
         .frame(
             egui::Frame::window(&ctx.style())
-                .fill(egui::Color32::from_rgb(14, 18, 23))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(43, 49, 58))),
+                .fill(theme::window_fill())
+                .stroke(egui::Stroke::new(1.0, theme::window_stroke())),
         )
         .show(ctx, |ui| {
+            // ── Map theme ──────────────────────────────────────────────────
+            ui.heading("Map Theme");
+            ui.colored_label(
+                theme::text_muted(),
+                "Each palette is grounded in a complementary color relationship. \
+                 The active theme applies immediately.",
+            );
+            ui.add_space(8.0);
+            ui.horizontal_wrapped(|ui| {
+                for &t in theme::MapTheme::ALL {
+                    let is_active = model.map_theme == t;
+                    let fill = if is_active {
+                        theme::chrome_active_fill()
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    let label_color = if is_active {
+                        theme::chrome_active_text()
+                    } else {
+                        theme::text_muted()
+                    };
+                    let btn = egui::Button::new(
+                        egui::RichText::new(t.label()).color(label_color).small(),
+                    )
+                    .fill(fill)
+                    .corner_radius(4.0);
+                    if ui.add(btn).clicked() {
+                        model.map_theme = t;
+                    }
+                }
+            });
+            if let Some(active) = theme::MapTheme::ALL.iter().find(|&&t| t == model.map_theme) {
+                ui.small(active.theory());
+            }
+            ui.add_space(14.0);
+            ui.separator();
+            ui.add_space(10.0);
+
+            // ── Factal ─────────────────────────────────────────────────────
             ui.heading("Factal");
             ui.colored_label(
                 theme::text_muted(),

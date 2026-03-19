@@ -52,7 +52,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let selected_camera_id = model.selected_camera_id.as_deref();
     let nearby = model.nearby_cameras(250.0);
 
-    let event_markers: Vec<_> = if model.cinematic_mode {
+    let event_markers: Vec<_> = if model.cinematic_mode || !model.show_event_markers {
         Vec::new()
     } else {
         model
@@ -145,7 +145,7 @@ fn draw_backdrop(painter: &egui::Painter, rect: egui::Rect, layout: &GlobeLayout
     painter.circle_filled(
         layout.center,
         layout.radius * 0.998,
-        egui::Color32::from_rgba_premultiplied(2, 6, 10, 252),
+        theme::scene_backdrop(),
     );
 
     painter.circle_stroke(
@@ -205,7 +205,7 @@ fn draw_graticule(
 
     let major_color = theme::grid_color().gamma_multiply(1.8).linear_multiply(0.9);
     let minor_color = theme::grid_color().gamma_multiply(0.7);
-    let special_color = egui::Color32::from_rgb(255, 210, 80).gamma_multiply(0.55); // amber for named lines
+    let special_color = theme::hot_color().gamma_multiply(0.72); // warm accent for named lines
 
     // ── Latitude lines ──────────────────────────────────────────────────────
     // Collect which latitudes to draw and whether each is special/major/minor.
@@ -274,7 +274,7 @@ fn draw_global_coastlines(
             view,
             &coastline.points,
             0.022,
-            egui::Color32::from_rgb(142, 234, 246),
+            theme::contour_color().gamma_multiply(1.2),
             0.16,
         );
     }
@@ -301,9 +301,9 @@ fn draw_global_topo(
     for contour in topo.iter() {
         let major = (contour.elevation_m.round() as i32).rem_euclid(2_000) == 0;
         let color = if major {
-            egui::Color32::from_rgb(210, 95, 45)
+            theme::hot_color()
         } else {
-            egui::Color32::from_rgb(115, 185, 210)
+            theme::contour_color()
         };
         draw_geo_path(
             painter,
@@ -345,9 +345,9 @@ fn draw_srtm_on_globe(
     for contour in contours.iter() {
         let major = (contour.elevation_m.round() as i32).rem_euclid(50) == 0;
         let color = if major {
-            egui::Color32::from_rgb(244, 123, 61)
+            theme::hot_color()
         } else {
-            egui::Color32::from_rgb(121, 212, 236)
+            theme::contour_color()
         };
         // Use the same altitude_scale as coastlines (0.022) so SRTM contours
         // sit on the sphere surface and don't parallax against the coastline layer.
@@ -449,11 +449,7 @@ fn draw_real_contours(
             view,
             &contour.points,
             lod.altitude_scale,
-            if emphasis {
-                egui::Color32::from_rgb(244, 123, 61)
-            } else {
-                egui::Color32::from_rgb(198, 229, 236)
-            },
+            if emphasis { theme::hot_color() } else { theme::contour_color() },
             lod.backface_alpha * 0.1,
         );
     }
@@ -472,10 +468,7 @@ fn draw_event_marker(
         painter.circle_stroke(
             marker.pos,
             pulse,
-            egui::Stroke::new(
-                1.3,
-                egui::Color32::from_rgba_premultiplied(255, 241, 212, 170),
-            ),
+            egui::Stroke::new(1.3, theme::marker_glow_warm()),
         );
     }
 
@@ -489,11 +482,7 @@ fn draw_event_marker(
 
 fn draw_camera_marker(painter: &egui::Painter, marker: ProjectedPoint, is_selected: bool) {
     let radius = 3.0 + marker.depth;
-    let color = if is_selected {
-        egui::Color32::from_rgb(215, 245, 252)
-    } else {
-        theme::camera_color()
-    };
+    let color = if is_selected { theme::marker_camera_ring() } else { theme::camera_color() };
 
     painter.circle_filled(marker.pos, radius, color);
     if is_selected {

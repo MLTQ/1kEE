@@ -55,7 +55,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
             globe_scene::paint(&painter, rect, model, ui.ctx().input(|input| input.time))
         };
 
-        if model.terrain_focus_location().is_some() {
+        if model.terrain_focus_location().is_some() && !model.cinematic_mode {
             draw_focus_card(ui, model, local_terrain_mode);
         }
         if local_terrain_mode {
@@ -87,8 +87,8 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
 
 fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
     egui::Frame::new()
-        .fill(egui::Color32::from_rgba_premultiplied(7, 18, 24, 216))
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(24, 63, 79)))
+        .fill(theme::panel_fill(216))
+        .stroke(egui::Stroke::new(1.0, theme::panel_stroke()))
         .corner_radius(10.0)
         .inner_margin(egui::Margin::symmetric(12, 10))
         .show(ui, |ui| {
@@ -97,9 +97,9 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                 ui.separator();
 
                 // GLOBE / LOCAL mode toggle
-                let active_fill = egui::Color32::from_rgb(24, 63, 79);
+                let active_fill = theme::chrome_active_fill();
                 let inactive_fill = egui::Color32::TRANSPARENT;
-                let active_text = egui::Color32::from_rgb(142, 234, 246);
+                let active_text = theme::chrome_active_text();
                 let inactive_text = theme::text_muted();
 
                 let globe_fill = if !model.globe_view.local_mode {
@@ -144,6 +144,7 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                 ui.separator();
                 ui.colored_label(theme::text_muted(), "Layers");
 
+                ui.checkbox(&mut model.show_event_markers, "Events");
                 ui.checkbox(&mut model.show_coastlines, "Coastline");
                 ui.checkbox(&mut model.show_graticule, "Graticule");
                 let major_changed = ui
@@ -222,8 +223,8 @@ fn draw_event_hover_tooltip(
         .interactable(false)
         .show(ctx, |ui| {
             egui::Frame::new()
-                .fill(egui::Color32::from_rgba_premultiplied(7, 18, 24, 238))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(24, 63, 79)))
+                .fill(theme::panel_fill(238))
+                .stroke(egui::Stroke::new(1.0, theme::panel_stroke()))
                 .corner_radius(8.0)
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
@@ -276,8 +277,8 @@ fn draw_focus_card(ui: &mut egui::Ui, model: &AppModel, local_terrain_mode: bool
         .interactable(false)
         .show(ui.ctx(), |ui| {
             egui::Frame::new()
-                .fill(egui::Color32::from_rgba_premultiplied(7, 18, 24, 230))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(24, 63, 79)))
+                .fill(theme::panel_fill(230))
+                .stroke(egui::Stroke::new(1.0, theme::panel_stroke()))
                 .corner_radius(10.0)
                 .inner_margin(egui::Margin::same(10))
                 .show(ui, |ui| {
@@ -325,8 +326,8 @@ fn globe_srtm_pending(model: &AppModel) -> bool {
 
 fn draw_local_footer(ui: &mut egui::Ui, model: &mut AppModel, beam_elevation_m: Option<f32>) {
     egui::Frame::new()
-        .fill(egui::Color32::from_rgba_premultiplied(7, 18, 24, 216))
-        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(24, 63, 79)))
+        .fill(theme::panel_fill(216))
+        .stroke(egui::Stroke::new(1.0, theme::panel_stroke()))
         .corner_radius(10.0)
         .inner_margin(egui::Margin::symmetric(12, 10))
         .show(ui, |ui| {
@@ -359,7 +360,7 @@ fn draw_local_footer(ui: &mut egui::Ui, model: &mut AppModel, beam_elevation_m: 
 
                 if model.show_coastlines {
                     ui.separator();
-                    ui.colored_label(egui::Color32::from_rgb(142, 234, 246), "CYAN");
+                    ui.colored_label(theme::contour_color(), "CYAN");
                     ui.label("coastline");
                 }
 

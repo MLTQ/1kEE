@@ -27,8 +27,8 @@ pub fn render_terrain_library(ctx: &egui::Context, model: &mut AppModel) {
         .min_size(egui::vec2(480.0, 420.0))
         .frame(
             egui::Frame::window(&ctx.style())
-                .fill(egui::Color32::from_rgb(14, 18, 23))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(43, 49, 58))),
+                .fill(theme::window_fill())
+                .stroke(egui::Stroke::new(1.0, theme::window_stroke())),
         )
         .show(ctx, |ui| {
             ui.colored_label(
@@ -71,7 +71,7 @@ pub fn render_terrain_library(ctx: &egui::Context, model: &mut AppModel) {
                     for city in city_catalog::search(&model.city_filter, 80) {
                         let mut checked = model.selected_city_ids.contains(city.id.as_str());
                         egui::Frame::group(ui.style())
-                            .fill(egui::Color32::from_rgb(15, 22, 28))
+                            .fill(theme::item_fill())
                             .inner_margin(egui::Margin::symmetric(10, 8))
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {

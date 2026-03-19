@@ -84,7 +84,7 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
 
 fn metric_chip(ui: &mut egui::Ui, label: &str, value: &str) {
     egui::Frame::new()
-        .fill(egui::Color32::from_rgb(13, 30, 43))
+        .fill(theme::item_fill())
         .corner_radius(8.0)
         .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {
