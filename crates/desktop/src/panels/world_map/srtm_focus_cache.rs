@@ -266,6 +266,7 @@ pub fn ensure_global_land_overview(selected_root: Option<&Path>) -> Option<PathB
             &out,
         );
         global_overview_building().store(false, Ordering::SeqCst);
+        crate::app::request_repaint();
     });
 
     None
@@ -298,6 +299,7 @@ pub fn ensure_global_coastline_cache(selected_root: Option<&Path>) -> Option<Pat
         let out = cache_root_clone.join("gebco_2025_coastline_0m.gpkg");
         let _ = build_global_coastline(&tiles, &tmp_vrt, &tmp_gpkg, &out);
         global_coastline_building().store(false, Ordering::SeqCst);
+        crate::app::request_repaint();
     });
 
     None
@@ -743,6 +745,7 @@ fn ensure_bucket_asset(
             guard.remove(&tile);
         }
         release_build_slot();
+        crate::app::request_repaint();
     });
 
     None

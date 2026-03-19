@@ -3,7 +3,27 @@ use crate::factal_stream;
 use crate::model::AppModel;
 use crate::panels;
 use crate::theme;
+use std::sync::OnceLock;
 use std::time::Duration;
+
+// ---------------------------------------------------------------------------
+// Global egui context — lets fire-and-forget background threads wake the
+// event loop when they finish, even when the window is on a hidden macOS Space.
+// ---------------------------------------------------------------------------
+static REPAINT_CTX: OnceLock<egui::Context> = OnceLock::new();
+
+/// Called once at startup from `DashboardApp::new`.
+pub(crate) fn register_repaint_ctx(ctx: &egui::Context) {
+    let _ = REPAINT_CTX.set(ctx.clone());
+}
+
+/// Call this from any background thread that has just produced new data the
+/// UI should show.  Safe to call from any thread, any number of times.
+pub fn request_repaint() {
+    if let Some(ctx) = REPAINT_CTX.get() {
+        ctx.request_repaint();
+    }
+}
 
 pub struct DashboardApp {
     model: AppModel,
@@ -13,6 +33,7 @@ pub struct DashboardApp {
 impl DashboardApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
+        register_repaint_ctx(&cc.egui_ctx);
 
         let model = AppModel::seed_demo();
         Self { last_theme: model.map_theme, model }
