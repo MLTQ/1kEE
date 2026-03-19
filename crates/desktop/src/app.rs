@@ -7,15 +7,15 @@ use std::time::Duration;
 
 pub struct DashboardApp {
     model: AppModel,
+    last_theme: theme::MapTheme,
 }
 
 impl DashboardApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
 
-        Self {
-            model: AppModel::seed_demo(),
-        }
+        let model = AppModel::seed_demo();
+        Self { last_theme: model.map_theme, model }
     }
 }
 
@@ -31,6 +31,11 @@ impl eframe::App for DashboardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         factal_stream::tick(&mut self.model);
         camera_registry::tick(&mut self.model);
+
+        if self.model.map_theme != self.last_theme {
+            theme::set_theme(ctx, self.model.map_theme);
+            self.last_theme = self.model.map_theme;
+        }
         if self.model.has_factal_api_key() || self.model.has_camera_source_keys() {
             ctx.request_repaint_after(Duration::from_secs(1));
         }
