@@ -1508,7 +1508,7 @@ fn expand_bounds(bounds: GeoBounds, margin_degrees: f32) -> GeoBounds {
     }
 }
 
-fn lat_lon_to_tile(lat: f32, lon: f32, zoom: u8) -> (u32, u32) {
+pub fn lat_lon_to_tile(lat: f32, lon: f32, zoom: u8) -> (u32, u32) {
     let lat = lat.clamp(-85.0511, 85.0511) as f64;
     let lon = lon.clamp(-180.0, 180.0) as f64;
     let zoom_scale = 2_f64.powi(i32::from(zoom));

@@ -1,8 +1,9 @@
 use crate::model::{AppModel, EventRecord, GeoPoint, GlobeViewState, NearbyCamera};
-use crate::osm_ingest::{self, GeoBounds as OsmGeoBounds, RoadLayerKind};
+use crate::osm_ingest::{self, GeoBounds as OsmGeoBounds, RoadLayerKind, RoadPolyline};
 use crate::terrain_assets;
 use crate::theme;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 use super::contour_asset;
 use super::globe_scene::GlobeScene;
@@ -703,6 +704,26 @@ fn draw_contour_stack(
     }
 }
 
+// ── Road tile cache ────────────────────────────────────────────────────────
+// Road geometry is fetched from SQLite and cached until the tile coverage
+// actually changes.  Opening a DB connection + running a query on every
+// frame was the source of the 2-5 FPS regression.
+
+struct RoadCache {
+    tile_zoom: u8,
+    tile_x_min: u32,
+    tile_x_max: u32,
+    tile_y_min: u32,
+    tile_y_max: u32,
+    major: Vec<RoadPolyline>,
+    minor: Vec<RoadPolyline>,
+}
+
+fn road_cache() -> &'static Mutex<Option<RoadCache>> {
+    static CACHE: OnceLock<Mutex<Option<RoadCache>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
 fn draw_roads(
     painter: &egui::Painter,
     layout: &LocalLayout,
@@ -714,6 +735,8 @@ fn draw_roads(
     show_minor_roads: bool,
 ) {
     if !show_major_roads && !show_minor_roads {
+        // Clear the cache so it reloads when roads are re-enabled.
+        if let Ok(mut g) = road_cache().lock() { *g = None; }
         return;
     }
 
@@ -725,45 +748,46 @@ fn draw_roads(
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
 
-    if show_minor_roads {
-        let roads = osm_ingest::load_roads_for_bounds(
-            selected_root,
-            bounds,
-            tile_zoom,
-            RoadLayerKind::Minor,
-        );
-        draw_road_layer(
-            painter,
-            layout,
-            view,
-            selected_root,
-            viewport_center,
-            extent_x_km,
-            extent_y_km,
-            &roads,
-            egui::Stroke::new(0.8, egui::Color32::from_rgb(116, 132, 142)),
-        );
+    // Tile coverage of the current viewport.
+    let (x0, y0) = osm_ingest::lat_lon_to_tile(bounds.max_lat, bounds.min_lon, tile_zoom);
+    let (x1, y1) = osm_ingest::lat_lon_to_tile(bounds.min_lat, bounds.max_lon, tile_zoom);
+    let (txmin, txmax) = (x0.min(x1), x0.max(x1));
+    let (tymin, tymax) = (y0.min(y1), y0.max(y1));
+
+    let mut cache_guard = match road_cache().lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+
+    // Re-query only when tile coverage or zoom changes.
+    let stale = cache_guard.as_ref().map_or(true, |c| {
+        c.tile_zoom != tile_zoom
+            || c.tile_x_min != txmin || c.tile_x_max != txmax
+            || c.tile_y_min != tymin || c.tile_y_max != tymax
+    });
+
+    if stale {
+        let major = if show_major_roads {
+            osm_ingest::load_roads_for_bounds(selected_root, bounds, tile_zoom, RoadLayerKind::Major)
+        } else {
+            Vec::new()
+        };
+        let minor = if show_minor_roads {
+            osm_ingest::load_roads_for_bounds(selected_root, bounds, tile_zoom, RoadLayerKind::Minor)
+        } else {
+            Vec::new()
+        };
+        *cache_guard = Some(RoadCache { tile_zoom, tile_x_min: txmin, tile_x_max: txmax, tile_y_min: tymin, tile_y_max: tymax, major, minor });
     }
 
-    if show_major_roads {
-        let roads = osm_ingest::load_roads_for_bounds(
-            selected_root,
-            bounds,
-            tile_zoom,
-            RoadLayerKind::Major,
-        );
-        draw_road_layer(
-            painter,
-            layout,
-            view,
-            selected_root,
-            viewport_center,
-            extent_x_km,
-            extent_y_km,
-            &roads,
-            egui::Stroke::new(1.35, egui::Color32::from_rgb(255, 210, 92)),
-        );
-    }
+    let cache = cache_guard.as_ref().unwrap();
+
+    draw_road_layer(painter, layout, view, selected_root, viewport_center,
+        extent_x_km, extent_y_km, &cache.minor,
+        egui::Stroke::new(0.8, egui::Color32::from_rgb(116, 132, 142)));
+    draw_road_layer(painter, layout, view, selected_root, viewport_center,
+        extent_x_km, extent_y_km, &cache.major,
+        egui::Stroke::new(1.35, egui::Color32::from_rgb(255, 210, 92)));
 }
 
 fn draw_road_layer(
