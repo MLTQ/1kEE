@@ -462,10 +462,10 @@ fn draw_tile_pulse_grid(
     time: f64,
     ready_buckets: &std::collections::HashSet<(i32, i32)>,
 ) {
-    const GRID: usize = 8;          // 8×8 = 64 cells per tile
+    const GRID: usize = 50;          // 50×50 = 2 500 cells per tile
     const DISSOLVE_CYCLE: f64 = 7.0; // seconds for one full sweep
     const EDGE_BAND: f32 = 0.14;    // fraction of cycle that counts as "burning"
-    const CELL_INSET: f32 = 0.06;   // fractional gap between cells
+    const CELL_INSET: f32 = 0.10;   // fractional gap between cells (10% each side)
 
     let half_extent = srtm_focus_cache::half_extent_for_zoom(render_zoom);
     let bucket_step = half_extent * 0.45;
@@ -564,7 +564,7 @@ fn draw_tile_pulse_grid(
                     if edge < 0.4 {
                         let t = 1.0 - edge / 0.4; // 0→1 as cell nears threshold
                         let fa = (t * 40.0 * breath) as u8;
-                        let offset = egui::Vec2::new(t * 3.5, 0.0);
+                        let offset = egui::Vec2::new(t * 1.8, 0.0);
 
                         // Hot ghost shifted one way
                         quad(&mut mesh_hot,
