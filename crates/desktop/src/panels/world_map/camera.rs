@@ -65,6 +65,49 @@ pub fn apply_interaction(
         view.yaw -= dt * 0.18;
     }
 
+    // ── Keyboard arrow navigation (active while map is hovered) ──────────────
+    if response.hovered() {
+        let dt = ctx.input(|input| input.stable_dt).clamp(0.0, 0.05);
+        let (left, right, up, down, rotate_mod) = ctx.input(|input| (
+            input.key_down(egui::Key::ArrowLeft),
+            input.key_down(egui::Key::ArrowRight),
+            input.key_down(egui::Key::ArrowUp),
+            input.key_down(egui::Key::ArrowDown),
+            input.modifiers.ctrl || input.modifiers.shift,
+        ));
+
+        if left || right || up || down {
+            let h = if left { -1.0f32 } else if right { 1.0 } else { 0.0 };
+            let v = if up { -1.0f32 } else if down { 1.0 } else { 0.0 };
+
+            if view.local_mode {
+                if rotate_mod {
+                    // Ctrl/Shift + arrows → rotate camera angle
+                    view.local_yaw -= h * dt * 1.6;
+                    view.local_pitch =
+                        (view.local_pitch - v * dt * 1.1).clamp(0.35, 1.35);
+                } else {
+                    // Plain arrows → pan using same logic as mouse drag
+                    // 180 px/s key speed gives a comfortable pan rate at any zoom level.
+                    let key_px = 180.0 * dt;
+                    pan_local_center(
+                        response.rect,
+                        view,
+                        egui::Vec2::new(h * key_px, v * key_px),
+                    );
+                }
+            } else {
+                // Globe mode: rotate yaw/pitch, speed eases down as zoom grows.
+                let rate = 1.4 / view.zoom.sqrt().max(0.5);
+                view.yaw -= h * dt * rate;
+                view.pitch = (view.pitch + v * dt * rate * 0.72)
+                    .clamp(-GLOBE_PITCH_LIMIT_RAD, GLOBE_PITCH_LIMIT_RAD);
+            }
+            view.auto_spin = false;
+            ctx.request_repaint();
+        }
+    }
+
     // Keep local_center in sync with the globe viewport while in globe mode,
     // so switching to local renders the area the user is looking at.
     if !view.local_mode {
