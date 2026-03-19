@@ -775,8 +775,15 @@ impl ElevatedRoad {
 /// Call this whenever the road layer checkboxes change.
 pub fn invalidate_road_cache() {
     if let Ok(mut g) = road_cache().lock() {
-        *g = None;
+        g.cache = None;
+        // Leave `building` alone — any in-flight thread will finish and
+        // write a result; the stale check will then trigger a fresh build.
     }
+}
+
+/// True while a background road-cache build is in progress.
+pub fn road_cache_building() -> bool {
+    road_cache().lock().map(|g| g.building).unwrap_or(false)
 }
 
 struct RoadCache {
@@ -785,18 +792,22 @@ struct RoadCache {
     tile_x_max: u32,
     tile_y_min: u32,
     tile_y_max: u32,
-    /// Snapshot of `osm_ingest::road_data_generation()` at load time.
     road_gen: u64,
-    /// Which layers were loaded — used to detect checkbox changes.
     had_major: bool,
     had_minor: bool,
     major: Vec<ElevatedRoad>,
     minor: Vec<ElevatedRoad>,
 }
 
-fn road_cache() -> &'static Mutex<Option<RoadCache>> {
-    static CACHE: OnceLock<Mutex<Option<RoadCache>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(None))
+struct RoadCacheStore {
+    cache: Option<RoadCache>,
+    /// True while a background thread is building new geometry.
+    building: bool,
+}
+
+fn road_cache() -> &'static Mutex<RoadCacheStore> {
+    static CACHE: OnceLock<Mutex<RoadCacheStore>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(RoadCacheStore { cache: None, building: false }))
 }
 
 fn draw_roads(
@@ -810,8 +821,7 @@ fn draw_roads(
     show_minor_roads: bool,
 ) {
     if !show_major_roads && !show_minor_roads {
-        // Clear the cache so it reloads when roads are re-enabled.
-        if let Ok(mut g) = road_cache().lock() { *g = None; }
+        if let Ok(mut g) = road_cache().lock() { g.cache = None; }
         return;
     }
 
@@ -823,76 +833,78 @@ fn draw_roads(
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
 
-    // Tile coverage of the current viewport.
     let (x0, y0) = osm_ingest::lat_lon_to_tile(bounds.max_lat, bounds.min_lon, tile_zoom);
     let (x1, y1) = osm_ingest::lat_lon_to_tile(bounds.min_lat, bounds.max_lon, tile_zoom);
     let (txmin, txmax) = (x0.min(x1), x0.max(x1));
     let (tymin, tymax) = (y0.min(y1), y0.max(y1));
+    const MARGIN: u32 = 1;
+    let current_gen = osm_ingest::road_data_generation();
 
-    let mut cache_guard = match road_cache().lock() {
+    // ── Stale check + background build launch ─────────────────────────────
+    {
+        let mut store = match road_cache().lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        let stale = store.cache.as_ref().map_or(true, |c| {
+            c.tile_zoom != tile_zoom
+                || c.road_gen != current_gen
+                || c.had_major != show_major_roads
+                || c.had_minor != show_minor_roads
+                || c.tile_x_min > txmin
+                || c.tile_x_max < txmax
+                || c.tile_y_min > tymin
+                || c.tile_y_max < tymax
+        });
+
+        if stale && !store.building {
+            let (lxmin, lxmax) = (txmin.saturating_sub(MARGIN), txmax + MARGIN);
+            let (lymin, lymax) = (tymin.saturating_sub(MARGIN), tymax + MARGIN);
+            store.building = true;
+            drop(store); // release lock before spawning
+
+            let root_buf = selected_root.map(|p| p.to_path_buf());
+            std::thread::spawn(move || {
+                let root_ref = root_buf.as_deref();
+                let major_polys = if show_major_roads {
+                    osm_ingest::load_roads_for_bounds(root_ref, bounds, tile_zoom, RoadLayerKind::Major)
+                } else { Vec::new() };
+                let major: Vec<ElevatedRoad> = major_polys.iter()
+                    .map(|p| ElevatedRoad::from_polyline(p, root_ref, 1))
+                    .collect();
+
+                let minor_polys = if show_minor_roads {
+                    osm_ingest::load_roads_for_bounds(root_ref, bounds, tile_zoom, RoadLayerKind::Minor)
+                } else { Vec::new() };
+                let minor: Vec<ElevatedRoad> = minor_polys.iter()
+                    .map(|p| ElevatedRoad::from_polyline(p, root_ref, 5))
+                    .collect();
+
+                if let Ok(mut store) = road_cache().lock() {
+                    store.cache = Some(RoadCache {
+                        tile_zoom,
+                        tile_x_min: lxmin, tile_x_max: lxmax,
+                        tile_y_min: lymin, tile_y_max: lymax,
+                        road_gen: current_gen,
+                        had_major: show_major_roads,
+                        had_minor: show_minor_roads,
+                        major,
+                        minor,
+                    });
+                    store.building = false;
+                }
+                crate::app::request_repaint();
+            });
+        }
+        // `store` dropped here (or already explicitly dropped above)
+    }
+
+    // ── Render from whatever cache is currently ready ───────────────────
+    let store = match road_cache().lock() {
         Ok(g) => g,
         Err(_) => return,
     };
-
-    // Stale when: zoom changes, show-flags changed (layer enabled/disabled),
-    // a new road import completed (road_gen advanced), or the viewport panned
-    // outside the loaded tile range.  1-tile margin so small pans don't reload.
-    const MARGIN: u32 = 1;
-    let current_gen = osm_ingest::road_data_generation();
-    let stale = cache_guard.as_ref().map_or(true, |c| {
-        c.tile_zoom != tile_zoom
-            || c.road_gen != current_gen
-            || c.had_major != show_major_roads
-            || c.had_minor != show_minor_roads
-            || c.tile_x_min > txmin
-            || c.tile_x_max < txmax
-            || c.tile_y_min > tymin
-            || c.tile_y_max < tymax
-    });
-
-    if stale {
-        let (lxmin, lxmax) = (txmin.saturating_sub(MARGIN), txmax + MARGIN);
-        let (lymin, lymax) = (tymin.saturating_sub(MARGIN), tymax + MARGIN);
-
-        // Load raw polylines from SQLite, then pre-sample elevation once per
-        // vertex.  This moves the expensive srtm_stream mutex work here (on
-        // a cache miss) instead of repeating it on every frame.
-        // Minor roads use elev_step=5 to reduce SRTM lookups by 5× — they
-        // still follow terrain via linear interpolation between sample points.
-        let major = if show_major_roads {
-            osm_ingest::load_roads_for_bounds(
-                selected_root, bounds, tile_zoom, RoadLayerKind::Major,
-            )
-            .iter()
-            .map(|p| ElevatedRoad::from_polyline(p, selected_root, 1))
-            .collect()
-        } else {
-            Vec::new()
-        };
-        let minor = if show_minor_roads {
-            osm_ingest::load_roads_for_bounds(
-                selected_root, bounds, tile_zoom, RoadLayerKind::Minor,
-            )
-            .iter()
-            .map(|p| ElevatedRoad::from_polyline(p, selected_root, 5))
-            .collect()
-        } else {
-            Vec::new()
-        };
-
-        *cache_guard = Some(RoadCache {
-            tile_zoom,
-            tile_x_min: lxmin, tile_x_max: lxmax,
-            tile_y_min: lymin, tile_y_max: lymax,
-            road_gen: current_gen,
-            had_major: show_major_roads,
-            had_minor: show_minor_roads,
-            major,
-            minor,
-        });
-    }
-
-    let cache = cache_guard.as_ref().unwrap();
+    let Some(cache) = &store.cache else { return };
 
     if show_minor_roads {
         draw_road_layer(painter, layout, view, viewport_center,
@@ -989,16 +1001,26 @@ struct WaterCache {
     features: Vec<ElevatedWater>,
 }
 
-fn water_cache() -> &'static Mutex<Option<WaterCache>> {
-    static CACHE: OnceLock<Mutex<Option<WaterCache>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(None))
+struct WaterCacheStore {
+    cache: Option<WaterCache>,
+    building: bool,
+}
+
+fn water_cache() -> &'static Mutex<WaterCacheStore> {
+    static CACHE: OnceLock<Mutex<WaterCacheStore>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(WaterCacheStore { cache: None, building: false }))
 }
 
 /// Clear the water tile cache so the next draw reloads from SQLite.
 pub fn invalidate_water_cache() {
     if let Ok(mut g) = water_cache().lock() {
-        *g = None;
+        g.cache = None;
     }
+}
+
+/// True while a background water-cache build is in progress.
+pub fn water_cache_building() -> bool {
+    water_cache().lock().map(|g| g.building).unwrap_or(false)
 }
 
 fn draw_water(
@@ -1011,7 +1033,7 @@ fn draw_water(
     show_water: bool,
 ) {
     if !show_water {
-        if let Ok(mut g) = water_cache().lock() { *g = None; }
+        if let Ok(mut g) = water_cache().lock() { g.cache = None; }
         return;
     }
 
@@ -1027,50 +1049,65 @@ fn draw_water(
     let (x1, y1) = osm_ingest::lat_lon_to_tile(bounds.min_lat, bounds.max_lon, tile_zoom);
     let (txmin, txmax) = (x0.min(x1), x0.max(x1));
     let (tymin, tymax) = (y0.min(y1), y0.max(y1));
+    const MARGIN: u32 = 1;
+    let current_gen = osm_ingest::water_data_generation();
 
-    let mut cache_guard = match water_cache().lock() {
+    // ── Stale check + background build launch ─────────────────────────────
+    {
+        let mut store = match water_cache().lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        let stale = store.cache.as_ref().map_or(true, |c| {
+            c.tile_zoom != tile_zoom
+                || c.water_gen != current_gen
+                || c.tile_x_min > txmin
+                || c.tile_x_max < txmax
+                || c.tile_y_min > tymin
+                || c.tile_y_max < tymax
+        });
+
+        if stale && !store.building {
+            let (lxmin, lxmax) = (txmin.saturating_sub(MARGIN), txmax + MARGIN);
+            let (lymin, lymax) = (tymin.saturating_sub(MARGIN), tymax + MARGIN);
+            store.building = true;
+            drop(store);
+
+            let root_buf = selected_root.map(|p| p.to_path_buf());
+            std::thread::spawn(move || {
+                let root_ref = root_buf.as_deref();
+                let polys = osm_ingest::load_water_for_bounds(root_ref, bounds, tile_zoom);
+                let features: Vec<ElevatedWater> = polys.iter()
+                    .map(|p| ElevatedWater::from_polyline(p, root_ref))
+                    .collect();
+
+                if let Ok(mut store) = water_cache().lock() {
+                    store.cache = Some(WaterCache {
+                        tile_zoom,
+                        tile_x_min: lxmin, tile_x_max: lxmax,
+                        tile_y_min: lymin, tile_y_max: lymax,
+                        water_gen: current_gen,
+                        features,
+                    });
+                    store.building = false;
+                }
+                crate::app::request_repaint();
+            });
+        }
+    }
+
+    // ── Render from whatever cache is currently ready ───────────────────
+    let store = match water_cache().lock() {
         Ok(g) => g,
         Err(_) => return,
     };
+    let Some(cache) = &store.cache else { return };
 
-    const MARGIN: u32 = 1;
-    let current_gen = osm_ingest::water_data_generation();
-    let stale = cache_guard.as_ref().map_or(true, |c| {
-        c.tile_zoom != tile_zoom
-            || c.water_gen != current_gen
-            || c.tile_x_min > txmin
-            || c.tile_x_max < txmax
-            || c.tile_y_min > tymin
-            || c.tile_y_max < tymax
-    });
-
-    if stale {
-        let (lxmin, lxmax) = (txmin.saturating_sub(MARGIN), txmax + MARGIN);
-        let (lymin, lymax) = (tymin.saturating_sub(MARGIN), tymax + MARGIN);
-
-        let features = osm_ingest::load_water_for_bounds(selected_root, bounds, tile_zoom)
-            .iter()
-            .map(|p| ElevatedWater::from_polyline(p, selected_root))
-            .collect();
-
-        *cache_guard = Some(WaterCache {
-            tile_zoom,
-            tile_x_min: lxmin, tile_x_max: lxmax,
-            tile_y_min: lymin, tile_y_max: lymax,
-            water_gen: current_gen,
-            features,
-        });
-    }
-
-    let cache = cache_guard.as_ref().unwrap();
     let water_col = crate::theme::water_color();
-    let area_fill = egui::Color32::from_rgba_unmultiplied(
-        water_col.r(), water_col.g(), water_col.b(), 35,
-    );
     let line_stroke = egui::Stroke::new(1.2, water_col);
 
     for feat in &cache.features {
-        let projected: Vec<_> = feat
+        let mut pts: Vec<_> = feat
             .points
             .iter()
             .filter_map(|&(pt, elev)| {
@@ -1080,20 +1117,18 @@ fn draw_water(
             })
             .collect();
 
-        if projected.len() < 2 {
+        if pts.len() < 2 {
             continue;
         }
 
-        if feat.is_area && projected.len() >= 3 {
-            // Draw a filled polygon outline for lakes/reservoirs.
-            painter.add(egui::Shape::convex_polygon(
-                projected.clone(),
-                area_fill,
-                line_stroke,
-            ));
-        } else {
-            painter.add(egui::Shape::line(projected, line_stroke));
+        // For area features (lakes, reservoirs) close the ring so it draws as a
+        // loop.  Do NOT use convex_polygon — OSM shorelines are non-convex and
+        // the fan triangulation produces the sharp spike artifacts seen in the
+        // screenshots.
+        if feat.is_area && pts.len() >= 3 {
+            pts.push(pts[0]);
         }
+        painter.add(egui::Shape::line(pts, line_stroke));
     }
 }
 

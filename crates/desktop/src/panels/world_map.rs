@@ -31,6 +31,8 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
                 && contour_asset::global_coastlines_pending(model.selected_root.as_deref()))
             || ((model.show_major_roads || model.show_minor_roads || model.show_water)
                 && osm_ingest::has_active_jobs(model.selected_root.as_deref()))
+            || local_terrain_scene::road_cache_building()
+            || local_terrain_scene::water_cache_building()
         {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(180));

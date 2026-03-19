@@ -171,7 +171,7 @@ pub fn apply_interaction(
     if view.local_mode {
         view.local_yaw += view.vel_local_yaw * dt;
         view.local_pitch =
-            (view.local_pitch + view.vel_local_pitch * dt).clamp(0.35, 1.35);
+            (view.local_pitch + view.vel_local_pitch * dt).clamp(0.02, 1.55);
         view.local_center.lat =
             (view.local_center.lat + view.vel_local_lat * dt).clamp(-85.0, 85.0);
         view.local_center.lon =
