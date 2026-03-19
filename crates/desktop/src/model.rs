@@ -39,6 +39,9 @@ pub struct GlobeViewState {
     /// Local-mode camera-angle rotation velocity (rad/s).
     pub vel_local_yaw: f32,
     pub vel_local_pitch: f32,
+    /// Seconds any movement key has been continuously held — drives the
+    /// acceleration ramp.  Resets to 0 when all keys are released.
+    pub key_hold_secs: f32,
 }
 
 impl GlobeViewState {
@@ -60,6 +63,7 @@ impl GlobeViewState {
             vel_local_lon: 0.0,
             vel_local_yaw: 0.0,
             vel_local_pitch: 0.0,
+            key_hold_secs: 0.0,
         };
         state.focus_on(point);
         state

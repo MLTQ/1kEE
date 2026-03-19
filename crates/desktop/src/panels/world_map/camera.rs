@@ -98,6 +98,14 @@ pub fn apply_interaction(
         ));
 
         if left || right || up || down {
+            // Accumulate hold time and compute an acceleration ramp.
+            // sqrt gives a fast initial rise that flattens at full speed,
+            // so a short tap is a small nudge while holding builds up pace.
+            // Full speed is reached after KEY_RAMP_SECS seconds.
+            const KEY_RAMP_SECS: f32 = 1.8;
+            view.key_hold_secs = (view.key_hold_secs + dt).min(KEY_RAMP_SECS);
+            let ramp = (view.key_hold_secs / KEY_RAMP_SECS).sqrt();
+
             input_active = true;
             let h = if left { -1.0f32 } else if right { 1.0 } else { 0.0 };
             let v = if up { -1.0f32 } else if down { 1.0 } else { 0.0 };
@@ -105,14 +113,13 @@ pub fn apply_interaction(
             if view.local_mode {
                 if rotate_mod {
                     // Ctrl/Shift + arrows → rotate camera
-                    view.vel_local_yaw = lerp(view.vel_local_yaw, -h * 0.9, 0.5);
-                    view.vel_local_pitch = lerp(view.vel_local_pitch, -v * 0.65, 0.5);
+                    view.vel_local_yaw = lerp(view.vel_local_yaw, -h * 1.1 * ramp, 0.5);
+                    view.vel_local_pitch = lerp(view.vel_local_pitch, -v * 0.8 * ramp, 0.5);
                     view.vel_local_lat *= 0.9;
                     view.vel_local_lon *= 0.9;
                 } else {
-                    // Plain arrows → pan.  Pass 105 px/s equivalent through the
-                    // same coordinate transform as mouse drag.
-                    let key_px = egui::Vec2::new(h * 105.0, v * 105.0);
+                    // Plain arrows → pan.  Scale the px/s target by ramp.
+                    let key_px = egui::Vec2::new(h * 160.0 * ramp, v * 160.0 * ramp);
                     let (lat_ps, lon_ps) = local_pan_delta_to_latlon(response.rect, view, key_px);
                     view.vel_local_lat = lerp(view.vel_local_lat, lat_ps, 0.5);
                     view.vel_local_lon = lerp(view.vel_local_lon, lon_ps, 0.5);
@@ -120,12 +127,17 @@ pub fn apply_interaction(
                     view.vel_local_pitch *= 0.9;
                 }
             } else {
-                let rate = 0.8 / view.zoom.sqrt().max(0.5);
+                let rate = 1.1 / view.zoom.sqrt().max(0.5) * ramp;
                 view.vel_yaw = lerp(view.vel_yaw, -h * rate, 0.5);
                 view.vel_pitch = lerp(view.vel_pitch, v * rate * 0.72, 0.5);
             }
             view.auto_spin = false;
+        } else {
+            // All keys released — reset ramp so the next tap starts slow again.
+            view.key_hold_secs = 0.0;
         }
+    } else {
+        view.key_hold_secs = 0.0;
     }
 
     // ── Auto-spin ────────────────────────────────────────────────────────────
