@@ -6,7 +6,7 @@ const GLOBE_PITCH_LIMIT_RAD: f32 = 1.53;
 
 /// Half-life for momentum decay in seconds.
 /// After this many seconds the velocity has dropped to 50% of its release value.
-const MOMENTUM_HALF_LIFE: f32 = 0.50;
+const MOMENTUM_HALF_LIFE: f32 = 0.28;
 
 /// Minimum velocity magnitude before it is zeroed out (prevents endless micro-repaints).
 const DEAD_VEL: f32 = 0.0005;
@@ -105,14 +105,14 @@ pub fn apply_interaction(
             if view.local_mode {
                 if rotate_mod {
                     // Ctrl/Shift + arrows → rotate camera
-                    view.vel_local_yaw = lerp(view.vel_local_yaw, -h * 1.6, 0.5);
-                    view.vel_local_pitch = lerp(view.vel_local_pitch, -v * 1.1, 0.5);
+                    view.vel_local_yaw = lerp(view.vel_local_yaw, -h * 0.9, 0.5);
+                    view.vel_local_pitch = lerp(view.vel_local_pitch, -v * 0.65, 0.5);
                     view.vel_local_lat *= 0.9;
                     view.vel_local_lon *= 0.9;
                 } else {
-                    // Plain arrows → pan.  Pass 180 px/s equivalent through the
+                    // Plain arrows → pan.  Pass 105 px/s equivalent through the
                     // same coordinate transform as mouse drag.
-                    let key_px = egui::Vec2::new(h * 180.0, v * 180.0);
+                    let key_px = egui::Vec2::new(h * 105.0, v * 105.0);
                     let (lat_ps, lon_ps) = local_pan_delta_to_latlon(response.rect, view, key_px);
                     view.vel_local_lat = lerp(view.vel_local_lat, lat_ps, 0.5);
                     view.vel_local_lon = lerp(view.vel_local_lon, lon_ps, 0.5);
@@ -120,7 +120,7 @@ pub fn apply_interaction(
                     view.vel_local_pitch *= 0.9;
                 }
             } else {
-                let rate = 1.4 / view.zoom.sqrt().max(0.5);
+                let rate = 0.8 / view.zoom.sqrt().max(0.5);
                 view.vel_yaw = lerp(view.vel_yaw, -h * rate, 0.5);
                 view.vel_pitch = lerp(view.vel_pitch, v * rate * 0.72, 0.5);
             }
