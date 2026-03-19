@@ -35,13 +35,15 @@ impl eframe::App for DashboardApp {
             ctx.request_repaint_after(Duration::from_secs(1));
         }
 
-        panels::render_header(ctx, &mut self.model);
-        panels::render_factal_brief(ctx, &mut self.model);
-        panels::render_factal_settings(ctx, &mut self.model);
-        panels::render_terrain_library(ctx, &mut self.model);
-        panels::render_status_log(ctx, &self.model);
-        panels::render_event_list(ctx, &mut self.model);
-        panels::render_camera_list(ctx, &mut self.model);
+        if !self.model.cinematic_mode {
+            panels::render_header(ctx, &mut self.model);
+            panels::render_factal_brief(ctx, &mut self.model);
+            panels::render_factal_settings(ctx, &mut self.model);
+            panels::render_terrain_library(ctx, &mut self.model);
+            panels::render_status_log(ctx, &self.model);
+            panels::render_event_list(ctx, &mut self.model);
+            panels::render_camera_list(ctx, &mut self.model);
+        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::canvas_background()))

@@ -34,8 +34,12 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let selected_root = model.selected_root.as_deref();
 
     draw_backdrop(painter, rect, &layout);
-    draw_hud_frame(painter, rect);
-    draw_wireframe(painter, &layout, &model.globe_view, &lod);
+    if !model.cinematic_mode {
+        draw_hud_frame(painter, rect);
+    }
+    if model.show_graticule {
+        draw_graticule(painter, &layout, &model.globe_view, &lod);
+    }
     if model.show_coastlines {
         draw_global_coastlines(painter, &layout, &model.globe_view, selected_root);
     }
@@ -48,54 +52,63 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let selected_camera_id = model.selected_camera_id.as_deref();
     let nearby = model.nearby_cameras(250.0);
 
-    let event_markers: Vec<_> = model
-        .events
-        .iter()
-        .filter_map(|event| {
-            project_geo(
-                &layout,
-                &model.globe_view,
-                event.location,
-                lod.altitude_scale * 0.7,
-            )
-            .map(|projected| {
-                draw_event_marker(
-                    painter,
-                    projected,
-                    event,
-                    selected_event_id == Some(event.id.as_str()),
-                    time,
-                );
-                (event.id.clone(), projected.pos)
+    let event_markers: Vec<_> = if model.cinematic_mode {
+        Vec::new()
+    } else {
+        model
+            .events
+            .iter()
+            .filter_map(|event| {
+                project_geo(
+                    &layout,
+                    &model.globe_view,
+                    event.location,
+                    lod.altitude_scale * 0.7,
+                )
+                .map(|projected| {
+                    draw_event_marker(
+                        painter,
+                        projected,
+                        event,
+                        selected_event_id == Some(event.id.as_str()),
+                        time,
+                    );
+                    (event.id.clone(), projected.pos)
+                })
             })
-        })
-        .collect();
+            .collect()
+    };
 
-    let camera_markers: Vec<_> = nearby
-        .iter()
-        .filter_map(|camera| {
-            project_geo(
-                &layout,
-                &model.globe_view,
-                camera.location,
-                lod.altitude_scale * 0.35,
-            )
-            .map(|projected| {
-                let is_selected = selected_camera_id == Some(camera.id.as_str());
-                draw_camera_marker(painter, projected, is_selected);
-                (camera.id.clone(), projected.pos)
+    let camera_markers: Vec<_> = if model.cinematic_mode {
+        Vec::new()
+    } else {
+        nearby
+            .iter()
+            .filter_map(|camera| {
+                project_geo(
+                    &layout,
+                    &model.globe_view,
+                    camera.location,
+                    lod.altitude_scale * 0.35,
+                )
+                .map(|projected| {
+                    let is_selected = selected_camera_id == Some(camera.id.as_str());
+                    draw_camera_marker(painter, projected, is_selected);
+                    (camera.id.clone(), projected.pos)
+                })
             })
-        })
-        .collect();
+            .collect()
+    };
 
-    if let Some((_, event_marker)) = event_markers
-        .iter()
-        .find(|(event_id, _)| selected_event_id == Some(event_id.as_str()))
-    {
-        draw_camera_links(painter, *event_marker, &camera_markers);
+    if !model.cinematic_mode {
+        if let Some((_, event_marker)) = event_markers
+            .iter()
+            .find(|(event_id, _)| selected_event_id == Some(event_id.as_str()))
+        {
+            draw_camera_links(painter, *event_marker, &camera_markers);
+        }
+        draw_legend(painter, rect, &layout, &model.globe_view, &lod);
     }
-
-    draw_legend(painter, rect, &layout, &model.globe_view, &lod);
 
     GlobeScene {
         event_markers,
@@ -167,7 +180,16 @@ fn draw_hud_frame(painter: &egui::Painter, rect: egui::Rect) {
     }
 }
 
-fn draw_wireframe(
+/// Named geographic parallels that always get the major-line treatment.
+const SPECIAL_LATS: &[f32] = &[
+    0.0,    // Equator
+    23.44,  // Tropic of Cancer
+    -23.44, // Tropic of Capricorn
+    66.56,  // Arctic Circle
+    -66.56, // Antarctic Circle
+];
+
+fn draw_graticule(
     painter: &egui::Painter,
     layout: &GlobeLayout,
     view: &GlobeViewState,
@@ -177,42 +199,61 @@ fn draw_wireframe(
         return;
     }
 
-    for lat in (-80..=80).step_by(lod.lat_line_step) {
-        let path: Vec<_> = (-180..=180)
-            .step_by(lod.sample_step)
-            .map(|lon| GeoPoint {
-                lat: lat as f32,
-                lon: lon as f32,
-            })
-            .collect();
-        draw_geo_path(
-            painter,
-            layout,
-            view,
-            &path,
-            lod.altitude_scale,
-            theme::contour_color(),
-            lod.backface_alpha * 0.42,
-        );
+    // At low zoom show every 30°; at medium 15°; zoomed in 10°.
+    let minor_lat_step: i32 = if view.zoom < 2.0 { 30 } else if view.zoom < 6.0 { 15 } else { 10 };
+    let minor_lon_step: i32 = if view.zoom < 2.0 { 30 } else if view.zoom < 6.0 { 15 } else { 10 };
+
+    let major_color = theme::grid_color().gamma_multiply(1.8).linear_multiply(0.9);
+    let minor_color = theme::grid_color().gamma_multiply(0.7);
+    let special_color = egui::Color32::from_rgb(255, 210, 80).gamma_multiply(0.55); // amber for named lines
+
+    // ── Latitude lines ──────────────────────────────────────────────────────
+    // Collect which latitudes to draw and whether each is special/major/minor.
+    let mut lat_lines: Vec<(i32, bool, bool)> = Vec::new(); // (lat_deg, is_special, is_major)
+
+    for lat in (-80..=80).step_by(minor_lat_step as usize) {
+        let is_special = SPECIAL_LATS.iter().any(|&s| (s as i32) == lat);
+        let is_major = lat % 30 == 0;
+        lat_lines.push((lat, is_special, is_major));
+    }
+    // Ensure all special lats are included regardless of step alignment.
+    for &slat in SPECIAL_LATS {
+        let d = slat as i32;
+        if !lat_lines.iter().any(|&(l, _, _)| l == d) {
+            lat_lines.push((d, true, false));
+        }
     }
 
-    for lon in (-180..=180).step_by(lod.lon_line_step) {
+    for (lat, is_special, is_major) in lat_lines {
+        let path: Vec<_> = (-180..=180)
+            .step_by(lod.sample_step)
+            .map(|lon| GeoPoint { lat: lat as f32, lon: lon as f32 })
+            .collect();
+        let (color, back_alpha_mult) = if is_special {
+            (special_color, 0.55)
+        } else if is_major {
+            (major_color, 0.45)
+        } else {
+            (minor_color, 0.28)
+        };
+        draw_geo_path(painter, layout, view, &path, lod.altitude_scale, color, lod.backface_alpha * back_alpha_mult);
+    }
+
+    // ── Longitude lines ──────────────────────────────────────────────────────
+    for lon in (-180..180).step_by(minor_lon_step as usize) {
+        let is_major = lon % 30 == 0;
         let path: Vec<_> = (-85..=85)
             .step_by(lod.sample_step)
-            .map(|lat| GeoPoint {
-                lat: lat as f32,
-                lon: lon as f32,
-            })
+            .map(|lat| GeoPoint { lat: lat as f32, lon: lon as f32 })
             .collect();
-        draw_geo_path(
-            painter,
-            layout,
-            view,
-            &path,
-            lod.altitude_scale,
-            theme::grid_color(),
-            lod.backface_alpha * 0.32,
-        );
+        let (color, back_alpha_mult) = if lon == 0 {
+            (special_color, 0.55) // Prime meridian
+        } else if is_major {
+            (major_color, 0.45)
+        } else {
+            (minor_color, 0.28)
+        };
+        draw_geo_path(painter, layout, view, &path, lod.altitude_scale, color, lod.backface_alpha * back_alpha_mult);
     }
 }
 

@@ -30,7 +30,9 @@ struct ProjectedLocalPoint {
 
 pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: f64) -> GlobeScene {
     painter.rect_filled(rect, 12.0, theme::canvas_background());
-    draw_frame(painter, rect);
+    if !model.cinematic_mode {
+        draw_frame(painter, rect);
+    }
 
     let layout = layout(rect);
     let Some(focus) = model.terrain_focus_location() else {

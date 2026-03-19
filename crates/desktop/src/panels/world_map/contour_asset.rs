@@ -119,7 +119,6 @@ pub fn load_srtm_region_for_view(
             entries: HashMap::new(),
         })
     });
-    let mut guard = cache.lock().ok()?;
     let feature_budget = srtm_focus_cache::feature_budget_for_zoom(zoom);
     let per_asset_budget = (feature_budget / assets.len().max(1)).max(120);
     let scene_key = SceneKey {
@@ -132,34 +131,64 @@ pub fn load_srtm_region_for_view(
             .unwrap_or_default(),
     };
 
-    if guard.scene_key.as_ref() != Some(&scene_key) {
-        guard.scene_key = Some(scene_key);
-        guard.entries.clear();
-    }
-
-    // Load any newly-ready tiles from the current viewport into the cache.
-    // Tiles already in `entries` are left as-is (no re-query).
-    for asset in &assets {
-        let key = CacheKey {
-            path: asset.path.clone(),
-            lat_bucket: asset.lat_bucket,
-            lon_bucket: asset.lon_bucket,
-            zoom_bucket: asset.zoom_bucket,
-        };
-        if !guard.entries.contains_key(&key) {
-            if let Ok(contours) = query_local_contours(
-                &key.path,
-                key.zoom_bucket,
-                key.lat_bucket,
-                key.lon_bucket,
-                asset.simplify_step,
-                per_asset_budget,
-            ) {
-                if !contours.is_empty() {
-                    guard.entries.insert(key, Arc::new(contours));
-                }
-            }
+    // Phase 1: lock, check for scene change, collect missing keys, then drop lock
+    // so the DB reads can run in parallel without blocking the render thread on
+    // the mutex.
+    let missing: Vec<(CacheKey, srtm_focus_cache::FocusContourAsset)> = {
+        let mut guard = cache.lock().ok()?;
+        if guard.scene_key.as_ref() != Some(&scene_key) {
+            guard.scene_key = Some(scene_key);
+            guard.entries.clear();
         }
+        assets
+            .iter()
+            .filter_map(|asset| {
+                let key = CacheKey {
+                    path: asset.path.clone(),
+                    lat_bucket: asset.lat_bucket,
+                    lon_bucket: asset.lon_bucket,
+                    zoom_bucket: asset.zoom_bucket,
+                };
+                if guard.entries.contains_key(&key) {
+                    None
+                } else {
+                    Some((key, asset.clone()))
+                }
+            })
+            .collect()
+    }; // guard dropped here
+
+    // Phase 2: load all missing tiles in parallel — each opens its own DB
+    // connection so SQLite concurrent-read is safe, and no mutex is held.
+    let loaded: Vec<(CacheKey, Vec<ContourPath>)> = std::thread::scope(|s| {
+        let handles: Vec<_> = missing
+            .into_iter()
+            .map(|(key, asset)| {
+                s.spawn(move || {
+                    query_local_contours(
+                        &key.path,
+                        key.zoom_bucket,
+                        key.lat_bucket,
+                        key.lon_bucket,
+                        asset.simplify_step,
+                        per_asset_budget,
+                    )
+                    .ok()
+                    .filter(|c| !c.is_empty())
+                    .map(|c| (key, c))
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().ok().flatten())
+            .collect()
+    });
+
+    // Phase 3: re-acquire lock, insert results.
+    let mut guard = cache.lock().ok()?;
+    for (key, contours) in loaded {
+        guard.entries.insert(key, Arc::new(contours));
     }
 
     // Evict tiles furthest from viewport_center when over the cap.
@@ -241,23 +270,45 @@ pub fn load_srtm_for_globe(
     let feature_budget = srtm_focus_cache::feature_budget_for_zoom(GLOBE_TILE_ZOOM);
     let per_asset_budget = (feature_budget / assets.len().max(1)).max(120);
 
-    // Load newly-ready tiles into the in-memory cache.
-    for asset in &assets {
-        let key = (asset.lat_bucket, asset.lon_bucket);
+    // Collect missing keys, then drop the lock before doing DB reads.
+    let missing: Vec<srtm_focus_cache::FocusContourAsset> = assets
+        .iter()
+        .filter(|a| !guard.tiles.contains_key(&(a.lat_bucket, a.lon_bucket)))
+        .cloned()
+        .collect();
+    drop(guard);
+
+    // Load all missing globe tiles in parallel.
+    let loaded: Vec<((i32, i32), Vec<ContourPath>)> = std::thread::scope(|s| {
+        let handles: Vec<_> = missing
+            .into_iter()
+            .map(|asset| {
+                s.spawn(move || {
+                    query_local_contours(
+                        &asset.path,
+                        asset.zoom_bucket,
+                        asset.lat_bucket,
+                        asset.lon_bucket,
+                        asset.simplify_step,
+                        per_asset_budget,
+                    )
+                    .ok()
+                    .filter(|c| !c.is_empty())
+                    .map(|c| ((asset.lat_bucket, asset.lon_bucket), c))
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|h| h.join().ok().flatten())
+            .collect()
+    });
+
+    let mut guard = cache.lock().ok()?;
+    for (key, contours) in loaded {
         if !guard.tiles.contains_key(&key) {
-            if let Ok(contours) = query_local_contours(
-                &asset.path,
-                asset.zoom_bucket,
-                asset.lat_bucket,
-                asset.lon_bucket,
-                asset.simplify_step,
-                per_asset_budget,
-            ) {
-                if !contours.is_empty() {
-                    guard.tiles.insert(key, Arc::new(contours));
-                    guard.order.push(key);
-                }
-            }
+            guard.tiles.insert(key, Arc::new(contours));
+            guard.order.push(key);
         }
     }
 

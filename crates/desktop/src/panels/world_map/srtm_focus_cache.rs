@@ -13,7 +13,14 @@ use std::time::{Duration, Instant};
 const BUILD_TIMEOUT: Duration = Duration::from_secs(90);
 const CACHE_DB_NAME: &str = "srtm_focus_cache.sqlite";
 const TEMP_DIR_NAME: &str = "srtm_focus_tmp";
-const MAX_BACKGROUND_BUILDS: usize = 2;
+// Allow up to (N_CPUS - 1) concurrent GDAL builds, clamped to [2, 8].
+// Evaluated once at startup so it never changes while the app is running.
+fn max_background_builds() -> usize {
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    (cpus.saturating_sub(1)).clamp(2, 8)
+}
 
 #[derive(Clone)]
 pub struct FocusContourAsset {
@@ -1140,9 +1147,10 @@ fn active_build_slots() -> &'static AtomicUsize {
 }
 
 fn try_acquire_build_slot() -> bool {
+    let limit = max_background_builds();
     active_build_slots()
         .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-            (count < MAX_BACKGROUND_BUILDS).then_some(count + 1)
+            (count < limit).then_some(count + 1)
         })
         .is_ok()
 }

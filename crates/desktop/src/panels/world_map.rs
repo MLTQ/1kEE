@@ -145,6 +145,7 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                 ui.colored_label(theme::text_muted(), "Layers");
 
                 ui.checkbox(&mut model.show_coastlines, "Coastline");
+                ui.checkbox(&mut model.show_graticule, "Graticule");
                 let major_changed = ui
                     .checkbox(&mut model.show_major_roads, "Major roads")
                     .changed();
@@ -171,6 +172,25 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
 
                 ui.separator();
                 ui.small(model.terrain_focus_location_name());
+
+                // Cinematic toggle — flush right
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (cin_fill, cin_text) = if model.cinematic_mode {
+                        (
+                            egui::Color32::from_rgb(160, 100, 20),
+                            egui::Color32::from_rgb(255, 210, 80),
+                        )
+                    } else {
+                        (egui::Color32::TRANSPARENT, theme::text_muted())
+                    };
+                    let cin_btn =
+                        egui::Button::new(egui::RichText::new("CINEMATIC").color(cin_text).small())
+                            .fill(cin_fill)
+                            .corner_radius(4.0);
+                    if ui.add(cin_btn).clicked() {
+                        model.cinematic_mode = !model.cinematic_mode;
+                    }
+                });
             });
         });
 }
