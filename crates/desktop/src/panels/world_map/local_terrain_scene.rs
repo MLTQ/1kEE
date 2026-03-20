@@ -132,32 +132,94 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         contours.as_ref().map(|v| v.as_slice()),
         model.show_beam,
     );
-    let (event_markers, camera_markers) = if !contours_slice.is_empty() {
-        if let Some(event) = model.selected_event() {
-            draw_markers(
-                painter,
-                &layout,
-                &model.globe_view,
-                model.selected_root.as_deref(),
-                viewport_center,
-                render_zoom,
-                event,
-                &nearby,
-                model.selected_event_id.as_deref(),
-                model.selected_camera_id.as_deref(),
-                time,
-            )
+    // ── Event beams — all events in the viewport, no contour dependency ───────
+    // Mirrors the globe_scene approach: draw every event whose location falls
+    // within the visible area, not just the selected one.
+    let half_extent_deg = visual_half_extent_for_zoom(model.globe_view.local_zoom);
+    let km_per_deg_lat = 111.32f32;
+    let km_per_deg_lon =
+        km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
+    let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
+    let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
+
+    let event_markers: Vec<(String, egui::Pos2)> =
+        if model.cinematic_mode || !model.show_event_markers {
+            Vec::new()
         } else {
-            (Vec::new(), Vec::new())
-        }
-    } else {
-        (Vec::new(), Vec::new())
-    };
-    draw_camera_links(
-        painter,
-        event_markers.first().map(|(_, pos)| *pos),
-        &camera_markers,
-    );
+            model
+                .events
+                .iter()
+                .filter_map(|event| {
+                    // Cheap pre-cull: skip events well outside the viewport.
+                    let dlat = (event.location.lat - viewport_center.lat).abs();
+                    let dlon = {
+                        let d = (event.location.lon - viewport_center.lon).abs();
+                        d.min(360.0 - d)
+                    };
+                    if dlat > half_extent_deg * 2.5 || dlon > half_extent_deg * 2.5 {
+                        return None;
+                    }
+                    let elev = marker_elevation_m(model.selected_root.as_deref(), event.location);
+                    let ground = project_local(
+                        &layout, &model.globe_view, viewport_center,
+                        event.location, elev, extent_x_km, extent_y_km,
+                    )?;
+                    // Tip: project the same point 1 km higher, then cap the
+                    // screen-space length so beams don't vary wildly with tilt.
+                    let tip = project_local(
+                        &layout, &model.globe_view, viewport_center,
+                        event.location, elev + 1000.0, extent_x_km, extent_y_km,
+                    )
+                    .map(|sky| {
+                        let dx = sky.pos.x - ground.pos.x;
+                        let dy = sky.pos.y - ground.pos.y;
+                        let len = (dx * dx + dy * dy).sqrt().max(0.1);
+                        egui::pos2(
+                            ground.pos.x + dx / len * EVENT_BEAM_HEIGHT_PX,
+                            ground.pos.y + dy / len * EVENT_BEAM_HEIGHT_PX,
+                        )
+                    })
+                    .unwrap_or(egui::pos2(
+                        ground.pos.x,
+                        ground.pos.y - EVENT_BEAM_HEIGHT_PX,
+                    ));
+                    draw_event_marker(
+                        painter, ground, tip, event,
+                        model.selected_event_id.as_deref() == Some(event.id.as_str()),
+                        time,
+                    );
+                    Some((event.id.clone(), ground.pos))
+                })
+                .collect()
+        };
+
+    // Camera markers for all nearby cameras.
+    let camera_markers: Vec<(String, egui::Pos2)> = nearby
+        .iter()
+        .filter_map(|camera| {
+            project_local(
+                &layout, &model.globe_view, viewport_center,
+                camera.location,
+                marker_elevation_m(model.selected_root.as_deref(), camera.location),
+                extent_x_km, extent_y_km,
+            )
+            .map(|projected| {
+                draw_camera_marker(
+                    painter, projected,
+                    model.selected_camera_id.as_deref() == Some(camera.id.as_str()),
+                );
+                (camera.id.clone(), projected.pos)
+            })
+        })
+        .collect();
+
+    // Camera link lines anchor to the selected event if one exists.
+    let anchor = event_markers
+        .iter()
+        .find(|(id, _)| model.selected_event_id.as_deref() == Some(id.as_str()))
+        .or_else(|| event_markers.first())
+        .map(|(_, pos)| *pos);
+    draw_camera_links(painter, anchor, &camera_markers);
     if model.show_coastlines {
         draw_coastlines_local(
             painter,
@@ -1290,11 +1352,10 @@ fn draw_camera_links(
 }
 
 /// Height in screen-space pixels of an event laser beam.
-const EVENT_BEAM_HEIGHT_PX: f32 = 72.0;
+const EVENT_BEAM_HEIGHT_PX: f32 = 110.0;
 
-/// Draw a Factal event as a glowing vertical laser beam that appears to stick
-/// out of the terrain surface normal.  Three rendered layers simulate the same
-/// atmospheric halo + crisp core treatment used on the main crosshair beam.
+/// Draw a Factal event as a glowing laser beam tapering to a point.
+/// Identical visual treatment to globe_scene::draw_event_marker.
 fn draw_event_marker(
     painter: &egui::Painter,
     ground: ProjectedLocalPoint,
@@ -1304,37 +1365,44 @@ fn draw_event_marker(
     time: f64,
 ) {
     let col = event.severity.color();
+    let dx = tip.x - ground.pos.x;
+    let dy = tip.y - ground.pos.y;
 
-    // ── Beam ─────────────────────────────────────────────────────────────────
-    // Wide atmospheric halo
-    painter.line_segment(
-        [ground.pos, tip],
-        egui::Stroke::new(9.0, col.gamma_multiply(0.05)),
-    );
-    // Mid glow — denser in the lower half, so the beam "roots" into the ground
-    let beam_mid = egui::lerp(ground.pos.y..=tip.y, 0.5);
-    let mid_pos  = egui::pos2(egui::lerp(ground.pos.x..=tip.x, 0.5), beam_mid);
-    painter.line_segment(
-        [ground.pos, mid_pos],
-        egui::Stroke::new(4.0, col.gamma_multiply(0.14)),
-    );
-    // Crisp core
-    painter.line_segment(
-        [ground.pos, tip],
-        egui::Stroke::new(1.2, col.gamma_multiply(0.85)),
-    );
+    // ── Atmospheric halos — taper in width and alpha toward the tip ───────────
+    const HALO_SEGS: u32 = 7;
+    for i in 0..HALO_SEGS {
+        let t0 = i as f32 / HALO_SEGS as f32;
+        let t1 = (i + 1) as f32 / HALO_SEGS as f32;
+        let tm = (t0 + t1) * 0.5;
+        let a = (1.0 - tm).powi(2);
+        let p0 = egui::pos2(ground.pos.x + dx * t0, ground.pos.y + dy * t0);
+        let p1 = egui::pos2(ground.pos.x + dx * t1, ground.pos.y + dy * t1);
+        painter.line_segment([p0, p1], egui::Stroke::new((22.0 * a).max(0.5), col.gamma_multiply(0.04 * a)));
+        painter.line_segment([p0, p1], egui::Stroke::new((11.0 * a).max(0.5), col.gamma_multiply(0.08 * a)));
+        painter.line_segment([p0, p1], egui::Stroke::new(( 4.5 * a).max(0.5), col.gamma_multiply(0.16 * a)));
+    }
 
-    // ── Tip cap ───────────────────────────────────────────────────────────────
-    painter.circle_filled(tip, 2.0, col);
-    painter.circle_stroke(tip, 3.8, egui::Stroke::new(0.9, col.gamma_multiply(0.45)));
+    // ── Tapering core — cubic fade, width narrows to a point ─────────────────
+    const SEGS: u32 = 14;
+    for i in 0..SEGS {
+        let t0 = i as f32 / SEGS as f32;
+        let t1 = (i + 1) as f32 / SEGS as f32;
+        let tm = (t0 + t1) * 0.5;
+        let falloff = 1.0 - tm;
+        let alpha   = falloff.powi(3);
+        let w_glow  = (4.0 * falloff.powf(0.7)).max(0.4);
+        let w_core  = (1.7 * falloff.powf(0.7)).max(0.3);
+        let p0 = egui::pos2(ground.pos.x + dx * t0, ground.pos.y + dy * t0);
+        let p1 = egui::pos2(ground.pos.x + dx * t1, ground.pos.y + dy * t1);
+        painter.line_segment([p0, p1], egui::Stroke::new(w_glow, col.gamma_multiply(alpha * 0.30)));
+        painter.line_segment([p0, p1], egui::Stroke::new(w_core, col.gamma_multiply(alpha * 0.96)));
+    }
 
     // ── Ground strike ─────────────────────────────────────────────────────────
-    // Pulsing selection ring
     if is_selected {
         let pulse = 9.0 + ((time as f32 * 2.6).sin() + 1.0) * 3.2;
         painter.circle_stroke(
-            ground.pos,
-            pulse,
+            ground.pos, pulse,
             egui::Stroke::new(1.3, theme::marker_glow_warm()),
         );
     }
@@ -1530,9 +1598,16 @@ fn draw_coastlines_local(
     //  2. A narrower, vivid blue core line.
     // Both are projected at a slight *negative* elevation (-3 m) so the
     // coastline sits visually just below the land surface.
+    //
+    // At high zoom the GEBCO source resolution (~450 m) looks coarse next to
+    // 30 m SRTM contours, so we fade the coastline out progressively.
+    // zoom ≤ 2 → full opacity;  zoom 5+ → nearly invisible.
+    let fade = (1.0_f32 - (view.local_zoom - 2.0).max(0.0) / 3.5).clamp(0.08, 1.0);
     const COAST_ELEV: f32 = -3.0;
-    let halo   = egui::Stroke::new(5.0, egui::Color32::from_rgba_premultiplied(10,  70, 130, 90));
-    let core   = egui::Stroke::new(2.2, egui::Color32::from_rgba_premultiplied(55, 165, 240, 230));
+    let halo_a = (60.0  * fade) as u8;
+    let core_a = (90.0  * fade) as u8;
+    let halo   = egui::Stroke::new(4.0, egui::Color32::from_rgba_premultiplied(10,  70, 130, halo_a));
+    let core   = egui::Stroke::new(1.6, egui::Color32::from_rgba_premultiplied(55, 165, 240, core_a));
 
     for coast in coastlines.iter() {
         // Quick bounding-box rejection before projecting any points.

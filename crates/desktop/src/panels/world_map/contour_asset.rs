@@ -517,8 +517,12 @@ fn global_coastline_lod(zoom: f32) -> (i32, usize, usize) {
         (0, 14, 700)
     } else if zoom < 1.8 {
         (1, 9, 1_300)
-    } else {
+    } else if zoom < 3.5 {
         (2, 6, 2_400)
+    } else if zoom < 6.0 {
+        (3, 2, 6_000)
+    } else {
+        (4, 1, 10_000)
     }
 }
 
