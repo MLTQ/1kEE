@@ -1460,15 +1460,26 @@ fn draw_coastlines_local(
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
 
-    // Expand viewport bounds by 20% to catch lines that start just outside
-    // but cross into the visible area.
-    let margin = half_extent_deg * 1.2;
+    // Expand viewport bounds by 50% to catch segments that start/end just
+    // outside but cross the visible area (particularly relevant for long
+    // continental coastlines at regional zoom).
+    let margin = half_extent_deg * 1.5;
     let min_lat = focus.lat - margin;
     let max_lat = focus.lat + margin;
     let min_lon = focus.lon - margin;
     let max_lon = focus.lon + margin;
 
-    let stroke = egui::Stroke::new(1.4, egui::Color32::from_rgba_premultiplied(45, 130, 195, 200));
+    // The coastline needs to be clearly distinct from the terrain.  Flat
+    // regions (Netherlands, Po Valley) sit at nearly the same visual height
+    // as the sea, so a thin line blends in.  We draw two passes:
+    //  1. A wide, dim "halo" so the line reads against both dark ocean and
+    //     bright terrain contours.
+    //  2. A narrower, vivid blue core line.
+    // Both are projected at a slight *negative* elevation (-3 m) so the
+    // coastline sits visually just below the land surface.
+    const COAST_ELEV: f32 = -3.0;
+    let halo   = egui::Stroke::new(5.0, egui::Color32::from_rgba_premultiplied(10,  70, 130, 90));
+    let core   = egui::Stroke::new(2.2, egui::Color32::from_rgba_premultiplied(55, 165, 240, 230));
 
     for coast in coastlines.iter() {
         // Quick bounding-box rejection before projecting any points.
@@ -1483,13 +1494,14 @@ fn draw_coastlines_local(
             .points
             .iter()
             .filter_map(|p| {
-                project_local(layout, view, focus, *p, 0.0, extent_x_km, extent_y_km)
+                project_local(layout, view, focus, *p, COAST_ELEV, extent_x_km, extent_y_km)
                     .map(|pp| pp.pos)
             })
             .collect();
 
         if points.len() >= 2 {
-            painter.add(egui::Shape::line(points, stroke));
+            painter.add(egui::Shape::line(points.clone(), halo));
+            painter.add(egui::Shape::line(points, core));
         }
     }
 }
