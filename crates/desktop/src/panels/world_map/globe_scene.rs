@@ -67,27 +67,27 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                     event.location,
                     lod.altitude_scale * 0.7,
                 )?;
-                // Beam direction: radially outward from the globe centre in
-                // screen-space.  This IS the surface normal direction as seen
-                // from the camera, so the beam appears to stick straight out
-                // of the Earth regardless of where on the globe it sits.
-                let dx = base.pos.x - layout.center.x;
-                let dy = base.pos.y - layout.center.y;
-                let dist = (dx * dx + dy * dy).sqrt().max(1.0);
-                // Height scales with the visible globe radius so it looks
-                // proportional at every zoom level, clamped for usability.
-                let beam_h = (layout.radius * 0.09).clamp(18.0, 110.0)
-                    * (0.45 + base.depth * 0.55);
-                let beam_dir = (dx / dist, dy / dist);
-                let tip = egui::pos2(
-                    base.pos.x + beam_dir.0 * beam_h,
-                    base.pos.y + beam_dir.1 * beam_h,
-                );
+                // Beam tip: project the same geographic point at a higher
+                // radius so that 3-D perspective foreshortening is correct.
+                // When the event faces the camera, base and tip project to
+                // almost the same screen position (tiny beam).  When the event
+                // is on the limb, the tip projects far from the base (full
+                // beam).  This eliminates the "spinning" artefact caused by
+                // computing the direction in screen space.
+                let extra_r = (55.0 / layout.radius).clamp(0.025, 0.09);
+                let tip = project_geo_elevated(
+                    &layout,
+                    &model.globe_view,
+                    event.location,
+                    lod.altitude_scale * 0.7,
+                    extra_r,
+                )
+                .map(|p| p.pos)
+                .unwrap_or(base.pos); // fallback: zero-length beam
                 draw_event_marker(
                     painter,
                     base,
                     tip,
-                    beam_dir,
                     event,
                     selected_event_id == Some(event.id.as_str()),
                     time,
@@ -473,58 +473,41 @@ fn draw_real_contours(
     }
 }
 
-/// Draw a Factal event as a glowing surface-normal laser beam with an NGE-
-/// style 4-point cross flare at the tip.  `base` is the ground-strike
-/// projected point, `tip` is the screen-space beam-tip position, and
-/// `beam_dir` is the normalised (nx, ny) outward direction.
+/// Draw a Factal event as a glowing surface-normal laser beam.
+/// `base` is the ground-strike projected point; `tip` is the 3-D-projected
+/// beam tip (not a screen-space offset, so perspective foreshortening is
+/// correct).  The beam fades from opaque at the base to transparent at the
+/// tip — as if light is emerging from the planet's surface.
 fn draw_event_marker(
     painter: &egui::Painter,
     base: ProjectedPoint,
     tip: egui::Pos2,
-    beam_dir: (f32, f32),
     event: &EventRecord,
     is_selected: bool,
     time: f64,
 ) {
     let col = event.severity.color();
-    let (nx, ny) = beam_dir;
+    let dx = tip.x - base.pos.x;
+    let dy = tip.y - base.pos.y;
 
-    let beam_len = ((tip.x - base.pos.x).powi(2) + (tip.y - base.pos.y).powi(2)).sqrt();
+    // ── Wide atmospheric halos — full beam length, very low alpha ────────────
+    // These give the diffuse glow without needing to be gradients.
+    painter.line_segment([base.pos, tip], egui::Stroke::new(22.0, col.gamma_multiply(0.04)));
+    painter.line_segment([base.pos, tip], egui::Stroke::new(11.0, col.gamma_multiply(0.08)));
+    painter.line_segment([base.pos, tip], egui::Stroke::new(4.5,  col.gamma_multiply(0.16)));
 
-    // ── Beam — atmospheric halo layers, wide → narrow ────────────────────────
-    painter.line_segment([base.pos, tip], egui::Stroke::new(22.0, col.gamma_multiply(0.03)));
-    painter.line_segment([base.pos, tip], egui::Stroke::new(11.0, col.gamma_multiply(0.07)));
-    painter.line_segment([base.pos, tip], egui::Stroke::new(4.5,  col.gamma_multiply(0.14)));
-    // Crisp bright core
-    painter.line_segment([base.pos, tip], egui::Stroke::new(1.4,  col.gamma_multiply(0.92)));
-    // Extra bright lower third — simulates beam tapering wider at the base
-    let lower_third = egui::pos2(
-        base.pos.x + nx * beam_len * 0.33,
-        base.pos.y + ny * beam_len * 0.33,
-    );
-    painter.line_segment([base.pos, lower_third], egui::Stroke::new(3.2, col.gamma_multiply(0.26)));
-
-    // ── 4-point cross flare at tip (Neon Genesis / lens-flare style) ─────────
-    let long_arm  = beam_len * 0.26;  // along-beam direction (longer)
-    let short_arm = beam_len * 0.16;  // perpendicular (shorter)
-    let perp = (-ny, nx);
-
-    // Along-beam arm: extends past tip AND slightly back toward base
-    let arm_up   = egui::pos2(tip.x + nx * long_arm  * 0.65, tip.y + ny * long_arm  * 0.65);
-    let arm_down = egui::pos2(tip.x - nx * long_arm  * 0.35, tip.y - ny * long_arm  * 0.35);
-    // Perpendicular arm
-    let arm_l    = egui::pos2(tip.x + perp.0 * short_arm, tip.y + perp.1 * short_arm);
-    let arm_r    = egui::pos2(tip.x - perp.0 * short_arm, tip.y - perp.1 * short_arm);
-
-    // Glow halos around both arms
-    painter.line_segment([arm_up, arm_down], egui::Stroke::new(8.0, col.gamma_multiply(0.08)));
-    painter.line_segment([arm_l,  arm_r   ], egui::Stroke::new(8.0, col.gamma_multiply(0.08)));
-    // Crisp cores
-    painter.line_segment([arm_up, arm_down], egui::Stroke::new(1.3, col.gamma_multiply(0.96)));
-    painter.line_segment([arm_l,  arm_r   ], egui::Stroke::new(1.3, col.gamma_multiply(0.96)));
-    // Hot dot at the cross centre
-    painter.circle_stroke(tip, 3.0, egui::Stroke::new(4.5, col.gamma_multiply(0.13)));
-    painter.circle_filled(tip, 1.8, col);
+    // ── Fading core — bright at the base, fading to nothing at the tip ───────
+    // 6 segments with quadratic alpha falloff simulate a gradient.
+    const SEGS: u32 = 6;
+    for i in 0..SEGS {
+        let t0 = i       as f32 / SEGS as f32;
+        let t1 = (i + 1) as f32 / SEGS as f32;
+        let alpha = (1.0 - t0).powi(2); // quadratic: 1.0 at base → 0.0 at tip
+        let p0 = egui::pos2(base.pos.x + dx * t0, base.pos.y + dy * t0);
+        let p1 = egui::pos2(base.pos.x + dx * t1, base.pos.y + dy * t1);
+        painter.line_segment([p0, p1], egui::Stroke::new(3.2, col.gamma_multiply(alpha * 0.30)));
+        painter.line_segment([p0, p1], egui::Stroke::new(1.4, col.gamma_multiply(alpha * 0.94)));
+    }
 
     // ── Ground strike ────────────────────────────────────────────────────────
     if is_selected {
@@ -673,6 +656,61 @@ fn flush_segments(
     } else {
         back_segment.clear();
     }
+}
+
+/// Like `project_geo` but adds `extra_radius` (in globe-unit fractions) on
+/// top of the terrain-based elevation.  Used to project a beam-tip point
+/// directly above a geographic location so that the resulting screen-space
+/// vector gives a perspective-correct beam direction: very short when the
+/// event faces the camera, full-length when it is on the limb.
+fn project_geo_elevated(
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    point: GeoPoint,
+    altitude_scale: f32,
+    extra_radius: f32,
+) -> Option<ProjectedPoint> {
+    let lat = point.lat.to_radians();
+    let lon = point.lon.to_radians();
+    let elevation_signal = terrain_field::elevation(point) / 1.6;
+    let signed_elevation = elevation_signal.mul_add(2.0, -1.0);
+    let elevation = signed_elevation * altitude_scale;
+    let radius = (1.0 + elevation + extra_radius).max(0.82);
+
+    let mut x = radius * lat.cos() * lon.cos();
+    let mut y = radius * lat.sin();
+    let mut z = radius * lat.cos() * lon.sin();
+
+    let yaw_cos = view.yaw.cos();
+    let yaw_sin = view.yaw.sin();
+    let x_yaw = x * yaw_cos + z * yaw_sin;
+    let z_yaw = -x * yaw_sin + z * yaw_cos;
+    x = x_yaw;
+    z = z_yaw;
+
+    let pitch_cos = view.pitch.cos();
+    let pitch_sin = view.pitch.sin();
+    let y_pitch = y * pitch_cos - z * pitch_sin;
+    let z_pitch = y * pitch_sin + z * pitch_cos;
+    y = y_pitch;
+    z = z_pitch;
+
+    let depth = layout.camera_distance - z;
+    if depth <= 0.05 {
+        return None;
+    }
+
+    let perspective = (layout.radius * layout.focal_length) / depth;
+    let pos = egui::pos2(
+        layout.center.x - x * perspective,
+        layout.center.y - y * perspective,
+    );
+
+    Some(ProjectedPoint {
+        pos,
+        depth: ((z + 1.0) * 0.5).clamp(0.0, 1.0),
+        front_facing: z >= 0.0,
+    })
 }
 
 fn project_geo(

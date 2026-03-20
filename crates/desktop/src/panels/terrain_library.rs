@@ -5,10 +5,11 @@ use crate::terrain_precompute::{self, PrecomputeJobState};
 use crate::theme;
 
 pub fn render_terrain_library(ctx: &egui::Context, model: &mut AppModel) {
+    // tick() is O(1) when no jobs are queued (reads an AtomicBool), so it's
+    // safe to call every frame.  It drives the import worker even when the
+    // library window is closed so queued jobs continue to make progress.
     terrain_precompute::tick(model.selected_root.as_deref());
     osm_ingest::tick(model.selected_root.as_deref());
-    model.osm_inventory =
-        crate::osm_ingest::OsmInventory::detect_from(model.selected_root.as_deref());
 
     if terrain_precompute::has_active_jobs(model.selected_root.as_deref())
         || osm_ingest::has_active_jobs(model.selected_root.as_deref())
@@ -19,6 +20,11 @@ pub fn render_terrain_library(ctx: &egui::Context, model: &mut AppModel) {
     if !model.terrain_library_open {
         return;
     }
+
+    // OsmInventory::detect_from opens SQLite — only refresh it while the
+    // library panel is visible, not on every single frame.
+    model.osm_inventory =
+        crate::osm_ingest::OsmInventory::detect_from(model.selected_root.as_deref());
 
     let mut open = model.terrain_library_open;
     egui::Window::new("Terrain Library")
