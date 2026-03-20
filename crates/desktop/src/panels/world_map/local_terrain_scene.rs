@@ -1203,19 +1203,38 @@ fn draw_markers(
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
 
+    let event_elev = marker_elevation_m(selected_root, event.location);
     let event_marker = project_local(
         layout,
         view,
         viewport_center,
         event.location,
-        marker_elevation_m(selected_root, event.location),
+        event_elev,
         extent_x_km,
         extent_y_km,
     );
+    // Compute the screen-space "up" direction by projecting the same point at
+    // a higher elevation and measuring the displacement.  Normalising then
+    // scaling gives a beam of consistent pixel length regardless of zoom.
+    let event_sky = project_local(
+        layout, view, viewport_center, event.location,
+        event_elev + 1000.0, extent_x_km, extent_y_km,
+    );
     if let Some(event_marker) = event_marker {
+        let tip = event_sky.map(|sky| {
+            let dx = sky.pos.x - event_marker.pos.x;
+            let dy = sky.pos.y - event_marker.pos.y;
+            let len = (dx * dx + dy * dy).sqrt().max(0.1);
+            egui::pos2(
+                event_marker.pos.x + dx / len * EVENT_BEAM_HEIGHT_PX,
+                event_marker.pos.y + dy / len * EVENT_BEAM_HEIGHT_PX,
+            )
+        }).unwrap_or(egui::pos2(event_marker.pos.x, event_marker.pos.y - EVENT_BEAM_HEIGHT_PX));
+
         draw_event_marker(
             painter,
             event_marker,
+            tip,
             event,
             selected_event_id == Some(event.id.as_str()),
             time,
@@ -1270,35 +1289,69 @@ fn draw_camera_links(
     }
 }
 
+/// Height in screen-space pixels of an event laser beam.
+const EVENT_BEAM_HEIGHT_PX: f32 = 72.0;
+
+/// Draw a Factal event as a glowing vertical laser beam that appears to stick
+/// out of the terrain surface normal.  Three rendered layers simulate the same
+/// atmospheric halo + crisp core treatment used on the main crosshair beam.
 fn draw_event_marker(
     painter: &egui::Painter,
-    marker: ProjectedLocalPoint,
+    ground: ProjectedLocalPoint,
+    tip: egui::Pos2,
     event: &EventRecord,
     is_selected: bool,
     time: f64,
 ) {
-    let radius = 5.1 + marker.depth * 1.8;
+    let col = event.severity.color();
+
+    // ── Beam ─────────────────────────────────────────────────────────────────
+    // Wide atmospheric halo
+    painter.line_segment(
+        [ground.pos, tip],
+        egui::Stroke::new(9.0, col.gamma_multiply(0.05)),
+    );
+    // Mid glow — denser in the lower half, so the beam "roots" into the ground
+    let beam_mid = egui::lerp(ground.pos.y..=tip.y, 0.5);
+    let mid_pos  = egui::pos2(egui::lerp(ground.pos.x..=tip.x, 0.5), beam_mid);
+    painter.line_segment(
+        [ground.pos, mid_pos],
+        egui::Stroke::new(4.0, col.gamma_multiply(0.14)),
+    );
+    // Crisp core
+    painter.line_segment(
+        [ground.pos, tip],
+        egui::Stroke::new(1.2, col.gamma_multiply(0.85)),
+    );
+
+    // ── Tip cap ───────────────────────────────────────────────────────────────
+    painter.circle_filled(tip, 2.0, col);
+    painter.circle_stroke(tip, 3.8, egui::Stroke::new(0.9, col.gamma_multiply(0.45)));
+
+    // ── Ground strike ─────────────────────────────────────────────────────────
+    // Pulsing selection ring
     if is_selected {
-        let pulse = radius + 4.0 + ((time as f32 * 2.5).sin() + 1.0) * 2.4;
+        let pulse = 9.0 + ((time as f32 * 2.6).sin() + 1.0) * 3.2;
         painter.circle_stroke(
-            marker.pos,
+            ground.pos,
             pulse,
             egui::Stroke::new(1.3, theme::marker_glow_warm()),
         );
     }
-
-    painter.circle_filled(marker.pos, radius, event.severity.color());
-    painter.circle_stroke(
-        marker.pos,
-        radius + 2.1,
-        egui::Stroke::new(1.0, theme::hot_color().gamma_multiply(0.8)),
-    );
+    painter.circle_stroke(ground.pos, 5.5, egui::Stroke::new(3.5, col.gamma_multiply(0.10)));
+    painter.circle_stroke(ground.pos, 4.8, egui::Stroke::new(1.1, col.gamma_multiply(0.60)));
+    painter.circle_filled(ground.pos, 2.2, col);
 }
 
 fn draw_camera_marker(painter: &egui::Painter, marker: ProjectedLocalPoint, is_selected: bool) {
     let radius = 3.4 + marker.depth;
     let color = if is_selected { theme::marker_camera_ring() } else { theme::camera_color() };
 
+    // Soft halo so cameras read against the terrain
+    painter.circle_stroke(
+        marker.pos, radius + 5.0,
+        egui::Stroke::new(5.0, color.gamma_multiply(0.08)),
+    );
     painter.circle_filled(marker.pos, radius, color);
     if is_selected {
         painter.circle_stroke(marker.pos, radius + 3.0, egui::Stroke::new(1.1, color));
