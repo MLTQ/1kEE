@@ -280,10 +280,14 @@ pub fn load_srtm_coastlines_for_view(
         Mutex::new(LocalRegionCache { scene_key: None, entries: HashMap::new() })
     });
 
+    // Coastline tiles are large-scale features: use a coarse 1° grid so that
+    // panning within ~1° doesn't clear the cache and fall back to GEBCO.
+    // (The terrain contour cache above uses 0.05° / *20.0 for fine-grained
+    // invalidation; coastlines don't need that precision.)
     let scene_key = SceneKey {
         root: selected_root.map(Path::to_path_buf),
-        anchor_lat_bucket: (viewport_center.lat * 20.0).round() as i32,
-        anchor_lon_bucket: (viewport_center.lon * 20.0).round() as i32,
+        anchor_lat_bucket: viewport_center.lat.round() as i32,
+        anchor_lon_bucket: viewport_center.lon.round() as i32,
         zoom_bucket: assets.first().map(|a| a.zoom_bucket).unwrap_or_default(),
     };
 
@@ -601,13 +605,17 @@ fn query_global_bathymetry(
     feature_budget: usize,
 ) -> rusqlite::Result<Vec<ContourPath>> {
     let connection = Connection::open(path)?;
-    // Fetch ocean contours only (negative elevation).
-    // Prioritise mid-depth range (-200 to -6000m) where shelf/slope structure
-    // is most visually interesting; include abyssal but at lower density.
-    let fetch_limit = (feature_budget * 8).max(3_000) as i64;
-    let mut statement = connection
-        .prepare("SELECT geom, elevation_m FROM contour WHERE elevation_m < 0 LIMIT ?1")?;
-    let rows = statement.query_map(params![fetch_limit], |row| {
+    // The GPKG is ordered by scan position (N→S), so a bare LIMIT only returns
+    // Arctic rows.  Stride-sample across the full FID range for global coverage.
+    let total: i64 = connection
+        .query_row("SELECT COUNT(*) FROM contour WHERE elevation_m < 0", [], |r| r.get(0))
+        .unwrap_or(0);
+    let fetch_target = (feature_budget * 8).max(3_000) as i64;
+    let stride = (total / fetch_target.max(1)).max(1);
+    let mut statement = connection.prepare(
+        "SELECT geom, elevation_m FROM contour WHERE elevation_m < 0 AND (fid % ?1) = 0",
+    )?;
+    let rows = statement.query_map(params![stride], |row| {
         let geometry: Vec<u8> = row.get(0)?;
         let elevation_m: f32 = row.get(1)?;
         Ok((geometry, elevation_m))
@@ -651,16 +659,18 @@ fn query_global_topo(
     feature_budget: usize,
 ) -> rusqlite::Result<Vec<ContourPath>> {
     let connection = Connection::open(path)?;
-    // Land-positive contours only — skips ocean bathymetry which is visually
-    // cluttered and tactically irrelevant at globe scale.
-    // No ORDER BY: a bare LIMIT on the sequential scan is much faster than
-    // sorting millions of rows in SQLite.  We sort by simplified line length
-    // in Rust to keep geographically significant features (long ridges,
-    // plateaus, continental edges) and drop short noise.
-    let fetch_limit = (feature_budget * 8).max(3_000) as i64;
-    let mut statement = connection
-        .prepare("SELECT geom, elevation_m FROM contour WHERE elevation_m > 0 LIMIT ?1")?;
-    let rows = statement.query_map(params![fetch_limit], |row| {
+    // Land-positive contours only.  The GPKG is ordered by scan position (N→S)
+    // so a bare LIMIT returns only Arctic/northern features.  Stride-sample
+    // across the full FID range to get globally-distributed land contours.
+    let total: i64 = connection
+        .query_row("SELECT COUNT(*) FROM contour WHERE elevation_m > 0", [], |r| r.get(0))
+        .unwrap_or(0);
+    let fetch_target = (feature_budget * 8).max(3_000) as i64;
+    let stride = (total / fetch_target.max(1)).max(1);
+    let mut statement = connection.prepare(
+        "SELECT geom, elevation_m FROM contour WHERE elevation_m > 0 AND (fid % ?1) = 0",
+    )?;
+    let rows = statement.query_map(params![stride], |row| {
         let geometry: Vec<u8> = row.get(0)?;
         let elevation_m: f32 = row.get(1)?;
         Ok((geometry, elevation_m))
@@ -864,9 +874,10 @@ fn query_local_coastlines(
         for line in parse_gpkg_lines(&geometry) {
             // Drop very short fragments — 0m SRTM contours produce thousands of
             // tiny rings around inland sea-level pixels (river deltas, wetlands)
-            // that render as noise dots.  Require at least 8 points (~240 m of
+            // that render as noise dots.  Require at least 20 points (~600 m of
             // coastline at 30 m resolution) to keep only meaningful segments.
-            if line.len() >= 8 {
+            // At 3-pass white glow, short segments accumulate into solid blobs.
+            if line.len() >= 20 {
                 contours.push(ContourPath { elevation_m: 0.0, points: line });
             }
         }
