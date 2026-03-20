@@ -727,18 +727,11 @@ fn contour_path(selected_root: Option<&Path>, zoom: f32) -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
-fn global_coastline_lod(zoom: f32) -> (i32, usize, usize) {
-    if zoom < 0.95 {
-        (0, 14, 700)
-    } else if zoom < 1.8 {
-        (1, 9, 1_300)
-    } else if zoom < 3.5 {
-        (2, 6, 2_400)
-    } else if zoom < 6.0 {
-        (3, 2, 6_000)
-    } else {
-        (4, 1, 10_000)
-    }
+fn global_coastline_lod(_zoom: f32) -> (i32, usize, usize) {
+    // Single LOD — no zoom-based switching.  Switching LOD buckets triggers a
+    // full cache reload (full table scan) which caused visible flickering every
+    // time a zoom threshold was crossed.  Load once at full detail.
+    (0, 1, 10_000)
 }
 
 fn query_global_coastlines(

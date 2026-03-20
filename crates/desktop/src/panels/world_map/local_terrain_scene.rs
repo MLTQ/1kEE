@@ -1679,57 +1679,17 @@ fn draw_coastlines_local(
     let min_lon = focus.lon - margin;
     let max_lon = focus.lon + margin;
 
-    // ── Try SRTM-derived 0m coastline (30m resolution) ───────────────────
-    // Trigger background extraction for tiles that are built but lack coastlines.
-    let srtm_coastlines = contour_asset::load_srtm_coastlines_for_view(
-        selected_root, focus, render_zoom, LOCAL_STREAM_RADIUS,
-    );
-
-    if let Some(coastlines) = &srtm_coastlines {
-        // Three-pass white glow: wide dim outer → mid → thin core.
-        // Keep alpha low so overlapping short segments don't accumulate into
-        // bright blobs (gdal_contour fragments coastlines heavily).
-        let outer = egui::Stroke::new(6.0, egui::Color32::from_rgba_premultiplied(200, 215, 255,  5));
-        let mid   = egui::Stroke::new(3.0, egui::Color32::from_rgba_premultiplied(210, 225, 255, 15));
-        let core  = egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(230, 240, 255, 45));
-        const COAST_ELEV: f32 = -3.0;
-
-        for coast in coastlines.iter() {
-            let in_view = coast.points.iter().any(|p| {
-                p.lat >= min_lat && p.lat <= max_lat && p.lon >= min_lon && p.lon <= max_lon
-            });
-            if !in_view { continue; }
-
-            let points: Vec<_> = coast.points.iter()
-                .filter_map(|p| {
-                    project_local(layout, view, focus, *p, COAST_ELEV, extent_x_km, extent_y_km)
-                        .map(|pp| pp.pos)
-                })
-                .collect();
-            if points.len() >= 2 {
-                painter.add(egui::Shape::line(points.clone(), outer));
-                painter.add(egui::Shape::line(points.clone(), mid));
-                painter.add(egui::Shape::line(points, core));
-            }
-        }
-        // SRTM coastlines available — don't also draw coarse GEBCO.
-        return;
-    }
-
-    // ── Fallback: GEBCO-derived global coastline (450m resolution) ───────
-    // Heavily faded so the coarseness is less jarring. Fades further at high zoom.
-    let fade = (1.0_f32 - (view.local_zoom - 2.0).max(0.0) / 3.5).clamp(0.05, 0.7);
-    let coastline_zoom = view.local_zoom.clamp(1.0, 8.0);
-    let Some(coastlines) = contour_asset::load_global_coastlines(selected_root, coastline_zoom)
-    else {
+    // GEBCO-derived global coastline (450m resolution).
+    // Single LOD in load_global_coastlines so this never reloads on zoom change.
+    let Some(coastlines) = contour_asset::load_global_coastlines(selected_root, 1.0) else {
         return;
     };
 
+    // Two-pass white glow — matches the global-view coastline style.
+    // Low alpha so the 450m GEBCO resolution isn't jarring at close zoom.
     const COAST_ELEV: f32 = -3.0;
-    let halo_a = (50.0 * fade) as u8;
-    let core_a = (75.0 * fade) as u8;
-    let halo = egui::Stroke::new(4.0, egui::Color32::from_rgba_premultiplied(10, 70, 130, halo_a));
-    let core = egui::Stroke::new(1.6, egui::Color32::from_rgba_premultiplied(55, 165, 240, core_a));
+    let outer = egui::Stroke::new(5.0, egui::Color32::from_rgba_premultiplied(200, 215, 255,  8));
+    let core  = egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(225, 235, 255, 40));
 
     for coast in coastlines.iter() {
         let in_view = coast.points.iter().any(|p| {
@@ -1743,7 +1703,7 @@ fn draw_coastlines_local(
             })
             .collect();
         if points.len() >= 2 {
-            painter.add(egui::Shape::line(points.clone(), halo));
+            painter.add(egui::Shape::line(points.clone(), outer));
             painter.add(egui::Shape::line(points, core));
         }
     }
