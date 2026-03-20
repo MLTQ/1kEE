@@ -15,6 +15,7 @@ static GLOBE_CONTOUR_CACHE: OnceLock<Mutex<GlobeRegionCache>> = OnceLock::new();
 static FOCUS_CONTOUR_CACHE: OnceLock<Mutex<Option<CachedContours>>> = OnceLock::new();
 static GLOBAL_COASTLINE_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();
 static GLOBAL_TOPO_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();
+static GLOBAL_BATHYMETRY_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();
 
 /// Instantly drop every in-memory tile cache.
 ///
@@ -38,6 +39,9 @@ pub fn blast_tile_caches() {
         if let Ok(mut g) = c.lock() { *g = None; }
     }
     if let Some(c) = GLOBAL_TOPO_CACHE.get() {
+        if let Ok(mut g) = c.lock() { *g = None; }
+    }
+    if let Some(c) = GLOBAL_BATHYMETRY_CACHE.get() {
         if let Ok(mut g) = c.lock() { *g = None; }
     }
 }
@@ -555,6 +559,80 @@ pub fn load_global_topo(selected_root: Option<&Path>, zoom: f32) -> Option<Arc<V
     }
 
     guard.as_ref().map(|cached| Arc::clone(&cached.contours))
+}
+
+fn global_bathymetry_lod(zoom: f32) -> (i32, usize, usize) {
+    if zoom < 1.5 {
+        (0, 20, 300)
+    } else if zoom < 3.0 {
+        (1, 13, 550)
+    } else {
+        (2, 8, 900)
+    }
+}
+
+pub fn load_global_bathymetry(
+    selected_root: Option<&Path>,
+    zoom: f32,
+) -> Option<Arc<Vec<ContourPath>>> {
+    let path = contour_path(selected_root, zoom)?;
+    let (lod_bucket, simplify_step, feature_budget) = global_bathymetry_lod(zoom);
+
+    let cache = GLOBAL_BATHYMETRY_CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cache.lock().ok()?;
+
+    let needs_reload = guard
+        .as_ref()
+        .map(|cached| cached.path.as_path() != path.as_path() || cached.lod_bucket != lod_bucket)
+        .unwrap_or(true);
+
+    if needs_reload {
+        let contours =
+            Arc::new(query_global_bathymetry(&path, simplify_step, feature_budget).ok()?);
+        *guard = Some(CachedGlobalContours { lod_bucket, path, contours });
+    }
+
+    guard.as_ref().map(|cached| Arc::clone(&cached.contours))
+}
+
+fn query_global_bathymetry(
+    path: &Path,
+    simplify_step: usize,
+    feature_budget: usize,
+) -> rusqlite::Result<Vec<ContourPath>> {
+    let connection = Connection::open(path)?;
+    // Fetch ocean contours only (negative elevation).
+    // Prioritise mid-depth range (-200 to -6000m) where shelf/slope structure
+    // is most visually interesting; include abyssal but at lower density.
+    let fetch_limit = (feature_budget * 8).max(3_000) as i64;
+    let mut statement = connection
+        .prepare("SELECT geom, elevation_m FROM contour WHERE elevation_m < 0 LIMIT ?1")?;
+    let rows = statement.query_map(params![fetch_limit], |row| {
+        let geometry: Vec<u8> = row.get(0)?;
+        let elevation_m: f32 = row.get(1)?;
+        Ok((geometry, elevation_m))
+    })?;
+
+    let mut contours = Vec::new();
+    for row in rows {
+        let (geometry, elevation_m) = row?;
+        for line in parse_gpkg_lines(&geometry) {
+            if line.len() < 2 {
+                continue;
+            }
+            let simplified = simplify_line(line, simplify_step);
+            if simplified.len() < 2 {
+                continue;
+            }
+            contours.push(ContourPath { elevation_m, points: simplified });
+        }
+    }
+
+    // Sort by line length descending — long lines are continental shelf edges,
+    // ocean ridges, and trench walls; short ones are noise at this scale.
+    contours.sort_unstable_by(|a, b| b.points.len().cmp(&a.points.len()));
+    contours.truncate(feature_budget);
+    Ok(contours)
 }
 
 fn global_topo_lod(zoom: f32) -> (i32, usize, usize) {

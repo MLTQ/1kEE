@@ -68,6 +68,9 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     if !model.cinematic_mode && model.show_reticle {
         draw_hud_frame(painter, rect);
     }
+    if model.show_bathymetry {
+        draw_global_bathymetry(painter, &layout, &model.globe_view, selected_root);
+    }
     if model.show_coastlines {
         draw_global_coastlines(painter, &layout, &model.globe_view, selected_root);
     }
@@ -225,6 +228,48 @@ fn draw_global_coastlines(
             0.022,
             theme::contour_color().gamma_multiply(0.65),
             0.08,
+        );
+    }
+}
+
+fn draw_global_bathymetry(
+    painter: &egui::Painter,
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    selected_root: Option<&std::path::Path>,
+) {
+    // Mirror the topo fade: full opacity at zoom ≤ 3.0, gone by 5.0.
+    let alpha = (1.0 - (view.zoom - 3.0) / 2.0).clamp(0.0, 1.0);
+    if alpha <= 0.01 {
+        return;
+    }
+
+    let Some(bathy) = contour_asset::load_global_bathymetry(selected_root, view.zoom) else {
+        return;
+    };
+
+    for contour in bathy.iter() {
+        // depth_norm: 0.0 = surface, 1.0 = 11 000 m deep
+        let depth_norm = (-contour.elevation_m / 11_000.0_f32).clamp(0.0, 1.0);
+        // Major every 1 000 m
+        let major = ((-contour.elevation_m.round() as i32) % 1_000) < 50;
+
+        // Colour: interpolate from shallow steel-blue to deep midnight blue.
+        let base_a = if major { 0.55_f32 } else { 0.28_f32 };
+        let a = (base_a * alpha * (0.45 + depth_norm * 0.55) * 255.0) as u8;
+        let r = (18.0 * (1.0 - depth_norm * 0.8)) as u8;
+        let g = (55.0 * (1.0 - depth_norm * 0.6)) as u8;
+        let b = (140 + (50.0 * depth_norm) as u8).min(255);
+        let color = egui::Color32::from_rgba_premultiplied(r, g, b, a);
+
+        draw_geo_path(
+            painter,
+            layout,
+            view,
+            &contour.points,
+            0.015,
+            color.gamma_multiply(alpha),
+            0.04 * alpha,
         );
     }
 }
