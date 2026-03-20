@@ -1,8 +1,8 @@
 use crate::model::AppModel;
 use crate::osm_ingest;
-use crate::settings_store;
 use crate::terrain_assets;
 use crate::theme;
+use crate::panels::world_map::contour_asset;
 
 pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
     egui::TopBottomPanel::top("header")
@@ -32,23 +32,20 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
                     model.factal_settings_open = true;
                 }
 
-                if ui.button("Pick Asset Root").clicked() {
-                    if let Some(path) = rfd::FileDialog::new()
-                        .set_directory(
-                            model
-                                .selected_root
-                                .clone()
-                                .or_else(settings_store::effective_asset_root)
-                                .unwrap_or_default(),
-                        )
-                        .pick_folder()
-                    {
-                        model.set_selected_root(path);
-                    }
-                }
-
                 if ui.button("Terrain Library").clicked() {
                     model.terrain_library_open = true;
+                }
+
+                let blast_btn = egui::Button::new(
+                    egui::RichText::new("⚡ Cache Blast")
+                        .color(egui::Color32::from_rgb(255, 160, 40)),
+                )
+                .fill(egui::Color32::from_rgba_premultiplied(80, 40, 0, 180));
+                if ui.add(blast_btn)
+                    .on_hover_text("Instantly drop all in-memory tile caches (global + regional).\nTiles re-read from disk on next frame — nothing is deleted.")
+                    .clicked()
+                {
+                    contour_asset::blast_tile_caches();
                 }
 
                 if model.terrain_focus_location().is_some() {

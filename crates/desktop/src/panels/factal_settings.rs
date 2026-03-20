@@ -1,6 +1,7 @@
 use crate::camera_registry;
 use crate::factal_stream;
 use crate::model::AppModel;
+use crate::settings_store;
 use crate::theme;
 
 pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
@@ -128,6 +129,31 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
                 "Leave Data/Derived/SRTM/Planet/GDAL blank to use the executable-folder defaults and PATH-based GDAL discovery.",
             );
             ui.add_space(8.0);
+
+            // Quick asset-root picker — equivalent to the old header button.
+            ui.horizontal(|ui| {
+                ui.label("Asset Root (quick pick)");
+                if ui.button("📂 Browse Folder…").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_directory(
+                            model
+                                .selected_root
+                                .clone()
+                                .or_else(settings_store::effective_asset_root)
+                                .unwrap_or_default(),
+                        )
+                        .pick_folder()
+                    {
+                        model.set_selected_root(path);
+                    }
+                }
+                if let Some(root) = &model.selected_root {
+                    ui.colored_label(theme::text_muted(), root.display().to_string());
+                } else {
+                    ui.colored_label(theme::text_muted(), "none selected");
+                }
+            });
+            ui.add_space(6.0);
 
             path_row(ui, "Asset Root", &mut model.settings_asset_root, true, false);
             path_row(ui, "Data Root", &mut model.settings_data_root, true, true);

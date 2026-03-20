@@ -7,6 +7,41 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use super::srtm_focus_cache;
 
+// ── Module-level cache statics ────────────────────────────────────────────────
+// Lifted to module scope so blast_tile_caches() can clear them all at once.
+static LOCAL_CONTOUR_CACHE: OnceLock<Mutex<LocalRegionCache>> = OnceLock::new();
+static LOCAL_COASTLINE_CACHE: OnceLock<Mutex<LocalRegionCache>> = OnceLock::new();
+static GLOBE_CONTOUR_CACHE: OnceLock<Mutex<GlobeRegionCache>> = OnceLock::new();
+static FOCUS_CONTOUR_CACHE: OnceLock<Mutex<Option<CachedContours>>> = OnceLock::new();
+static GLOBAL_COASTLINE_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();
+static GLOBAL_TOPO_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();
+
+/// Instantly drop every in-memory tile cache.
+///
+/// Forces a full reload on the next frame — both the global globe view and the
+/// local terrain view.  Does NOT delete anything from disk; the SQLite cache
+/// files are untouched and tiles will be re-read (not re-built) on demand.
+pub fn blast_tile_caches() {
+    if let Some(c) = LOCAL_CONTOUR_CACHE.get() {
+        if let Ok(mut g) = c.lock() { g.scene_key = None; g.entries.clear(); }
+    }
+    if let Some(c) = LOCAL_COASTLINE_CACHE.get() {
+        if let Ok(mut g) = c.lock() { g.scene_key = None; g.entries.clear(); }
+    }
+    if let Some(c) = GLOBE_CONTOUR_CACHE.get() {
+        if let Ok(mut g) = c.lock() { *g = GlobeRegionCache::default(); }
+    }
+    if let Some(c) = FOCUS_CONTOUR_CACHE.get() {
+        if let Ok(mut g) = c.lock() { *g = None; }
+    }
+    if let Some(c) = GLOBAL_COASTLINE_CACHE.get() {
+        if let Ok(mut g) = c.lock() { *g = None; }
+    }
+    if let Some(c) = GLOBAL_TOPO_CACHE.get() {
+        if let Ok(mut g) = c.lock() { *g = None; }
+    }
+}
+
 #[derive(Clone)]
 pub struct ContourPath {
     pub elevation_m: f32,
@@ -112,12 +147,8 @@ pub fn load_srtm_region_for_view(
     // — well within real-time render budget.
     const MAX_LOCAL_TILES: usize = 200;
 
-    static CACHE: OnceLock<Mutex<LocalRegionCache>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| {
-        Mutex::new(LocalRegionCache {
-            scene_key: None,
-            entries: HashMap::new(),
-        })
+    let cache = LOCAL_CONTOUR_CACHE.get_or_init(|| {
+        Mutex::new(LocalRegionCache { scene_key: None, entries: HashMap::new() })
     });
     let feature_budget = srtm_focus_cache::feature_budget_for_zoom(zoom);
     let per_asset_budget = (feature_budget / assets.len().max(1)).max(120);
@@ -241,8 +272,7 @@ pub fn load_srtm_coastlines_for_view(
         return None;
     }
 
-    static CACHE: OnceLock<Mutex<LocalRegionCache>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| {
+    let cache = LOCAL_COASTLINE_CACHE.get_or_init(|| {
         Mutex::new(LocalRegionCache { scene_key: None, entries: HashMap::new() })
     });
 
@@ -333,8 +363,7 @@ pub fn load_srtm_for_globe(
     let assets =
         srtm_focus_cache::ensure_focus_contour_region(selected_root, center, GLOBE_TILE_ZOOM, 2);
 
-    static CACHE: OnceLock<Mutex<GlobeRegionCache>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(GlobeRegionCache::default()));
+    let cache = GLOBE_CONTOUR_CACHE.get_or_init(|| Mutex::new(GlobeRegionCache::default()));
     let mut guard = cache.lock().ok()?;
 
     let zoom_bucket = srtm_focus_cache::zoom_bucket_for_zoom(GLOBE_TILE_ZOOM);
@@ -445,8 +474,7 @@ pub fn load_for_focus(
         zoom_bucket: (zoom * 10.0).round() as i32,
     };
 
-    static CACHE: OnceLock<Mutex<Option<CachedContours>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    let cache = FOCUS_CONTOUR_CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = cache.lock().ok()?;
 
     let needs_reload = guard
@@ -478,8 +506,7 @@ pub fn load_global_coastlines(
     })?;
     let (lod_bucket, simplify_step, feature_budget) = global_coastline_lod(zoom);
 
-    static CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    let cache = GLOBAL_COASTLINE_CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = cache.lock().ok()?;
 
     let needs_reload = guard
@@ -510,8 +537,7 @@ pub fn load_global_topo(selected_root: Option<&Path>, zoom: f32) -> Option<Arc<V
     let path = srtm_focus_cache::ensure_global_land_overview(selected_root)?;
     let (lod_bucket, simplify_step, feature_budget) = global_topo_lod(zoom);
 
-    static CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    let cache = GLOBAL_TOPO_CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = cache.lock().ok()?;
 
     let needs_reload = guard
