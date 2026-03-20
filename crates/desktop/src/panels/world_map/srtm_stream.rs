@@ -5,7 +5,9 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+#[allow(dead_code)]
 const MIN_LAND_ELEVATION_M: f32 = -600.0;
+#[allow(dead_code)]
 const MAX_LAND_ELEVATION_M: f32 = 9_000.0;
 const MAX_CACHED_TILES: usize = 8;
 
@@ -25,6 +27,7 @@ struct TileCache {
     missing: HashSet<PathBuf>,
 }
 
+#[allow(dead_code)]
 pub fn sample_normalized(selected_root: Option<&Path>, point: GeoPoint) -> Option<f32> {
     let elevation_m = sample_elevation_m(selected_root, point)?;
     Some(

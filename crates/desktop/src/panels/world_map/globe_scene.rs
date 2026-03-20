@@ -316,7 +316,7 @@ fn draw_srtm_on_globe(
     painter: &egui::Painter,
     layout: &GlobeLayout,
     view: &GlobeViewState,
-    lod: &GlobeLod,
+    _lod: &GlobeLod,
     selected_root: Option<&std::path::Path>,
 ) {
     if view.zoom < 1.5 {
@@ -425,6 +425,7 @@ fn draw_zoom_crosshair(
     }
 }
 
+#[allow(dead_code)]
 fn draw_real_contours(
     painter: &egui::Painter,
     layout: &GlobeLayout,

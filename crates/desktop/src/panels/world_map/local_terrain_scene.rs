@@ -11,7 +11,9 @@ use super::local_terrain_pass;
 use super::srtm_focus_cache;
 use super::srtm_stream;
 
+#[allow(dead_code)]
 pub const LOCAL_TRANSITION_START_ZOOM: f32 = 4.0;
+#[allow(dead_code)]
 pub const LOCAL_MODE_MIN_ZOOM: f32 = 25.0;
 const LOCAL_STREAM_RADIUS: i32 = 2;
 const BASE_VERTICAL_EXAGGERATION: f32 = 2.1;
@@ -285,6 +287,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     }
 }
 
+#[allow(dead_code)]
 pub fn paint_transition_overlay(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -329,6 +332,7 @@ pub fn is_active(model: &AppModel) -> bool {
         && terrain_assets::find_srtm_root(model.selected_root.as_deref()).is_some()
 }
 
+#[allow(dead_code)]
 pub fn transition_progress(zoom: f32) -> f32 {
     ((zoom - LOCAL_TRANSITION_START_ZOOM) / (LOCAL_MODE_MIN_ZOOM - LOCAL_TRANSITION_START_ZOOM))
         .clamp(0.0, 1.0)
@@ -412,6 +416,7 @@ fn layout(rect: egui::Rect) -> LocalLayout {
     }
 }
 
+#[allow(dead_code)]
 fn transition_layout(rect: egui::Rect, progress: f32) -> LocalLayout {
     let progress = progress.clamp(0.0, 1.0);
     let target = layout(rect);
@@ -1285,6 +1290,7 @@ fn draw_water(
     }
 }
 
+#[allow(dead_code)]
 fn draw_markers(
     painter: &egui::Painter,
     layout: &LocalLayout,
@@ -1664,7 +1670,7 @@ fn draw_coastlines_local(
     layout: &LocalLayout,
     view: &GlobeViewState,
     focus: GeoPoint,
-    render_zoom: f32,
+    _render_zoom: f32,
     selected_root: Option<&Path>,
 ) {
     let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);

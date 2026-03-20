@@ -21,6 +21,7 @@ struct CachedRaster {
 }
 
 impl TerrainRaster {
+    #[allow(dead_code)]
     pub fn sample_normalized(&self, point: GeoPoint) -> f32 {
         let elevation_m = self.sample_elevation_m(point);
         ((elevation_m - MIN_ELEVATION_M) / (MAX_ELEVATION_M - MIN_ELEVATION_M)).clamp(0.0, 1.0)
@@ -67,6 +68,7 @@ pub fn sample_global_elevation_m(selected_root: Option<&Path>, point: GeoPoint) 
     )
 }
 
+#[allow(dead_code)]
 pub fn sample_normalized(selected_root: Option<&Path>, point: GeoPoint) -> Option<f32> {
     Some(
         sample_elevation_m(selected_root, point)?
@@ -78,10 +80,12 @@ pub fn sample_normalized(selected_root: Option<&Path>, point: GeoPoint) -> Optio
     )
 }
 
+#[allow(dead_code)]
 pub fn sample_visual_intensity(selected_root: Option<&Path>, point: GeoPoint) -> Option<f32> {
     sample_global_visual_intensity(selected_root, point)
 }
 
+#[allow(dead_code)]
 pub fn sample_global_visual_intensity(
     selected_root: Option<&Path>,
     point: GeoPoint,
@@ -103,6 +107,7 @@ pub fn sample_global_visual_intensity(
 }
 
 impl TerrainRaster {
+    #[allow(dead_code)]
     fn sample_pixel_normalized(&self, point: GeoPoint) -> f32 {
         let u = ((point.lon + 180.0) / 360.0).rem_euclid(1.0);
         let v = ((90.0 - point.lat) / 180.0).clamp(0.0, 1.0);
@@ -170,4 +175,5 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 }
 
 static HEIGHT_CACHE: OnceLock<Mutex<Option<CachedRaster>>> = OnceLock::new();
+#[allow(dead_code)]
 static VISUAL_CACHE: OnceLock<Mutex<Option<CachedRaster>>> = OnceLock::new();

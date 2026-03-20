@@ -9,11 +9,15 @@ pub struct CityEntry {
     pub name: String,
     pub region: Option<String>,
     pub country: String,
+    #[allow(dead_code)]
     pub ascii_name: String,
+    #[allow(dead_code)]
     pub country_code: String,
+    #[allow(dead_code)]
     pub admin1_code: String,
     pub location: GeoPoint,
     pub population: u32,
+    #[allow(dead_code)]
     pub aliases: String,
 }
 

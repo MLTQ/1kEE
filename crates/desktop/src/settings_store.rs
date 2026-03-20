@@ -61,11 +61,13 @@ pub fn save_app_settings(settings: &AppSettings) -> std::io::Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn load_factal_api_key() -> Option<String> {
     let trimmed = load_app_settings().factal_api_key.trim().to_owned();
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
+#[allow(dead_code)]
 pub fn save_factal_api_key(api_key: &str) -> std::io::Result<()> {
     let mut settings = load_app_settings();
     settings.factal_api_key = api_key.trim().to_owned();

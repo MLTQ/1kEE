@@ -13,11 +13,15 @@ const DEAD_VEL: f32 = 0.0005;
 const DEAD_PAN: f32 = 0.000_02; // degrees/s
 
 pub struct GlobeLod {
+    #[allow(dead_code)]
     pub lat_line_step: usize,
+    #[allow(dead_code)]
     pub lon_line_step: usize,
+    #[allow(dead_code)]
     pub sample_step: usize,
     pub contour_layers: usize,
     pub altitude_scale: f32,
+    #[allow(dead_code)]
     pub backface_alpha: f32,
 }
 

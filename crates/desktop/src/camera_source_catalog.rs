@@ -19,6 +19,7 @@ pub struct PublicCameraSource {
     #[serde(default)]
     pub array_field: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     pub feature_field: Option<String>,
     #[serde(default)]
     pub id_field: Option<String>,

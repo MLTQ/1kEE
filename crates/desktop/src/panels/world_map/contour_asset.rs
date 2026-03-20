@@ -10,9 +10,7 @@ use super::srtm_focus_cache;
 // ── Module-level cache statics ────────────────────────────────────────────────
 // Lifted to module scope so blast_tile_caches() can clear them all at once.
 static LOCAL_CONTOUR_CACHE: OnceLock<Mutex<LocalRegionCache>> = OnceLock::new();
-static LOCAL_COASTLINE_CACHE: OnceLock<Mutex<LocalRegionCache>> = OnceLock::new();
 static GLOBE_CONTOUR_CACHE: OnceLock<Mutex<GlobeRegionCache>> = OnceLock::new();
-static FOCUS_CONTOUR_CACHE: OnceLock<Mutex<Option<CachedContours>>> = OnceLock::new();
 static GLOBAL_COASTLINE_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();
 static GLOBAL_TOPO_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();
 static GLOBAL_BATHYMETRY_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();
@@ -26,14 +24,8 @@ pub fn blast_tile_caches() {
     if let Some(c) = LOCAL_CONTOUR_CACHE.get() {
         if let Ok(mut g) = c.lock() { g.scene_key = None; g.entries.clear(); }
     }
-    if let Some(c) = LOCAL_COASTLINE_CACHE.get() {
-        if let Ok(mut g) = c.lock() { g.scene_key = None; g.entries.clear(); }
-    }
     if let Some(c) = GLOBE_CONTOUR_CACHE.get() {
         if let Ok(mut g) = c.lock() { *g = GlobeRegionCache::default(); }
-    }
-    if let Some(c) = FOCUS_CONTOUR_CACHE.get() {
-        if let Ok(mut g) = c.lock() { *g = None; }
     }
     if let Some(c) = GLOBAL_COASTLINE_CACHE.get() {
         if let Ok(mut g) = c.lock() { *g = None; }
@@ -58,11 +50,6 @@ struct CacheKey {
     lat_bucket: i32,
     lon_bucket: i32,
     zoom_bucket: i32,
-}
-
-struct CachedContours {
-    key: CacheKey,
-    contours: Arc<Vec<ContourPath>>,
 }
 
 struct CachedGlobalContours {
@@ -106,31 +93,6 @@ struct SceneKey {
     anchor_lat_bucket: i32,
     anchor_lon_bucket: i32,
     zoom_bucket: i32,
-}
-
-#[derive(Clone, Copy)]
-struct GeoBounds {
-    min_lat: f32,
-    max_lat: f32,
-    min_lon: f32,
-    max_lon: f32,
-}
-
-pub fn load_srtm_for_focus(
-    selected_root: Option<&Path>,
-    focus: GeoPoint,
-    zoom: f32,
-) -> Option<Arc<Vec<ContourPath>>> {
-    load_srtm_region_for_focus(selected_root, focus, zoom, 0)
-}
-
-pub fn load_srtm_region_for_focus(
-    selected_root: Option<&Path>,
-    focus: GeoPoint,
-    zoom: f32,
-    radius: i32,
-) -> Option<Arc<Vec<ContourPath>>> {
-    load_srtm_region_for_view(selected_root, focus, focus, zoom, radius)
 }
 
 pub fn load_srtm_region_for_view(
@@ -258,96 +220,6 @@ pub fn load_srtm_region_for_view(
     Some(Arc::new(merged))
 }
 
-/// Load SRTM-derived 0m coastline paths for the local terrain view.
-///
-/// Calls `ensure_focus_coastline_region` to trigger background builds for any
-/// tiles that have main contour data but haven't had their coastline extracted
-/// yet.  Returns `None` until at least one coastline tile is ready.
-pub fn load_srtm_coastlines_for_view(
-    selected_root: Option<&Path>,
-    viewport_center: GeoPoint,
-    zoom: f32,
-    radius: i32,
-) -> Option<Arc<Vec<ContourPath>>> {
-    let assets = srtm_focus_cache::ensure_focus_coastline_region(
-        selected_root, viewport_center, zoom, radius,
-    );
-    if assets.is_empty() {
-        return None;
-    }
-
-    let cache = LOCAL_COASTLINE_CACHE.get_or_init(|| {
-        Mutex::new(LocalRegionCache { scene_key: None, entries: HashMap::new() })
-    });
-
-    // Coastline tiles are large-scale features: use a coarse 1° grid so that
-    // panning within ~1° doesn't clear the cache and fall back to GEBCO.
-    // (The terrain contour cache above uses 0.05° / *20.0 for fine-grained
-    // invalidation; coastlines don't need that precision.)
-    let scene_key = SceneKey {
-        root: selected_root.map(Path::to_path_buf),
-        anchor_lat_bucket: viewport_center.lat.round() as i32,
-        anchor_lon_bucket: viewport_center.lon.round() as i32,
-        zoom_bucket: assets.first().map(|a| a.zoom_bucket).unwrap_or_default(),
-    };
-
-    // Phase 1: lock, check scene, collect missing keys, drop lock immediately.
-    // We never block the render thread waiting for DB reads.
-    let missing: Vec<(CacheKey, srtm_focus_cache::FocusContourAsset)> = {
-        let mut guard = cache.lock().ok()?;
-        if guard.scene_key.as_ref() != Some(&scene_key) {
-            guard.scene_key = Some(scene_key);
-            guard.entries.clear();
-        }
-        assets
-            .iter()
-            .filter_map(|asset| {
-                let key = CacheKey {
-                    path: asset.path.clone(),
-                    lat_bucket: asset.lat_bucket,
-                    lon_bucket: asset.lon_bucket,
-                    zoom_bucket: asset.zoom_bucket,
-                };
-                if guard.entries.contains_key(&key) { None } else { Some((key, asset.clone())) }
-            })
-            .collect()
-    }; // lock dropped here — render thread is free
-
-    // Phase 2: spawn detached threads for each missing tile.  They write into
-    // the shared cache and request a repaint when done.  This call returns
-    // immediately; the coastline appears on the next frame(s) as tiles load.
-    // `cache` is `&'static`, so it satisfies the `'static` bound on thread::spawn.
-    for (key, _asset) in missing {
-        std::thread::spawn(move || {
-            let result = query_local_coastlines(
-                &key.path,
-                key.zoom_bucket,
-                key.lat_bucket,
-                key.lon_bucket,
-            )
-            .ok()
-            .filter(|c| !c.is_empty());
-            if let Some(contours) = result {
-                if let Ok(mut guard) = cache.lock() {
-                    guard.entries.insert(key, Arc::new(contours));
-                }
-                crate::app::request_repaint();
-            }
-        });
-    }
-
-    // Phase 3: return whatever is already cached — may be empty on the first
-    // call, populated on subsequent frames as the spawned threads complete.
-    let guard = cache.lock().ok()?;
-    let merged: Vec<ContourPath> = guard
-        .entries
-        .values()
-        .flat_map(|v| v.iter().cloned())
-        .collect();
-
-    if merged.is_empty() { None } else { Some(Arc::new(merged)) }
-}
-
 /// Load SRTM focus-tile contours for globe-mode rendering.
 ///
 /// Differences from `load_srtm_region_for_view`:
@@ -467,40 +339,6 @@ fn render_globe_tiles(guard: &GlobeRegionCache) -> Option<Arc<Vec<ContourPath>>>
     } else {
         Some(Arc::new(merged))
     }
-}
-
-pub fn load_for_focus(
-    selected_root: Option<&Path>,
-    focus: GeoPoint,
-    zoom: f32,
-) -> Option<Arc<Vec<ContourPath>>> {
-    let path = contour_path(selected_root, zoom)?;
-    let key = CacheKey {
-        path,
-        lat_bucket: (focus.lat * 2.0).round() as i32,
-        lon_bucket: (focus.lon * 2.0).round() as i32,
-        zoom_bucket: (zoom * 10.0).round() as i32,
-    };
-
-    let cache = FOCUS_CONTOUR_CACHE.get_or_init(|| Mutex::new(None));
-    let mut guard = cache.lock().ok()?;
-
-    let needs_reload = guard
-        .as_ref()
-        .map(|cached| {
-            cached.key.path != key.path
-                || cached.key.lat_bucket != key.lat_bucket
-                || cached.key.lon_bucket != key.lon_bucket
-                || cached.key.zoom_bucket != key.zoom_bucket
-        })
-        .unwrap_or(true);
-
-    if needs_reload {
-        let contours = Arc::new(query_gebco_contours(&key.path, focus, zoom).ok()?);
-        *guard = Some(CachedContours { key, contours });
-    }
-
-    guard.as_ref().map(|cached| Arc::clone(&cached.contours))
 }
 
 pub fn load_global_coastlines(
@@ -774,124 +612,6 @@ fn query_global_coastlines(
     Ok(contours)
 }
 
-fn query_gebco_contours(
-    path: &Path,
-    focus: GeoPoint,
-    zoom: f32,
-) -> rusqlite::Result<Vec<ContourPath>> {
-    let connection = Connection::open(path)?;
-    let half_extent = if zoom < 1.0 {
-        8.0
-    } else if zoom < 2.5 {
-        4.0
-    } else if zoom < 5.0 {
-        2.25
-    } else {
-        1.2
-    };
-    let bounds = GeoBounds {
-        min_lon: focus.lon - half_extent,
-        max_lon: focus.lon + half_extent,
-        min_lat: (focus.lat - half_extent).max(-90.0),
-        max_lat: (focus.lat + half_extent).min(90.0),
-    };
-    let limit = if zoom >= 5.0 {
-        180
-    } else if zoom >= 2.5 {
-        120
-    } else {
-        80
-    };
-    let simplify_step = if zoom >= 5.0 {
-        2
-    } else if zoom >= 2.5 {
-        3
-    } else {
-        5
-    };
-
-    let mut statement = connection.prepare(
-        "SELECT c.geom, c.elevation_m
-         FROM contour c
-         JOIN rtree_contour_geom r ON c.fid = r.id
-         WHERE r.maxx >= ?1 AND r.minx <= ?2 AND r.maxy >= ?3 AND r.miny <= ?4
-         LIMIT ?5",
-    )?;
-
-    let rows = statement.query_map(
-        params![
-            bounds.min_lon,
-            bounds.max_lon,
-            bounds.min_lat,
-            bounds.max_lat,
-            limit
-        ],
-        |row| {
-            let geometry: Vec<u8> = row.get(0)?;
-            let elevation_m: f32 = row.get(1)?;
-            Ok((geometry, elevation_m))
-        },
-    )?;
-
-    let mut contours = Vec::new();
-    for row in rows {
-        let (geometry, elevation_m) = row?;
-        for line in parse_gpkg_lines(&geometry) {
-            for clipped in clip_polyline_to_bounds(&line, bounds) {
-                if clipped.len() < 2 {
-                    continue;
-                }
-                contours.push(ContourPath {
-                    elevation_m,
-                    points: simplify_line(clipped, simplify_step),
-                });
-            }
-        }
-    }
-
-    let positive_count = contours
-        .iter()
-        .filter(|contour| contour.elevation_m >= 0.0)
-        .count();
-    if positive_count >= contours.len().saturating_div(6).max(24) {
-        contours.retain(|contour| contour.elevation_m >= 0.0);
-    }
-
-    Ok(contours)
-}
-
-fn query_local_coastlines(
-    path: &Path,
-    zoom_bucket: i32,
-    lat_bucket: i32,
-    lon_bucket: i32,
-) -> rusqlite::Result<Vec<ContourPath>> {
-    let connection = Connection::open(path)?;
-    let mut statement = connection.prepare(
-        "SELECT geom FROM coastline_tiles
-         WHERE zoom_bucket = ?1 AND lat_bucket = ?2 AND lon_bucket = ?3
-         ORDER BY fid",
-    )?;
-    let rows = statement.query_map(params![zoom_bucket, lat_bucket, lon_bucket], |row| {
-        row.get::<_, Vec<u8>>(0)
-    })?;
-
-    let mut contours = Vec::new();
-    for row in rows {
-        let geometry = row?;
-        for line in parse_gpkg_lines(&geometry) {
-            // Drop short fragments — 0m SRTM contours produce thousands of
-            // tiny rings around inland sea-level pixels (river deltas, wetlands,
-            // tidal channels) that render as noise blobs even at low alpha.
-            // 60 pts × 30 m/pt ≈ 1.8 km minimum arc — keeps only real coasts.
-            if line.len() >= 60 {
-                contours.push(ContourPath { elevation_m: 0.0, points: line });
-            }
-        }
-    }
-    Ok(contours)
-}
-
 fn query_local_contours(
     path: &Path,
     zoom_bucket: i32,
@@ -954,80 +674,6 @@ fn simplify_line(points: Vec<GeoPoint>, step: usize) -> Vec<GeoPoint> {
 
     simplified.dedup_by(|left, right| left.lat == right.lat && left.lon == right.lon);
     simplified
-}
-
-fn clip_polyline_to_bounds(points: &[GeoPoint], bounds: GeoBounds) -> Vec<Vec<GeoPoint>> {
-    let mut result = Vec::new();
-    let mut current = Vec::new();
-
-    for pair in points.windows(2) {
-        let start = pair[0];
-        let end = pair[1];
-        if let Some((clipped_start, clipped_end)) = clip_segment(start, end, bounds) {
-            if current
-                .last()
-                .is_none_or(|last: &GeoPoint| points_distinct(*last, clipped_start))
-            {
-                current.push(clipped_start);
-            }
-            current.push(clipped_end);
-        } else if current.len() >= 2 {
-            result.push(std::mem::take(&mut current));
-        } else {
-            current.clear();
-        }
-    }
-
-    if current.len() >= 2 {
-        result.push(current);
-    }
-
-    result
-}
-
-fn clip_segment(start: GeoPoint, end: GeoPoint, bounds: GeoBounds) -> Option<(GeoPoint, GeoPoint)> {
-    let mut t0 = 0.0f32;
-    let mut t1 = 1.0f32;
-    let dx = end.lon - start.lon;
-    let dy = end.lat - start.lat;
-
-    for (p, q) in [
-        (-dx, start.lon - bounds.min_lon),
-        (dx, bounds.max_lon - start.lon),
-        (-dy, start.lat - bounds.min_lat),
-        (dy, bounds.max_lat - start.lat),
-    ] {
-        if p.abs() <= f32::EPSILON {
-            if q < 0.0 {
-                return None;
-            }
-            continue;
-        }
-
-        let r = q / p;
-        if p < 0.0 {
-            if r > t1 {
-                return None;
-            }
-            t0 = t0.max(r);
-        } else {
-            if r < t0 {
-                return None;
-            }
-            t1 = t1.min(r);
-        }
-    }
-
-    Some((
-        GeoPoint {
-            lat: start.lat + dy * t0,
-            lon: start.lon + dx * t0,
-        },
-        GeoPoint {
-            lat: start.lat + dy * t1,
-            lon: start.lon + dx * t1,
-        },
-    ))
 }
 
 fn parse_gpkg_lines(blob: &[u8]) -> Vec<Vec<GeoPoint>> {
@@ -1132,10 +778,6 @@ fn read_f64(bytes: &[u8], cursor: &mut usize, little: bool) -> Option<f64> {
     } else {
         f64::from_be_bytes(slice.try_into().ok()?)
     })
-}
-
-fn points_distinct(left: GeoPoint, right: GeoPoint) -> bool {
-    (left.lat - right.lat).abs() > 0.000_01 || (left.lon - right.lon).abs() > 0.000_01
 }
 
 #[cfg(test)]

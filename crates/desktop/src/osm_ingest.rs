@@ -131,6 +131,7 @@ const ROAD_TILE_ZOOMS: &[u8] = &[4, 6, 8, 10];
 const PROGRESS_FLUSH_INTERVAL: usize = 25_000;
 const FOCUS_SCAN_PROGRESS_INTERVAL: usize = 2_000_000;
 const FOCUS_NODE_MARGIN_DEGREES: f32 = 0.08;
+#[allow(dead_code)]
 const DEFAULT_FOCUS_RADIUS_MILES: f32 = 20.0;
 /// Sentinel source path used when queuing an Overpass-backed focus job
 /// (i.e. no local planet.osm.pbf is available).
@@ -170,6 +171,7 @@ pub struct OsmInventory {
     pub queued_jobs: usize,
     pub road_tiles: usize,
     pub building_tiles: usize,
+    #[allow(dead_code)]
     pub water_tiles: usize,
     pub primary_runtime_source: &'static str,
 }
@@ -179,8 +181,11 @@ pub struct OsmInventory {
 /// (first ≈ last point) and rendered as outlines + light fill.
 #[derive(Clone, Debug)]
 pub struct WaterPolyline {
+    #[allow(dead_code)]
     pub way_id: i64,
+    #[allow(dead_code)]
     pub water_class: String, // "river"|"stream"|"canal"|"drain"|"lake"|"reservoir"
+    #[allow(dead_code)]
     pub name: Option<String>,
     pub points: Vec<GeoPoint>,
     pub is_area: bool,
@@ -194,8 +199,11 @@ pub enum RoadLayerKind {
 
 #[derive(Clone, Debug)]
 pub struct RoadPolyline {
+    #[allow(dead_code)]
     pub way_id: i64,
+    #[allow(dead_code)]
     pub road_class: String,
+    #[allow(dead_code)]
     pub name: Option<String>,
     pub points: Vec<GeoPoint>,
 }
@@ -659,6 +667,7 @@ pub fn find_planet_pbf(selected_root: Option<&Path>) -> Option<PathBuf> {
     None
 }
 
+#[allow(dead_code)]
 pub fn validate_reader(selected_root: Option<&Path>) -> Result<(), String> {
     let path = find_planet_pbf(selected_root)
         .ok_or_else(|| "No planet-latest.osm.pbf source found for validation.".to_owned())?;
@@ -1479,6 +1488,7 @@ fn import_focus_roads_via_stream_scan(db_path: &Path, job: &OsmJob) -> Result<St
     ))
 }
 
+#[allow(dead_code)]
 fn import_focus_roads_via_ogr2ogr(db_path: &Path, job: &OsmJob) -> Result<String, String> {
     let output_dir = db_path
         .parent()
@@ -2167,7 +2177,7 @@ impl WaterTileWriter {
         self.connection.execute_batch("COMMIT; BEGIN IMMEDIATE;").map_err(|e| e.to_string())
     }
 
-    fn finish_simple(mut self) -> rusqlite::Result<()> {
+    fn finish_simple(self) -> rusqlite::Result<()> {
         self.connection.execute_batch("COMMIT;")?;
         Ok(())
     }
@@ -2310,6 +2320,7 @@ fn decode_linestring_wkb(bytes: &[u8]) -> Option<Vec<GeoPoint>> {
     Some(points)
 }
 
+#[allow(dead_code)]
 fn parse_geojson_linestring(geometry: &Value) -> Option<Vec<GeoPoint>> {
     let coordinates = geometry.get("coordinates")?.as_array()?;
     let mut points = Vec::with_capacity(coordinates.len());
@@ -2325,6 +2336,7 @@ fn parse_geojson_linestring(geometry: &Value) -> Option<Vec<GeoPoint>> {
     Some(points)
 }
 
+#[allow(dead_code)]
 fn parse_geojson_multilinestring(geometry: &Value) -> Option<Vec<Vec<GeoPoint>>> {
     let coordinates = geometry.get("coordinates")?.as_array()?;
     let mut lines = Vec::with_capacity(coordinates.len());

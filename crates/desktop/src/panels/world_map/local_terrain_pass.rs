@@ -38,6 +38,7 @@ const INDEX_COUNT: u32 = GRID_N * GRID_N * 6;
 const ELEV_MIN_M: f32 = -2_000.0;
 const ELEV_RANGE_M: f32 = 12_000.0; // −2 km … +10 km
 
+#[allow(dead_code)]
 const BASE_VERT_EXAG: f32 = 2.1;
 
 // ── Uniform buffer layout (must match WGSL struct byte-for-byte) ──────────────
