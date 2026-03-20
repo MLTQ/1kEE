@@ -1621,12 +1621,6 @@ fn draw_bathymetry_local(
     let min_lon = focus.lon - margin;
     let max_lon = focus.lon + margin;
 
-    // Fade out at high zoom (GEBCO 450m resolution looks coarse vs SRTM).
-    let fade = (1.0_f32 - (view.local_zoom - 2.0).max(0.0) / 4.0).clamp(0.0, 1.0);
-    if fade < 0.01 {
-        return;
-    }
-
     let _ = render_zoom; // used by caller for LOD selection via bathy_zoom
 
     const BATHY_ELEV_OFFSET: f32 = -5.0; // project just below sea level
@@ -1642,7 +1636,7 @@ fn draw_bathymetry_local(
         let depth_norm = (-contour.elevation_m / 11_000.0_f32).clamp(0.0, 1.0);
         let major = ((-contour.elevation_m.round() as i32) % 1_000) < 50;
         let base_a = if major { 0.50_f32 } else { 0.25_f32 };
-        let a = (base_a * fade * (0.4 + depth_norm * 0.6) * 255.0) as u8;
+        let a = (base_a * (0.4 + depth_norm * 0.6) * 255.0) as u8;
         let r = (18.0 * (1.0 - depth_norm * 0.8)) as u8;
         let g = (55.0 * (1.0 - depth_norm * 0.6)) as u8;
         let b = (130 + (60.0 * depth_norm) as u8).min(255);

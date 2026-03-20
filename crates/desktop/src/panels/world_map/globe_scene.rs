@@ -238,12 +238,6 @@ fn draw_global_bathymetry(
     view: &GlobeViewState,
     selected_root: Option<&std::path::Path>,
 ) {
-    // Mirror the topo fade: full opacity at zoom ≤ 3.0, gone by 5.0.
-    let alpha = (1.0 - (view.zoom - 3.0) / 2.0).clamp(0.0, 1.0);
-    if alpha <= 0.01 {
-        return;
-    }
-
     let Some(bathy) = contour_asset::load_global_bathymetry(selected_root, view.zoom) else {
         return;
     };
@@ -256,7 +250,7 @@ fn draw_global_bathymetry(
 
         // Colour: interpolate from shallow steel-blue to deep midnight blue.
         let base_a = if major { 0.55_f32 } else { 0.28_f32 };
-        let a = (base_a * alpha * (0.45 + depth_norm * 0.55) * 255.0) as u8;
+        let a = (base_a * (0.45 + depth_norm * 0.55) * 255.0) as u8;
         let r = (18.0 * (1.0 - depth_norm * 0.8)) as u8;
         let g = (55.0 * (1.0 - depth_norm * 0.6)) as u8;
         let b = (140 + (50.0 * depth_norm) as u8).min(255);
@@ -268,8 +262,8 @@ fn draw_global_bathymetry(
             view,
             &contour.points,
             0.015,
-            color.gamma_multiply(alpha),
-            0.04 * alpha,
+            color,
+            0.04,
         );
     }
 }

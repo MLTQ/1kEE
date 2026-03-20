@@ -566,12 +566,14 @@ pub fn load_global_topo(selected_root: Option<&Path>, zoom: f32) -> Option<Arc<V
 }
 
 fn global_bathymetry_lod(zoom: f32) -> (i32, usize, usize) {
+    // Bathymetry renders at all zoom levels (no fade-out).
+    // Generous budgets since ocean features are sparse relative to land topo.
     if zoom < 1.5 {
-        (0, 20, 300)
+        (0, 16, 800)
     } else if zoom < 3.0 {
-        (1, 13, 550)
+        (1, 10, 1_400)
     } else {
-        (2, 8, 900)
+        (2, 6, 2_200)
     }
 }
 
@@ -605,42 +607,62 @@ fn query_global_bathymetry(
     feature_budget: usize,
 ) -> rusqlite::Result<Vec<ContourPath>> {
     let connection = Connection::open(path)?;
-    // The GPKG is ordered by scan position (N→S), so a bare LIMIT only returns
-    // Arctic rows.  Stride-sample across the full FID range for global coverage.
-    let total: i64 = connection
-        .query_row("SELECT COUNT(*) FROM contour WHERE elevation_m < 0", [], |r| r.get(0))
-        .unwrap_or(0);
-    let fetch_target = (feature_budget * 8).max(3_000) as i64;
-    let stride = (total / fetch_target.max(1)).max(1);
-    let mut statement = connection.prepare(
-        "SELECT geom, elevation_m FROM contour WHERE elevation_m < 0 AND (fid % ?1) = 0",
-    )?;
-    let rows = statement.query_map(params![stride], |row| {
-        let geometry: Vec<u8> = row.get(0)?;
-        let elevation_m: f32 = row.get(1)?;
-        Ok((geometry, elevation_m))
-    })?;
 
-    let mut contours = Vec::new();
-    for row in rows {
-        let (geometry, elevation_m) = row?;
-        for line in parse_gpkg_lines(&geometry) {
-            if line.len() < 2 {
-                continue;
-            }
-            let simplified = simplify_line(line, simplify_step);
-            if simplified.len() < 2 {
-                continue;
-            }
-            contours.push(ContourPath { elevation_m, points: simplified });
+    // gdal_contour fragments each isobath into many short scan-line segments.
+    // Stride-sampling those fragments gives a globally-distributed but spotty
+    // point cloud.  Instead, query a set of geomorphologically meaningful
+    // depth levels — continental shelf edge (-200m), slope, abyssal plain
+    // transitions — fetch ALL fragments at each level, sort by length, and
+    // keep the longest ones.  Long fragments = major shelf/ridge/trench lines.
+    //
+    // Budget split across depth levels (shelf gets the most):
+    let depth_levels: &[(f32, usize)] = &[
+        (-200.0,  feature_budget * 30 / 100),  // continental shelf edge
+        (-500.0,  feature_budget * 15 / 100),  // upper slope
+        (-1000.0, feature_budget * 15 / 100),  // mid slope
+        (-2000.0, feature_budget * 12 / 100),  // lower slope / rise
+        (-3000.0, feature_budget * 10 / 100),  // abyssal plains begin
+        (-4000.0, feature_budget *  8 / 100),  // deep abyssal
+        (-5000.0, feature_budget *  6 / 100),  // hadal zone entry
+        (-6000.0, feature_budget *  4 / 100),  // trenches
+    ];
+
+    let mut all_contours: Vec<ContourPath> = Vec::new();
+
+    for &(depth, per_depth_budget) in depth_levels {
+        if per_depth_budget == 0 {
+            continue;
         }
+        // Fetch generously, then keep the longest segments only.
+        let fetch_limit = (per_depth_budget * 12).max(400) as i64;
+        let mut stmt = connection.prepare(
+            "SELECT geom FROM contour WHERE ABS(elevation_m - ?1) < 1.0 LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![depth, fetch_limit], |row| {
+            row.get::<_, Vec<u8>>(0)
+        })?;
+
+        let mut depth_contours: Vec<ContourPath> = Vec::new();
+        for row in rows {
+            let geometry = row?;
+            for line in parse_gpkg_lines(&geometry) {
+                if line.len() < 2 {
+                    continue;
+                }
+                let simplified = simplify_line(line, simplify_step);
+                if simplified.len() >= 3 {
+                    depth_contours.push(ContourPath { elevation_m: depth, points: simplified });
+                }
+            }
+        }
+        // Keep the longest segments at this depth — they are the actual shelf/
+        // ridge/trench lines rather than noise fragments.
+        depth_contours.sort_unstable_by(|a, b| b.points.len().cmp(&a.points.len()));
+        depth_contours.truncate(per_depth_budget);
+        all_contours.extend(depth_contours);
     }
 
-    // Sort by line length descending — long lines are continental shelf edges,
-    // ocean ridges, and trench walls; short ones are noise at this scale.
-    contours.sort_unstable_by(|a, b| b.points.len().cmp(&a.points.len()));
-    contours.truncate(feature_budget);
-    Ok(contours)
+    Ok(all_contours)
 }
 
 fn global_topo_lod(zoom: f32) -> (i32, usize, usize) {
