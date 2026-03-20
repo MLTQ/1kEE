@@ -565,24 +565,16 @@ pub fn load_global_topo(selected_root: Option<&Path>, zoom: f32) -> Option<Arc<V
     guard.as_ref().map(|cached| Arc::clone(&cached.contours))
 }
 
-fn global_bathymetry_lod(zoom: f32) -> (i32, usize, usize) {
-    // Bathymetry renders at all zoom levels (no fade-out).
-    // Generous budgets since ocean features are sparse relative to land topo.
-    if zoom < 1.5 {
-        (0, 16, 800)
-    } else if zoom < 3.0 {
-        (1, 10, 1_400)
-    } else {
-        (2, 6, 2_200)
-    }
-}
-
 pub fn load_global_bathymetry(
     selected_root: Option<&Path>,
     zoom: f32,
 ) -> Option<Arc<Vec<ContourPath>>> {
     let path = contour_path(selected_root, zoom)?;
-    let (lod_bucket, simplify_step, feature_budget) = global_bathymetry_lod(zoom);
+    // Single LOD — no zoom-based switching so the cache never reloads on zoom
+    // changes (which was causing contours to appear/disappear while panning).
+    let lod_bucket: i32 = 0;
+    let simplify_step: usize = 6;
+    let feature_budget: usize = 2_200;
 
     let cache = GLOBAL_BATHYMETRY_CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = cache.lock().ok()?;
