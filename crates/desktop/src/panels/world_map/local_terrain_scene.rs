@@ -52,7 +52,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     // ── GPU terrain surface ────────────────────────────────────────────────
     // Renders a smooth shaded mesh as an underlayer; CPU contours/roads/markers
     // are drawn on top by the remainder of this function.
-    {
+    if model.show_terrain_surface {
         let half_extent_deg = visual_half_extent_for_zoom(model.globe_view.local_zoom);
         let terrain_layout = local_terrain_pass::LocalTerrainLayout {
             focus_center:    layout.focus_center,
