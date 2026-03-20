@@ -3,6 +3,7 @@ use crate::factal_stream;
 use crate::model::AppModel;
 use crate::panels;
 use crate::panels::world_map::globe_pass;
+use crate::panels::world_map::local_terrain_pass;
 use crate::theme;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -36,13 +37,19 @@ impl DashboardApp {
         theme::install(&cc.egui_ctx);
         register_repaint_ctx(&cc.egui_ctx);
 
-        // Initialise the GPU globe pass resources (pipeline, bind group, uniform buffer).
+        // Initialise GPU pass resources for the globe and local terrain views.
         if let Some(wgpu_state) = cc.wgpu_render_state.as_ref() {
-            let resources = globe_pass::GlobePassResources::new(
+            let globe_res = globe_pass::GlobePassResources::new(
                 &wgpu_state.device,
                 wgpu_state.target_format,
             );
-            wgpu_state.renderer.write().callback_resources.insert(resources);
+            let terrain_res = local_terrain_pass::LocalTerrainPassResources::new(
+                &wgpu_state.device,
+                wgpu_state.target_format,
+            );
+            let mut renderer = wgpu_state.renderer.write();
+            renderer.callback_resources.insert(globe_res);
+            renderer.callback_resources.insert(terrain_res);
         }
 
         let model = AppModel::seed_demo();
