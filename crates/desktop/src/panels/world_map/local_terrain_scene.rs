@@ -1614,8 +1614,11 @@ fn draw_coastlines_local(
     );
 
     if let Some(coastlines) = &srtm_coastlines {
-        let halo = egui::Stroke::new(4.0, egui::Color32::from_rgba_premultiplied(10, 70, 130, 80));
-        let core = egui::Stroke::new(1.4, egui::Color32::from_rgba_premultiplied(55, 165, 240, 180));
+        // Three-pass white glow: wide dim outer → mid → thin bright core.
+        // Subtle and soft so it reads against both dark ocean and lit terrain.
+        let outer = egui::Stroke::new(6.0, egui::Color32::from_rgba_premultiplied(200, 215, 255, 12));
+        let mid   = egui::Stroke::new(3.0, egui::Color32::from_rgba_premultiplied(210, 225, 255, 40));
+        let core  = egui::Stroke::new(1.1, egui::Color32::from_rgba_premultiplied(230, 240, 255, 115));
         const COAST_ELEV: f32 = -3.0;
 
         for coast in coastlines.iter() {
@@ -1631,7 +1634,8 @@ fn draw_coastlines_local(
                 })
                 .collect();
             if points.len() >= 2 {
-                painter.add(egui::Shape::line(points.clone(), halo));
+                painter.add(egui::Shape::line(points.clone(), outer));
+                painter.add(egui::Shape::line(points.clone(), mid));
                 painter.add(egui::Shape::line(points, core));
             }
         }

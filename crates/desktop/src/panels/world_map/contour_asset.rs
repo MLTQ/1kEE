@@ -253,7 +253,8 @@ pub fn load_srtm_coastlines_for_view(
         zoom_bucket: assets.first().map(|a| a.zoom_bucket).unwrap_or_default(),
     };
 
-    // Collect missing keys without holding the lock.
+    // Phase 1: lock, check scene, collect missing keys, drop lock immediately.
+    // We never block the render thread waiting for DB reads.
     let missing: Vec<(CacheKey, srtm_focus_cache::FocusContourAsset)> = {
         let mut guard = cache.lock().ok()?;
         if guard.scene_key.as_ref() != Some(&scene_key) {
@@ -272,33 +273,34 @@ pub fn load_srtm_coastlines_for_view(
                 if guard.entries.contains_key(&key) { None } else { Some((key, asset.clone())) }
             })
             .collect()
-    };
+    }; // lock dropped here — render thread is free
 
-    let loaded: Vec<(CacheKey, Vec<ContourPath>)> = std::thread::scope(|s| {
-        let handles: Vec<_> = missing
-            .into_iter()
-            .map(|(key, _asset)| {
-                s.spawn(move || {
-                    query_local_coastlines(
-                        &key.path,
-                        key.zoom_bucket,
-                        key.lat_bucket,
-                        key.lon_bucket,
-                    )
-                    .ok()
-                    .filter(|c| !c.is_empty())
-                    .map(|c| (key, c))
-                })
-            })
-            .collect();
-        handles.into_iter().filter_map(|h| h.join().ok().flatten()).collect()
-    });
-
-    let mut guard = cache.lock().ok()?;
-    for (key, contours) in loaded {
-        guard.entries.insert(key, Arc::new(contours));
+    // Phase 2: spawn detached threads for each missing tile.  They write into
+    // the shared cache and request a repaint when done.  This call returns
+    // immediately; the coastline appears on the next frame(s) as tiles load.
+    // `cache` is `&'static`, so it satisfies the `'static` bound on thread::spawn.
+    for (key, _asset) in missing {
+        std::thread::spawn(move || {
+            let result = query_local_coastlines(
+                &key.path,
+                key.zoom_bucket,
+                key.lat_bucket,
+                key.lon_bucket,
+            )
+            .ok()
+            .filter(|c| !c.is_empty());
+            if let Some(contours) = result {
+                if let Ok(mut guard) = cache.lock() {
+                    guard.entries.insert(key, Arc::new(contours));
+                }
+                crate::app::request_repaint();
+            }
+        });
     }
 
+    // Phase 3: return whatever is already cached — may be empty on the first
+    // call, populated on subsequent frames as the spawned threads complete.
+    let guard = cache.lock().ok()?;
     let merged: Vec<ContourPath> = guard
         .entries
         .values()
@@ -756,7 +758,11 @@ fn query_local_coastlines(
     for row in rows {
         let geometry = row?;
         for line in parse_gpkg_lines(&geometry) {
-            if line.len() >= 2 {
+            // Drop very short fragments — 0m SRTM contours produce thousands of
+            // tiny rings around inland sea-level pixels (river deltas, wetlands)
+            // that render as noise dots.  Require at least 8 points (~240 m of
+            // coastline at 30 m resolution) to keep only meaningful segments.
+            if line.len() >= 8 {
                 contours.push(ContourPath { elevation_m: 0.0, points: line });
             }
         }
