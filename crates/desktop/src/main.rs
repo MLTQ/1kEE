@@ -20,6 +20,7 @@ fn main() -> eframe::Result<()> {
             .with_inner_size([1520.0, 920.0])
             .with_min_inner_size([1100.0, 720.0])
             .with_title("1kEE | One Thousand Electric Eye"),
+        renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
 

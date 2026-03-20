@@ -2,6 +2,7 @@ use crate::camera_registry;
 use crate::factal_stream;
 use crate::model::AppModel;
 use crate::panels;
+use crate::panels::world_map::globe_pass;
 use crate::theme;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -34,6 +35,15 @@ impl DashboardApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install(&cc.egui_ctx);
         register_repaint_ctx(&cc.egui_ctx);
+
+        // Initialise the GPU globe pass resources (pipeline, bind group, uniform buffer).
+        if let Some(wgpu_state) = cc.wgpu_render_state.as_ref() {
+            let resources = globe_pass::GlobePassResources::new(
+                &wgpu_state.device,
+                wgpu_state.target_format,
+            );
+            wgpu_state.renderer.write().callback_resources.insert(resources);
+        }
 
         let model = AppModel::seed_demo();
         Self { last_theme: model.map_theme, model }

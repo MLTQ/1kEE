@@ -1,5 +1,6 @@
 mod camera;
 mod contour_asset;
+pub(crate) mod globe_pass;
 mod globe_scene;
 mod local_terrain_scene;
 pub(crate) mod srtm_focus_cache;

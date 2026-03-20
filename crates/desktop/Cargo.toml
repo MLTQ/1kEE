@@ -5,7 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-eframe = { version = "0.31", default-features = true }
+eframe = { version = "0.31", default-features = false, features = ["wgpu", "default_fonts"] }
+bytemuck = { version = "1", features = ["derive"] }
 egui = "0.31"
 image = { version = "0.25", default-features = false, features = ["png", "tiff"] }
 osmpbf = "0.2"

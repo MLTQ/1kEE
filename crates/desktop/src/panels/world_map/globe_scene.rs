@@ -3,6 +3,7 @@ use crate::theme;
 
 use super::camera::{self, GlobeLod};
 use super::contour_asset;
+use super::globe_pass;
 use super::terrain_field;
 
 pub struct GlobeScene {
@@ -33,12 +34,39 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let layout = globe_layout(rect, &model.globe_view);
     let selected_root = model.selected_root.as_deref();
 
-    draw_backdrop(painter, rect, &layout);
+    // ── GPU globe backdrop (terrain shading + graticule) ───────────────────
+    // Replaces the CPU draw_backdrop (flat circle) and draw_graticule (polylines).
+    let ppp = painter.ctx().pixels_per_point();
+    let show_grat = model.show_graticule && !model.globe_view.local_mode;
+    painter.add(
+        globe_pass::GlobeCallback::new(
+            layout.center,
+            layout.radius,
+            layout.focal_length,
+            layout.camera_distance,
+            model.globe_view.yaw,
+            model.globe_view.pitch,
+            ppp,
+            show_grat,
+            theme::scene_backdrop(),
+            theme::topo_color(),
+            theme::wireframe_color(),
+            theme::grid_color(),
+            theme::hot_color(),
+        )
+        .into_paint_callback(rect),
+    );
+
+    // Outer panel rect stroke (was part of draw_backdrop)
+    painter.rect_stroke(
+        rect.shrink(6.0),
+        12.0,
+        egui::Stroke::new(0.7, theme::topo_color().gamma_multiply(0.45)),
+        egui::StrokeKind::Outside,
+    );
+
     if !model.cinematic_mode && model.show_reticle {
         draw_hud_frame(painter, rect);
-    }
-    if model.show_graticule {
-        draw_graticule(painter, &layout, &model.globe_view, &lod);
     }
     if model.show_coastlines {
         draw_global_coastlines(painter, &layout, &model.globe_view, selected_root);
@@ -159,27 +187,6 @@ fn globe_layout(rect: egui::Rect, view: &GlobeViewState) -> GlobeLayout {
     }
 }
 
-fn draw_backdrop(painter: &egui::Painter, rect: egui::Rect, layout: &GlobeLayout) {
-    painter.circle_filled(
-        layout.center,
-        layout.radius * 0.998,
-        theme::scene_backdrop(),
-    );
-
-    painter.circle_stroke(
-        layout.center,
-        layout.radius,
-        egui::Stroke::new(1.25, theme::wireframe_color().gamma_multiply(0.75)),
-    );
-
-    painter.rect_stroke(
-        rect.shrink(6.0),
-        12.0,
-        egui::Stroke::new(0.7, theme::topo_color().gamma_multiply(0.45)),
-        egui::StrokeKind::Outside,
-    );
-}
-
 fn draw_hud_frame(painter: &egui::Painter, rect: egui::Rect) {
     for &(x, y, x_dir, y_dir) in &[
         (rect.left() + 18.0, rect.top() + 18.0, 28.0, 16.0),
@@ -198,82 +205,6 @@ fn draw_hud_frame(painter: &egui::Painter, rect: egui::Rect) {
     }
 }
 
-/// Named geographic parallels that always get the major-line treatment.
-const SPECIAL_LATS: &[f32] = &[
-    0.0,    // Equator
-    23.44,  // Tropic of Cancer
-    -23.44, // Tropic of Capricorn
-    66.56,  // Arctic Circle
-    -66.56, // Antarctic Circle
-];
-
-fn draw_graticule(
-    painter: &egui::Painter,
-    layout: &GlobeLayout,
-    view: &GlobeViewState,
-    lod: &GlobeLod,
-) {
-    if view.local_mode {
-        return;
-    }
-
-    // At low zoom show every 30°; at medium 15°; zoomed in 10°.
-    let minor_lat_step: i32 = if view.zoom < 2.0 { 30 } else if view.zoom < 6.0 { 15 } else { 10 };
-    let minor_lon_step: i32 = if view.zoom < 2.0 { 30 } else if view.zoom < 6.0 { 15 } else { 10 };
-
-    let major_color = theme::grid_color().gamma_multiply(1.8).linear_multiply(0.9);
-    let minor_color = theme::grid_color().gamma_multiply(0.7);
-    let special_color = theme::hot_color().gamma_multiply(0.72); // warm accent for named lines
-
-    // ── Latitude lines ──────────────────────────────────────────────────────
-    // Collect which latitudes to draw and whether each is special/major/minor.
-    let mut lat_lines: Vec<(i32, bool, bool)> = Vec::new(); // (lat_deg, is_special, is_major)
-
-    for lat in (-80..=80).step_by(minor_lat_step as usize) {
-        let is_special = SPECIAL_LATS.iter().any(|&s| (s as i32) == lat);
-        let is_major = lat % 30 == 0;
-        lat_lines.push((lat, is_special, is_major));
-    }
-    // Ensure all special lats are included regardless of step alignment.
-    for &slat in SPECIAL_LATS {
-        let d = slat as i32;
-        if !lat_lines.iter().any(|&(l, _, _)| l == d) {
-            lat_lines.push((d, true, false));
-        }
-    }
-
-    for (lat, is_special, is_major) in lat_lines {
-        let path: Vec<_> = (-180..=180)
-            .step_by(lod.sample_step)
-            .map(|lon| GeoPoint { lat: lat as f32, lon: lon as f32 })
-            .collect();
-        let (color, back_alpha_mult) = if is_special {
-            (special_color, 0.55)
-        } else if is_major {
-            (major_color, 0.45)
-        } else {
-            (minor_color, 0.28)
-        };
-        draw_geo_path(painter, layout, view, &path, lod.altitude_scale, color, lod.backface_alpha * back_alpha_mult);
-    }
-
-    // ── Longitude lines ──────────────────────────────────────────────────────
-    for lon in (-180..180).step_by(minor_lon_step as usize) {
-        let is_major = lon % 30 == 0;
-        let path: Vec<_> = (-85..=85)
-            .step_by(lod.sample_step)
-            .map(|lat| GeoPoint { lat: lat as f32, lon: lon as f32 })
-            .collect();
-        let (color, back_alpha_mult) = if lon == 0 {
-            (special_color, 0.55) // Prime meridian
-        } else if is_major {
-            (major_color, 0.45)
-        } else {
-            (minor_color, 0.28)
-        };
-        draw_geo_path(painter, layout, view, &path, lod.altitude_scale, color, lod.backface_alpha * back_alpha_mult);
-    }
-}
 
 fn draw_global_coastlines(
     painter: &egui::Painter,
