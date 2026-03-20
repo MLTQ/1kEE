@@ -1685,11 +1685,9 @@ fn draw_coastlines_local(
         return;
     };
 
-    // Two-pass white glow — matches the global-view coastline style.
-    // Low alpha so the 450m GEBCO resolution isn't jarring at close zoom.
+    // Single thin white line — same visual weight as the topo contours.
     const COAST_ELEV: f32 = -3.0;
-    let outer = egui::Stroke::new(5.0, egui::Color32::from_rgba_premultiplied(200, 215, 255,  8));
-    let core  = egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(225, 235, 255, 40));
+    let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(220, 230, 255, 55));
 
     for coast in coastlines.iter() {
         let in_view = coast.points.iter().any(|p| {
@@ -1703,8 +1701,7 @@ fn draw_coastlines_local(
             })
             .collect();
         if points.len() >= 2 {
-            painter.add(egui::Shape::line(points.clone(), outer));
-            painter.add(egui::Shape::line(points, core));
+            painter.add(egui::Shape::line(points, stroke));
         }
     }
 }

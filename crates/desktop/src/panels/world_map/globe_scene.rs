@@ -219,15 +219,18 @@ fn draw_global_coastlines(
         return;
     };
 
+    // Thin white line — same weight as topo contours but white to distinguish
+    // land/sea boundary.
+    let coast_color = egui::Color32::from_rgba_premultiplied(210, 220, 255, 90);
     for coastline in coastlines.iter() {
         draw_geo_path(
             painter,
             layout,
             view,
             &coastline.points,
-            0.022,
-            theme::contour_color().gamma_multiply(0.65),
-            0.08,
+            0.015,
+            coast_color,
+            0.04,
         );
     }
 }
