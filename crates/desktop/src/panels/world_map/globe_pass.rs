@@ -385,7 +385,7 @@ fn apply_graticule(
 
     // ── Major lat/lon lines (30° grid) ─────────────────────────────────────
     {
-        let major_col = u.grid_col.rgb * 2.5;
+        let major_col = u.grid_col.rgb * 1.8;
         let lat_a = line_alpha(deg_dist_to_step(lat_deg, 30.0), half_w_lat) * 0.55;
         rgb = mix(rgb, major_col, lat_a);
 
@@ -436,11 +436,12 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let disc = b*b - 4.0*a*c;
 
     if disc < 0.0 {
-        // ── Outside sphere — soft atmospheric halo ─────────────────────────
+        // ── Outside sphere — very faint limb halo only ────────────────────
+        // Keep this extremely subtle so the globe reads as a clean disc
+        // against the background rather than having a visible coloured bloom.
         let edge_dist = sqrt(dx*dx + dy*dy) / u.radius - 1.0;
-        let halo      = exp(-edge_dist * 9.0) * 0.14;
-        // Premultiplied alpha
-        return vec4<f32>(u.grid_col.rgb * halo * 1.4, halo);
+        let halo      = exp(-edge_dist * 12.0) * 0.045;
+        return vec4<f32>(u.ocean_col.rgb * halo * 2.0, halo);
     }
 
     // Front-face hit (smaller t).
@@ -483,10 +484,12 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 
     // ── Rim atmosphere (view-space fresnel) ───────────────────────────────
     // Camera is at (0,0,cam_dist) in view space; hit is on unit sphere.
+    // Blend toward the ocean colour (nearly black) so the limb darkens
+    // naturally instead of glowing the theme accent colour.
     let to_cam  = normalize(vec3<f32>(-hit.x, -hit.y, u.camera_distance - hit.z));
     let rim     = 1.0 - clamp(dot(hit, to_cam), 0.0, 1.0);
-    let atm     = pow(rim, 3.5) * 0.42;
-    rgb = mix(rgb, u.grid_col.rgb * 2.2, atm);
+    let atm     = pow(rim, 3.0) * 0.55;
+    rgb = mix(rgb, u.ocean_col.rgb * 0.4, atm);
 
     // ── Graticule ──────────────────────────────────────────────────────────
     if u.show_graticule != 0u {

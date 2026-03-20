@@ -102,7 +102,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 // is on the limb, the tip projects far from the base (full
                 // beam).  This eliminates the "spinning" artefact caused by
                 // computing the direction in screen space.
-                let extra_r = (82.0 / layout.radius).clamp(0.037, 0.135);
+                let extra_r = (135.0 / layout.radius).clamp(0.060, 0.220);
                 let tip = project_geo_elevated(
                     &layout,
                     &model.globe_view,
@@ -223,8 +223,8 @@ fn draw_global_coastlines(
             view,
             &coastline.points,
             0.022,
-            theme::contour_color().gamma_multiply(1.2),
-            0.16,
+            theme::contour_color().gamma_multiply(0.65),
+            0.08,
         );
     }
 }
@@ -421,23 +421,40 @@ fn draw_event_marker(
     let dx = tip.x - base.pos.x;
     let dy = tip.y - base.pos.y;
 
-    // ── Wide atmospheric halos — full beam length, very low alpha ────────────
-    // These give the diffuse glow without needing to be gradients.
-    painter.line_segment([base.pos, tip], egui::Stroke::new(22.0, col.gamma_multiply(0.04)));
-    painter.line_segment([base.pos, tip], egui::Stroke::new(11.0, col.gamma_multiply(0.08)));
-    painter.line_segment([base.pos, tip], egui::Stroke::new(4.5,  col.gamma_multiply(0.16)));
-
-    // ── Fading core — bright at the base, fading to nothing at the tip ───────
-    // 6 segments with quadratic alpha falloff simulate a gradient.
-    const SEGS: u32 = 6;
-    for i in 0..SEGS {
-        let t0 = i       as f32 / SEGS as f32;
-        let t1 = (i + 1) as f32 / SEGS as f32;
-        let alpha = (1.0 - t0).powi(2); // quadratic: 1.0 at base → 0.0 at tip
+    // ── Atmospheric halos — taper in both width and alpha toward the tip ─────
+    // Fewer segments needed since halos are soft and low-alpha.
+    const HALO_SEGS: u32 = 7;
+    for i in 0..HALO_SEGS {
+        let t0 = i as f32 / HALO_SEGS as f32;
+        let t1 = (i + 1) as f32 / HALO_SEGS as f32;
+        let tm = (t0 + t1) * 0.5;
+        // Quadratic falloff for halos — they should fade a bit slower than the
+        // core so the diffuse glow reaches the upper portion of the beam.
+        let a = (1.0 - tm).powi(2);
         let p0 = egui::pos2(base.pos.x + dx * t0, base.pos.y + dy * t0);
         let p1 = egui::pos2(base.pos.x + dx * t1, base.pos.y + dy * t1);
-        painter.line_segment([p0, p1], egui::Stroke::new(3.2, col.gamma_multiply(alpha * 0.30)));
-        painter.line_segment([p0, p1], egui::Stroke::new(1.4, col.gamma_multiply(alpha * 0.94)));
+        painter.line_segment([p0, p1], egui::Stroke::new((22.0 * a).max(0.5), col.gamma_multiply(0.04 * a)));
+        painter.line_segment([p0, p1], egui::Stroke::new((11.0 * a).max(0.5), col.gamma_multiply(0.08 * a)));
+        painter.line_segment([p0, p1], egui::Stroke::new(( 4.5 * a).max(0.5), col.gamma_multiply(0.16 * a)));
+    }
+
+    // ── Tapering core — bright and wide at the base, tapers to a sharp point ─
+    // Cubic alpha gives a steep, dramatic fade that stays bright through the
+    // lower two-thirds of the beam then quickly collapses to nothing.
+    // Width narrows in parallel so the tip forms a visual spike, not a blunt end.
+    const SEGS: u32 = 14;
+    for i in 0..SEGS {
+        let t0 = i as f32 / SEGS as f32;
+        let t1 = (i + 1) as f32 / SEGS as f32;
+        let tm = (t0 + t1) * 0.5;
+        let falloff = 1.0 - tm;
+        let alpha   = falloff.powi(3);                       // cubic: steep near tip
+        let w_glow  = (4.0  * falloff.powf(0.7)).max(0.4);  // wide glow, tapers fast
+        let w_core  = (1.7  * falloff.powf(0.7)).max(0.3);  // crisp inner core
+        let p0 = egui::pos2(base.pos.x + dx * t0, base.pos.y + dy * t0);
+        let p1 = egui::pos2(base.pos.x + dx * t1, base.pos.y + dy * t1);
+        painter.line_segment([p0, p1], egui::Stroke::new(w_glow, col.gamma_multiply(alpha * 0.30)));
+        painter.line_segment([p0, p1], egui::Stroke::new(w_core, col.gamma_multiply(alpha * 0.96)));
     }
 
     // ── Ground strike ────────────────────────────────────────────────────────
