@@ -74,7 +74,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 // is on the limb, the tip projects far from the base (full
                 // beam).  This eliminates the "spinning" artefact caused by
                 // computing the direction in screen space.
-                let extra_r = (55.0 / layout.radius).clamp(0.025, 0.09);
+                let extra_r = (82.0 / layout.radius).clamp(0.037, 0.135);
                 let tip = project_geo_elevated(
                     &layout,
                     &model.globe_view,

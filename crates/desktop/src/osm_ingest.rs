@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -1194,6 +1194,8 @@ fn import_focus_roads_via_osmium(db_path: &Path, job: &OsmJob) -> Result<String,
             let status = Command::new(&osmium)
                 .arg("extract").arg("-b").arg(&bbox)
                 .arg(&job.source_path).arg("-o").arg(&extract_path).arg("--overwrite")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status().map_err(|e| format!("Failed to launch osmium: {e}"))?;
             if !status.success() {
                 let _ = fs::remove_file(&extract_path);
@@ -1507,6 +1509,8 @@ fn import_focus_roads_via_ogr2ogr(db_path: &Path, job: &OsmJob) -> Result<String
         .arg(job.bounds.max_lat.to_string())
         .arg("-where")
         .arg("highway IS NOT NULL")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map_err(|error| format!("Failed to launch ogr2ogr focused-road import: {error}"))?;
 
@@ -1920,6 +1924,8 @@ fn import_focus_water_via_osmium(db_path: &Path, job: &OsmJob) -> Result<String,
             let status = Command::new(&osmium)
                 .arg("extract").arg("-b").arg(&bbox)
                 .arg(&job.source_path).arg("-o").arg(&extract_path).arg("--overwrite")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status().map_err(|e| format!("osmium launch failed: {e}"))?;
             if !status.success() {
                 let _ = fs::remove_file(&extract_path);

@@ -150,6 +150,8 @@ fn load_tile_via_gdal(src: &Path) -> Option<SrtmTile> {
         .args(["-q", "-ot", "Int16", "-of", "EHdr"])
         .arg(src)
         .arg(&stem)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .ok()?;
 

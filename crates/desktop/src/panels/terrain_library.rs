@@ -5,11 +5,14 @@ use crate::terrain_precompute::{self, PrecomputeJobState};
 use crate::theme;
 
 pub fn render_terrain_library(ctx: &egui::Context, model: &mut AppModel) {
-    // tick() is O(1) when no jobs are queued (reads an AtomicBool), so it's
-    // safe to call every frame.  It drives the import worker even when the
-    // library window is closed so queued jobs continue to make progress.
+    // tick() is O(1) when no jobs are queued (reads an AtomicBool).
     terrain_precompute::tick(model.selected_root.as_deref());
-    osm_ingest::tick(model.selected_root.as_deref());
+    // Only drive the OSM worker when at least one OSM layer is actually
+    // wanted by the user.  This prevents background osmium processes from
+    // running while all road/water layers are toggled off.
+    if model.show_major_roads || model.show_minor_roads || model.show_water {
+        osm_ingest::tick(model.selected_root.as_deref());
+    }
 
     if terrain_precompute::has_active_jobs(model.selected_root.as_deref())
         || osm_ingest::has_active_jobs(model.selected_root.as_deref())
