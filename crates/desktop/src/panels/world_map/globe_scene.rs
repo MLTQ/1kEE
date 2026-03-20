@@ -61,22 +61,38 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             .events
             .iter()
             .filter_map(|event| {
-                project_geo(
+                let base = project_geo(
                     &layout,
                     &model.globe_view,
                     event.location,
                     lod.altitude_scale * 0.7,
-                )
-                .map(|projected| {
-                    draw_event_marker(
-                        painter,
-                        projected,
-                        event,
-                        selected_event_id == Some(event.id.as_str()),
-                        time,
-                    );
-                    (event.id.clone(), projected.pos)
-                })
+                )?;
+                // Beam direction: radially outward from the globe centre in
+                // screen-space.  This IS the surface normal direction as seen
+                // from the camera, so the beam appears to stick straight out
+                // of the Earth regardless of where on the globe it sits.
+                let dx = base.pos.x - layout.center.x;
+                let dy = base.pos.y - layout.center.y;
+                let dist = (dx * dx + dy * dy).sqrt().max(1.0);
+                // Height scales with the visible globe radius so it looks
+                // proportional at every zoom level, clamped for usability.
+                let beam_h = (layout.radius * 0.09).clamp(18.0, 110.0)
+                    * (0.45 + base.depth * 0.55);
+                let beam_dir = (dx / dist, dy / dist);
+                let tip = egui::pos2(
+                    base.pos.x + beam_dir.0 * beam_h,
+                    base.pos.y + beam_dir.1 * beam_h,
+                );
+                draw_event_marker(
+                    painter,
+                    base,
+                    tip,
+                    beam_dir,
+                    event,
+                    selected_event_id == Some(event.id.as_str()),
+                    time,
+                );
+                Some((event.id.clone(), base.pos))
             })
             .collect()
     };
@@ -457,35 +473,80 @@ fn draw_real_contours(
     }
 }
 
+/// Draw a Factal event as a glowing surface-normal laser beam with an NGE-
+/// style 4-point cross flare at the tip.  `base` is the ground-strike
+/// projected point, `tip` is the screen-space beam-tip position, and
+/// `beam_dir` is the normalised (nx, ny) outward direction.
 fn draw_event_marker(
     painter: &egui::Painter,
-    marker: ProjectedPoint,
+    base: ProjectedPoint,
+    tip: egui::Pos2,
+    beam_dir: (f32, f32),
     event: &EventRecord,
     is_selected: bool,
     time: f64,
 ) {
-    let radius = 4.8 + marker.depth * 1.8;
+    let col = event.severity.color();
+    let (nx, ny) = beam_dir;
+
+    let beam_len = ((tip.x - base.pos.x).powi(2) + (tip.y - base.pos.y).powi(2)).sqrt();
+
+    // ── Beam — atmospheric halo layers, wide → narrow ────────────────────────
+    painter.line_segment([base.pos, tip], egui::Stroke::new(22.0, col.gamma_multiply(0.03)));
+    painter.line_segment([base.pos, tip], egui::Stroke::new(11.0, col.gamma_multiply(0.07)));
+    painter.line_segment([base.pos, tip], egui::Stroke::new(4.5,  col.gamma_multiply(0.14)));
+    // Crisp bright core
+    painter.line_segment([base.pos, tip], egui::Stroke::new(1.4,  col.gamma_multiply(0.92)));
+    // Extra bright lower third — simulates beam tapering wider at the base
+    let lower_third = egui::pos2(
+        base.pos.x + nx * beam_len * 0.33,
+        base.pos.y + ny * beam_len * 0.33,
+    );
+    painter.line_segment([base.pos, lower_third], egui::Stroke::new(3.2, col.gamma_multiply(0.26)));
+
+    // ── 4-point cross flare at tip (Neon Genesis / lens-flare style) ─────────
+    let long_arm  = beam_len * 0.26;  // along-beam direction (longer)
+    let short_arm = beam_len * 0.16;  // perpendicular (shorter)
+    let perp = (-ny, nx);
+
+    // Along-beam arm: extends past tip AND slightly back toward base
+    let arm_up   = egui::pos2(tip.x + nx * long_arm  * 0.65, tip.y + ny * long_arm  * 0.65);
+    let arm_down = egui::pos2(tip.x - nx * long_arm  * 0.35, tip.y - ny * long_arm  * 0.35);
+    // Perpendicular arm
+    let arm_l    = egui::pos2(tip.x + perp.0 * short_arm, tip.y + perp.1 * short_arm);
+    let arm_r    = egui::pos2(tip.x - perp.0 * short_arm, tip.y - perp.1 * short_arm);
+
+    // Glow halos around both arms
+    painter.line_segment([arm_up, arm_down], egui::Stroke::new(8.0, col.gamma_multiply(0.08)));
+    painter.line_segment([arm_l,  arm_r   ], egui::Stroke::new(8.0, col.gamma_multiply(0.08)));
+    // Crisp cores
+    painter.line_segment([arm_up, arm_down], egui::Stroke::new(1.3, col.gamma_multiply(0.96)));
+    painter.line_segment([arm_l,  arm_r   ], egui::Stroke::new(1.3, col.gamma_multiply(0.96)));
+    // Hot dot at the cross centre
+    painter.circle_stroke(tip, 3.0, egui::Stroke::new(4.5, col.gamma_multiply(0.13)));
+    painter.circle_filled(tip, 1.8, col);
+
+    // ── Ground strike ────────────────────────────────────────────────────────
     if is_selected {
-        let pulse = radius + 4.0 + ((time as f32 * 2.5).sin() + 1.0) * 2.4;
+        let pulse = 9.0 + ((time as f32 * 2.6).sin() + 1.0) * 3.5;
         painter.circle_stroke(
-            marker.pos,
-            pulse,
+            base.pos, pulse,
             egui::Stroke::new(1.3, theme::marker_glow_warm()),
         );
     }
-
-    painter.circle_filled(marker.pos, radius, event.severity.color());
-    painter.circle_stroke(
-        marker.pos,
-        radius + 2.2,
-        egui::Stroke::new(0.9, theme::hot_color().gamma_multiply(0.75)),
-    );
+    painter.circle_stroke(base.pos, 6.5, egui::Stroke::new(9.0,  col.gamma_multiply(0.06)));
+    painter.circle_stroke(base.pos, 4.8, egui::Stroke::new(1.1,  col.gamma_multiply(0.60)));
+    painter.circle_filled(base.pos, 2.5, col);
 }
 
 fn draw_camera_marker(painter: &egui::Painter, marker: ProjectedPoint, is_selected: bool) {
     let radius = 3.0 + marker.depth;
     let color = if is_selected { theme::marker_camera_ring() } else { theme::camera_color() };
 
+    painter.circle_stroke(
+        marker.pos, radius + 5.5,
+        egui::Stroke::new(5.5, color.gamma_multiply(0.07)),
+    );
     painter.circle_filled(marker.pos, radius, color);
     if is_selected {
         painter.circle_stroke(marker.pos, radius + 3.2, egui::Stroke::new(1.1, color));
