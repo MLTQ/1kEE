@@ -886,12 +886,11 @@ fn query_local_coastlines(
     for row in rows {
         let geometry = row?;
         for line in parse_gpkg_lines(&geometry) {
-            // Drop very short fragments — 0m SRTM contours produce thousands of
-            // tiny rings around inland sea-level pixels (river deltas, wetlands)
-            // that render as noise dots.  Require at least 20 points (~600 m of
-            // coastline at 30 m resolution) to keep only meaningful segments.
-            // At 3-pass white glow, short segments accumulate into solid blobs.
-            if line.len() >= 20 {
+            // Drop short fragments — 0m SRTM contours produce thousands of
+            // tiny rings around inland sea-level pixels (river deltas, wetlands,
+            // tidal channels) that render as noise blobs even at low alpha.
+            // 60 pts × 30 m/pt ≈ 1.8 km minimum arc — keeps only real coasts.
+            if line.len() >= 60 {
                 contours.push(ContourPath { elevation_m: 0.0, points: line });
             }
         }

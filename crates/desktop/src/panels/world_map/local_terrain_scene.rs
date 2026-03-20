@@ -1686,11 +1686,12 @@ fn draw_coastlines_local(
     );
 
     if let Some(coastlines) = &srtm_coastlines {
-        // Three-pass white glow: wide dim outer → mid → thin bright core.
-        // Subtle and soft so it reads against both dark ocean and lit terrain.
-        let outer = egui::Stroke::new(6.0, egui::Color32::from_rgba_premultiplied(200, 215, 255, 12));
-        let mid   = egui::Stroke::new(3.0, egui::Color32::from_rgba_premultiplied(210, 225, 255, 40));
-        let core  = egui::Stroke::new(1.1, egui::Color32::from_rgba_premultiplied(230, 240, 255, 115));
+        // Three-pass white glow: wide dim outer → mid → thin core.
+        // Keep alpha low so overlapping short segments don't accumulate into
+        // bright blobs (gdal_contour fragments coastlines heavily).
+        let outer = egui::Stroke::new(6.0, egui::Color32::from_rgba_premultiplied(200, 215, 255,  5));
+        let mid   = egui::Stroke::new(3.0, egui::Color32::from_rgba_premultiplied(210, 225, 255, 15));
+        let core  = egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(230, 240, 255, 45));
         const COAST_ELEV: f32 = -3.0;
 
         for coast in coastlines.iter() {
