@@ -223,6 +223,91 @@ pub fn load_srtm_region_for_view(
     Some(Arc::new(merged))
 }
 
+/// Load SRTM-derived 0m coastline paths for the local terrain view.
+///
+/// Calls `ensure_focus_coastline_region` to trigger background builds for any
+/// tiles that have main contour data but haven't had their coastline extracted
+/// yet.  Returns `None` until at least one coastline tile is ready.
+pub fn load_srtm_coastlines_for_view(
+    selected_root: Option<&Path>,
+    viewport_center: GeoPoint,
+    zoom: f32,
+    radius: i32,
+) -> Option<Arc<Vec<ContourPath>>> {
+    let assets = srtm_focus_cache::ensure_focus_coastline_region(
+        selected_root, viewport_center, zoom, radius,
+    );
+    if assets.is_empty() {
+        return None;
+    }
+
+    static CACHE: OnceLock<Mutex<LocalRegionCache>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| {
+        Mutex::new(LocalRegionCache { scene_key: None, entries: HashMap::new() })
+    });
+
+    let scene_key = SceneKey {
+        root: selected_root.map(Path::to_path_buf),
+        anchor_lat_bucket: (viewport_center.lat * 20.0).round() as i32,
+        anchor_lon_bucket: (viewport_center.lon * 20.0).round() as i32,
+        zoom_bucket: assets.first().map(|a| a.zoom_bucket).unwrap_or_default(),
+    };
+
+    // Collect missing keys without holding the lock.
+    let missing: Vec<(CacheKey, srtm_focus_cache::FocusContourAsset)> = {
+        let mut guard = cache.lock().ok()?;
+        if guard.scene_key.as_ref() != Some(&scene_key) {
+            guard.scene_key = Some(scene_key);
+            guard.entries.clear();
+        }
+        assets
+            .iter()
+            .filter_map(|asset| {
+                let key = CacheKey {
+                    path: asset.path.clone(),
+                    lat_bucket: asset.lat_bucket,
+                    lon_bucket: asset.lon_bucket,
+                    zoom_bucket: asset.zoom_bucket,
+                };
+                if guard.entries.contains_key(&key) { None } else { Some((key, asset.clone())) }
+            })
+            .collect()
+    };
+
+    let loaded: Vec<(CacheKey, Vec<ContourPath>)> = std::thread::scope(|s| {
+        let handles: Vec<_> = missing
+            .into_iter()
+            .map(|(key, _asset)| {
+                s.spawn(move || {
+                    query_local_coastlines(
+                        &key.path,
+                        key.zoom_bucket,
+                        key.lat_bucket,
+                        key.lon_bucket,
+                    )
+                    .ok()
+                    .filter(|c| !c.is_empty())
+                    .map(|c| (key, c))
+                })
+            })
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().ok().flatten()).collect()
+    });
+
+    let mut guard = cache.lock().ok()?;
+    for (key, contours) in loaded {
+        guard.entries.insert(key, Arc::new(contours));
+    }
+
+    let merged: Vec<ContourPath> = guard
+        .entries
+        .values()
+        .flat_map(|v| v.iter().cloned())
+        .collect();
+
+    if merged.is_empty() { None } else { Some(Arc::new(merged)) }
+}
+
 /// Load SRTM focus-tile contours for globe-mode rendering.
 ///
 /// Differences from `load_srtm_region_for_view`:
@@ -648,6 +733,34 @@ fn query_gebco_contours(
         contours.retain(|contour| contour.elevation_m >= 0.0);
     }
 
+    Ok(contours)
+}
+
+fn query_local_coastlines(
+    path: &Path,
+    zoom_bucket: i32,
+    lat_bucket: i32,
+    lon_bucket: i32,
+) -> rusqlite::Result<Vec<ContourPath>> {
+    let connection = Connection::open(path)?;
+    let mut statement = connection.prepare(
+        "SELECT geom FROM coastline_tiles
+         WHERE zoom_bucket = ?1 AND lat_bucket = ?2 AND lon_bucket = ?3
+         ORDER BY fid",
+    )?;
+    let rows = statement.query_map(params![zoom_bucket, lat_bucket, lon_bucket], |row| {
+        row.get::<_, Vec<u8>>(0)
+    })?;
+
+    let mut contours = Vec::new();
+    for row in rows {
+        let geometry = row?;
+        for line in parse_gpkg_lines(&geometry) {
+            if line.len() >= 2 {
+                contours.push(ContourPath { elevation_m: 0.0, points: line });
+            }
+        }
+    }
     Ok(contours)
 }
 

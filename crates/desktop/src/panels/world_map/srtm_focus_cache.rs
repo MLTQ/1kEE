@@ -794,6 +794,17 @@ fn build_focus_contours(
 
     run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m).ok()?;
     import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path).ok()?;
+
+    // Piggyback: extract 0m coastline from the same warped TIF while we have it.
+    let tmp_coast_gpkg_path = cache_root.join(TEMP_DIR_NAME).join(format!(
+        "z{}_lat{}_lon{}.coast.tmp.gpkg",
+        tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket
+    ));
+    if run_gdal_coastline_0m(&tmp_tif_path, &tmp_coast_gpkg_path).is_ok() {
+        let _ = import_coastline_into_cache(cache_db_path, tile, &tmp_coast_gpkg_path);
+    }
+    let _ = fs::remove_file(&tmp_coast_gpkg_path);
+
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
     Some(())
 }
@@ -840,6 +851,27 @@ fn ensure_cache_schema_with_connection(connection: &Connection) -> rusqlite::Res
 
         CREATE INDEX IF NOT EXISTS idx_contour_tiles_lookup
             ON contour_tiles (zoom_bucket, lat_bucket, lon_bucket, elevation_m, fid);
+
+        CREATE TABLE IF NOT EXISTS coastline_tile_manifest (
+            zoom_bucket INTEGER NOT NULL,
+            lat_bucket INTEGER NOT NULL,
+            lon_bucket INTEGER NOT NULL,
+            line_count INTEGER NOT NULL,
+            built_at INTEGER NOT NULL DEFAULT (unixepoch()),
+            PRIMARY KEY (zoom_bucket, lat_bucket, lon_bucket)
+        );
+
+        CREATE TABLE IF NOT EXISTS coastline_tiles (
+            zoom_bucket INTEGER NOT NULL,
+            lat_bucket INTEGER NOT NULL,
+            lon_bucket INTEGER NOT NULL,
+            fid INTEGER NOT NULL,
+            geom BLOB NOT NULL,
+            PRIMARY KEY (zoom_bucket, lat_bucket, lon_bucket, fid)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_coastline_tiles_lookup
+            ON coastline_tiles (zoom_bucket, lat_bucket, lon_bucket, fid);
         ",
     )?;
     Ok(())
@@ -1019,6 +1051,98 @@ fn run_gdal_contour(input_path: &Path, output_path: &Path, interval_m: i32) -> s
     run_command(command, "gdal_contour")
 }
 
+fn run_gdal_coastline_0m(input_path: &Path, output_path: &Path) -> std::io::Result<()> {
+    let mut command = Command::new(gdal_tool_path("gdal_contour"));
+    command.args([
+        "-q",
+        "-f", "GPKG",
+        "-a", "elevation_m",
+        "-fl", "0",
+        "-snodata", "-32768",
+        "-nln", "contour",
+    ]);
+    command.arg(input_path);
+    command.arg(output_path);
+    run_command(command, "gdal_contour (srtm coastline 0m)")
+}
+
+fn import_coastline_into_cache(
+    cache_db_path: &Path,
+    tile: TileKey,
+    gpkg_path: &Path,
+) -> rusqlite::Result<()> {
+    let source = Connection::open(gpkg_path)?;
+    source.busy_timeout(Duration::from_secs(30))?;
+    // The gpkg may not have the contour table if no 0m crossings exist
+    let table_exists: bool = source
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='contour'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false);
+
+    let mut cache = open_cache_db(cache_db_path)?;
+    let transaction = cache.transaction()?;
+    transaction.execute(
+        "DELETE FROM coastline_tiles WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
+        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
+    )?;
+    transaction.execute(
+        "DELETE FROM coastline_tile_manifest WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
+        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
+    )?;
+
+    let mut line_count = 0usize;
+    if table_exists {
+        let mut stmt = source.prepare("SELECT fid, geom FROM contour ORDER BY fid")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let fid: i64 = row.get(0)?;
+            let geometry: Vec<u8> = row.get(1)?;
+            transaction.execute(
+                "INSERT INTO coastline_tiles (zoom_bucket, lat_bucket, lon_bucket, fid, geom)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket, fid, geometry],
+            )?;
+            line_count += 1;
+        }
+    }
+
+    transaction.execute(
+        "INSERT INTO coastline_tile_manifest (zoom_bucket, lat_bucket, lon_bucket, line_count)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket, line_count as i64],
+    )?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn coastline_tile_exists(connection: &Connection, tile: TileKey) -> rusqlite::Result<bool> {
+    connection
+        .query_row(
+            "SELECT 1 FROM coastline_tile_manifest
+             WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3 LIMIT 1",
+            params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|v| v.is_some())
+}
+
+fn coastline_pending_set() -> &'static Mutex<HashSet<TileKey>> {
+    static SET: OnceLock<Mutex<HashSet<TileKey>>> = OnceLock::new();
+    SET.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn is_coastline_pending(tile: TileKey) -> bool {
+    coastline_pending_set()
+        .lock()
+        .map(|g| g.contains(&tile))
+        .unwrap_or(false)
+}
+
 fn gdal_tool_path(tool: &str) -> PathBuf {
     settings_store::resolve_gdal_tool(tool)
 }
@@ -1170,4 +1294,148 @@ fn is_pending(tile: TileKey) -> bool {
         .lock()
         .map(|guard| guard.contains(&tile))
         .unwrap_or(false)
+}
+
+/// Returns the set of focus tiles that have SRTM-derived 0m coastline data built.
+/// For tiles whose main contour exists but coastline doesn't, spawns background builds.
+/// Returns only tiles that are already ready (coastline built).
+pub fn ensure_focus_coastline_region(
+    selected_root: Option<&Path>,
+    focus: GeoPoint,
+    zoom: f32,
+    radius: i32,
+) -> Vec<FocusContourAsset> {
+    let Some(srtm_root) = terrain_assets::find_srtm_root(selected_root) else {
+        return Vec::new();
+    };
+    let Some(cache_root) = focus_cache_root(selected_root) else {
+        return Vec::new();
+    };
+    let Some(cache_db_path) = focus_cache_db_path(selected_root) else {
+        return Vec::new();
+    };
+    if ensure_cache_schema(&cache_db_path).is_err() {
+        return Vec::new();
+    }
+
+    let spec = spec_for_zoom(zoom);
+    let bucket_step = spec.half_extent_deg * 0.45;
+    let center_lat_bucket = (focus.lat / bucket_step).round() as i32;
+    let center_lon_bucket = (focus.lon / bucket_step).round() as i32;
+    let mut assets = Vec::new();
+
+    for lat_bucket in (center_lat_bucket - radius)..=(center_lat_bucket + radius) {
+        for lon_bucket in (center_lon_bucket - radius)..=(center_lon_bucket + radius) {
+            let tile = TileKey { zoom_bucket: spec.zoom_bucket, lat_bucket, lon_bucket };
+            let Ok(conn) = open_cache_db(&cache_db_path) else { continue };
+
+            // Only process tiles that have main contour data already built.
+            if !tile_exists(&conn, tile).unwrap_or(false) {
+                continue;
+            }
+
+            // If coastline already built, add to return list.
+            if coastline_tile_exists(&conn, tile).unwrap_or(false) {
+                assets.push(FocusContourAsset {
+                    path: cache_db_path.clone(),
+                    simplify_step: 1,
+                    zoom_bucket: spec.zoom_bucket,
+                    lat_bucket,
+                    lon_bucket,
+                });
+                continue;
+            }
+
+            // Coastline not built yet — spawn a background-only coastline build.
+            if is_coastline_pending(tile) {
+                continue;
+            }
+            if !try_acquire_build_slot() {
+                continue;
+            }
+            let mut guard = match coastline_pending_set().lock() {
+                Ok(g) => g,
+                Err(_) => { release_build_slot(); continue; }
+            };
+            if !guard.insert(tile) {
+                release_build_slot();
+                continue;
+            }
+            drop(guard);
+
+            let srtm_root = srtm_root.to_path_buf();
+            let cache_root = cache_root.to_path_buf();
+            let cache_db_path_clone = cache_db_path.clone();
+            let bucket_center = GeoPoint {
+                lat: lat_bucket as f32 * bucket_step,
+                lon: lon_bucket as f32 * bucket_step,
+            };
+            let bounds = GeoBounds::around(bucket_center, spec.half_extent_deg);
+
+            std::thread::spawn(move || {
+                let _ = build_srtm_coastline_tile(
+                    &srtm_root, &cache_root, &cache_db_path_clone, tile, bounds, spec,
+                );
+                if let Ok(mut g) = coastline_pending_set().lock() {
+                    g.remove(&tile);
+                }
+                release_build_slot();
+                crate::app::request_repaint();
+            });
+        }
+    }
+
+    assets
+}
+
+fn build_srtm_coastline_tile(
+    srtm_root: &Path,
+    cache_root: &Path,
+    cache_db_path: &Path,
+    tile: TileKey,
+    bounds: GeoBounds,
+    spec: FocusContourSpec,
+) -> Option<()> {
+    if shutdown_requested().load(Ordering::Relaxed) {
+        return None;
+    }
+
+    let tmp_dir = cache_root.join(TEMP_DIR_NAME);
+    fs::create_dir_all(&tmp_dir).ok()?;
+    let tmp_tif = tmp_dir.join(format!(
+        "z{}_lat{}_lon{}.coast.tmp.tif", tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket
+    ));
+    let tmp_gpkg = tmp_dir.join(format!(
+        "z{}_lat{}_lon{}.coast.tmp.gpkg", tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket
+    ));
+    let _ = fs::remove_file(&tmp_tif);
+    let _ = fs::remove_file(&tmp_gpkg);
+
+    let tiles = tile_paths_for_bounds(srtm_root, bounds);
+    if tiles.is_empty() {
+        // No SRTM tiles — record an empty manifest entry so we don't keep retrying.
+        if let Ok(conn) = open_cache_db(cache_db_path) {
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO coastline_tile_manifest
+                 (zoom_bucket, lat_bucket, lon_bucket, line_count) VALUES (?1, ?2, ?3, 0)",
+                params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
+            );
+        }
+        return Some(());
+    }
+
+    run_gdalwarp(&tiles, &tmp_tif, bounds, spec).ok()?;
+
+    if shutdown_requested().load(Ordering::Relaxed) {
+        let _ = fs::remove_file(&tmp_tif);
+        return None;
+    }
+
+    if run_gdal_coastline_0m(&tmp_tif, &tmp_gpkg).is_ok() {
+        let _ = import_coastline_into_cache(cache_db_path, tile, &tmp_gpkg);
+    }
+
+    let _ = fs::remove_file(&tmp_tif);
+    let _ = fs::remove_file(&tmp_gpkg);
+    Some(())
 }
