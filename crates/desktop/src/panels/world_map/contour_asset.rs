@@ -728,10 +728,11 @@ fn contour_path(selected_root: Option<&Path>, zoom: f32) -> Option<PathBuf> {
 }
 
 fn global_coastline_lod(_zoom: f32) -> (i32, usize, usize) {
-    // Single LOD — no zoom-based switching.  Switching LOD buckets triggers a
-    // full cache reload (full table scan) which caused visible flickering every
-    // time a zoom threshold was crossed.  Load once at full detail.
-    (0, 1, 10_000)
+    // Single LOD bucket so the cache never reloads on zoom change (changing
+    // the bucket was causing full-table-scan reloads = visible flicker).
+    // Budget/step are fixed at a mid-range density: comparable to the old
+    // zoom-1.8–3.5 tier which looked correct on the globe.
+    (0, 5, 2_500)
 }
 
 fn query_global_coastlines(
