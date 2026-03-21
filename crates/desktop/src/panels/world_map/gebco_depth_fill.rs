@@ -1,18 +1,19 @@
-/// Depth-fill layer for the globe view.
+/// GEBCO depth-fill layer for the globe view.
 ///
-/// Loads a tiny 180×90 (2° per pixel) depth grid from the pre-generated
-/// `gebco_depth_180x90.bil` file and exposes it for per-frame quad rendering.
+/// Loads a 1440×720 (0.25° per pixel) depth grid from
+/// `gebco_depth_1440x720.bil` (pre-generated once via gdal_translate).
+/// Converts it to an egui texture where ocean pixels carry a depth-colour
+/// and land/nodata pixels are fully transparent.
 ///
-/// At 2° per cell, the projected cell width at globe radius ~350px is ~12px —
-/// cells tile seamlessly with no gaps, giving a solid filled ocean background
-/// rather than the dot-grid artefact produced by smaller, sparser samples.
+/// Rendering contract
+/// ------------------
+/// `ensure_texture(ctx, root)` uploads the texture on first call and
+/// returns a stable `TextureId` on every subsequent call.
 ///
-/// Rendering contract:
-///   `depth_at(lat, lon) -> Option<i16>` — returns `None` for land / nodata,
-///   `Some(depth_m)` for ocean (depth_m < 0).
-///
-/// The .bil is raw little-endian Int16, row-major, top-to-bottom (north first),
-/// left-to-right (west first), covering -90..90 lat and -180..180 lon.
+/// `globe_scene` then builds a 2°×2° UV-mapped sphere mesh that references
+/// the texture.  GPU bilinear interpolation (`TextureOptions::LINEAR`)
+/// gives smooth depth gradients that follow the actual bathymetry — no
+/// rectangular grid artefacts, no land bleed.
 
 use std::{
     path::Path,
@@ -21,112 +22,130 @@ use std::{
 
 use crate::terrain_assets;
 
-const GRID_W: usize = 180;
-const GRID_H: usize = 90;
+// ── grid constants ────────────────────────────────────────────────────────────
+const GRID_W: usize = 1440;
+const GRID_H: usize = 720;
 const NODATA: i16 = -32767;
-const CELL_DEG: f32 = 2.0; // degrees per cell
 
-/// Cached depth grid: 180×90 Int16 values, row-major north→south.
+// ── statics ───────────────────────────────────────────────────────────────────
 static DEPTH_GRID: OnceLock<Mutex<Option<Vec<i16>>>> = OnceLock::new();
+static TEXTURE_HANDLE: OnceLock<Mutex<Option<egui::TextureHandle>>> = OnceLock::new();
 
-/// Return the GEBCO depth (m, negative = ocean) at the given lat/lon,
-/// or None if the cell is land, nodata, or the grid is not yet loaded.
-pub fn depth_at(lat: f32, lon: f32) -> Option<i16> {
-    let grid = DEPTH_GRID.get_or_init(|| Mutex::new(None));
-    let guard = grid.lock().ok()?;
-    let pixels = guard.as_ref()?;
+// ── public API ────────────────────────────────────────────────────────────────
 
-    // Convert lat/lon to grid indices.
-    // Grid: row 0 = 90°N, col 0 = 180°W.
-    let col = ((lon + 180.0) / CELL_DEG) as usize;
-    let row = ((90.0 - lat) / CELL_DEG) as usize;
-    let col = col.min(GRID_W - 1);
-    let row = row.min(GRID_H - 1);
-
-    let v = pixels[row * GRID_W + col];
-    if v == NODATA || v >= 0 {
-        None // land or sea-level
-    } else {
-        Some(v)
-    }
-}
-
-/// Load (or trigger load of) the depth grid.  Call once per frame from
-/// `draw_global_bathymetry`; returns true once the grid is ready.
-pub fn ensure_loaded(selected_root: Option<&Path>) -> bool {
-    let cache = DEPTH_GRID.get_or_init(|| Mutex::new(None));
+/// Ensure the texture is uploaded and return its id, or `None` if the .bil
+/// file is not present yet.
+pub fn ensure_texture(
+    ctx: &egui::Context,
+    selected_root: Option<&Path>,
+) -> Option<egui::TextureId> {
+    let handle_cell = TEXTURE_HANDLE.get_or_init(|| Mutex::new(None));
     {
-        let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.is_some() {
-            return true;
+        let guard = handle_cell.lock().ok()?;
+        if let Some(h) = guard.as_ref() {
+            return Some(h.id());
         }
     }
-    // Try to load synchronously (32KB — negligible cost).
-    if let Some(pixels) = load(selected_root) {
-        let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-        *guard = Some(pixels);
-        true
-    } else {
-        false
-    }
+    // Not uploaded yet — try to load the grid and build the texture.
+    ensure_grid_loaded(selected_root)?;
+    let image = build_color_image()?;
+    let handle = ctx.load_texture(
+        "gebco_depth_fill",
+        image,
+        egui::TextureOptions {
+            magnification: egui::TextureFilter::Linear,
+            minification: egui::TextureFilter::Linear,
+            wrap_mode: egui::TextureWrapMode::ClampToEdge,
+            mipmap_mode: None,
+        },
+    );
+    let id = handle.id();
+    let mut guard = handle_cell.lock().ok()?;
+    *guard = Some(handle);
+    Some(id)
 }
 
-/// Clear the cached grid (used by Cache Blast).
+/// Clear all caches (Cache Blast button).
 pub fn clear() {
-    if let Some(cache) = DEPTH_GRID.get() {
-        if let Ok(mut g) = cache.lock() {
-            *g = None;
-        }
+    if let Some(c) = DEPTH_GRID.get() {
+        if let Ok(mut g) = c.lock() { *g = None; }
+    }
+    if let Some(c) = TEXTURE_HANDLE.get() {
+        if let Ok(mut g) = c.lock() { *g = None; }
     }
 }
 
-// ── private ──────────────────────────────────────────────────────────────────
+// ── private ───────────────────────────────────────────────────────────────────
 
 fn bil_path(selected_root: Option<&Path>) -> Option<std::path::PathBuf> {
     let derived = terrain_assets::find_derived_root(selected_root)?;
-    let p = derived.join("terrain/gebco_depth_180x90.bil");
+    let p = derived.join("terrain/gebco_depth_1440x720.bil");
     p.exists().then_some(p)
 }
 
-fn load(selected_root: Option<&Path>) -> Option<Vec<i16>> {
+fn ensure_grid_loaded(selected_root: Option<&Path>) -> Option<()> {
+    let cache = DEPTH_GRID.get_or_init(|| Mutex::new(None));
+    {
+        let guard = cache.lock().ok()?;
+        if guard.is_some() { return Some(()); }
+    }
     let path = bil_path(selected_root)?;
     let bytes = std::fs::read(&path).ok()?;
-    let expected = GRID_W * GRID_H * 2;
-    if bytes.len() != expected {
+    if bytes.len() != GRID_W * GRID_H * 2 {
         eprintln!(
-            "gebco_depth_fill: expected {} bytes, got {} in {:?}",
-            expected,
-            bytes.len(),
-            path
+            "gebco_depth_fill: expected {} bytes, got {}",
+            GRID_W * GRID_H * 2, bytes.len()
         );
         return None;
     }
-    // EHdr BIL is BYTEORDER M (big-endian) according to the .hdr.
-    // gdal_translate writes MSB by default for EHdr.
-    // Detect endianness from .hdr file; fall back to big-endian.
-    let big_endian = hdr_is_big_endian(&path);
+    // .hdr says BYTEORDER I (Intel / little-endian).
     let pixels: Vec<i16> = bytes
         .chunks_exact(2)
-        .map(|c| {
-            if big_endian {
-                i16::from_be_bytes([c[0], c[1]])
+        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let mut guard = cache.lock().ok()?;
+    *guard = Some(pixels);
+    Some(())
+}
+
+fn build_color_image() -> Option<egui::ColorImage> {
+    let cache = DEPTH_GRID.get()?.lock().ok()?;
+    let pixels = cache.as_ref()?;
+
+    let colors: Vec<egui::Color32> = pixels
+        .iter()
+        .map(|&v| {
+            if v == NODATA || v >= 0 {
+                egui::Color32::TRANSPARENT // land → globe background shows through
             } else {
-                i16::from_le_bytes([c[0], c[1]])
+                depth_color(v)
             }
         })
         .collect();
-    Some(pixels)
+
+    Some(egui::ColorImage {
+        size: [GRID_W, GRID_H],
+        pixels: colors,
+    })
 }
 
-fn hdr_is_big_endian(bil_path: &Path) -> bool {
-    let hdr = bil_path.with_extension("hdr");
-    if let Ok(text) = std::fs::read_to_string(hdr) {
-        for line in text.lines() {
-            let l = line.trim().to_uppercase();
-            if l.starts_with("BYTEORDER") {
-                return !l.contains('I'); // 'I' = Intel/little-endian; 'M' = big
-            }
-        }
-    }
-    true // GDAL EHdr default is big-endian
+/// Convert a negative depth value (metres) to a premultiplied colour.
+///
+/// Ramp (all dark — ocean is not the main focus, depth cues are):
+///   shelf  (−200 m)  → dark steel-blue   b ≈ 56
+///   slope  (−1 000 m) → dim navy          b ≈ 28
+///   abyss  (−4 000 m) → very dark indigo  b ≈ 12
+///   hadal  (−9 000 m) → near-black        b ≈ 5
+pub fn depth_color(depth_m: i16) -> egui::Color32 {
+    let d = (-depth_m as f32).clamp(1.0, 11_000.0);
+    // powf(0.35): concentrates perceptual variation in shallow zone
+    let t = (d / 11_000.0).powf(0.35);
+    let r = lerp(8.0,  1.0, t) as u8;
+    let g = lerp(22.0, 3.0, t) as u8;
+    let b = lerp(62.0, 6.0, t) as u8;
+    let a = lerp(210.0, 250.0, t) as u8;
+    egui::Color32::from_rgba_premultiplied(r, g, b, a)
 }
+
+#[inline]
+fn lerp(a: f32, b: f32, t: f32) -> f32 { a + (b - a) * t }
