@@ -261,17 +261,19 @@ fn draw_global_bathymetry(
                     continue; // land or nodata
                 };
 
-                // Depth colour ramp:
-                // -1 m  → vivid cyan-blue  (shallow shelf)
-                // -200 m → steel blue
-                // -3 000 m → deep navy
-                // -6 000 m → near-black midnight blue
+                // Depth colour ramp — dark palette, wide contrast:
+                //   shelf  (-200 m)  → dark steel-blue   b≈60
+                //   slope  (-1 000 m) → dim navy          b≈30
+                //   abyss  (-4 000 m) → very dark indigo  b≈14
+                //   hadal  (-9 000 m) → near-black        b≈6
+                // powf(0.35) keeps most colour variance in the shallow zone
+                // where geography is interesting; deep plains are near-black.
                 let d = (-depth_m as f32).clamp(1.0, 11_000.0);
-                let t = (d / 11_000.0).powf(0.5); // sqrt curve: more colour variance at shallow
-                let r = (lerp(30.0, 5.0, t)) as u8;
-                let g = (lerp(80.0, 15.0, t)) as u8;
-                let b = (lerp(160.0, 55.0, t)) as u8;
-                let a = (lerp(180.0, 230.0, t)) as u8;
+                let t = (d / 11_000.0).powf(0.35);
+                let r = (lerp(8.0,  1.0, t)) as u8;
+                let g = (lerp(22.0, 3.0, t)) as u8;
+                let b = (lerp(62.0, 6.0, t)) as u8;
+                let a = (lerp(210.0, 250.0, t)) as u8;
                 let color = egui::Color32::from_rgba_premultiplied(r, g, b, a);
 
                 // Project all four corners of the 2°×2° cell.
