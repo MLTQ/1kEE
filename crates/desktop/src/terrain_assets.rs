@@ -6,10 +6,6 @@ use std::sync::{Mutex, OnceLock};
 pub struct TerrainInventory {
     pub gebco_topography_tiles: usize,
     pub gebco_tid_tiles: usize,
-    /// Raw GEBCO 2025 GeoTIFF elevation tiles (8 global quadrants).
-    pub gebco_raw_tiles: usize,
-    /// Pre-computed 1440×720 depth grid for raster-based bathymetry rendering.
-    pub gebco_depth_grid: bool,
     pub natural_earth_relief: bool,
     pub srtm_tiles: usize,
     pub runtime_height_preview: bool,
@@ -39,13 +35,6 @@ impl TerrainInventory {
             data_root.join("GEBCO/gebco_2025_tid_geotiff"),
             "gebco_2025_tid_",
         );
-        // Raw GEBCO 2025 GeoTIFF elevation tiles (new format, any GEBCO_* dir).
-        let gebco_raw_tiles = find_gebco_raw_dir_in(&data_root)
-            .map(|dir| count_tifs(dir, "gebco_2025_"))
-            .unwrap_or(0);
-        let gebco_depth_grid = derived_root
-            .join("terrain/gebco_2025_depth_1440x720.tif")
-            .exists();
         let natural_earth_relief = data_root
             .join("natural_earth/GRAY_HR_SR_OB_DR/GRAY_HR_SR_OB_DR.tif")
             .exists();
@@ -65,13 +54,11 @@ impl TerrainInventory {
 
         let primary_runtime_source = if srtm_tiles > 0 {
             "SRTM streamed land tiles + GEBCO global fallback"
-        } else if gebco_depth_grid {
-            "GEBCO 2025 raster depth grid + contours"
         } else if runtime_height_preview {
             "GEBCO runtime preview asset"
         } else if runtime_contours_200m || runtime_contours_500m {
             "GEBCO runtime contours"
-        } else if gebco_topography_tiles > 0 || gebco_raw_tiles > 0 {
+        } else if gebco_topography_tiles > 0 {
             "GEBCO global terrain"
         } else if natural_earth_relief {
             "Natural Earth raster relief"
@@ -82,8 +69,6 @@ impl TerrainInventory {
         Self {
             gebco_topography_tiles,
             gebco_tid_tiles,
-            gebco_raw_tiles,
-            gebco_depth_grid,
             natural_earth_relief,
             srtm_tiles,
             runtime_height_preview,
@@ -282,27 +267,6 @@ fn normalize_named_root(path: &Path, names: &[&str]) -> Option<PathBuf> {
         .iter()
         .map(|name| path.join(name))
         .find(|candidate| candidate.exists())
-}
-
-/// Locate the raw GEBCO 2025 GeoTIFF tiles directory inside `data_root`.
-/// Looks for any `GEBCO_*` sub-directory containing the expected tile pattern.
-fn find_gebco_raw_dir_in(data_root: &Path) -> Option<PathBuf> {
-    let dir = fs::read_dir(data_root).ok()?;
-    for entry in dir.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name.starts_with("GEBCO") {
-            let probe =
-                path.join("gebco_2025_n90.0_s0.0_w-180.0_e-120.0_geotiff.tif");
-            if probe.exists() {
-                return Some(path);
-            }
-        }
-    }
-    None
 }
 
 fn count_tifs(root: PathBuf, prefix: &str) -> usize {

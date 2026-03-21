@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use super::gebco_raster;
 use super::srtm_focus_cache;
 
 // ── Module-level cache statics ────────────────────────────────────────────────
@@ -37,7 +36,6 @@ pub fn blast_tile_caches() {
     if let Some(c) = GLOBAL_BATHYMETRY_CACHE.get() {
         if let Ok(mut g) = c.lock() { *g = None; }
     }
-    gebco_raster::blast_cache();
 }
 
 #[derive(Clone)]
