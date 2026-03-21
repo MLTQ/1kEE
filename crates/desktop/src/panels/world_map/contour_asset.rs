@@ -411,8 +411,8 @@ pub fn load_global_bathymetry(
     // Single LOD — no zoom-based switching so the cache never reloads on zoom
     // changes (which was causing contours to appear/disappear while panning).
     let lod_bucket: i32 = 0;
-    let simplify_step: usize = 6;
-    let feature_budget: usize = 2_200;
+    let simplify_step: usize = 4;
+    let feature_budget: usize = 4_000;
 
     let cache = GLOBAL_BATHYMETRY_CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = cache.lock().ok()?;
@@ -447,13 +447,13 @@ fn query_global_bathymetry(
     //
     // Budget split across depth levels (shelf gets the most):
     let depth_levels: &[(f32, usize)] = &[
-        (-200.0,  feature_budget * 30 / 100),  // continental shelf edge
-        (-500.0,  feature_budget * 15 / 100),  // upper slope
-        (-1000.0, feature_budget * 15 / 100),  // mid slope
-        (-2000.0, feature_budget * 12 / 100),  // lower slope / rise
-        (-3000.0, feature_budget * 10 / 100),  // abyssal plains begin
-        (-4000.0, feature_budget *  8 / 100),  // deep abyssal
-        (-5000.0, feature_budget *  6 / 100),  // hadal zone entry
+        (-200.0,  feature_budget * 22 / 100),  // continental shelf edge
+        (-500.0,  feature_budget * 12 / 100),  // upper slope
+        (-1000.0, feature_budget * 12 / 100),  // mid slope
+        (-2000.0, feature_budget * 16 / 100),  // ridge crests / lower slope
+        (-3000.0, feature_budget * 14 / 100),  // ridge flanks / abyssal rise
+        (-4000.0, feature_budget * 12 / 100),  // deep abyssal plains
+        (-5000.0, feature_budget *  8 / 100),  // hadal zone entry
         (-6000.0, feature_budget *  4 / 100),  // trenches
     ];
 
@@ -463,16 +463,24 @@ fn query_global_bathymetry(
         if per_depth_budget == 0 {
             continue;
         }
-        // Fetch generously, then keep the longest segments only.
-        let fetch_limit = (per_depth_budget * 12).max(400) as i64;
+        // Let SQLite do the global sort by raw byte length so we get the
+        // geographically significant features (mid-Atlantic ridge, shelf edges,
+        // trench walls) regardless of where in the table they live.
+        // Previous approach used LIMIT N without ORDER BY, which returned only
+        // the northernmost rows (N→S scan order) and missed major S-hemisphere
+        // features entirely.  Full-table scan here costs ~100 ms/depth level
+        // total — acceptable for a one-time startup load cached in a Mutex.
+        let budget = per_depth_budget as i64;
         let mut stmt = connection.prepare(
-            "SELECT geom FROM contour WHERE ABS(elevation_m - ?1) < 1.0 LIMIT ?2",
+            "SELECT geom FROM contour \
+             WHERE ABS(elevation_m - ?1) < 1.0 \
+             ORDER BY length(geom) DESC \
+             LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![depth, fetch_limit], |row| {
+        let rows = stmt.query_map(params![depth, budget], |row| {
             row.get::<_, Vec<u8>>(0)
         })?;
 
-        let mut depth_contours: Vec<ContourPath> = Vec::new();
         for row in rows {
             let geometry = row?;
             for line in parse_gpkg_lines(&geometry) {
@@ -481,15 +489,10 @@ fn query_global_bathymetry(
                 }
                 let simplified = simplify_line(line, simplify_step);
                 if simplified.len() >= 3 {
-                    depth_contours.push(ContourPath { elevation_m: depth, points: simplified });
+                    all_contours.push(ContourPath { elevation_m: depth, points: simplified });
                 }
             }
         }
-        // Keep the longest segments at this depth — they are the actual shelf/
-        // ridge/trench lines rather than noise fragments.
-        depth_contours.sort_unstable_by(|a, b| b.points.len().cmp(&a.points.len()));
-        depth_contours.truncate(per_depth_budget);
-        all_contours.extend(depth_contours);
     }
 
     Ok(all_contours)
