@@ -84,6 +84,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         viewport_center,
         render_zoom,
         LOCAL_STREAM_RADIUS,
+        painter.ctx().clone(),
     );
     let cache_status = srtm_focus_cache::focus_contour_region_status(
         model.selected_root.as_deref(),
@@ -310,6 +311,7 @@ pub fn paint_transition_overlay(
         viewport_center,
         render_zoom,
         LOCAL_STREAM_RADIUS,
+        painter.ctx().clone(),
     ) else {
         return;
     };
@@ -1611,7 +1613,7 @@ fn draw_bathymetry_local(
 ) {
     // Use GEBCO bathymetry — same zoom/LOD approach as global coastline.
     let bathy_zoom = view.local_zoom.clamp(1.0, 8.0);
-    let Some(bathy) = contour_asset::load_global_bathymetry(selected_root, bathy_zoom) else {
+    let Some(bathy) = contour_asset::load_global_bathymetry(selected_root, bathy_zoom, painter.ctx().clone()) else {
         return;
     };
 
@@ -1687,7 +1689,7 @@ fn draw_coastlines_local(
 
     // GEBCO-derived global coastline (450m resolution).
     // Single LOD in load_global_coastlines so this never reloads on zoom change.
-    let Some(coastlines) = contour_asset::load_global_coastlines(selected_root, 1.0) else {
+    let Some(coastlines) = contour_asset::load_global_coastlines(selected_root, 1.0, painter.ctx().clone()) else {
         return;
     };
 

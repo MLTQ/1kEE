@@ -216,7 +216,7 @@ fn draw_global_coastlines(
     view: &GlobeViewState,
     selected_root: Option<&std::path::Path>,
 ) {
-    let Some(coastlines) = contour_asset::load_global_coastlines(selected_root, view.zoom) else {
+    let Some(coastlines) = contour_asset::load_global_coastlines(selected_root, view.zoom, painter.ctx().clone()) else {
         return;
     };
 
@@ -308,7 +308,7 @@ fn draw_global_bathymetry(
     }
 
     // ── Layer 2: isobath contour lines on top ────────────────────────────────
-    let Some(bathy) = contour_asset::load_global_bathymetry(selected_root, view.zoom) else {
+    let Some(bathy) = contour_asset::load_global_bathymetry(selected_root, view.zoom, painter.ctx().clone()) else {
         return;
     };
 
@@ -345,7 +345,7 @@ fn draw_global_topo(
         return;
     }
 
-    let Some(topo) = contour_asset::load_global_topo(selected_root, view.zoom) else {
+    let Some(topo) = contour_asset::load_global_topo(selected_root, view.zoom, painter.ctx().clone()) else {
         return;
     };
 
@@ -388,7 +388,7 @@ fn draw_srtm_on_globe(
     let alpha = ((view.zoom - 1.5) / 1.5).clamp(0.0, 1.0);
 
     let Some(contours) =
-        contour_asset::load_srtm_for_globe(selected_root, view.local_center, view.zoom)
+        contour_asset::load_srtm_for_globe(selected_root, view.local_center, view.zoom, painter.ctx().clone())
     else {
         return;
     };
