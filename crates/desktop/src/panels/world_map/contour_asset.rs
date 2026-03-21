@@ -553,15 +553,10 @@ fn query_global_topo(
     Ok(contours)
 }
 
-fn contour_path(selected_root: Option<&Path>, zoom: f32) -> Option<PathBuf> {
+fn contour_path(selected_root: Option<&Path>, _zoom: f32) -> Option<PathBuf> {
     let derived_root = terrain_assets::find_derived_root(selected_root)?;
-    let file = if zoom >= 4.0 {
-        "terrain/gebco_2025_contours_200m.gpkg"
-    } else {
-        "terrain/gebco_2025_contours_500m.gpkg"
-    };
-
-    let path = derived_root.join(file);
+    // Only the 200m GPKG exists; use it at all zoom levels.
+    let path = derived_root.join("terrain/gebco_2025_contours_200m.gpkg");
     path.exists().then_some(path)
 }
 
