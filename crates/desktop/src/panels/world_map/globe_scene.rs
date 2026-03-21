@@ -3,6 +3,7 @@ use crate::theme;
 
 use super::camera::{self, GlobeLod};
 use super::contour_asset;
+use super::gebco_depth_fill;
 use super::globe_pass;
 use super::terrain_field;
 
@@ -241,6 +242,73 @@ fn draw_global_bathymetry(
     view: &GlobeViewState,
     selected_root: Option<&std::path::Path>,
 ) {
+    // ── Layer 1: filled depth zones ──────────────────────────────────────────
+    // Render the 180×90 (2° per cell) depth grid as filled quads — one mesh
+    // per frame, drawn before contour lines.  At globe scale each cell
+    // projects to ~12px wide, so adjacent cells share edges with no gaps,
+    // giving a smooth filled ocean background.
+    if gebco_depth_fill::ensure_loaded(selected_root) {
+        let mut mesh = egui::epaint::Mesh::default();
+        let uv = egui::epaint::WHITE_UV;
+        let half = 1.0_f32; // half-cell in degrees
+
+        for row in 0..90_usize {
+            for col in 0..180_usize {
+                let lat = 89.0 - row as f32 * 2.0; // centre of cell
+                let lon = -179.0 + col as f32 * 2.0;
+
+                let Some(depth_m) = gebco_depth_fill::depth_at(lat, lon) else {
+                    continue; // land or nodata
+                };
+
+                // Depth colour ramp:
+                // -1 m  → vivid cyan-blue  (shallow shelf)
+                // -200 m → steel blue
+                // -3 000 m → deep navy
+                // -6 000 m → near-black midnight blue
+                let d = (-depth_m as f32).clamp(1.0, 11_000.0);
+                let t = (d / 11_000.0).powf(0.5); // sqrt curve: more colour variance at shallow
+                let r = (lerp(30.0, 5.0, t)) as u8;
+                let g = (lerp(80.0, 15.0, t)) as u8;
+                let b = (lerp(160.0, 55.0, t)) as u8;
+                let a = (lerp(180.0, 230.0, t)) as u8;
+                let color = egui::Color32::from_rgba_premultiplied(r, g, b, a);
+
+                // Project all four corners of the 2°×2° cell.
+                let corners = [
+                    GeoPoint { lat: lat + half, lon: lon - half },
+                    GeoPoint { lat: lat + half, lon: lon + half },
+                    GeoPoint { lat: lat - half, lon: lon + half },
+                    GeoPoint { lat: lat - half, lon: lon - half },
+                ];
+
+                let projected: Vec<_> = corners
+                    .iter()
+                    .filter_map(|&pt| project_geo(layout, view, pt, 0.0))
+                    .filter(|p| p.front_facing)
+                    .map(|p| p.pos)
+                    .collect();
+
+                // Only draw if all four corners are visible.
+                if projected.len() < 4 {
+                    continue;
+                }
+
+                let i = mesh.vertices.len() as u32;
+                for &pos in &projected {
+                    mesh.vertices.push(egui::epaint::Vertex { pos, uv, color });
+                }
+                // Two triangles: 0-1-2 and 0-2-3
+                mesh.indices.extend_from_slice(&[i, i+1, i+2, i, i+2, i+3]);
+            }
+        }
+
+        if !mesh.vertices.is_empty() {
+            painter.add(egui::Shape::mesh(mesh));
+        }
+    }
+
+    // ── Layer 2: isobath contour lines ───────────────────────────────────────
     let Some(bathy) = contour_asset::load_global_bathymetry(selected_root, view.zoom) else {
         return;
     };
@@ -251,24 +319,21 @@ fn draw_global_bathymetry(
         // Major every 1 000 m
         let major = ((-contour.elevation_m.round() as i32) % 1_000) < 50;
 
-        // Colour: interpolate from shallow steel-blue to deep midnight blue.
-        let base_a = if major { 0.55_f32 } else { 0.28_f32 };
-        let a = (base_a * (0.45 + depth_norm * 0.55) * 255.0) as u8;
-        let r = (18.0 * (1.0 - depth_norm * 0.8)) as u8;
-        let g = (55.0 * (1.0 - depth_norm * 0.6)) as u8;
-        let b = (140 + (50.0 * depth_norm) as u8).min(255);
+        // Lighter lines on top of the filled background — less opacity than before.
+        let base_a = if major { 0.40_f32 } else { 0.18_f32 };
+        let a = (base_a * (0.5 + depth_norm * 0.5) * 255.0) as u8;
+        let r = (25.0 * (1.0 - depth_norm * 0.8)) as u8;
+        let g = (70.0 * (1.0 - depth_norm * 0.6)) as u8;
+        let b = (180 + (40.0 * depth_norm) as u8).min(255);
         let color = egui::Color32::from_rgba_premultiplied(r, g, b, a);
 
-        draw_geo_path(
-            painter,
-            layout,
-            view,
-            &contour.points,
-            0.015,
-            color,
-            0.04,
-        );
+        draw_geo_path(painter, layout, view, &contour.points, 0.01, color, 0.03);
     }
+}
+
+#[inline]
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
 }
 
 fn draw_global_topo(
