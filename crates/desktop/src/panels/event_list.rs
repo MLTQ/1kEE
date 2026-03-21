@@ -22,9 +22,9 @@ pub fn render_event_list(ctx: &egui::Context, model: &mut AppModel) {
 
                     egui::Frame::group(ui.style())
                         .fill(if is_selected {
-                            egui::Color32::from_rgb(19, 42, 57)
+                            theme::selected_item_fill()
                         } else {
-                            egui::Color32::from_rgb(11, 24, 35)
+                            theme::item_fill()
                         })
                         .inner_margin(egui::Margin::same(12))
                         .show(ui, |ui| {

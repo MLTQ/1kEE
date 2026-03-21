@@ -274,7 +274,7 @@ fn draw_job_row(ui: &mut egui::Ui, job: &terrain_precompute::PrecomputeJobSnapsh
     };
 
     egui::Frame::group(ui.style())
-        .fill(egui::Color32::from_rgb(15, 22, 28))
+        .fill(theme::item_fill())
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -306,7 +306,7 @@ fn draw_job_row(ui: &mut egui::Ui, job: &terrain_precompute::PrecomputeJobSnapsh
 
 fn draw_osm_job_row(ui: &mut egui::Ui, job: &osm_ingest::OsmJobSnapshot) {
     egui::Frame::group(ui.style())
-        .fill(egui::Color32::from_rgb(15, 22, 28))
+        .fill(theme::item_fill())
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
