@@ -25,6 +25,7 @@ use crate::settings_store;
 use crate::terrain_assets;
 use image::ImageReader;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
 
 // ── constants ─────────────────────────────────────────────────────────────────
@@ -160,19 +161,75 @@ pub fn find_gebco_raw_dir(selected_root: Option<&Path>) -> Option<PathBuf> {
 // ── file loading ──────────────────────────────────────────────────────────────
 
 fn load_depth_grid_file(path: &Path) -> Option<GebcoDepthGrid> {
-    // The 1440×720 output of gdal_translate is a standard uncompressed Int16
-    // GeoTIFF that the `image` crate reads as Luma16.  We reinterpret u16 → i16
-    // exactly as srtm_stream.rs does for SRTM tiles.
+    // Fast path: image crate handles simple 16-bit TIFFs.
+    if let Some(grid) = load_via_image(path) {
+        return Some(grid);
+    }
+    // Slow path: some GeoTIFF variants (Int16 TIFF with GeoTIFF metadata tags)
+    // cause the image crate to fail silently.  Convert to a headerless raw
+    // Int16 binary (EHdr / BIL format) via gdal_translate once, then read
+    // directly — exactly the same two-stage approach used by srtm_stream.rs.
+    load_via_gdal_convert(path)
+}
+
+fn load_via_image(path: &Path) -> Option<GebcoDepthGrid> {
     let image = ImageReader::open(path).ok()?.decode().ok()?.to_luma16();
     let (w, h) = image.dimensions();
     if w != GRID_W || h != GRID_H {
-        eprintln!(
-            "gebco_raster: depth grid is {}×{}, expected {}×{}",
-            w, h, GRID_W, GRID_H
-        );
         return None;
     }
     let pixels: Vec<i16> = image.into_raw().into_iter().map(|u| u as i16).collect();
+    // Sanity check: a successfully decoded ocean depth file must have negative
+    // values.  If all values are ≥ 0 the sign-extension was lost during decode.
+    if pixels.iter().all(|&v| v >= 0) {
+        return None;
+    }
+    Some(GebcoDepthGrid { pixels })
+}
+
+/// Convert the GeoTIFF to a headerless raw Int16 BIL file via gdal_translate
+/// (cached next to the source with a `.bil` extension), then read it.
+fn load_via_gdal_convert(tif_path: &Path) -> Option<GebcoDepthGrid> {
+    let bil_path = tif_path.with_extension("bil");
+    if !bil_path.exists() {
+        // Pass the full .bil path to gdal_translate so it names the output file
+        // explicitly — passing the bare stem causes GDAL to emit an extensionless
+        // file on macOS, which we would then fail to find.
+        let gdal_translate = settings_store::resolve_gdal_tool("gdal_translate");
+        let ok = std::process::Command::new(&gdal_translate)
+            .args(["-q", "-ot", "Int16", "-of", "EHdr"])
+            .arg(tif_path)
+            .arg(&bil_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("gebco_raster: gdal_translate fallback failed for {:?}", tif_path);
+            return None;
+        }
+    }
+    load_raw_int16_le(&bil_path)
+}
+
+/// Read a headerless little-endian Int16 binary file of exactly GRID_W × GRID_H
+/// samples.  This is what `gdal_translate -of EHdr` produces.
+fn load_raw_int16_le(path: &Path) -> Option<GebcoDepthGrid> {
+    let bytes = std::fs::read(path).ok()?;
+    let expected = GRID_W as usize * GRID_H as usize * 2;
+    if bytes.len() != expected {
+        eprintln!(
+            "gebco_raster: raw file is {} bytes, expected {}",
+            bytes.len(),
+            expected
+        );
+        return None;
+    }
+    let pixels: Vec<i16> = bytes
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .collect();
     Some(GebcoDepthGrid { pixels })
 }
 
