@@ -1,5 +1,6 @@
 mod camera;
 pub(crate) mod contour_asset;
+pub(crate) mod gebco_raster;
 pub(crate) mod globe_pass;
 mod globe_scene;
 pub(crate) mod local_terrain_pass;

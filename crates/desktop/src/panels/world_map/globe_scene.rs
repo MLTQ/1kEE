@@ -3,6 +3,7 @@ use crate::theme;
 
 use super::camera::{self, GlobeLod};
 use super::contour_asset;
+use super::gebco_raster;
 use super::globe_pass;
 use super::terrain_field;
 
@@ -241,33 +242,64 @@ fn draw_global_bathymetry(
     view: &GlobeViewState,
     selected_root: Option<&std::path::Path>,
 ) {
-    let Some(bathy) = contour_asset::load_global_bathymetry(selected_root, view.zoom) else {
+    let Some((coarse, fine)) = gebco_raster::load_depth_grid(selected_root) else {
         return;
     };
 
-    for contour in bathy.iter() {
-        // depth_norm: 0.0 = surface, 1.0 = 11 000 m deep
-        let depth_norm = (-contour.elevation_m / 11_000.0_f32).clamp(0.0, 1.0);
-        // Major every 1 000 m
-        let major = ((-contour.elevation_m.round() as i32) % 1_000) < 50;
+    // LOD: more detail at higher zoom.
+    let points: &[(f32, f32, f32)] = if view.zoom >= 2.0 { &fine } else { &coarse };
 
-        // Colour: interpolate from shallow steel-blue to deep midnight blue.
-        let base_a = if major { 0.55_f32 } else { 0.28_f32 };
-        let a = (base_a * (0.45 + depth_norm * 0.55) * 255.0) as u8;
-        let r = (18.0 * (1.0 - depth_norm * 0.8)) as u8;
-        let g = (55.0 * (1.0 - depth_norm * 0.6)) as u8;
-        let b = (140 + (50.0 * depth_norm) as u8).min(255);
+    // Build a single batched Mesh — one 2×2 px quad per ocean sample.
+    // This is far more GPU-efficient than thousands of individual painter calls.
+    let mut mesh = egui::epaint::Mesh::default();
+    let uv = egui::epaint::WHITE_UV;
+    let dot_r = 1.3_f32;
+
+    for &(lat, lon, depth_m) in points {
+        let Some(proj) = project_geo(layout, view, GeoPoint { lat, lon }, 0.01) else {
+            continue;
+        };
+        // Skip back-facing pixels — they are on the far side of the globe.
+        if !proj.front_facing {
+            continue;
+        }
+
+        // Depth colour: shallow steel-blue → deep midnight blue.
+        // depth_norm 0 = surface, 1 = 11 000 m deep
+        let depth_norm = (-depth_m / 11_000.0_f32).clamp(0.0, 1.0);
+        let a = (55.0 + depth_norm * 35.0) as u8;
+        let r = (20.0 * (1.0 - depth_norm * 0.85)) as u8;
+        let g = (65.0 * (1.0 - depth_norm * 0.7)) as u8;
+        let b = (150 + (55.0 * depth_norm) as u8).min(215);
         let color = egui::Color32::from_rgba_premultiplied(r, g, b, a);
 
-        draw_geo_path(
-            painter,
-            layout,
-            view,
-            &contour.points,
-            0.015,
+        let p = proj.pos;
+        let i = mesh.vertices.len() as u32;
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: egui::pos2(p.x - dot_r, p.y - dot_r),
+            uv,
             color,
-            0.04,
-        );
+        });
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: egui::pos2(p.x + dot_r, p.y - dot_r),
+            uv,
+            color,
+        });
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: egui::pos2(p.x + dot_r, p.y + dot_r),
+            uv,
+            color,
+        });
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: egui::pos2(p.x - dot_r, p.y + dot_r),
+            uv,
+            color,
+        });
+        mesh.indices.extend_from_slice(&[i, i + 1, i + 2, i, i + 2, i + 3]);
+    }
+
+    if !mesh.vertices.is_empty() {
+        painter.add(egui::Shape::mesh(mesh));
     }
 }
 
