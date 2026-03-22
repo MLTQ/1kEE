@@ -107,9 +107,11 @@ pub fn ensure_focus_contour_region(
     let Some(cache_db_path) = focus_cache_db_path(selected_root) else {
         return Vec::new();
     };
-    if ensure_cache_schema(&cache_db_path).is_err() {
+    // Open ONE connection for all tile checks — avoids 25 separate open+pragma
+    // cycles per frame that stall the render thread under WAL contention.
+    let Ok(connection) = open_cache_db(&cache_db_path) else {
         return Vec::new();
-    }
+    };
     let spec = spec_for_zoom(zoom);
     let bucket_step = spec.half_extent_deg * 0.45;
     let center_lat_bucket = (focus.lat / bucket_step).round() as i32;
@@ -122,6 +124,7 @@ pub fn ensure_focus_contour_region(
                 &srtm_root,
                 &cache_root,
                 &cache_db_path,
+                &connection,
                 spec,
                 lat_bucket,
                 lon_bucket,
@@ -676,6 +679,7 @@ fn ensure_bucket_asset(
     srtm_root: &Path,
     cache_root: &Path,
     cache_db_path: &Path,
+    connection: &Connection,
     spec: FocusContourSpec,
     lat_bucket: i32,
     lon_bucket: i32,
@@ -696,11 +700,9 @@ fn ensure_bucket_asset(
         lon_bucket,
     };
 
-    if open_cache_db(cache_db_path)
-        .and_then(|connection| tile_exists(&connection, tile))
-        .ok()
-        .unwrap_or(false)
-    {
+    // Use the shared connection passed from ensure_focus_contour_region —
+    // avoids opening a new SQLite connection (with WAL pragma overhead) per tile.
+    if tile_exists(connection, tile).unwrap_or(false) {
         return Some(FocusContourAsset {
             path: cache_db_path.to_path_buf(),
             simplify_step: spec.simplify_step,
@@ -810,11 +812,6 @@ fn open_cache_db(path: &Path) -> rusqlite::Result<Connection> {
     connection.pragma_update(None, "temp_store", "MEMORY")?;
     ensure_cache_schema_with_connection(&connection)?;
     Ok(connection)
-}
-
-fn ensure_cache_schema(path: &Path) -> rusqlite::Result<()> {
-    let _ = open_cache_db(path)?;
-    Ok(())
 }
 
 fn ensure_cache_schema_with_connection(connection: &Connection) -> rusqlite::Result<()> {
