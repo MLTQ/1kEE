@@ -1,4 +1,5 @@
-use crate::model::{AppModel, EventRecord, FlightCategory, FlightTrack, GeoPoint, GlobeViewState, MovingTrack};
+use crate::model::{AppModel, EventRecord, FlightCategory, FlightTrack, GeoPoint, GlobeViewState, MovingTrack, S2Event};
+use crate::s2_underground;
 use crate::theme;
 
 use super::camera::{self, GlobeLod};
@@ -179,6 +180,11 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         );
     }
 
+    // ── S2Underground event markers ────────────────────────────────────────
+    if !model.globe_view.local_mode && !model.s2_events.is_empty() {
+        draw_s2_events(painter, &layout, &model.globe_view, &model.s2_events);
+    }
+
     let ship_markers: Vec<(u64, egui::Pos2)> = if model.show_ships && !model.globe_view.local_mode {
         model
             .tracks
@@ -222,6 +228,44 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         ship_markers,
         flight_markers,
         beam_elevation_m: None,
+    }
+}
+
+/// Draw S2Underground incident markers as filled circles with glow halos.
+/// Color is per-layer (distinct from Factal event beams and flight triangles).
+/// Events with casualties get a larger outer ring.
+fn draw_s2_events(
+    painter: &egui::Painter,
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    events: &[S2Event],
+) {
+    for event in events {
+        let Some(proj) = project_geo(layout, view, event.location, 0.0) else {
+            continue;
+        };
+        if !proj.front_facing {
+            continue;
+        }
+
+        let col = s2_underground::layer_color(&event.layer_key);
+        let pos = proj.pos;
+        let has_cas = event.has_casualties();
+
+        // Outer glow halo
+        painter.circle_stroke(
+            pos,
+            if has_cas { 9.0 } else { 6.5 },
+            egui::Stroke::new(2.5, col.gamma_multiply(0.12)),
+        );
+        if has_cas {
+            painter.circle_stroke(pos, 6.5, egui::Stroke::new(1.5, col.gamma_multiply(0.22)));
+        }
+
+        // Filled core dot
+        painter.circle_filled(pos, if has_cas { 3.5 } else { 2.5 }, col);
+        // Bright centre spot
+        painter.circle_filled(pos, 1.2, col.gamma_multiply(1.4));
     }
 }
 

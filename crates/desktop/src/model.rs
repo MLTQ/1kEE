@@ -2,7 +2,7 @@ use crate::city_catalog;
 use crate::osm_ingest::{self, OsmInventory};
 use crate::settings_store;
 use crate::terrain_assets::{self, TerrainInventory};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 
 const GLOBE_PITCH_LIMIT_RAD: f32 = 1.53;
@@ -369,6 +369,50 @@ impl MovingTrack {
     }
 }
 
+/// An incident record from the S2Underground ArcGIS Feature Services.
+#[derive(Clone, Debug)]
+pub struct S2Event {
+    pub object_id: i64,
+    /// Key matching one of `s2_underground::LAYERS[*].key`.
+    pub layer_key: String,
+    pub location: GeoPoint,
+    /// Unix milliseconds timestamp; None if not set.
+    pub date_ms: Option<i64>,
+    pub attack_type: Option<String>,
+    pub motive: Option<String>,
+    pub notes: Option<String>,
+    pub address: Option<String>,
+    pub civilian_killed: Option<i32>,
+    pub civilian_wounded: Option<i32>,
+    pub friendly_killed: Option<i32>,
+    pub friendly_wounded: Option<i32>,
+    pub enemy_killed: Option<i32>,
+    pub enemy_wounded: Option<i32>,
+}
+
+impl S2Event {
+    pub fn display_type(&self) -> &str {
+        self.attack_type.as_deref().unwrap_or("Unknown Event")
+    }
+    pub fn total_killed(&self) -> i32 {
+        [self.civilian_killed, self.friendly_killed, self.enemy_killed]
+            .iter()
+            .filter_map(|&c| c)
+            .filter(|&v| v > 0)
+            .sum()
+    }
+    pub fn total_wounded(&self) -> i32 {
+        [self.civilian_wounded, self.friendly_wounded, self.enemy_wounded]
+            .iter()
+            .filter_map(|&c| c)
+            .filter(|&v| v > 0)
+            .sum()
+    }
+    pub fn has_casualties(&self) -> bool {
+        self.total_killed() > 0 || self.total_wounded() > 0
+    }
+}
+
 pub struct AppModel {
     pub events: Vec<EventRecord>,
     pub cameras: Vec<CameraFeed>,
@@ -398,6 +442,10 @@ pub struct AppModel {
     pub show_bathymetry: bool,
     pub show_ships: bool,
     pub show_flights: bool,
+    /// Merged events from all enabled S2Underground layers.
+    pub s2_events: Vec<S2Event>,
+    /// Which S2 layers are enabled; keyed by S2LayerDef.key.
+    pub s2_layer_enabled: HashMap<String, bool>,
     pub selected_root: Option<PathBuf>,
     pub factal_settings_open: bool,
     pub factal_brief_open: bool,
@@ -590,6 +638,8 @@ impl AppModel {
             show_bathymetry: true,
             show_ships: false,
             show_flights: false,
+            s2_events: Vec::new(),
+            s2_layer_enabled: HashMap::new(),
             selected_root,
             factal_settings_open: false,
             factal_brief_open: false,

@@ -13,6 +13,7 @@ mod terrain_raster;
 use crate::flight_tracks;
 use crate::model::{AppModel, FlightCategory};
 use crate::moving_tracks;
+use crate::s2_underground;
 use crate::osm_ingest;
 use crate::theme;
 use std::sync::{Mutex, OnceLock};
@@ -61,6 +62,12 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
                 model.globe_view.globe_center_latlon(),
                 ui.ctx().clone(),
             );
+        }
+
+        // Poll S2Underground layers
+        if !model.globe_view.local_mode {
+            model.s2_events =
+                s2_underground::poll_enabled(&model.s2_layer_enabled.clone(), ui.ctx().clone());
         }
 
         let local_terrain_mode = local_terrain_scene::is_active(model);
