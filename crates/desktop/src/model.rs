@@ -446,6 +446,8 @@ pub struct AppModel {
     pub s2_events: Vec<S2Event>,
     /// Which S2 layers are enabled; keyed by S2LayerDef.key.
     pub s2_layer_enabled: HashMap<String, bool>,
+    /// Currently selected S2Underground event (by object_id), if any.
+    pub selected_s2_event_id: Option<i64>,
     pub selected_root: Option<PathBuf>,
     pub factal_settings_open: bool,
     pub factal_brief_open: bool,
@@ -465,6 +467,7 @@ pub struct AppModel {
     pub city_filter: String,
     pub selected_city_ids: BTreeSet<String>,
     pub activity_log: Vec<String>,
+    pub log_collapsed: bool,
     pub factal_stream_status: String,
     pub camera_registry_status: String,
     pub terrain_inventory: TerrainInventory,
@@ -640,6 +643,7 @@ impl AppModel {
             show_flights: false,
             s2_events: Vec::new(),
             s2_layer_enabled: HashMap::new(),
+            selected_s2_event_id: None,
             selected_root,
             factal_settings_open: false,
             factal_brief_open: false,
@@ -684,6 +688,7 @@ impl AppModel {
                 }
                 lines
             },
+            log_collapsed: false,
             factal_stream_status: if factal_api_key.is_empty() {
                 "demo".into()
             } else {

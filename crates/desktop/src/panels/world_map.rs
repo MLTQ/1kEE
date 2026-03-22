@@ -137,6 +137,16 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
                     .find(|(_, marker)| marker.distance(pointer) <= 11.0)
                 {
                     model.select_event(event_id);
+                } else if let Some((s2_id, _)) = scene
+                    .s2_event_markers
+                    .iter()
+                    .find(|(_, marker)| marker.distance(pointer) <= 10.0)
+                {
+                    if model.selected_s2_event_id == Some(*s2_id) {
+                        model.selected_s2_event_id = None;
+                    } else {
+                        model.selected_s2_event_id = Some(*s2_id);
+                    }
                 }
             }
         }
@@ -146,6 +156,14 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         draw_flight_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
         draw_ship_detail_panel(ui.ctx(), model);
         draw_flight_detail_panel(ui.ctx(), model);
+        draw_s2_detail_panel(ui.ctx(), model);
+        if let Some(hover) = response.hover_pos() {
+            if !model.globe_view.local_mode {
+                if let Some(geo) = globe_scene::screen_to_latlon(rect, &model.globe_view, hover) {
+                    draw_globe_coord_overlay(ui.ctx(), geo, rect);
+                }
+            }
+        }
     });
 }
 
@@ -959,4 +977,150 @@ fn draw_local_footer(ui: &mut egui::Ui, model: &mut AppModel, beam_elevation_m: 
                 }
             });
         });
+}
+
+fn draw_globe_coord_overlay(ctx: &egui::Context, geo: crate::model::GeoPoint, rect: egui::Rect) {
+    let ns = if geo.lat >= 0.0 { 'N' } else { 'S' };
+    let ew = if geo.lon >= 0.0 { 'E' } else { 'W' };
+    let text = format!(
+        "{:.4}°{}  {:.4}°{}",
+        geo.lat.abs(), ns, geo.lon.abs(), ew
+    );
+    egui::Area::new("globe_coord_overlay".into())
+        .fixed_pos(egui::pos2(
+            rect.center().x - 80.0,
+            rect.bottom() - 28.0,
+        ))
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(theme::panel_fill(200))
+                .corner_radius(5.0)
+                .inner_margin(egui::Margin::symmetric(8, 4))
+                .show(ui, |ui| {
+                    ui.colored_label(
+                        theme::contour_color(),
+                        egui::RichText::new(text).monospace().small(),
+                    );
+                });
+        });
+}
+
+fn draw_s2_detail_panel(ctx: &egui::Context, model: &mut AppModel) {
+    let Some(selected_id) = model.selected_s2_event_id else {
+        return;
+    };
+    let Some(event) = model.s2_events.iter().find(|e| e.object_id == selected_id) else {
+        return;
+    };
+    // Clone what we need to avoid borrow issues
+    let event = event.clone();
+    let col = crate::s2_underground::layer_color(&event.layer_key);
+    let layer_name = crate::s2_underground::LAYERS
+        .iter()
+        .find(|l| l.key == event.layer_key)
+        .map(|l| l.display_name)
+        .unwrap_or("S2Underground Event");
+
+    let mut open = true;
+    egui::Window::new("S2 Event Detail")
+        .id("s2_detail_panel".into())
+        .open(&mut open)
+        .resizable(false)
+        .min_width(280.0)
+        .frame(
+            egui::Frame::window(&ctx.style())
+                .stroke(egui::Stroke::new(1.5, col)),
+        )
+        .show(ctx, |ui| {
+            ui.colored_label(col, layer_name);
+            ui.separator();
+
+            // Date
+            if let Some(ms) = event.date_ms {
+                ui.horizontal(|ui| {
+                    ui.strong("Date:");
+                    ui.label(crate::s2_underground::format_date(ms));
+                });
+            }
+
+            // Location
+            let ns = if event.location.lat >= 0.0 { 'N' } else { 'S' };
+            let ew = if event.location.lon >= 0.0 { 'E' } else { 'W' };
+            ui.horizontal(|ui| {
+                ui.strong("Location:");
+                ui.label(egui::RichText::new(format!(
+                    "{:.4}°{}  {:.4}°{}",
+                    event.location.lat.abs(), ns,
+                    event.location.lon.abs(), ew,
+                )).monospace().small());
+            });
+
+            if let Some(addr) = &event.address {
+                if !addr.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.strong("Address:");
+                        ui.label(addr);
+                    });
+                }
+            }
+
+            ui.add_space(4.0);
+
+            if let Some(attack) = &event.attack_type {
+                ui.horizontal(|ui| {
+                    ui.strong("Type:");
+                    ui.label(attack);
+                });
+            }
+            if let Some(motive) = &event.motive {
+                if !motive.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.strong("Motive:");
+                        ui.label(motive);
+                    });
+                }
+            }
+            if let Some(notes) = &event.notes {
+                if !notes.is_empty() {
+                    ui.add_space(4.0);
+                    ui.strong("Notes:");
+                    ui.label(notes);
+                }
+            }
+
+            // Casualties section
+            if event.has_casualties() {
+                ui.add_space(4.0);
+                ui.separator();
+                ui.colored_label(egui::Color32::from_rgb(220, 60, 60), "Casualties");
+                egui::Grid::new("casualties_grid").num_columns(3).show(ui, |ui| {
+                    ui.label("");
+                    ui.strong("Killed");
+                    ui.strong("Wounded");
+                    ui.end_row();
+                    if event.civilian_killed.unwrap_or(0) > 0 || event.civilian_wounded.unwrap_or(0) > 0 {
+                        ui.label("Civilian");
+                        ui.label(event.civilian_killed.unwrap_or(0).to_string());
+                        ui.label(event.civilian_wounded.unwrap_or(0).to_string());
+                        ui.end_row();
+                    }
+                    if event.friendly_killed.unwrap_or(0) > 0 || event.friendly_wounded.unwrap_or(0) > 0 {
+                        ui.label("Friendly");
+                        ui.label(event.friendly_killed.unwrap_or(0).to_string());
+                        ui.label(event.friendly_wounded.unwrap_or(0).to_string());
+                        ui.end_row();
+                    }
+                    if event.enemy_killed.unwrap_or(0) > 0 || event.enemy_wounded.unwrap_or(0) > 0 {
+                        ui.label("Enemy");
+                        ui.label(event.enemy_killed.unwrap_or(0).to_string());
+                        ui.label(event.enemy_wounded.unwrap_or(0).to_string());
+                        ui.end_row();
+                    }
+                });
+            }
+        });
+    if !open {
+        model.selected_s2_event_id = None;
+    }
 }

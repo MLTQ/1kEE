@@ -15,6 +15,8 @@ pub struct GlobeScene {
     pub ship_markers: Vec<(u64, egui::Pos2)>,
     /// ICAO24 → screen position for hover detection.
     pub flight_markers: Vec<(String, egui::Pos2)>,
+    /// object_id → screen position for S2Underground click detection.
+    pub s2_event_markers: Vec<(i64, egui::Pos2)>,
     /// Terrain elevation (metres) at the beam contact point, if available.
     pub beam_elevation_m: Option<f32>,
 }
@@ -181,9 +183,11 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     }
 
     // ── S2Underground event markers ────────────────────────────────────────
-    if !model.globe_view.local_mode && !model.s2_events.is_empty() {
-        draw_s2_events(painter, &layout, &model.globe_view, &model.s2_events);
-    }
+    let s2_event_markers = if !model.globe_view.local_mode && !model.s2_events.is_empty() {
+        draw_s2_events(painter, &layout, &model.globe_view, &model.s2_events, model.selected_s2_event_id)
+    } else {
+        Vec::new()
+    };
 
     let ship_markers: Vec<(u64, egui::Pos2)> = if model.show_ships && !model.globe_view.local_mode {
         model
@@ -227,6 +231,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         camera_markers,
         ship_markers,
         flight_markers,
+        s2_event_markers,
         beam_elevation_m: None,
     }
 }
@@ -234,12 +239,15 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 /// Draw S2Underground incident markers as filled circles with glow halos.
 /// Color is per-layer (distinct from Factal event beams and flight triangles).
 /// Events with casualties get a larger outer ring.
+/// Returns a list of (object_id, screen_pos) pairs for click detection.
 fn draw_s2_events(
     painter: &egui::Painter,
     layout: &GlobeLayout,
     view: &GlobeViewState,
     events: &[S2Event],
-) {
+    selected_s2_event_id: Option<i64>,
+) -> Vec<(i64, egui::Pos2)> {
+    let mut markers = Vec::new();
     for event in events {
         let Some(proj) = project_geo(layout, view, event.location, 0.0) else {
             continue;
@@ -251,6 +259,15 @@ fn draw_s2_events(
         let col = s2_underground::layer_color(&event.layer_key);
         let pos = proj.pos;
         let has_cas = event.has_casualties();
+
+        // White selection ring around the selected event
+        if selected_s2_event_id == Some(event.object_id) {
+            painter.circle_stroke(
+                pos,
+                if has_cas { 13.0 } else { 11.0 },
+                egui::Stroke::new(1.5, egui::Color32::WHITE),
+            );
+        }
 
         // Outer glow halo
         painter.circle_stroke(
@@ -266,7 +283,10 @@ fn draw_s2_events(
         painter.circle_filled(pos, if has_cas { 3.5 } else { 2.5 }, col);
         // Bright centre spot
         painter.circle_filled(pos, 1.2, col.gamma_multiply(1.4));
+
+        markers.push((event.object_id, pos));
     }
+    markers
 }
 
 fn globe_layout(rect: egui::Rect, view: &GlobeViewState) -> GlobeLayout {
@@ -291,6 +311,55 @@ fn globe_layout(rect: egui::Rect, view: &GlobeViewState) -> GlobeLayout {
         // Keep at least 2.0 so the front pole stays visible (depth > 0).
         camera_distance: 3.15 - zoom_t * 1.15,
     }
+}
+
+/// Convert a screen-space position to geographic coordinates (lat/lon degrees)
+/// by intersecting a perspective ray with the unit sphere.
+/// Returns `None` if the cursor is not over the globe (ray misses the sphere).
+pub fn screen_to_latlon(
+    rect: egui::Rect,
+    view: &GlobeViewState,
+    screen_pos: egui::Pos2,
+) -> Option<GeoPoint> {
+    let layout = globe_layout(rect, view);
+
+    let dx = (layout.center.x - screen_pos.x) / layout.radius;
+    let dy = (layout.center.y - screen_pos.y) / layout.radius;
+    let fl = layout.focal_length;
+    let cd = layout.camera_distance;
+
+    // Quadratic: t^2*(dx^2+dy^2+fl^2) - 2*t*cd*fl + (cd^2-1) = 0
+    let a = dx * dx + dy * dy + fl * fl;
+    let b = -2.0 * cd * fl;
+    let c = cd * cd - 1.0;
+    let disc = b * b - 4.0 * a * c;
+    if disc < 0.0 {
+        return None; // cursor is off the globe
+    }
+    let t = (-b - disc.sqrt()) / (2.0 * a); // smaller root = front face
+
+    // Point on sphere in rotated frame
+    let px = t * dx;
+    let py = t * dy;
+    let pz = cd - t * fl;
+
+    // Inverse pitch rotation
+    let pitch = view.pitch;
+    let y2 =  py * pitch.cos() + pz * pitch.sin();
+    let z2 = -py * pitch.sin() + pz * pitch.cos();
+
+    // Inverse yaw rotation
+    let yaw = view.yaw;
+    let x3 =  px * yaw.cos() - z2 * yaw.sin();
+    let z3 =  px * yaw.sin() + z2 * yaw.cos();
+
+    let lat_rad = y2.clamp(-1.0, 1.0).asin();
+    let lon_rad = z3.atan2(x3);
+
+    Some(GeoPoint {
+        lat: lat_rad.to_degrees(),
+        lon: lon_rad.to_degrees(),
+    })
 }
 
 fn draw_hud_frame(painter: &egui::Painter, rect: egui::Rect) {

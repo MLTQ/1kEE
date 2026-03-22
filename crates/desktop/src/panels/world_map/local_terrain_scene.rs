@@ -46,6 +46,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             camera_markers: Vec::new(),
             ship_markers: Vec::new(),
             flight_markers: Vec::new(),
+            s2_event_markers: Vec::new(),
             beam_elevation_m: None,
         };
     };
@@ -288,6 +289,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         camera_markers,
         ship_markers: Vec::new(),
         flight_markers: Vec::new(),
+        s2_event_markers: Vec::new(),
         beam_elevation_m: Some(beam_elevation_m),
     }
 }

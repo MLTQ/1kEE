@@ -83,7 +83,7 @@ impl eframe::App for DashboardApp {
             panels::render_factal_brief(ctx, &mut self.model);
             panels::render_factal_settings(ctx, &mut self.model);
             panels::render_terrain_library(ctx, &mut self.model);
-            panels::render_status_log(ctx, &self.model);
+            panels::render_status_log(ctx, &mut self.model);
             panels::render_event_list(ctx, &mut self.model);
             panels::render_camera_list(ctx, &mut self.model);
         }
