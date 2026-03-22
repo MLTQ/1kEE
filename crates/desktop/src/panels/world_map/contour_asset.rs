@@ -1,7 +1,7 @@
 use crate::model::GeoPoint;
 use crate::terrain_assets;
 use rusqlite::{Connection, params};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -23,7 +23,7 @@ static GLOBAL_BATHYMETRY_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = 
 /// files are untouched and tiles will be re-read (not re-built) on demand.
 pub fn blast_tile_caches() {
     if let Some(c) = LOCAL_CONTOUR_CACHE.get() {
-        if let Ok(mut g) = c.lock() { g.scene_key = None; g.entries.clear(); }
+        if let Ok(mut g) = c.lock() { g.scene_key = None; g.entries.clear(); g.in_flight.clear(); }
     }
     if let Some(c) = GLOBE_CONTOUR_CACHE.get() {
         if let Ok(mut g) = c.lock() { *g = GlobeRegionCache::default(); }
@@ -87,6 +87,11 @@ impl Default for GlobeRegionCache {
 struct LocalRegionCache {
     scene_key: Option<SceneKey>,
     entries: HashMap<CacheKey, Arc<Vec<ContourPath>>>,
+    /// Keys for which a background load thread has been spawned but not yet
+    /// completed.  Prevents spawning O(N) duplicate threads per repaint
+    /// (each finishing thread calls ctx.request_repaint(), which would
+    /// otherwise trigger another batch of thread spawns for still-loading tiles).
+    in_flight: HashSet<CacheKey>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -117,7 +122,7 @@ pub fn load_srtm_region_for_view(
     const MAX_LOCAL_TILES: usize = 200;
 
     let cache: &'static Mutex<LocalRegionCache> = LOCAL_CONTOUR_CACHE.get_or_init(|| {
-        Mutex::new(LocalRegionCache { scene_key: None, entries: HashMap::new() })
+        Mutex::new(LocalRegionCache { scene_key: None, entries: HashMap::new(), in_flight: HashSet::new() })
     });
     let feature_budget = srtm_focus_cache::feature_budget_for_zoom(zoom);
     let per_asset_budget = (feature_budget / assets.len().max(1)).max(120);
@@ -131,16 +136,17 @@ pub fn load_srtm_region_for_view(
             .unwrap_or_default(),
     };
 
-    // Phase 1: lock, check for scene change, collect missing keys, then drop lock
-    // so the DB reads can run in parallel without blocking the render thread on
-    // the mutex.
+    // Phase 1: lock, check for scene change, collect tiles that need loading,
+    // and atomically mark them as in-flight — all under a single lock
+    // acquisition so no other frame can race and spawn duplicate threads.
     let missing: Vec<(CacheKey, srtm_focus_cache::FocusContourAsset)> = {
         let mut guard = cache.lock().ok()?;
         if guard.scene_key.as_ref() != Some(&scene_key) {
             guard.scene_key = Some(scene_key);
             guard.entries.clear();
+            guard.in_flight.clear();
         }
-        assets
+        let missing: Vec<_> = assets
             .iter()
             .filter_map(|asset| {
                 let key = CacheKey {
@@ -149,21 +155,31 @@ pub fn load_srtm_region_for_view(
                     lon_bucket: asset.lon_bucket,
                     zoom_bucket: asset.zoom_bucket,
                 };
-                if guard.entries.contains_key(&key) {
+                // Skip tiles already loaded or already being loaded by another thread.
+                // Without this check, every repaint (including those triggered by
+                // finishing threads) would spawn a fresh batch of N threads for the
+                // still-loading tiles — an O(N²) explosion that looks like a strobe.
+                if guard.entries.contains_key(&key) || guard.in_flight.contains(&key) {
                     None
                 } else {
                     Some((key, asset.clone()))
                 }
             })
-            .collect()
+            .collect();
+        // Mark new tiles as in-flight before dropping the lock so the next
+        // frame's Phase 1 won't double-spawn them.
+        for (key, _) in &missing {
+            guard.in_flight.insert(key.clone());
+        }
+        missing
     }; // guard dropped here
 
-    // Phase 2: spawn detached threads for each missing tile; return immediately
-    // with whatever is currently cached rather than blocking the render thread.
+    // Phase 2: spawn detached threads for each newly-claimed tile; return
+    // immediately with whatever is currently cached rather than blocking.
     for (key, asset) in missing {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            if let Some(contours) = query_local_contours(
+            let result = query_local_contours(
                 &key.path,
                 key.zoom_bucket,
                 key.lat_bucket,
@@ -172,11 +188,14 @@ pub fn load_srtm_region_for_view(
                 per_asset_budget,
             )
             .ok()
-            .filter(|c| !c.is_empty())
-            {
-                if let Ok(mut g) = cache.lock() {
-                    g.entries.entry(key).or_insert_with(|| Arc::new(contours));
+            .filter(|c| !c.is_empty());
+
+            if let Ok(mut g) = cache.lock() {
+                if let Some(contours) = result {
+                    g.entries.entry(key.clone()).or_insert_with(|| Arc::new(contours));
                 }
+                // Always clear in-flight so a failed tile can be retried next frame.
+                g.in_flight.remove(&key);
             }
             ctx.request_repaint();
         });
