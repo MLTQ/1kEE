@@ -11,6 +11,7 @@ mod terrain_field;
 mod terrain_raster;
 
 use crate::model::AppModel;
+use crate::moving_tracks;
 use crate::osm_ingest;
 use crate::theme;
 use std::sync::{Mutex, OnceLock};
@@ -39,6 +40,12 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         {
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(180));
+        }
+
+        // Refresh AIS vessel cache (non-blocking — spawns background thread
+        // if interval elapsed; returns immediately with cached data).
+        if model.show_ships && !model.globe_view.local_mode {
+            model.tracks = moving_tracks::poll(&model.aisstream_api_key, ui.ctx().clone());
         }
 
         let local_terrain_mode = local_terrain_scene::is_active(model);
@@ -73,7 +80,18 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
 
         if response.clicked() && response.drag_delta().length_sq() < 4.0 {
             if let Some(pointer) = response.interact_pointer_pos() {
-                if let Some((camera_id, _)) = scene
+                if let Some((mmsi, _)) = scene
+                    .ship_markers
+                    .iter()
+                    .find(|(_, marker)| marker.distance(pointer) <= 11.0)
+                {
+                    // Toggle selection: clicking the same ship deselects it.
+                    if model.selected_track_mmsi == Some(*mmsi) {
+                        model.selected_track_mmsi = None;
+                    } else {
+                        model.selected_track_mmsi = Some(*mmsi);
+                    }
+                } else if let Some((camera_id, _)) = scene
                     .camera_markers
                     .iter()
                     .find(|(_, marker)| marker.distance(pointer) <= 9.0)
@@ -90,6 +108,8 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         }
 
         draw_event_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
+        draw_ship_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
+        draw_ship_detail_panel(ui.ctx(), model);
     });
 }
 
@@ -156,6 +176,17 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                 ui.checkbox(&mut model.show_coastlines, "Coastline");
                 ui.checkbox(&mut model.show_bathymetry, "Bathymetry");
                 ui.checkbox(&mut model.show_graticule, "Graticule");
+                {
+                    let ships_enabled = !model.aisstream_api_key.is_empty();
+                    let hint = if ships_enabled {
+                        moving_tracks::status()
+                    } else {
+                        "Configure AISStream key in Settings".into()
+                    };
+                    ui.add_enabled(ships_enabled, egui::Checkbox::new(&mut model.show_ships, "Ships"))
+                        .on_hover_text(hint)
+                        .on_disabled_hover_text("Configure AISStream key in Settings");
+                }
                 if !model.globe_view.local_mode {
                     ui.checkbox(&mut model.show_reticle, "Reticle");
                 }
@@ -284,6 +315,131 @@ fn draw_event_hover_tooltip(
                     ui.small(event.location_name.as_str());
                 });
         });
+}
+
+fn draw_ship_hover_tooltip(
+    ctx: &egui::Context,
+    model: &AppModel,
+    scene: &globe_scene::GlobeScene,
+    hover_pos: Option<egui::Pos2>,
+) {
+    let Some(pointer) = hover_pos else { return };
+
+    // Don't show hover tooltip if a ship is already selected (detail panel visible).
+    if model.selected_track_mmsi.is_some() { return; }
+
+    let Some(&(mmsi, marker_pos)) = scene
+        .ship_markers
+        .iter()
+        .find(|(_, marker)| marker.distance(pointer) <= 12.0)
+    else {
+        return;
+    };
+
+    let Some(track) = model.tracks.iter().find(|t| t.mmsi == mmsi) else {
+        return;
+    };
+
+    egui::Area::new("ship_hover_tooltip".into())
+        .fixed_pos(marker_pos + egui::vec2(14.0, -8.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(theme::panel_fill(238))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 210, 180).gamma_multiply(0.5)))
+                .corner_radius(8.0)
+                .inner_margin(egui::Margin::same(8))
+                .show(ui, |ui| {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(40, 210, 180),
+                        track.ship_type_label(),
+                    );
+                    ui.strong(&track.name);
+                    ui.small(format!("MMSI {}", track.mmsi));
+                    if let Some(spd) = track.speed_knots {
+                        ui.small(format!("{:.1} kn", spd));
+                    }
+                });
+        });
+}
+
+fn draw_ship_detail_panel(ctx: &egui::Context, model: &mut AppModel) {
+    let Some(mmsi) = model.selected_track_mmsi else { return };
+
+    // Clone the data we need so we don't hold a borrow on model.
+    let track = model.tracks.iter().find(|t| t.mmsi == mmsi).cloned();
+
+    let Some(track) = track else {
+        // Vessel has left the cache — deselect.
+        model.selected_track_mmsi = None;
+        return;
+    };
+
+    let mut open = true;
+    let ship_accent = egui::Color32::from_rgb(40, 210, 180);
+
+    egui::Window::new("Vessel Detail")
+        .id("ship_detail_panel".into())
+        .open(&mut open)
+        .default_size(egui::vec2(320.0, 360.0))
+        .resizable(true)
+        .collapsible(false)
+        .frame(
+            egui::Frame::window(&ctx.style())
+                .fill(theme::window_fill())
+                .stroke(egui::Stroke::new(1.0, ship_accent.gamma_multiply(0.5))),
+        )
+        .show(ctx, |ui| {
+            ui.colored_label(ship_accent, track.ship_type_label());
+            ui.heading(&track.name);
+            ui.add_space(6.0);
+
+            egui::Grid::new("vessel_fields")
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    let mut row = |label: &str, value: &str| {
+                        ui.colored_label(theme::text_muted(), label);
+                        ui.label(value);
+                        ui.end_row();
+                    };
+
+                    row("MMSI", &track.mmsi.to_string());
+
+                    if let Some(imo) = track.imo {
+                        row("IMO", &imo.to_string());
+                    }
+                    if let Some(cs) = &track.callsign {
+                        row("Callsign", cs);
+                    }
+                    row(
+                        "Position",
+                        &format!(
+                            "{:.4}°N  {:.4}°E",
+                            track.location.lat, track.location.lon
+                        ),
+                    );
+                    if let Some(spd) = track.speed_knots {
+                        row("Speed", &format!("{spd:.1} kn"));
+                    }
+                    if let Some(hdg) = track.heading_deg {
+                        row("Heading", &format!("{hdg:.0}°"));
+                    }
+                    if let Some(dest) = &track.destination {
+                        row("Destination", dest);
+                    }
+                    if let Some(eta) = &track.eta_str {
+                        row("ETA", eta);
+                    }
+                    if let Some(d) = track.draught_m {
+                        row("Draught", &format!("{d:.1} m"));
+                    }
+                });
+        });
+
+    if !open {
+        model.selected_track_mmsi = None;
+    }
 }
 
 fn ensure_visible_road_layers(model: &mut AppModel, local_terrain_mode: bool) {

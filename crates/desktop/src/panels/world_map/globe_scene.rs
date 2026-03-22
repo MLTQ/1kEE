@@ -1,4 +1,4 @@
-use crate::model::{AppModel, EventRecord, GeoPoint, GlobeViewState};
+use crate::model::{AppModel, EventRecord, GeoPoint, GlobeViewState, MovingTrack};
 use crate::theme;
 
 use super::camera::{self, GlobeLod};
@@ -10,6 +10,8 @@ use super::terrain_field;
 pub struct GlobeScene {
     pub event_markers: Vec<(String, egui::Pos2)>,
     pub camera_markers: Vec<(String, egui::Pos2)>,
+    /// MMSI → screen position for click/hover detection.
+    pub ship_markers: Vec<(u64, egui::Pos2)>,
     /// Terrain elevation (metres) at the beam contact point, if available.
     pub beam_elevation_m: Option<f32>,
 }
@@ -150,6 +152,27 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             .collect()
     };
 
+    // ── AIS ship markers ──────────────────────────────────────────────────
+    // `model.tracks` is refreshed each frame by `render_world_map` before
+    // this function is called.  We just draw whatever is cached.
+    if model.show_ships && !model.globe_view.local_mode {
+        draw_ships(painter, &layout, &model.globe_view, &model.tracks, model.selected_track_mmsi);
+    }
+
+    let ship_markers: Vec<(u64, egui::Pos2)> = if model.show_ships && !model.globe_view.local_mode {
+        model
+            .tracks
+            .iter()
+            .filter_map(|t| {
+                project_geo(&layout, &model.globe_view, t.location, 0.0)
+                    .filter(|p| p.front_facing)
+                    .map(|p| (t.mmsi, p.pos))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     if !model.cinematic_mode {
         if let Some((_, event_marker)) = event_markers
             .iter()
@@ -163,6 +186,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     GlobeScene {
         event_markers,
         camera_markers,
+        ship_markers,
         beam_elevation_m: None,
     }
 }
@@ -504,6 +528,78 @@ fn draw_real_contours(
             if emphasis { theme::hot_color() } else { theme::contour_color() },
             lod.backface_alpha * 0.1,
         );
+    }
+}
+
+/// Draw all live AIS vessels as small ship markers on the globe.
+fn draw_ships(
+    painter: &egui::Painter,
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    tracks: &[MovingTrack],
+    selected_mmsi: Option<u64>,
+) {
+    // Cyan-teal — distinct from event (red/orange) and camera (blue) markers.
+    let ship_color = egui::Color32::from_rgb(40, 210, 180);
+    let selected_color = egui::Color32::from_rgb(255, 230, 80);
+
+    for track in tracks {
+        let Some(proj) = project_geo(layout, view, track.location, 0.0) else {
+            continue;
+        };
+        if !proj.front_facing {
+            continue;
+        }
+
+        let is_selected = selected_mmsi == Some(track.mmsi);
+        let col = if is_selected { selected_color } else { ship_color };
+        let pos = proj.pos;
+
+        // Glow halo
+        painter.circle_stroke(pos, 6.0, egui::Stroke::new(4.0, col.gamma_multiply(0.12)));
+
+        // Heading arrow: draw a small directional triangle if heading is known.
+        if let Some(heading) = track.heading_deg {
+            let angle = heading.to_radians() - std::f32::consts::FRAC_PI_2;
+            let fwd: f32 = 7.0;
+            let back: f32 = 3.5;
+            let wing: f32 = 3.0;
+
+            // Tip of triangle (in heading direction)
+            let tip = egui::pos2(pos.x + angle.cos() * fwd, pos.y + angle.sin() * fwd);
+            // Left and right wing points (perpendicular to heading, slightly back)
+            let angle_l = angle + std::f32::consts::FRAC_PI_2;
+            let angle_r = angle - std::f32::consts::FRAC_PI_2;
+            let left = egui::pos2(
+                pos.x - angle.cos() * back + angle_l.cos() * wing,
+                pos.y - angle.sin() * back + angle_l.sin() * wing,
+            );
+            let right = egui::pos2(
+                pos.x - angle.cos() * back + angle_r.cos() * wing,
+                pos.y - angle.sin() * back + angle_r.sin() * wing,
+            );
+
+            // Filled triangle (mesh)
+            let mut mesh = egui::epaint::Mesh::default();
+            let base_i = mesh.vertices.len() as u32;
+            for &p in &[tip, left, right] {
+                mesh.vertices.push(egui::epaint::Vertex {
+                    pos: p,
+                    uv: egui::pos2(0.0, 0.0),
+                    color: col,
+                });
+            }
+            mesh.indices.extend_from_slice(&[base_i, base_i + 1, base_i + 2]);
+            painter.add(egui::Shape::mesh(mesh));
+        } else {
+            // No heading: draw a simple filled dot
+            painter.circle_filled(pos, 3.0, col);
+        }
+
+        // Selection ring
+        if is_selected {
+            painter.circle_stroke(pos, 9.0, egui::Stroke::new(1.5, selected_color));
+        }
     }
 }
 

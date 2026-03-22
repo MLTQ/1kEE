@@ -14,6 +14,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub ny511_api_key: String,
     #[serde(default)]
+    pub aisstream_api_key: String,
+    #[serde(default)]
     pub asset_root: Option<String>,
     #[serde(default)]
     pub data_root: Option<String>,
@@ -205,6 +207,7 @@ fn normalize_settings(mut settings: AppSettings) -> AppSettings {
     settings.factal_api_key = settings.factal_api_key.trim().to_owned();
     settings.windy_webcams_api_key = settings.windy_webcams_api_key.trim().to_owned();
     settings.ny511_api_key = settings.ny511_api_key.trim().to_owned();
+    settings.aisstream_api_key = settings.aisstream_api_key.trim().to_owned();
     settings.asset_root = normalize_asset_root_owned(settings.asset_root);
     settings.data_root = normalize_named_root_owned(settings.data_root, &["Data", "data"]);
     settings.derived_root =

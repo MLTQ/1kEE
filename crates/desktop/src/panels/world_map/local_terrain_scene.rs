@@ -44,6 +44,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         return GlobeScene {
             event_markers: Vec::new(),
             camera_markers: Vec::new(),
+            ship_markers: Vec::new(),
             beam_elevation_m: None,
         };
     };
@@ -284,6 +285,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     GlobeScene {
         event_markers,
         camera_markers,
+        ship_markers: Vec::new(),
         beam_elevation_m: Some(beam_elevation_m),
     }
 }

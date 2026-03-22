@@ -202,11 +202,61 @@ pub struct NearbyCamera {
     pub location: GeoPoint,
 }
 
+/// A live AIS vessel position record fetched from AISStream.
+#[derive(Clone, Debug)]
+pub struct MovingTrack {
+    /// 9-digit Maritime Mobile Service Identity.
+    pub mmsi: u64,
+    /// Vessel name as broadcast by the ship.
+    pub name: String,
+    pub location: GeoPoint,
+    /// True heading 0–359 degrees; `None` when unknown (AIS value 511).
+    pub heading_deg: Option<f32>,
+    /// Speed over ground in knots.
+    pub speed_knots: Option<f32>,
+    /// Radio callsign from static data.
+    pub callsign: Option<String>,
+    /// IMO vessel number.
+    pub imo: Option<u64>,
+    /// Next port of call.
+    pub destination: Option<String>,
+    /// ETA as a human-readable string built from the AIS ETA struct.
+    pub eta_str: Option<String>,
+    /// AIS ship type code (70–79 = cargo, 80–89 = tanker, etc.).
+    pub ship_type_code: Option<u32>,
+    /// Draught in metres.
+    pub draught_m: Option<f32>,
+}
+
+impl MovingTrack {
+    /// Short descriptive label for the ship type.
+    pub fn ship_type_label(&self) -> &'static str {
+        match self.ship_type_code {
+            Some(30)      => "Fishing",
+            Some(36)      => "Sailing",
+            Some(37)      => "Pleasure craft",
+            Some(50)      => "Pilot",
+            Some(51)      => "SAR",
+            Some(52)      => "Tug",
+            Some(53)      => "Port tender",
+            Some(35)      => "Military",
+            Some(60..=69) => "Passenger",
+            Some(70..=79) => "Cargo",
+            Some(80..=89) => "Tanker",
+            _             => "Vessel",
+        }
+    }
+}
+
 pub struct AppModel {
     pub events: Vec<EventRecord>,
     pub cameras: Vec<CameraFeed>,
+    /// Live AIS vessel positions; refreshed periodically by `moving_tracks`.
+    pub tracks: Vec<MovingTrack>,
     pub selected_event_id: Option<String>,
     pub selected_camera_id: Option<String>,
+    /// MMSI string of the currently-selected vessel (for detail panel).
+    pub selected_track_mmsi: Option<u64>,
     pub globe_view: GlobeViewState,
     pub focused_city_id: Option<String>,
     pub cinematic_mode: bool,
@@ -221,12 +271,14 @@ pub struct AppModel {
     pub show_beam: bool,
     pub show_terrain_surface: bool,
     pub show_bathymetry: bool,
+    pub show_ships: bool,
     pub selected_root: Option<PathBuf>,
     pub factal_settings_open: bool,
     pub factal_brief_open: bool,
     pub factal_api_key: String,
     pub windy_webcams_api_key: String,
     pub ny511_api_key: String,
+    pub aisstream_api_key: String,
     pub settings_asset_root: String,
     pub settings_data_root: String,
     pub settings_derived_root: String,
@@ -256,6 +308,7 @@ impl AppModel {
         let factal_api_key = app_settings.factal_api_key.trim().to_owned();
         let windy_webcams_api_key = app_settings.windy_webcams_api_key.trim().to_owned();
         let ny511_api_key = app_settings.ny511_api_key.trim().to_owned();
+        let aisstream_api_key = app_settings.aisstream_api_key.trim().to_owned();
 
         let events = vec![
             EventRecord {
@@ -386,8 +439,10 @@ impl AppModel {
         let mut model = Self {
             events,
             cameras,
+            tracks: Vec::new(),
             selected_event_id: Some("evt-sf".into()),
             selected_camera_id: None,
+            selected_track_mmsi: None,
             globe_view: GlobeViewState::from_focus(GeoPoint {
                 lat: 37.7544,
                 lon: -122.4477,
@@ -405,12 +460,14 @@ impl AppModel {
             show_beam: true,
             show_terrain_surface: true,
             show_bathymetry: true,
+            show_ships: false,
             selected_root,
             factal_settings_open: false,
             factal_brief_open: false,
             factal_api_key: factal_api_key.clone(),
             windy_webcams_api_key: windy_webcams_api_key.clone(),
             ny511_api_key: ny511_api_key.clone(),
+            aisstream_api_key: aisstream_api_key.clone(),
             settings_asset_root: settings_store::effective_asset_root()
                 .map(|path| path.display().to_string())
                 .unwrap_or_default(),
@@ -514,6 +571,7 @@ impl AppModel {
             factal_api_key: self.factal_api_key.trim().to_owned(),
             windy_webcams_api_key: self.windy_webcams_api_key.trim().to_owned(),
             ny511_api_key: self.ny511_api_key.trim().to_owned(),
+            aisstream_api_key: self.aisstream_api_key.trim().to_owned(),
             asset_root: optional_path_field(&self.settings_asset_root),
             data_root: optional_path_field(&self.settings_data_root),
             derived_root: optional_path_field(&self.settings_derived_root),
@@ -544,6 +602,7 @@ impl AppModel {
         self.settings_prefer_overpass = settings.prefer_overpass;
         self.windy_webcams_api_key = settings.windy_webcams_api_key.trim().to_owned();
         self.ny511_api_key = settings.ny511_api_key.trim().to_owned();
+        self.aisstream_api_key = settings.aisstream_api_key.trim().to_owned();
 
         self.terrain_inventory = TerrainInventory::detect_from(self.selected_root.as_deref());
         let osm_runtime_store = osm_ingest::ensure_runtime_store(self.selected_root.as_deref());

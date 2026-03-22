@@ -1,6 +1,7 @@
 use crate::camera_registry;
 use crate::factal_stream;
 use crate::model::AppModel;
+use crate::moving_tracks;
 use crate::settings_store;
 use crate::theme;
 
@@ -123,6 +124,30 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
             ui.separator();
             ui.add_space(10.0);
 
+            // ── AISStream ──────────────────────────────────────────────────
+            ui.heading("AISStream");
+            ui.colored_label(
+                theme::text_muted(),
+                "Live AIS vessel positions via AISStream WebSocket. Free tier available at aisstream.io.",
+            );
+            ui.add_space(8.0);
+
+            ui.label("API Key");
+            ui.add_sized(
+                [ui.available_width(), 30.0],
+                egui::TextEdit::singleline(&mut model.aisstream_api_key)
+                    .password(true)
+                    .hint_text("AISStream API key"),
+            );
+
+            ui.add_space(4.0);
+            ui.small(format!("Ship layer status: {}", moving_tracks::status()));
+            ui.small("Enable the Ships layer in the Operations Globe to start polling.");
+
+            ui.add_space(14.0);
+            ui.separator();
+            ui.add_space(10.0);
+
             ui.heading("Paths");
             ui.colored_label(
                 theme::text_muted(),
@@ -192,6 +217,8 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
         model.factal_api_key = trimmed;
         model.ny511_api_key = model.ny511_api_key.trim().to_owned();
         model.windy_webcams_api_key = model.windy_webcams_api_key.trim().to_owned();
+        model.aisstream_api_key = model.aisstream_api_key.trim().to_owned();
+        moving_tracks::invalidate();
         match model.save_settings() {
             Ok(()) => {
                 model.apply_saved_settings();
@@ -233,6 +260,8 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
         model.factal_api_key.clear();
         model.ny511_api_key.clear();
         model.windy_webcams_api_key.clear();
+        model.aisstream_api_key.clear();
+        moving_tracks::invalidate();
         match model.save_settings() {
             Ok(()) => {
                 model.factal_stream_status = "demo".into();
