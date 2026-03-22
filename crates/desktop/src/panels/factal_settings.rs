@@ -69,11 +69,10 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
             ui.add_space(6.0);
 
             // ── Scrollable tab content ─────────────────────────────────────
-            // Reserve ~52 px at the bottom for the action buttons.
-            let content_height = ui.available_height() - 52.0;
+            // Fixed cap — avoids the feedback loop where available_height()
+            // grows → ScrollArea requests more space → window grows → repeat.
             egui::ScrollArea::vertical()
-                .max_height(content_height)
-                .auto_shrink([false, false])
+                .max_height(400.0)
                 .show(ui, |ui| {
                     match tab {
                         SettingsTab::Theme => tab_theme(ui, model),

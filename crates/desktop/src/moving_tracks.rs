@@ -130,20 +130,16 @@ pub fn poll(api_key: &str, ctx: egui::Context) -> Vec<MovingTrack> {
     if should_spawn {
         if let Ok(mut g) = cache().lock() {
             g.loading = true;
-            g.status = "syncing".into();
+            g.status = "syncing…".into();
         }
         let key = api_key.to_owned();
         std::thread::spawn(move || {
-            let vessels = fetch_vessels(&key);
+            let (vessels, status) = fetch_vessels(&key);
             if let Ok(mut g) = cache().lock() {
                 g.vessels = vessels;
                 g.loading = false;
                 g.last_poll = Some(Instant::now());
-                g.status = if g.vessels.is_empty() {
-                    "no data".into()
-                } else {
-                    format!("{} vessels", g.vessels.len())
-                };
+                g.status = status;
             }
             ctx.request_repaint();
         });
@@ -173,7 +169,9 @@ pub fn invalidate() {
 
 // ── WebSocket polling ─────────────────────────────────────────────────────────
 
-fn fetch_vessels(api_key: &str) -> Vec<MovingTrack> {
+/// Returns `(vessels, status_string)`.  Never blocks the caller — all IO
+/// happens inside a background thread (see `poll`).
+fn fetch_vessels(api_key: &str) -> (Vec<MovingTrack>, String) {
     use tungstenite::{Message, connect};
 
     let url = "wss://stream.aisstream.io/v0/stream";
@@ -181,9 +179,26 @@ fn fetch_vessels(api_key: &str) -> Vec<MovingTrack> {
         Ok(pair) => pair,
         Err(e) => {
             eprintln!("[moving_tracks] AISStream connect error: {e}");
-            return Vec::new();
+            return (Vec::new(), format!("connect error: {e}"));
         }
     };
+
+    // Set a short read timeout on the underlying TCP stream so the deadline
+    // loop can actually fire.  Without this, ws.read() blocks indefinitely on
+    // a quiet socket and the deadline check at the top of the loop is never
+    // reached.  MaybeTlsStream wraps either a plain or a rustls TcpStream.
+    {
+        use tungstenite::stream::MaybeTlsStream;
+        let timeout = Some(Duration::from_millis(500));
+        let result = match ws.get_mut() {
+            MaybeTlsStream::Plain(tcp) => tcp.set_read_timeout(timeout),
+            MaybeTlsStream::Rustls(tls) => tls.get_ref().set_read_timeout(timeout),
+            _ => Ok(()),
+        };
+        if let Err(e) = result {
+            eprintln!("[moving_tracks] set_read_timeout: {e}");
+        }
+    }
 
     // Send subscription for global positions + static data.
     let sub = serde_json::json!({
@@ -191,8 +206,8 @@ fn fetch_vessels(api_key: &str) -> Vec<MovingTrack> {
         "BoundingBoxes": [[[-90.0, -180.0], [90.0, 180.0]]],
         "FilterMessageTypes": ["PositionReport", "ShipStaticData"]
     });
-    if ws.send(Message::Text(sub.to_string())).is_err() {
-        return Vec::new();
+    if let Err(e) = ws.send(Message::Text(sub.to_string())) {
+        return (Vec::new(), format!("subscribe error: {e}"));
     }
 
     let mut accumulator: HashMap<u64, VesselAccum> = HashMap::new();
@@ -216,6 +231,8 @@ fn fetch_vessels(api_key: &str) -> Vec<MovingTrack> {
             }
             Ok(Message::Close(_)) => break,
             Ok(_) => {}
+            // Timeout / WouldBlock — normal on a quiet socket; loop back and
+            // re-check the deadline.
             Err(tungstenite::Error::Io(e))
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut => {}
@@ -228,10 +245,18 @@ fn fetch_vessels(api_key: &str) -> Vec<MovingTrack> {
 
     let _ = ws.close(None);
 
-    accumulator
+    let vessels: Vec<MovingTrack> = accumulator
         .into_values()
         .filter_map(|v| v.into_track())
-        .collect()
+        .collect();
+
+    let status = if vessels.is_empty() {
+        format!("connected — 0 vessels (check API key / plan tier)")
+    } else {
+        format!("{} vessels", vessels.len())
+    };
+
+    (vessels, status)
 }
 
 // ── message ingestion ─────────────────────────────────────────────────────────
