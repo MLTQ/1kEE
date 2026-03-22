@@ -84,11 +84,21 @@ impl VesselAccum {
     }
 }
 
+/// Half-width of the bounding box sent to AISStream (degrees).
+/// ±15° keeps us well within free-tier limits while covering a large region.
+const BOX_HALF_DEG: f32 = 15.0;
+
+/// Re-poll immediately when the globe center moves more than this far from
+/// the center used for the last poll (degrees, great-circle approximation).
+const RECENTER_THRESHOLD_DEG: f32 = BOX_HALF_DEG * 0.5;
+
 // ── static cache ──────────────────────────────────────────────────────────────
 
 struct PollState {
     vessels: Vec<MovingTrack>,
     last_poll: Option<Instant>,
+    /// Globe center used for the last successful poll bounding box.
+    last_center: Option<GeoPoint>,
     loading: bool,
     pub status: String,
 }
@@ -99,6 +109,7 @@ fn cache() -> &'static Mutex<PollState> {
         Mutex::new(PollState {
             vessels: Vec::new(),
             last_poll: None,
+            last_center: None,
             loading: false,
             status: "idle".into(),
         })
@@ -109,10 +120,11 @@ fn cache() -> &'static Mutex<PollState> {
 
 /// Returns the current cached vessel list immediately.
 ///
-/// If no poll has run yet (or the interval has elapsed), spawns a background
-/// thread to refresh the cache.  The caller must handle the case where the
-/// returned list is empty (poll in progress or key not configured).
-pub fn poll(api_key: &str, ctx: egui::Context) -> Vec<MovingTrack> {
+/// Spawns a background refresh when the poll interval has elapsed **or** when
+/// the globe center has drifted more than `RECENTER_THRESHOLD_DEG` outside the
+/// previous bounding box — so panning to a new area of the globe triggers a
+/// fresh fetch automatically.
+pub fn poll(api_key: &str, center: GeoPoint, ctx: egui::Context) -> Vec<MovingTrack> {
     if api_key.is_empty() {
         return Vec::new();
     }
@@ -120,10 +132,21 @@ pub fn poll(api_key: &str, ctx: egui::Context) -> Vec<MovingTrack> {
     let should_spawn = cache()
         .lock()
         .map(|g| {
-            !g.loading
-                && g.last_poll
-                    .map(|t| t.elapsed() >= POLL_INTERVAL)
-                    .unwrap_or(true)
+            if g.loading {
+                return false;
+            }
+            // Re-poll on interval expiry.
+            let interval_expired = g.last_poll
+                .map(|t| t.elapsed() >= POLL_INTERVAL)
+                .unwrap_or(true);
+            // Re-poll when the globe center has moved significantly outside the
+            // previous bounding box so vessels stay relevant to the current view.
+            let drifted = g.last_center.map(|prev| {
+                let dlat = (center.lat - prev.lat).abs();
+                let dlon = (center.lon - prev.lon).abs().min(360.0 - (center.lon - prev.lon).abs());
+                dlat > RECENTER_THRESHOLD_DEG || dlon > RECENTER_THRESHOLD_DEG
+            }).unwrap_or(false);
+            interval_expired || drifted
         })
         .unwrap_or(false);
 
@@ -134,11 +157,12 @@ pub fn poll(api_key: &str, ctx: egui::Context) -> Vec<MovingTrack> {
         }
         let key = api_key.to_owned();
         std::thread::spawn(move || {
-            let (vessels, status) = fetch_vessels(&key);
+            let (vessels, status) = fetch_vessels(&key, center);
             if let Ok(mut g) = cache().lock() {
                 g.vessels = vessels;
                 g.loading = false;
                 g.last_poll = Some(Instant::now());
+                g.last_center = Some(center);
                 g.status = status;
             }
             ctx.request_repaint();
@@ -163,6 +187,7 @@ pub fn status() -> String {
 pub fn invalidate() {
     if let Ok(mut g) = cache().lock() {
         g.last_poll = None;
+        g.last_center = None;
         g.loading = false;
     }
 }
@@ -171,7 +196,7 @@ pub fn invalidate() {
 
 /// Returns `(vessels, status_string)`.  Never blocks the caller — all IO
 /// happens inside a background thread (see `poll`).
-fn fetch_vessels(api_key: &str) -> (Vec<MovingTrack>, String) {
+fn fetch_vessels(api_key: &str, center: GeoPoint) -> (Vec<MovingTrack>, String) {
     use tungstenite::{Message, connect};
 
     let url = "wss://stream.aisstream.io/v0/stream";
@@ -200,10 +225,18 @@ fn fetch_vessels(api_key: &str) -> (Vec<MovingTrack>, String) {
         }
     }
 
-    // Send subscription for global positions + static data.
+    // Build a ±BOX_HALF_DEG bounding box around the current globe center.
+    // This keeps us within free-tier limits and returns relevant local traffic
+    // rather than requesting every ship on Earth.
+    let min_lat = (center.lat - BOX_HALF_DEG).max(-90.0) as f64;
+    let max_lat = (center.lat + BOX_HALF_DEG).min(90.0) as f64;
+    let min_lon = (center.lon - BOX_HALF_DEG).max(-180.0) as f64;
+    let max_lon = (center.lon + BOX_HALF_DEG).min(180.0) as f64;
+
+    // Send subscription for positions + static data within the local box.
     let sub = serde_json::json!({
         "APIKey": api_key,
-        "BoundingBoxes": [[[-90.0, -180.0], [90.0, 180.0]]],
+        "BoundingBoxes": [[[min_lat, min_lon], [max_lat, max_lon]]],
         "FilterMessageTypes": ["PositionReport", "ShipStaticData"]
     });
     if let Err(e) = ws.send(Message::Text(sub.to_string())) {
@@ -251,7 +284,10 @@ fn fetch_vessels(api_key: &str) -> (Vec<MovingTrack>, String) {
         .collect();
 
     let status = if vessels.is_empty() {
-        format!("connected — 0 vessels (check API key / plan tier)")
+        format!(
+            "0 vessels near {:.1}°, {:.1}° (check API key)",
+            center.lat, center.lon
+        )
     } else {
         format!("{} vessels", vessels.len())
     };

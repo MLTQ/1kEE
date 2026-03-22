@@ -45,7 +45,11 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         // Refresh AIS vessel cache (non-blocking — spawns background thread
         // if interval elapsed; returns immediately with cached data).
         if model.show_ships && !model.globe_view.local_mode {
-            model.tracks = moving_tracks::poll(&model.aisstream_api_key, ui.ctx().clone());
+            model.tracks = moving_tracks::poll(
+                &model.aisstream_api_key,
+                model.globe_view.globe_center_latlon(),
+                ui.ctx().clone(),
+            );
         }
 
         let local_terrain_mode = local_terrain_scene::is_active(model);
