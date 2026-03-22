@@ -5,6 +5,7 @@ mod camera_source_catalog;
 mod city_catalog;
 mod factal_stream;
 mod model;
+mod flight_tracks;
 mod moving_tracks;
 mod osm_ingest;
 mod panels;

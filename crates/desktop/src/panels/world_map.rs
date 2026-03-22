@@ -10,6 +10,7 @@ mod srtm_stream;
 mod terrain_field;
 mod terrain_raster;
 
+use crate::flight_tracks;
 use crate::model::AppModel;
 use crate::moving_tracks;
 use crate::osm_ingest;
@@ -47,6 +48,14 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         if model.show_ships && !model.globe_view.local_mode {
             model.tracks = moving_tracks::poll(
                 &model.aisstream_api_key,
+                model.globe_view.globe_center_latlon(),
+                ui.ctx().clone(),
+            );
+        }
+
+        // Refresh ADS-B flight cache (OpenSky Network, no key required).
+        if model.show_flights && !model.globe_view.local_mode {
+            model.flights = flight_tracks::poll(
                 model.globe_view.globe_center_latlon(),
                 ui.ctx().clone(),
             );
@@ -113,6 +122,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
 
         draw_event_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
         draw_ship_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
+        draw_flight_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
         draw_ship_detail_panel(ui.ctx(), model);
     });
 }
@@ -191,6 +201,8 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                         .on_hover_text(hint)
                         .on_disabled_hover_text("Configure AISStream key in Settings");
                 }
+                ui.checkbox(&mut model.show_flights, "Flights")
+                    .on_hover_text(flight_tracks::status());
                 if !model.globe_view.local_mode {
                     ui.checkbox(&mut model.show_reticle, "Reticle");
                 }
@@ -362,6 +374,50 @@ fn draw_ship_hover_tooltip(
                     ui.small(format!("MMSI {}", track.mmsi));
                     if let Some(spd) = track.speed_knots {
                         ui.small(format!("{:.1} kn", spd));
+                    }
+                });
+        });
+}
+
+fn draw_flight_hover_tooltip(
+    ctx: &egui::Context,
+    model: &AppModel,
+    scene: &globe_scene::GlobeScene,
+    hover_pos: Option<egui::Pos2>,
+) {
+    let Some(pointer) = hover_pos else { return };
+    let Some((icao24, marker_pos)) = scene
+        .flight_markers
+        .iter()
+        .find(|(_, pos)| pos.distance(pointer) <= 12.0)
+    else {
+        return;
+    };
+    let Some(flight) = model.flights.iter().find(|f| &f.icao24 == icao24) else {
+        return;
+    };
+
+    let amber = egui::Color32::from_rgb(255, 200, 60);
+
+    egui::Area::new("flight_hover_tooltip".into())
+        .fixed_pos(*marker_pos + egui::vec2(14.0, -8.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(theme::panel_fill(238))
+                .stroke(egui::Stroke::new(1.0, amber.gamma_multiply(0.5)))
+                .corner_radius(8.0)
+                .inner_margin(egui::Margin::same(8))
+                .show(ui, |ui| {
+                    ui.colored_label(amber, format!("✈ {}", flight.label()));
+                    ui.small(format!(
+                        "{} {} {}",
+                        flight.altitude_label(),
+                        flight.trend_symbol(),
+                        flight.origin_country.as_deref().unwrap_or(""),
+                    ));
+                    if let Some(spd) = flight.speed_knots {
+                        ui.small(format!("{:.0} kn", spd));
                     }
                 });
         });

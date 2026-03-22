@@ -1,4 +1,4 @@
-use crate::model::{AppModel, EventRecord, GeoPoint, GlobeViewState, MovingTrack};
+use crate::model::{AppModel, EventRecord, FlightTrack, GeoPoint, GlobeViewState, MovingTrack};
 use crate::theme;
 
 use super::camera::{self, GlobeLod};
@@ -12,6 +12,8 @@ pub struct GlobeScene {
     pub camera_markers: Vec<(String, egui::Pos2)>,
     /// MMSI → screen position for click/hover detection.
     pub ship_markers: Vec<(u64, egui::Pos2)>,
+    /// ICAO24 → screen position for hover detection.
+    pub flight_markers: Vec<(String, egui::Pos2)>,
     /// Terrain elevation (metres) at the beam contact point, if available.
     pub beam_elevation_m: Option<f32>,
 }
@@ -159,6 +161,11 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         draw_ships(painter, &layout, &model.globe_view, &model.tracks, model.selected_track_mmsi);
     }
 
+    // ── ADS-B flight markers ───────────────────────────────────────────────
+    if model.show_flights && !model.globe_view.local_mode {
+        draw_flights(painter, &layout, &model.globe_view, &model.flights);
+    }
+
     let ship_markers: Vec<(u64, egui::Pos2)> = if model.show_ships && !model.globe_view.local_mode {
         model
             .tracks
@@ -183,10 +190,24 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         draw_legend(painter, rect, &layout, &model.globe_view, &lod);
     }
 
+    let flight_markers: Vec<(String, egui::Pos2)> =
+        if model.show_flights && !model.globe_view.local_mode {
+            model.flights.iter()
+                .filter_map(|f| {
+                    project_geo(&layout, &model.globe_view, f.location, 0.0)
+                        .filter(|p| p.front_facing)
+                        .map(|p| (f.icao24.clone(), p.pos))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
     GlobeScene {
         event_markers,
         camera_markers,
         ship_markers,
+        flight_markers,
         beam_elevation_m: None,
     }
 }
@@ -599,6 +620,73 @@ fn draw_ships(
         // Selection ring
         if is_selected {
             painter.circle_stroke(pos, 9.0, egui::Stroke::new(1.5, selected_color));
+        }
+    }
+}
+
+/// Draw all live ADS-B flights as small directional markers on the globe.
+///
+/// Colour scheme: amber/gold — distinct from ships (cyan) and events (red).
+/// Climbing flights get a brighter tint; descending ones are slightly dimmer.
+fn draw_flights(
+    painter: &egui::Painter,
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    flights: &[FlightTrack],
+) {
+    // Base colour: warm amber — distinct from cyan ships and red events.
+    let base_col = egui::Color32::from_rgb(255, 200, 60);
+    let climb_col = egui::Color32::from_rgb(255, 230, 120);
+    let descent_col = egui::Color32::from_rgb(220, 160, 40);
+
+    for flight in flights {
+        let Some(proj) = project_geo(layout, view, flight.location, 0.0) else {
+            continue;
+        };
+        if !proj.front_facing {
+            continue;
+        }
+
+        let col = match flight.vertical_rate_fpm {
+            Some(r) if r > 100.0  => climb_col,
+            Some(r) if r < -100.0 => descent_col,
+            _                      => base_col,
+        };
+        let pos = proj.pos;
+
+        // Soft glow halo
+        painter.circle_stroke(pos, 5.5, egui::Stroke::new(3.5, col.gamma_multiply(0.10)));
+
+        if let Some(heading) = flight.heading_deg {
+            // Small filled triangle pointing in the direction of travel.
+            let angle = heading.to_radians() - std::f32::consts::FRAC_PI_2;
+            let fwd: f32 = 6.0;
+            let back: f32 = 3.0;
+            let wing: f32 = 2.5;
+
+            let tip   = egui::pos2(pos.x + angle.cos() * fwd,  pos.y + angle.sin() * fwd);
+            let left  = egui::pos2(
+                pos.x - angle.cos() * back + (angle + std::f32::consts::FRAC_PI_2).cos() * wing,
+                pos.y - angle.sin() * back + (angle + std::f32::consts::FRAC_PI_2).sin() * wing,
+            );
+            let right = egui::pos2(
+                pos.x - angle.cos() * back + (angle - std::f32::consts::FRAC_PI_2).cos() * wing,
+                pos.y - angle.sin() * back + (angle - std::f32::consts::FRAC_PI_2).sin() * wing,
+            );
+
+            let mut mesh = egui::epaint::Mesh::default();
+            let base_i = mesh.vertices.len() as u32;
+            for &p in &[tip, left, right] {
+                mesh.vertices.push(egui::epaint::Vertex {
+                    pos: p,
+                    uv: egui::pos2(0.0, 0.0),
+                    color: col,
+                });
+            }
+            mesh.indices.extend_from_slice(&[base_i, base_i + 1, base_i + 2]);
+            painter.add(egui::Shape::mesh(mesh));
+        } else {
+            painter.circle_filled(pos, 2.5, col);
         }
     }
 }

@@ -202,6 +202,55 @@ pub struct NearbyCamera {
     pub location: GeoPoint,
 }
 
+/// A live ADS-B flight position record fetched from OpenSky Network.
+#[derive(Clone, Debug)]
+pub struct FlightTrack {
+    /// ICAO 24-bit transponder address (hex string, e.g. "a1b2c3").
+    pub icao24: String,
+    /// Flight callsign / flight number, if broadcast (e.g. "UAL123").
+    pub callsign: Option<String>,
+    /// Country of registration.
+    pub origin_country: Option<String>,
+    pub location: GeoPoint,
+    /// Barometric altitude in metres; `None` when unavailable.
+    pub baro_altitude_m: Option<f32>,
+    /// True when the aircraft is reporting itself as on the ground.
+    pub on_ground: bool,
+    /// Ground speed in knots; `None` when unavailable.
+    pub speed_knots: Option<f32>,
+    /// Track angle in degrees clockwise from north; `None` when unavailable.
+    pub heading_deg: Option<f32>,
+    /// Vertical rate in feet per minute (positive = climbing); `None` when unavailable.
+    pub vertical_rate_fpm: Option<f32>,
+}
+
+impl FlightTrack {
+    /// Short display label — callsign if known, otherwise ICAO24.
+    pub fn label(&self) -> &str {
+        self.callsign.as_deref().unwrap_or(&self.icao24)
+    }
+
+    /// Altitude formatted for display (feet, rounded to nearest 100).
+    pub fn altitude_label(&self) -> String {
+        match self.baro_altitude_m {
+            Some(m) if m > 0.0 => {
+                let ft = (m * 3.280_84 / 100.0).round() as i32 * 100;
+                format!("{ft} ft")
+            }
+            _ => "—".into(),
+        }
+    }
+
+    /// Vertical trend symbol.
+    pub fn trend_symbol(&self) -> &'static str {
+        match self.vertical_rate_fpm {
+            Some(r) if r > 100.0  => "↑",
+            Some(r) if r < -100.0 => "↓",
+            _                      => "→",
+        }
+    }
+}
+
 /// A live AIS vessel position record fetched from AISStream.
 #[derive(Clone, Debug)]
 pub struct MovingTrack {
@@ -253,6 +302,8 @@ pub struct AppModel {
     pub cameras: Vec<CameraFeed>,
     /// Live AIS vessel positions; refreshed periodically by `moving_tracks`.
     pub tracks: Vec<MovingTrack>,
+    /// Live ADS-B flight positions; refreshed periodically by `flight_tracks`.
+    pub flights: Vec<FlightTrack>,
     pub selected_event_id: Option<String>,
     pub selected_camera_id: Option<String>,
     /// MMSI string of the currently-selected vessel (for detail panel).
@@ -272,6 +323,7 @@ pub struct AppModel {
     pub show_terrain_surface: bool,
     pub show_bathymetry: bool,
     pub show_ships: bool,
+    pub show_flights: bool,
     pub selected_root: Option<PathBuf>,
     pub factal_settings_open: bool,
     pub factal_brief_open: bool,
@@ -440,6 +492,7 @@ impl AppModel {
             events,
             cameras,
             tracks: Vec::new(),
+            flights: Vec::new(),
             selected_event_id: Some("evt-sf".into()),
             selected_camera_id: None,
             selected_track_mmsi: None,
@@ -461,6 +514,7 @@ impl AppModel {
             show_terrain_surface: true,
             show_bathymetry: true,
             show_ships: false,
+            show_flights: false,
             selected_root,
             factal_settings_open: false,
             factal_brief_open: false,
