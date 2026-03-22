@@ -26,6 +26,21 @@ use crate::model::{FlightTrack, GeoPoint};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+// ── persistent HTTP client ─────────────────────────────────────────────────────
+// `reqwest::blocking::get()` creates a new Client (and an internal Tokio runtime)
+// on every call.  Creating multiple runtimes in the same process eventually fails
+// with "builder error".  A single lazily-initialised client avoids that entirely.
+
+fn http_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("failed to build reqwest blocking client")
+    })
+}
+
 const POLL_INTERVAL: Duration = Duration::from_secs(15);
 const BOX_HALF_DEG: f32 = 15.0;
 const RECENTER_THRESHOLD_DEG: f32 = BOX_HALF_DEG * 0.5;
@@ -135,7 +150,7 @@ fn fetch_flights(center: GeoPoint) -> (Vec<FlightTrack>, String) {
          ?lamin={min_lat}&lomin={min_lon}&lamax={max_lat}&lomax={max_lon}"
     );
 
-    let response = match reqwest::blocking::get(&url) {
+    let response = match http_client().get(&url).send() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("[flight_tracks] HTTP error: {e}");

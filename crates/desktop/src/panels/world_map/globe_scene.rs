@@ -626,19 +626,15 @@ fn draw_ships(
 
 /// Draw all live ADS-B flights as small directional markers on the globe.
 ///
-/// Colour scheme: amber/gold — distinct from ships (cyan) and events (red).
-/// Climbing flights get a brighter tint; descending ones are slightly dimmer.
+/// Colour scheme: altitude gradient (red-orange → amber → gold → white-gold),
+/// distinct from ships (cyan) and events (red).  Vertical rate adds a subtle
+/// brightness boost (climbing) or dimming (descending) on top of the altitude hue.
 fn draw_flights(
     painter: &egui::Painter,
     layout: &GlobeLayout,
     view: &GlobeViewState,
     flights: &[FlightTrack],
 ) {
-    // Base colour: warm amber — distinct from cyan ships and red events.
-    let base_col = egui::Color32::from_rgb(255, 200, 60);
-    let climb_col = egui::Color32::from_rgb(255, 230, 120);
-    let descent_col = egui::Color32::from_rgb(220, 160, 40);
-
     for flight in flights {
         let Some(proj) = project_geo(layout, view, flight.location, 0.0) else {
             continue;
@@ -647,10 +643,26 @@ fn draw_flights(
             continue;
         }
 
+        // ── Altitude-based hue ──────────────────────────────────────────────
+        // Altitude bands (metres):
+        //   < 3 000 m  → reddish-orange  (approach / departure traffic)
+        //  3 000–7 500 → amber           (mid-altitude prop / regional jet)
+        //  7 500–10500 → gold            (lower cruise, FL250–FL350)
+        //  >10 500 m   → bright white-gold (high cruise, FL350+)
+        let alt_col: egui::Color32 = match flight.baro_altitude_m {
+            Some(a) if a < 3_000.0  => egui::Color32::from_rgb(255, 110,  40),
+            Some(a) if a < 7_500.0  => egui::Color32::from_rgb(255, 180,  50),
+            Some(a) if a < 10_500.0 => egui::Color32::from_rgb(255, 215,  80),
+            Some(_)                 => egui::Color32::from_rgb(255, 245, 160),
+            // No altitude data — default amber
+            None                    => egui::Color32::from_rgb(255, 200,  60),
+        };
+
+        // ── Vertical-rate brightness modifier ──────────────────────────────
         let col = match flight.vertical_rate_fpm {
-            Some(r) if r > 100.0  => climb_col,
-            Some(r) if r < -100.0 => descent_col,
-            _                      => base_col,
+            Some(r) if r >  100.0 => alt_col.gamma_multiply(1.20),
+            Some(r) if r < -100.0 => alt_col.gamma_multiply(0.80),
+            _                     => alt_col,
         };
         let pos = proj.pos;
 
