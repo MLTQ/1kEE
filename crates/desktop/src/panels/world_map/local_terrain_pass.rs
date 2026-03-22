@@ -14,6 +14,7 @@
 ///   Its `prepare` step rebuilds/uploads the heightmap when the viewport changes and
 ///   writes the per-frame uniforms; its `paint` step issues one indexed draw call.
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock, atomic::{AtomicBool, Ordering}};
 
 use eframe::egui_wgpu;
 use eframe::wgpu;
@@ -22,6 +23,32 @@ use wgpu::util::DeviceExt as _;
 use crate::model::GeoPoint;
 
 use super::terrain_raster;
+
+// ── Non-blocking heightmap build ──────────────────────────────────────────────
+//
+// `build_heightmap` samples 16 384 elevation points, each of which acquires
+// the global SRTM tile-cache mutex.  Calling it from `prepare()` (the wgpu
+// render thread) would block the render thread whenever a background contour
+// loading thread is simultaneously holding that mutex.  The resulting frame
+// drops look like a strobe.
+//
+// Instead we kick off a background thread the first time (or whenever the
+// viewport key changes), immediately return from `prepare()`, and on the NEXT
+// `prepare()` call check whether the result is ready.  The texture shows the
+// previous viewport's heightmap (or flat zeros on the very first frame) until
+// the background build completes — which is imperceptible at render speed.
+
+struct PendingHeightmap {
+    key: HeightmapKey,
+    data: Vec<u8>,
+}
+
+fn pending_hmap_slot() -> &'static Mutex<Option<PendingHeightmap>> {
+    static SLOT: OnceLock<Mutex<Option<PendingHeightmap>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+static BUILDING: AtomicBool = AtomicBool::new(false);
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -124,7 +151,7 @@ fn color_to_linear(c: egui::Color32) -> [f32; 4] {
 
 // ── Cache key for heightmap rebuilds ─────────────────────────────────────────
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone)]
 struct HeightmapKey {
     /// Quantized to 4 decimal places (~11 m) to avoid per-frame rebuilds.
     lat_q:     i32,
@@ -341,6 +368,25 @@ fn build_heightmap(
     data
 }
 
+/// Upload a completed heightmap byte buffer to the GPU texture.
+fn upload_heightmap(queue: &wgpu::Queue, tex: &wgpu::Texture, data: &[u8]) {
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture:   tex,
+            mip_level: 0,
+            origin:    wgpu::Origin3d::ZERO,
+            aspect:    wgpu::TextureAspect::All,
+        },
+        data,
+        wgpu::TexelCopyBufferLayout {
+            offset:         0,
+            bytes_per_row:  Some(HMAP_SIZE * 4),
+            rows_per_image: Some(HMAP_SIZE),
+        },
+        wgpu::Extent3d { width: HMAP_SIZE, height: HMAP_SIZE, depth_or_array_layers: 1 },
+    );
+}
+
 // ── Per-frame callback ────────────────────────────────────────────────────────
 
 /// Parameters for one frame's terrain draw.  Construct via [`LocalTerrainCallback::new`]
@@ -442,26 +488,35 @@ impl egui_wgpu::CallbackTrait for LocalTerrainCallback {
         uniforms.screen_height = screen_descriptor.size_in_pixels[1] as f32;
         queue.write_buffer(&res.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
 
-        // Rebuild the heightmap texture if the viewport has changed.
+        // ── Non-blocking heightmap update ────────────────────────────────────
         let key = HeightmapKey::new(self.center, self.half_extent_deg, self.selected_root.as_deref());
-        if res.cached_key.as_ref() != Some(&key) {
-            let hmap = build_heightmap(self.center, self.half_extent_deg, self.selected_root.as_deref());
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture:   &res.heightmap_tex,
-                    mip_level: 0,
-                    origin:    wgpu::Origin3d::ZERO,
-                    aspect:    wgpu::TextureAspect::All,
-                },
-                &hmap,
-                wgpu::TexelCopyBufferLayout {
-                    offset:         0,
-                    bytes_per_row:  Some(HMAP_SIZE * 4),
-                    rows_per_image: Some(HMAP_SIZE),
-                },
-                wgpu::Extent3d { width: HMAP_SIZE, height: HMAP_SIZE, depth_or_array_layers: 1 },
-            );
-            res.cached_key = Some(key);
+
+        // 1. If a background build finished, upload the result now.
+        if let Ok(mut slot) = pending_hmap_slot().lock() {
+            if let Some(pending) = slot.take() {
+                upload_heightmap(queue, &res.heightmap_tex, &pending.data);
+                res.cached_key = Some(pending.key);
+            }
+        }
+
+        // 2. If the uploaded key still doesn't match (viewport moved) and no
+        //    build is in flight, kick off a new background build.  Never block.
+        if res.cached_key.as_ref() != Some(&key)
+            && !BUILDING.load(Ordering::Relaxed)
+        {
+            BUILDING.store(true, Ordering::Relaxed);
+            let center       = self.center;
+            let half_extent  = self.half_extent_deg;
+            let root         = self.selected_root.clone();
+            let key_clone    = key.clone();
+            std::thread::spawn(move || {
+                let data = build_heightmap(center, half_extent, root.as_deref());
+                if let Ok(mut slot) = pending_hmap_slot().lock() {
+                    *slot = Some(PendingHeightmap { key: key_clone, data });
+                }
+                BUILDING.store(false, Ordering::Relaxed);
+                crate::app::request_repaint();
+            });
         }
 
         Vec::new()
