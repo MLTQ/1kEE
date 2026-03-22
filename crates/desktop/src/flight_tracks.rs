@@ -9,17 +9,23 @@
 /// calls the OpenSky `/states/all` endpoint, parses the state vectors, writes
 /// them to the static cache, and calls `ctx.request_repaint()`.
 ///
+/// # Rate limiting
+///
+/// OpenSky allows **one request per 10 seconds** for anonymous callers.
+/// All outbound HTTP calls (state poll + metadata lookups) share a single
+/// `RATE_GATE` that serialises them with an 11-second minimum gap.
+/// Metadata threads sleep-wait inside the gate so they never pile up.
+/// If the server still returns 429 the existing flight list is preserved and
+/// a 60-second `backoff_until` prevents further polling.
+///
 /// # OpenSky API
 ///
-/// Anonymous REST endpoint — no API key required:
 /// ```
 /// GET https://opensky-network.org/api/states/all
 ///     ?lamin={min_lat}&lomin={min_lon}&lamax={max_lat}&lomax={max_lon}
 /// ```
-/// Returns a JSON object `{ "time": unix_ts, "states": [[...], ...] }`.
-/// Each state vector is a fixed-position array; see `parse_state` for the
-/// field mapping.  Anonymous callers are rate-limited to one request per 10 s
-/// globally; we poll every 15 s to be comfortably within the limit.
+/// Returns `{ "time": unix_ts, "states": [[…], …] }`.
+/// Each state vector is a fixed-position array; see `parse_state`.
 
 use crate::model::{FlightTrack, GeoPoint};
 
@@ -28,9 +34,6 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 // ── persistent HTTP client ─────────────────────────────────────────────────────
-// `reqwest::blocking::get()` creates a new Client (and an internal Tokio runtime)
-// on every call.  Creating multiple runtimes in the same process eventually fails
-// with "builder error".  A single lazily-initialised client avoids that entirely.
 
 fn http_client() -> &'static reqwest::blocking::Client {
     static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
@@ -42,17 +45,54 @@ fn http_client() -> &'static reqwest::blocking::Client {
     })
 }
 
+// ── global rate gate ──────────────────────────────────────────────────────────
+// All OpenSky HTTP calls (states/all + metadata) pass through here.
+// Background threads sleep-wait so requests naturally queue instead of
+// firing concurrently and triggering 429s.
+
+const RATE_GAP: Duration = Duration::from_millis(11_000); // comfortably > 10 s
+
+fn wait_for_rate_gate() {
+    static LAST: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    let mutex = LAST.get_or_init(|| Mutex::new(None));
+
+    // Atomically read the last-request time and reserve the next slot.
+    let sleep_dur = {
+        let mut last = mutex.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        let wait = last
+            .map(|t| {
+                let elapsed = now.duration_since(t);
+                if elapsed >= RATE_GAP { Duration::ZERO } else { RATE_GAP - elapsed }
+            })
+            .unwrap_or(Duration::ZERO);
+        // Reserve: mark the "virtual now" at now+wait so concurrent waiters
+        // queue up sequentially rather than all sleeping for the same gap.
+        *last = Some(now + wait);
+        wait
+    };
+
+    if !sleep_dur.is_zero() {
+        std::thread::sleep(sleep_dur);
+    }
+}
+
+// ── constants ─────────────────────────────────────────────────────────────────
+
 const POLL_INTERVAL: Duration = Duration::from_secs(15);
+const BACKOFF_AFTER_429: Duration = Duration::from_secs(60);
 const BOX_HALF_DEG: f32 = 15.0;
 const RECENTER_THRESHOLD_DEG: f32 = BOX_HALF_DEG * 0.5;
 const MAX_FLIGHTS: usize = 2_000;
 
-// ── static cache ──────────────────────────────────────────────────────────────
+// ── static poll cache ─────────────────────────────────────────────────────────
 
 struct PollState {
     flights: Vec<FlightTrack>,
     last_poll: Option<Instant>,
     last_center: Option<GeoPoint>,
+    /// Set after a 429 to prevent retry storms.
+    backoff_until: Option<Instant>,
     loading: bool,
     pub status: String,
 }
@@ -64,6 +104,7 @@ fn cache() -> &'static Mutex<PollState> {
             flights: Vec::new(),
             last_poll: None,
             last_center: None,
+            backoff_until: None,
             loading: false,
             status: "idle".into(),
         })
@@ -73,10 +114,6 @@ fn cache() -> &'static Mutex<PollState> {
 // ── public API ────────────────────────────────────────────────────────────────
 
 /// Returns the current cached flight list immediately.
-///
-/// Spawns a background refresh when the poll interval has elapsed **or** when
-/// the globe center has drifted more than `RECENTER_THRESHOLD_DEG` from the
-/// center used for the last poll.
 pub fn poll(center: GeoPoint, ctx: egui::Context) -> Vec<FlightTrack> {
     let should_spawn = cache()
         .lock()
@@ -84,12 +121,17 @@ pub fn poll(center: GeoPoint, ctx: egui::Context) -> Vec<FlightTrack> {
             if g.loading {
                 return false;
             }
+            // Honour the backoff window after a 429.
+            if g.backoff_until.map(|t| t > Instant::now()).unwrap_or(false) {
+                return false;
+            }
             let interval_expired = g.last_poll
                 .map(|t| t.elapsed() >= POLL_INTERVAL)
                 .unwrap_or(true);
             let drifted = g.last_center.map(|prev| {
                 let dlat = (center.lat - prev.lat).abs();
-                let dlon = (center.lon - prev.lon).abs().min(360.0 - (center.lon - prev.lon).abs());
+                let dlon = (center.lon - prev.lon).abs()
+                    .min(360.0 - (center.lon - prev.lon).abs());
                 dlat > RECENTER_THRESHOLD_DEG || dlon > RECENTER_THRESHOLD_DEG
             }).unwrap_or(false);
             interval_expired || drifted
@@ -102,13 +144,34 @@ pub fn poll(center: GeoPoint, ctx: egui::Context) -> Vec<FlightTrack> {
             g.status = "syncing…".into();
         }
         std::thread::spawn(move || {
-            let (flights, status) = fetch_flights(center);
-            if let Ok(mut g) = cache().lock() {
-                g.flights = flights;
-                g.loading = false;
-                g.last_poll = Some(Instant::now());
-                g.last_center = Some(center);
-                g.status = status;
+            match fetch_flights(center) {
+                FlightFetchResult::Ok { flights, status } => {
+                    if let Ok(mut g) = cache().lock() {
+                        g.flights = flights;
+                        g.status = status;
+                        g.last_poll = Some(Instant::now());
+                        g.last_center = Some(center);
+                        g.backoff_until = None;
+                        g.loading = false;
+                    }
+                }
+                FlightFetchResult::RateLimited => {
+                    // Preserve the existing flight list — don't blank the map.
+                    if let Ok(mut g) = cache().lock() {
+                        let resume = Instant::now() + BACKOFF_AFTER_429;
+                        g.status = "rate limited — cooling down 60 s".into();
+                        g.backoff_until = Some(resume);
+                        g.last_poll = Some(Instant::now());
+                        g.loading = false;
+                    }
+                }
+                FlightFetchResult::Error(msg) => {
+                    if let Ok(mut g) = cache().lock() {
+                        g.status = msg;
+                        g.last_poll = Some(Instant::now());
+                        g.loading = false;
+                    }
+                }
             }
             ctx.request_repaint();
         });
@@ -134,13 +197,20 @@ pub fn invalidate() {
     if let Ok(mut g) = cache().lock() {
         g.last_poll = None;
         g.last_center = None;
+        g.backoff_until = None;
         g.loading = false;
     }
 }
 
 // ── HTTP fetch ────────────────────────────────────────────────────────────────
 
-fn fetch_flights(center: GeoPoint) -> (Vec<FlightTrack>, String) {
+enum FlightFetchResult {
+    Ok { flights: Vec<FlightTrack>, status: String },
+    RateLimited,
+    Error(String),
+}
+
+fn fetch_flights(center: GeoPoint) -> FlightFetchResult {
     let min_lat = (center.lat - BOX_HALF_DEG).max(-90.0);
     let max_lat = (center.lat + BOX_HALF_DEG).min(90.0);
     let min_lon = (center.lon - BOX_HALF_DEG).max(-180.0);
@@ -151,39 +221,41 @@ fn fetch_flights(center: GeoPoint) -> (Vec<FlightTrack>, String) {
          ?lamin={min_lat}&lomin={min_lon}&lamax={max_lat}&lomax={max_lon}"
     );
 
+    wait_for_rate_gate();
+
     let response = match http_client().get(&url).send() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("[flight_tracks] HTTP error: {e}");
-            return (Vec::new(), format!("connect error: {e}"));
+            return FlightFetchResult::Error(format!("connect error: {e}"));
         }
     };
 
+    let code = response.status().as_u16();
+    if code == 429 {
+        eprintln!("[flight_tracks] 429 rate-limited");
+        return FlightFetchResult::RateLimited;
+    }
     if !response.status().is_success() {
-        let code = response.status().as_u16();
         eprintln!("[flight_tracks] OpenSky returned HTTP {code}");
-        return (
-            Vec::new(),
-            format!(
-                "HTTP {code}{}",
-                if code == 429 { " — rate limited, wait 15 s" } else { "" }
-            ),
-        );
+        return FlightFetchResult::Error(format!("HTTP {code}"));
     }
 
     let text = match response.text() {
         Ok(t) => t,
-        Err(e) => return (Vec::new(), format!("read error: {e}")),
+        Err(e) => return FlightFetchResult::Error(format!("read error: {e}")),
     };
 
     let json: serde_json::Value = match serde_json::from_str(&text) {
         Ok(v) => v,
-        Err(e) => return (Vec::new(), format!("parse error: {e}")),
+        Err(e) => return FlightFetchResult::Error(format!("parse error: {e}")),
     };
 
     let Some(states) = json["states"].as_array() else {
-        // OpenSky returns `{"states": null}` when the box is empty.
-        return (Vec::new(), format!("0 flights near {:.1}°, {:.1}°", center.lat, center.lon));
+        return FlightFetchResult::Ok {
+            flights: Vec::new(),
+            status: format!("0 flights near {:.1}°, {:.1}°", center.lat, center.lon),
+        };
     };
 
     let mut flights: Vec<FlightTrack> = states
@@ -192,7 +264,6 @@ fn fetch_flights(center: GeoPoint) -> (Vec<FlightTrack>, String) {
         .take(MAX_FLIGHTS)
         .collect();
 
-    // Filter out stale on-ground aircraft to reduce clutter; keep airborne ones.
     flights.retain(|f| !f.on_ground);
 
     let status = if flights.is_empty() {
@@ -201,12 +272,11 @@ fn fetch_flights(center: GeoPoint) -> (Vec<FlightTrack>, String) {
         format!("{} airborne", flights.len())
     };
 
-    (flights, status)
+    FlightFetchResult::Ok { flights, status }
 }
 
 // ── OpenSky state vector parsing ──────────────────────────────────────────────
 //
-// Each state vector is a fixed-position JSON array:
 //  [0]  icao24          string
 //  [1]  callsign        string | null
 //  [2]  origin_country  string
@@ -247,7 +317,6 @@ fn parse_state(state: &serde_json::Value) -> Option<FlightTrack> {
     let baro_altitude_m = arr.get(7).and_then(|v| v.as_f64()).map(|v| v as f32);
     let on_ground = arr.get(8).and_then(|v| v.as_bool()).unwrap_or(false);
 
-    // velocity is m/s; convert to knots (1 m/s = 1.94384 kt)
     let speed_knots = arr.get(9)
         .and_then(|v| v.as_f64())
         .map(|v| (v * 1.943_84) as f32);
@@ -256,7 +325,6 @@ fn parse_state(state: &serde_json::Value) -> Option<FlightTrack> {
         .and_then(|v| v.as_f64())
         .map(|v| v as f32);
 
-    // vertical_rate is m/s; convert to feet/min (1 m/s = 196.85 fpm)
     let vertical_rate_fpm = arr.get(11)
         .and_then(|v| v.as_f64())
         .map(|v| (v * 196.85) as f32);
@@ -281,8 +349,8 @@ fn parse_state(state: &serde_json::Value) -> Option<FlightTrack> {
 // ── Aircraft metadata (OpenSky extended database) ─────────────────────────────
 //
 // GET https://opensky-network.org/api/metadata/aircraft/icao/{icao24}
-// Returns registration, manufacturer, model, typecode, and operator fields.
-// We fetch lazily on first click and cache indefinitely (data doesn't change).
+// Fetched lazily on first click, cached indefinitely (static aircraft data).
+// Uses the same rate gate as the state poll so clicks never crowd out polls.
 
 /// Static aircraft metadata from the OpenSky extended database.
 #[derive(Clone, Debug)]
@@ -308,10 +376,8 @@ fn meta_cache() -> &'static Mutex<HashMap<String, MetaEntry>> {
     META.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Kick off a background metadata fetch for `icao24` if not already cached/loading.
-/// The caller should call `ctx.request_repaint()` (handled internally via the thread).
+/// Kick off a background metadata fetch for `icao24` if not already cached.
 pub fn request_metadata(icao24: &str, ctx: egui::Context) {
-    // Avoid double-fetch.
     if let Ok(c) = meta_cache().lock() {
         if c.contains_key(icao24) {
             return;
@@ -322,15 +388,21 @@ pub fn request_metadata(icao24: &str, ctx: egui::Context) {
     }
     let icao24 = icao24.to_owned();
     std::thread::spawn(move || {
+        // Waits behind any in-progress poll — never races for the quota.
         let entry = fetch_aircraft_meta(&icao24);
         if let Ok(mut c) = meta_cache().lock() {
-            c.insert(icao24, entry);
+            // On 429: remove the Loading entry so the user can retry by
+            // clicking again rather than being stuck on a spinner forever.
+            match entry {
+                MetaEntry::Loading => { c.remove(&icao24); }
+                other              => { c.insert(icao24, other); }
+            }
         }
         ctx.request_repaint();
     });
 }
 
-/// Returns cached metadata for `icao24`, or `None` if not yet loaded.
+/// Returns cached metadata, or `None` if not yet loaded / not found.
 pub fn get_metadata(icao24: &str) -> Option<AircraftMeta> {
     meta_cache().lock().ok().and_then(|c| {
         if let Some(MetaEntry::Loaded(m)) = c.get(icao24) {
@@ -353,6 +425,9 @@ fn fetch_aircraft_meta(icao24: &str) -> MetaEntry {
     let url = format!(
         "https://opensky-network.org/api/metadata/aircraft/icao/{icao24}"
     );
+
+    wait_for_rate_gate();
+
     let resp = match http_client().get(&url).send() {
         Ok(r) => r,
         Err(e) => {
@@ -360,13 +435,21 @@ fn fetch_aircraft_meta(icao24: &str) -> MetaEntry {
             return MetaEntry::NotFound;
         }
     };
-    if resp.status().as_u16() == 404 {
-        return MetaEntry::NotFound;
+
+    match resp.status().as_u16() {
+        404 => return MetaEntry::NotFound,
+        429 => {
+            eprintln!("[flight_tracks] metadata 429 — will retry on next click");
+            // Return Loading so the caller removes it from the map (see above).
+            return MetaEntry::Loading;
+        }
+        code if code >= 400 => {
+            eprintln!("[flight_tracks] metadata HTTP {code}");
+            return MetaEntry::NotFound;
+        }
+        _ => {}
     }
-    if !resp.status().is_success() {
-        eprintln!("[flight_tracks] metadata HTTP {}", resp.status().as_u16());
-        return MetaEntry::NotFound;
-    }
+
     let text = match resp.text() {
         Ok(t) => t,
         Err(_) => return MetaEntry::NotFound,
