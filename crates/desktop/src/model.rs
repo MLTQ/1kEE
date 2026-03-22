@@ -202,6 +202,64 @@ pub struct NearbyCamera {
     pub location: GeoPoint,
 }
 
+/// Classification of a flight derived from its ICAO callsign.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlightCategory {
+    /// Scheduled passenger airline — 3-letter ICAO code + flight number (UAL123, BAW456).
+    Airline,
+    /// Known cargo operators (FedEx, UPS, DHL, etc.).
+    Cargo,
+    /// Military or government callsigns.
+    Military,
+    /// General aviation — registration-style callsign (N123AB, G-ABCD).
+    GA,
+    /// No callsign or unrecognized pattern.
+    Unknown,
+}
+
+fn classify_callsign(cs: &str) -> FlightCategory {
+    // Military prefixes first (takes priority over everything else).
+    const MILITARY: &[&str] = &[
+        "RCH", "SAM", "DUKE", "MAGMA", "REACH", "NAVY", "ARMY", "USAF",
+        "NATO", "CLAM", "JAKE", "CASEY", "WOLF", "LOBO", "PETE", "DARKSTAR",
+    ];
+    if MILITARY.iter().any(|m| cs.starts_with(m)) {
+        return FlightCategory::Military;
+    }
+
+    // Known cargo ICAO operator prefixes.
+    const CARGO: &[&str] = &[
+        "FDX", "UPS", "GTI", "ABX", "ATN", "DHL", "TNT", "CKS", "PAC",
+        "NCR", "CLX", "KMF", "WOA", "AMC", "CGE", "AIJ",
+    ];
+    if CARGO.iter().any(|c| cs.starts_with(c)) {
+        return FlightCategory::Cargo;
+    }
+
+    let bytes = cs.as_bytes();
+
+    // ICAO airline pattern: exactly 3 uppercase letters then ≥1 digit.
+    if bytes.len() >= 4
+        && bytes[0].is_ascii_uppercase()
+        && bytes[1].is_ascii_uppercase()
+        && bytes[2].is_ascii_uppercase()
+        && bytes[3].is_ascii_digit()
+    {
+        return FlightCategory::Airline;
+    }
+
+    // Registration-style: contains a hyphen (G-ABCD, VH-ABC, D-EABC).
+    if cs.contains('-') {
+        return FlightCategory::GA;
+    }
+    // US N-number: starts with 'N' followed by a digit.
+    if bytes[0] == b'N' && bytes.len() >= 2 && bytes[1].is_ascii_digit() {
+        return FlightCategory::GA;
+    }
+
+    FlightCategory::Unknown
+}
+
 /// A live ADS-B flight position record fetched from OpenSky Network.
 #[derive(Clone, Debug)]
 pub struct FlightTrack {
@@ -247,6 +305,14 @@ impl FlightTrack {
             Some(r) if r > 100.0  => "↑",
             Some(r) if r < -100.0 => "↓",
             _                      => "→",
+        }
+    }
+
+    /// Classify this flight based on its callsign.
+    pub fn category(&self) -> FlightCategory {
+        match self.callsign.as_deref().filter(|s| !s.is_empty()) {
+            Some(cs) => classify_callsign(cs),
+            None     => FlightCategory::Unknown,
         }
     }
 }
@@ -308,6 +374,8 @@ pub struct AppModel {
     pub selected_camera_id: Option<String>,
     /// MMSI string of the currently-selected vessel (for detail panel).
     pub selected_track_mmsi: Option<u64>,
+    /// ICAO24 hex of the currently-selected flight (for detail panel).
+    pub selected_flight_icao24: Option<String>,
     pub globe_view: GlobeViewState,
     pub focused_city_id: Option<String>,
     pub cinematic_mode: bool,
@@ -496,6 +564,7 @@ impl AppModel {
             selected_event_id: Some("evt-sf".into()),
             selected_camera_id: None,
             selected_track_mmsi: None,
+            selected_flight_icao24: None,
             globe_view: GlobeViewState::from_focus(GeoPoint {
                 lat: 37.7544,
                 lon: -122.4477,

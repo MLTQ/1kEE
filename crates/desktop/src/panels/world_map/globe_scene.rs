@@ -1,4 +1,4 @@
-use crate::model::{AppModel, EventRecord, FlightTrack, GeoPoint, GlobeViewState, MovingTrack};
+use crate::model::{AppModel, EventRecord, FlightCategory, FlightTrack, GeoPoint, GlobeViewState, MovingTrack};
 use crate::theme;
 
 use super::camera::{self, GlobeLod};
@@ -163,7 +163,13 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 
     // ── ADS-B flight markers ───────────────────────────────────────────────
     if model.show_flights && !model.globe_view.local_mode {
-        draw_flights(painter, &layout, &model.globe_view, &model.flights);
+        draw_flights(
+            painter,
+            &layout,
+            &model.globe_view,
+            &model.flights,
+            model.selected_flight_icao24.as_deref(),
+        );
     }
 
     let ship_markers: Vec<(u64, egui::Pos2)> = if model.show_ships && !model.globe_view.local_mode {
@@ -626,14 +632,16 @@ fn draw_ships(
 
 /// Draw all live ADS-B flights as small directional markers on the globe.
 ///
-/// Colour scheme: altitude gradient (red-orange → amber → gold → white-gold),
-/// distinct from ships (cyan) and events (red).  Vertical rate adds a subtle
-/// brightness boost (climbing) or dimming (descending) on top of the altitude hue.
+/// Colour scheme: callsign-derived category colours from the active theme,
+/// so markers integrate with Topo / Phosphor / Thermal / Ghost / Akira palettes.
+/// Vertical rate adds a subtle brightness modifier.  The selected flight gets
+/// an outer selection ring so it stands out from the crowd.
 fn draw_flights(
     painter: &egui::Painter,
     layout: &GlobeLayout,
     view: &GlobeViewState,
     flights: &[FlightTrack],
+    selected_icao24: Option<&str>,
 ) {
     for flight in flights {
         let Some(proj) = project_geo(layout, view, flight.location, 0.0) else {
@@ -643,26 +651,20 @@ fn draw_flights(
             continue;
         }
 
-        // ── Altitude-based hue ──────────────────────────────────────────────
-        // Altitude bands (metres):
-        //   < 3 000 m  → reddish-orange  (approach / departure traffic)
-        //  3 000–7 500 → amber           (mid-altitude prop / regional jet)
-        //  7 500–10500 → gold            (lower cruise, FL250–FL350)
-        //  >10 500 m   → bright white-gold (high cruise, FL350+)
-        let alt_col: egui::Color32 = match flight.baro_altitude_m {
-            Some(a) if a < 3_000.0  => egui::Color32::from_rgb(255, 110,  40),
-            Some(a) if a < 7_500.0  => egui::Color32::from_rgb(255, 180,  50),
-            Some(a) if a < 10_500.0 => egui::Color32::from_rgb(255, 215,  80),
-            Some(_)                 => egui::Color32::from_rgb(255, 245, 160),
-            // No altitude data — default amber
-            None                    => egui::Color32::from_rgb(255, 200,  60),
+        // ── Category → base colour (theme-aware) ───────────────────────────
+        let cat_col: egui::Color32 = match flight.category() {
+            FlightCategory::Airline  => theme::flight_airline_color(),
+            FlightCategory::Cargo    => theme::flight_cargo_color(),
+            FlightCategory::Military => theme::flight_military_color(),
+            FlightCategory::GA       => theme::flight_ga_color(),
+            FlightCategory::Unknown  => theme::flight_unknown_color(),
         };
 
         // ── Vertical-rate brightness modifier ──────────────────────────────
         let col = match flight.vertical_rate_fpm {
-            Some(r) if r >  100.0 => alt_col.gamma_multiply(1.20),
-            Some(r) if r < -100.0 => alt_col.gamma_multiply(0.80),
-            _                     => alt_col,
+            Some(r) if r >  100.0 => cat_col.gamma_multiply(1.20),
+            Some(r) if r < -100.0 => cat_col.gamma_multiply(0.80),
+            _                     => cat_col,
         };
         let pos = proj.pos;
 
@@ -699,6 +701,12 @@ fn draw_flights(
             painter.add(egui::Shape::mesh(mesh));
         } else {
             painter.circle_filled(pos, 2.5, col);
+        }
+
+        // ── Selection ring ─────────────────────────────────────────────────
+        if selected_icao24 == Some(flight.icao24.as_str()) {
+            painter.circle_stroke(pos, 10.0, egui::Stroke::new(2.0, col));
+            painter.circle_stroke(pos, 12.5, egui::Stroke::new(1.0, col.gamma_multiply(0.4)));
         }
     }
 }

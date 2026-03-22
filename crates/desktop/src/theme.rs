@@ -366,6 +366,64 @@ pub fn marker_camera_ring() -> egui::Color32 {
     }
 }
 
+// ── ADS-B flight category colours ────────────────────────────────────────────
+// Each category gets a visually distinct hue that reads on every dark background.
+
+/// Scheduled passenger airline flights (sky-blue family).
+pub fn flight_airline_color() -> egui::Color32 {
+    match current() {
+        MapTheme::Topo     => egui::Color32::from_rgb( 80, 185, 255),
+        MapTheme::Phosphor => egui::Color32::from_rgb( 60, 215, 205),
+        MapTheme::Thermal  => egui::Color32::from_rgb(130, 205, 255),
+        MapTheme::Ghost    => egui::Color32::from_rgb(160, 205, 235),
+        MapTheme::Akira    => egui::Color32::from_rgb(  0, 215, 255),
+    }
+}
+
+/// Cargo / freight operators (warm orange family).
+pub fn flight_cargo_color() -> egui::Color32 {
+    match current() {
+        MapTheme::Topo     => egui::Color32::from_rgb(255, 155,  40),
+        MapTheme::Phosphor => egui::Color32::from_rgb(230, 180,  35),
+        MapTheme::Thermal  => egui::Color32::from_rgb(255, 175,  55),
+        MapTheme::Ghost    => egui::Color32::from_rgb(225, 175, 135),
+        MapTheme::Akira    => egui::Color32::from_rgb(255, 135,  30),
+    }
+}
+
+/// Military / government callsigns (red family).
+pub fn flight_military_color() -> egui::Color32 {
+    match current() {
+        MapTheme::Topo     => egui::Color32::from_rgb(215,  65,  75),
+        MapTheme::Phosphor => egui::Color32::from_rgb(205, 100,  50),
+        MapTheme::Thermal  => egui::Color32::from_rgb(215,  55,  90),
+        MapTheme::Ghost    => egui::Color32::from_rgb(200, 120, 130),
+        MapTheme::Akira    => egui::Color32::from_rgb(255,  38,  55),
+    }
+}
+
+/// General aviation — private / training / recreational (lime-green family).
+pub fn flight_ga_color() -> egui::Color32 {
+    match current() {
+        MapTheme::Topo     => egui::Color32::from_rgb(155, 225,  70),
+        MapTheme::Phosphor => egui::Color32::from_rgb(200, 230,  45),
+        MapTheme::Thermal  => egui::Color32::from_rgb(145, 235,  85),
+        MapTheme::Ghost    => egui::Color32::from_rgb(170, 215, 150),
+        MapTheme::Akira    => egui::Color32::from_rgb(180, 255,  55),
+    }
+}
+
+/// No callsign / unrecognised pattern (muted amber).
+pub fn flight_unknown_color() -> egui::Color32 {
+    match current() {
+        MapTheme::Topo     => egui::Color32::from_rgb(195, 170,  60),
+        MapTheme::Phosphor => egui::Color32::from_rgb(165, 160,  50),
+        MapTheme::Thermal  => egui::Color32::from_rgb(190, 175,  65),
+        MapTheme::Ghost    => egui::Color32::from_rgb(170, 170, 150),
+        MapTheme::Akira    => egui::Color32::from_rgb(195, 155,  45),
+    }
+}
+
 /// Water features (rivers, lakes, streams).  Always blue-family but tuned
 /// per theme so it reads clearly against each background palette.
 pub fn water_color() -> egui::Color32 {

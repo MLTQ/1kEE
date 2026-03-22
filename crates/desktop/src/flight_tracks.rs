@@ -23,6 +23,7 @@
 
 use crate::model::{FlightTrack, GeoPoint};
 
+use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -274,5 +275,117 @@ fn parse_state(state: &serde_json::Value) -> Option<FlightTrack> {
         speed_knots,
         heading_deg,
         vertical_rate_fpm,
+    })
+}
+
+// ── Aircraft metadata (OpenSky extended database) ─────────────────────────────
+//
+// GET https://opensky-network.org/api/metadata/aircraft/icao/{icao24}
+// Returns registration, manufacturer, model, typecode, and operator fields.
+// We fetch lazily on first click and cache indefinitely (data doesn't change).
+
+/// Static aircraft metadata from the OpenSky extended database.
+#[derive(Clone, Debug)]
+pub struct AircraftMeta {
+    pub registration:      Option<String>,
+    pub manufacturer:      Option<String>,
+    pub model:             Option<String>,
+    pub typecode:          Option<String>,
+    pub owner:             Option<String>,
+    pub operator:          Option<String>,
+    pub operator_callsign: Option<String>,
+    pub operator_icao:     Option<String>,
+}
+
+enum MetaEntry {
+    Loading,
+    Loaded(AircraftMeta),
+    NotFound,
+}
+
+fn meta_cache() -> &'static Mutex<HashMap<String, MetaEntry>> {
+    static META: OnceLock<Mutex<HashMap<String, MetaEntry>>> = OnceLock::new();
+    META.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Kick off a background metadata fetch for `icao24` if not already cached/loading.
+/// The caller should call `ctx.request_repaint()` (handled internally via the thread).
+pub fn request_metadata(icao24: &str, ctx: egui::Context) {
+    // Avoid double-fetch.
+    if let Ok(c) = meta_cache().lock() {
+        if c.contains_key(icao24) {
+            return;
+        }
+    }
+    if let Ok(mut c) = meta_cache().lock() {
+        c.insert(icao24.to_owned(), MetaEntry::Loading);
+    }
+    let icao24 = icao24.to_owned();
+    std::thread::spawn(move || {
+        let entry = fetch_aircraft_meta(&icao24);
+        if let Ok(mut c) = meta_cache().lock() {
+            c.insert(icao24, entry);
+        }
+        ctx.request_repaint();
+    });
+}
+
+/// Returns cached metadata for `icao24`, or `None` if not yet loaded.
+pub fn get_metadata(icao24: &str) -> Option<AircraftMeta> {
+    meta_cache().lock().ok().and_then(|c| {
+        if let Some(MetaEntry::Loaded(m)) = c.get(icao24) {
+            Some(m.clone())
+        } else {
+            None
+        }
+    })
+}
+
+/// Returns `true` while a metadata fetch is in flight.
+pub fn is_meta_loading(icao24: &str) -> bool {
+    meta_cache()
+        .lock()
+        .map(|c| matches!(c.get(icao24), Some(MetaEntry::Loading)))
+        .unwrap_or(false)
+}
+
+fn fetch_aircraft_meta(icao24: &str) -> MetaEntry {
+    let url = format!(
+        "https://opensky-network.org/api/metadata/aircraft/icao/{icao24}"
+    );
+    let resp = match http_client().get(&url).send() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[flight_tracks] metadata fetch error: {e}");
+            return MetaEntry::NotFound;
+        }
+    };
+    if resp.status().as_u16() == 404 {
+        return MetaEntry::NotFound;
+    }
+    if !resp.status().is_success() {
+        eprintln!("[flight_tracks] metadata HTTP {}", resp.status().as_u16());
+        return MetaEntry::NotFound;
+    }
+    let text = match resp.text() {
+        Ok(t) => t,
+        Err(_) => return MetaEntry::NotFound,
+    };
+    let json: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return MetaEntry::NotFound,
+    };
+    let s = |key: &str| -> Option<String> {
+        json[key].as_str().filter(|v| !v.is_empty()).map(|v| v.to_owned())
+    };
+    MetaEntry::Loaded(AircraftMeta {
+        registration:      s("registration"),
+        manufacturer:      s("manufacturername"),
+        model:             s("model"),
+        typecode:          s("typecode"),
+        owner:             s("owner"),
+        operator:          s("operator"),
+        operator_callsign: s("operatorcallsign"),
+        operator_icao:     s("operatoricao"),
     })
 }
