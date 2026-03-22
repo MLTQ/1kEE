@@ -151,6 +151,40 @@ pub fn apply_interaction(
         input_active = true;
     }
 
+    // ── Cinematic meander ─────────────────────────────────────────────────────
+    // Drives vel_yaw and vel_pitch with a smooth aperiodic signal composed of
+    // three sine waves whose frequencies are incommensurate (golden-ratio and √2
+    // multiples), so the path never visibly repeats on any typical session length.
+    // Velocities are lerped in gently (τ ≈ 1 s) so a user drag cleanly overrides
+    // the meander and the view coasts back into it when released.
+    if view.meander_mode && !response.dragged() && !view.local_mode {
+        let t = ctx.input(|i| i.time) as f32;
+
+        // Incommensurate frequency multipliers.
+        const PHI:   f32 = 1.618_034; // golden ratio
+        const SQRT2: f32 = 1.414_213;
+
+        let s = view.meander_speed;
+
+        // Yaw (horizontal drift): sum bounded by ±1.65, scaled to ±0.22 rad/s.
+        let yaw_sum = (t * 0.080).sin() * 0.80
+                    + (t * 0.130 * PHI).sin() * 0.50
+                    + (t * 0.210 * SQRT2).sin() * 0.35;
+        let yaw_target = s * 0.22 * yaw_sum / 1.65;
+
+        // Pitch (vertical tilt): sum bounded by ±1.25, scaled to ±0.09 rad/s.
+        // Phase offsets ensure pitch and yaw drift independently.
+        let pitch_sum = (t * 0.060 + 1.1).sin() * 0.70
+                      + (t * 0.110 * PHI + 2.8).sin() * 0.55;
+        let pitch_target = s * 0.09 * pitch_sum / 1.25;
+
+        // Smooth blend — fast enough to track the slowly-evolving target,
+        // slow enough that any momentum from a drag release fades naturally.
+        view.vel_yaw   = lerp(view.vel_yaw,   yaw_target,   0.05);
+        view.vel_pitch = lerp(view.vel_pitch, pitch_target, 0.05);
+        input_active = true;
+    }
+
     // ── Momentum decay ───────────────────────────────────────────────────────
     // Only decay when no input is actively driving the velocity.
     if !input_active {

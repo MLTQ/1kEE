@@ -28,6 +28,10 @@ pub struct GlobeViewState {
     /// Explicit GLOBE / LOCAL mode switch (not derived from zoom).
     pub local_mode: bool,
     pub auto_spin: bool,
+    /// Enable cinematic meander (smooth random-walk camera drift).
+    pub meander_mode: bool,
+    /// Meander velocity scale 0.05 – 1.0 (set by the speed slider in the UI).
+    pub meander_speed: f32,
 
     // ── Momentum velocities ────────────────────────────────────────────────
     /// Globe rotation velocity (rad/s).
@@ -57,6 +61,8 @@ impl GlobeViewState {
             local_zoom: 25.0,
             local_mode: false,
             auto_spin: false,
+            meander_mode: false,
+            meander_speed: 0.30,
             vel_yaw: 0.0,
             vel_pitch: 0.0,
             vel_local_lat: 0.0,

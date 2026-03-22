@@ -25,7 +25,9 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         .inner_margin(egui::Margin::same(14));
 
     panel_frame.show(ui, |ui| {
-        if model.globe_view.auto_spin {
+        if model.globe_view.auto_spin
+            || (model.cinematic_mode && model.globe_view.meander_mode)
+        {
             ui.ctx().request_repaint();
         } else if local_terrain_scene::has_pending_cache(model) {
             // Faster repaint while tile pulse animation is running (~30 fps)
@@ -285,8 +287,11 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                 ui.separator();
                 ui.small(model.terrain_focus_location_name());
 
-                // Cinematic toggle — flush right
+                // Cinematic / meander controls — flush right.
+                // Layout is right-to-left so items are added in reverse visual order:
+                //   [speed slider] [MEANDER] [CINEMATIC]  →  right edge
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // ── CINEMATIC toggle ──────────────────────────────────────
                     let (cin_fill, cin_text) = if model.cinematic_mode {
                         (
                             egui::Color32::from_rgb(160, 100, 20),
@@ -301,6 +306,50 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                             .corner_radius(4.0);
                     if ui.add(cin_btn).clicked() {
                         model.cinematic_mode = !model.cinematic_mode;
+                        // Turning off cinematic also stops the meander.
+                        if !model.cinematic_mode {
+                            model.globe_view.meander_mode = false;
+                        }
+                    }
+
+                    // ── Meander controls (only while cinematic is active) ─────
+                    if model.cinematic_mode && !model.globe_view.local_mode {
+                        let view = &mut model.globe_view;
+
+                        let (mn_fill, mn_text) = if view.meander_mode {
+                            (
+                                egui::Color32::from_rgb(20, 80, 140),
+                                egui::Color32::from_rgb(100, 195, 255),
+                            )
+                        } else {
+                            (egui::Color32::TRANSPARENT, theme::text_muted())
+                        };
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("MEANDER").color(mn_text).small(),
+                                )
+                                .fill(mn_fill)
+                                .corner_radius(4.0),
+                            )
+                            .on_hover_text("Smooth random-walk camera drift")
+                            .clicked()
+                        {
+                            view.meander_mode = !view.meander_mode;
+                        }
+
+                        if view.meander_mode {
+                            // Speed slider: compact, no numeric label, tooltip shows %.
+                            ui.spacing_mut().slider_width = 72.0;
+                            ui.add(
+                                egui::Slider::new(&mut view.meander_speed, 0.05_f32..=1.0)
+                                    .show_value(false),
+                            )
+                            .on_hover_text(format!(
+                                "Meander speed  {:.0}%",
+                                view.meander_speed * 100.0
+                            ));
+                        }
                     }
                 });
             });
