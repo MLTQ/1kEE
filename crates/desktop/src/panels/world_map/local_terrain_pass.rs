@@ -53,10 +53,12 @@ static BUILDING: AtomicBool = AtomicBool::new(false);
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 /// Side length of the heightmap texture (pixels).
-const HMAP_SIZE: u32 = 128;
+/// 256×256 gives one sample per ~400m at typical zoom, matching SRTM contour detail.
+const HMAP_SIZE: u32 = 256;
 
 /// Number of quads per side of the terrain grid.
-const GRID_N: u32 = 64;
+/// 128×128 = 16 384 triangles, still trivial for GPU but visually matches heightmap resolution.
+const GRID_N: u32 = 128;
 
 /// Total index count: GRID_N × GRID_N quads × 2 triangles × 3 indices.
 const INDEX_COUNT: u32 = GRID_N * GRID_N * 6;
@@ -584,8 +586,8 @@ struct Uniforms {
 @group(0) @binding(2) var hmap_samp: sampler;
 
 const BASE_VERT_EXAG: f32 = 2.1;
-const GRID_N: u32 = 64u;
-const VERTS_PER_ROW: u32 = 65u;  // GRID_N + 1
+const GRID_N: u32 = 128u;
+const VERTS_PER_ROW: u32 = 129u;  // GRID_N + 1
 
 struct VsOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -611,7 +613,10 @@ fn project_local_ndc(lat: f32, lon: f32, elevation_m: f32) -> vec2<f32> {
     let elev_z_offset   = z    * u.pitch_cos;
 
     let gps = u.layout_height * 0.55;                     // ground_pitch_scale
-    let gds = u.layout_height * 0.10;                     // ground_depth_scale
+    // ground_depth_scale: subtle recede cue.  Must stay < gps/tan(max_pitch).
+    // Max pitch = 1.55 rad → tan ≈ 48.  0.55/48 ≈ 0.0114, so 0.01 is safely below
+    // the singularity while still giving a gentle depth-recession illusion.
+    let gds = u.layout_height * 0.01;                     // ground_depth_scale
     let eps = u.layout_height * 0.55 * u.layer_spread;    // elev_pitch_scale
     let eds = u.layout_height * 0.24 * u.layer_spread;    // elev_depth_scale
 

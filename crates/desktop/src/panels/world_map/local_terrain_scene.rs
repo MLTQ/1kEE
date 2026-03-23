@@ -71,7 +71,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             model.globe_view.local_yaw,
             model.globe_view.local_pitch,
             model.globe_view.local_layer_spread,
-            0.82,
+            0.92,
             model.selected_root.as_deref(),
             theme::scene_backdrop(),  // sea / deep
             theme::topo_color(),      // low land
@@ -1795,7 +1795,9 @@ fn project_local(
     let z_pitch = ground_z_pitch + elevation_z_offset;
 
     let ground_pitch_scale = layout.height * 0.55;
-    let ground_depth_scale = layout.height * 0.10;
+    // Keep in sync with shader gds constant: must be < gps/tan(max_pitch).
+    // max_pitch=1.55 rad → tan≈48 → threshold ≈0.0114.  Using 0.01 for safety.
+    let ground_depth_scale = layout.height * 0.01;
     let elevation_pitch_scale = layout.height * 0.55 * view.local_layer_spread;
     let elevation_depth_scale = layout.height * 0.24 * view.local_layer_spread;
 
