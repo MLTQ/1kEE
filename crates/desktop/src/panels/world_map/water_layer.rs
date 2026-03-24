@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use super::local_terrain_scene::{
-    local_geo_bounds, project_local, road_tile_zoom, visual_half_extent_for_zoom, LocalLayout,
+    LocalLayout, local_geo_bounds, project_local, road_tile_zoom, visual_half_extent_for_zoom,
 };
 use super::srtm_stream;
 
@@ -22,40 +22,21 @@ struct ElevatedWater {
 impl ElevatedWater {
     fn from_polyline(poly: &WaterPolyline, selected_root: Option<&Path>) -> Self {
         let pts = &poly.points;
-        let n = pts.len();
-        if n == 0 {
+        if pts.is_empty() {
             return Self {
                 points: Vec::new(),
                 is_area: poly.is_area,
             };
         }
-        // Sample every 4th vertex for water (large polygons can be huge).
-        let step = 4usize;
-        let mut sampled: Vec<(usize, f32)> = (0..n)
-            .step_by(step)
-            .map(|i| {
-                let e = srtm_stream::sample_elevation_m(selected_root, pts[i]).unwrap_or(0.0) + 1.5;
-                (i, e)
+        let points = pts
+            .iter()
+            .copied()
+            .map(|pt| {
+                let elevation =
+                    srtm_stream::sample_elevation_m(selected_root, pt).unwrap_or(0.0) + 1.5;
+                (pt, elevation)
             })
             .collect();
-        if sampled.last().map(|&(i, _)| i) != Some(n - 1) {
-            let e = srtm_stream::sample_elevation_m(selected_root, pts[n - 1]).unwrap_or(0.0) + 1.5;
-            sampled.push((n - 1, e));
-        }
-        let mut elevations = vec![0.0f32; n];
-        for w in sampled.windows(2) {
-            let (i0, e0) = w[0];
-            let (i1, e1) = w[1];
-            for i in i0..=i1 {
-                let t = if i1 > i0 {
-                    (i - i0) as f32 / (i1 - i0) as f32
-                } else {
-                    0.0
-                };
-                elevations[i] = e0 + (e1 - e0) * t;
-            }
-        }
-        let points = pts.iter().zip(elevations).map(|(&pt, e)| (pt, e)).collect();
         Self {
             points,
             is_area: poly.is_area,
@@ -190,11 +171,9 @@ pub(super) fn draw_water(
 
     let water_col = crate::theme::water_color();
     let line_stroke = egui::Stroke::new(1.2, water_col);
-    let min_screen_step_sq = (line_stroke.width.max(1.0) * 1.1).powi(2);
 
     for feat in features {
         let mut pts = Vec::with_capacity(feat.points.len());
-        let mut last_kept: Option<egui::Pos2> = None;
         for &(pt, elev) in &feat.points {
             let Some(pos) = project_local(
                 layout,
@@ -208,14 +187,7 @@ pub(super) fn draw_water(
             .map(|p| p.pos) else {
                 continue;
             };
-
-            let keep = last_kept
-                .map(|prev| prev.distance_sq(pos) >= min_screen_step_sq)
-                .unwrap_or(true);
-            if keep {
-                last_kept = Some(pos);
-                pts.push(pos);
-            }
+            pts.push(pos);
         }
 
         if pts.len() < 2 {

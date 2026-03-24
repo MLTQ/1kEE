@@ -19,7 +19,7 @@ Builds and renders the local-terrain road overlays. The file caches road geometr
 - **Rationale**: Keeps heavy I/O and elevation prep out of the per-frame hot path while still matching the active palette
 
 ### `draw_road_layer`
-- **Does**: Projects elevated road polylines into screen space, drops near-duplicate screen points, and submits the line shapes to egui
+- **Does**: Projects elevated road polylines into screen space and submits the full linework to egui
 - **Interacts with**: `project_local` in `local_terrain_scene.rs`
 
 ## Contracts
@@ -32,4 +32,4 @@ Builds and renders the local-terrain road overlays. The file caches road geometr
 
 ## Notes
 - Elevation enrichment now happens in the background cache-build thread instead of on the first render frame, which avoids a visible hitch when enabling road layers or panning into uncached tiles.
-- The draw path now applies a tiny screen-space decimation step before handing lines to egui so dense polylines do not waste work on sub-pixel duplicates.
+- Minor roads now keep full per-vertex elevation sampling and full projected linework, so the layer preserves the terrain-following detail while still staying off the UI-thread hot path.

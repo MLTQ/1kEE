@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use super::local_terrain_scene::{
-    local_geo_bounds, project_local, road_tile_zoom, visual_half_extent_for_zoom, LocalLayout,
+    LocalLayout, local_geo_bounds, project_local, road_tile_zoom, visual_half_extent_for_zoom,
 };
 use super::srtm_stream;
 
@@ -22,51 +22,22 @@ struct ElevatedRoad {
 }
 
 impl ElevatedRoad {
-    /// Build an elevated road, sampling SRTM elevation at every `elev_step`-th
-    /// vertex and linearly interpolating the rest.  Use `elev_step = 1` for
-    /// major roads (full fidelity) and a larger value for minor roads to cap
-    /// the number of expensive per-point SRTM lookups.
-    fn from_polyline(
-        poly: &osm_ingest::RoadPolyline,
-        selected_root: Option<&Path>,
-        elev_step: usize,
-    ) -> Self {
+    /// Build an elevated road with a terrain sample for every vertex.
+    fn from_polyline(poly: &osm_ingest::RoadPolyline, selected_root: Option<&Path>) -> Self {
         let pts = &poly.points;
-        let n = pts.len();
-        if n == 0 {
+        if pts.is_empty() {
             return Self { points: Vec::new() };
         }
-        let step = elev_step.max(1);
 
-        // Sample elevation at every `step`-th index (always including last).
-        let mut sampled: Vec<(usize, f32)> = (0..n)
-            .step_by(step)
-            .map(|i| {
-                let e = srtm_stream::sample_elevation_m(selected_root, pts[i]).unwrap_or(0.0) + 3.0;
-                (i, e)
+        let points = pts
+            .iter()
+            .copied()
+            .map(|pt| {
+                let elevation =
+                    srtm_stream::sample_elevation_m(selected_root, pt).unwrap_or(0.0) + 3.0;
+                (pt, elevation)
             })
             .collect();
-        if sampled.last().map(|&(i, _)| i) != Some(n - 1) {
-            let e = srtm_stream::sample_elevation_m(selected_root, pts[n - 1]).unwrap_or(0.0) + 3.0;
-            sampled.push((n - 1, e));
-        }
-
-        // Linearly interpolate elevations for skipped vertices.
-        let mut elevations = vec![0.0f32; n];
-        for w in sampled.windows(2) {
-            let (i0, e0) = w[0];
-            let (i1, e1) = w[1];
-            for i in i0..=i1 {
-                let t = if i1 > i0 {
-                    (i - i0) as f32 / (i1 - i0) as f32
-                } else {
-                    0.0
-                };
-                elevations[i] = e0 + (e1 - e0) * t;
-            }
-        }
-
-        let points = pts.iter().zip(elevations).map(|(&pt, e)| (pt, e)).collect();
         Self { points }
     }
 }
@@ -183,7 +154,7 @@ pub(super) fn draw_roads(
                         RoadLayerKind::Major,
                     )
                     .into_iter()
-                    .map(|poly| ElevatedRoad::from_polyline(&poly, root_ref, 1))
+                    .map(|poly| ElevatedRoad::from_polyline(&poly, root_ref))
                     .collect()
                 } else {
                     Vec::new()
@@ -196,7 +167,7 @@ pub(super) fn draw_roads(
                         RoadLayerKind::Minor,
                     )
                     .into_iter()
-                    .map(|poly| ElevatedRoad::from_polyline(&poly, root_ref, 5))
+                    .map(|poly| ElevatedRoad::from_polyline(&poly, root_ref))
                     .collect()
                 } else {
                     Vec::new()
@@ -267,10 +238,8 @@ fn draw_road_layer(
     roads: &[ElevatedRoad],
     stroke: egui::Stroke,
 ) {
-    let min_screen_step_sq = (stroke.width.max(0.9) * 0.95).powi(2);
     for road in roads {
         let mut points = Vec::with_capacity(road.points.len());
-        let mut last_kept: Option<egui::Pos2> = None;
         for &(pt, elev) in &road.points {
             let Some(pos) = project_local(
                 layout,
@@ -284,14 +253,7 @@ fn draw_road_layer(
             .map(|p| p.pos) else {
                 continue;
             };
-
-            let keep = last_kept
-                .map(|prev| prev.distance_sq(pos) >= min_screen_step_sq)
-                .unwrap_or(true);
-            if keep {
-                last_kept = Some(pos);
-                points.push(pos);
-            }
+            points.push(pos);
         }
 
         if points.len() >= 2 {

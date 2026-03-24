@@ -23,10 +23,14 @@ fn cell_progress_store() -> &'static Mutex<Option<(u32, u32)>> {
     P.get_or_init(|| Mutex::new(None))
 }
 fn set_cell_progress(done: u32, total: u32) {
-    if let Ok(mut g) = cell_progress_store().lock() { *g = Some((done, total)); }
+    if let Ok(mut g) = cell_progress_store().lock() {
+        *g = Some((done, total));
+    }
 }
 fn clear_cell_progress() {
-    if let Ok(mut g) = cell_progress_store().lock() { *g = None; }
+    if let Ok(mut g) = cell_progress_store().lock() {
+        *g = None;
+    }
 }
 /// Returns `(cells_done, cells_total)` while osmium cell extraction is running.
 pub fn osmium_cell_progress() -> Option<(u32, u32)> {
@@ -66,7 +70,9 @@ fn initialize_caches(db_path: &Path) {
     if caches_initialized().swap(true, Ordering::SeqCst) {
         return; // already done
     }
-    let Ok(connection) = open_runtime_db(db_path) else { return };
+    let Ok(connection) = open_runtime_db(db_path) else {
+        return;
+    };
 
     // Populate known_notes with every note that was ever queued/completed.
     if let Ok(mut stmt) = connection.prepare(
@@ -148,9 +154,9 @@ pub enum OsmFeatureKind {
 impl OsmFeatureKind {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Roads     => "roads",
+            Self::Roads => "roads",
             Self::Buildings => "buildings",
-            Self::Water     => "water",
+            Self::Water => "water",
         }
     }
 }
@@ -238,11 +244,12 @@ impl OsmInventory {
             .unwrap_or_default();
         let runtime_db_path = runtime_db_path(selected_root);
 
-        let (runtime_db_ready, queued_jobs, road_tiles, building_tiles, water_tiles) = runtime_db_path
-            .as_ref()
-            .filter(|path| path.exists())
-            .and_then(|path| read_runtime_counts(path).ok())
-            .unwrap_or((false, 0, 0, 0, 0));
+        let (runtime_db_ready, queued_jobs, road_tiles, building_tiles, water_tiles) =
+            runtime_db_path
+                .as_ref()
+                .filter(|path| path.exists())
+                .and_then(|path| read_runtime_counts(path).ok())
+                .unwrap_or((false, 0, 0, 0, 0));
 
         let primary_runtime_source = if road_tiles > 0 || building_tiles > 0 || water_tiles > 0 {
             "Planet OSM -> shared SQLite tile store"
@@ -432,16 +439,15 @@ pub fn queue_focus_roads_import(
     }
 
     // Use osmium + planet file when available, otherwise Overpass.
-    let source_path = if find_planet_pbf(selected_root).is_some()
-        && !settings_store::prefer_overpass()
-    {
-        find_planet_pbf(selected_root)
-            .unwrap()
-            .to_string_lossy()
-            .into_owned()
-    } else {
-        OVERPASS_SOURCE.to_owned()
-    };
+    let source_path =
+        if find_planet_pbf(selected_root).is_some() && !settings_store::prefer_overpass() {
+            find_planet_pbf(selected_root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            OVERPASS_SOURCE.to_owned()
+        };
 
     let db_path = ensure_runtime_store(selected_root)?;
     let connection = open_runtime_db(&db_path).map_err(|e| e.to_string())?;
@@ -564,8 +570,8 @@ pub fn tick(selected_root: Option<&Path>) {
 
     let handle = thread::spawn(move || {
         let result = match job.feature_kind {
-            OsmFeatureKind::Roads     => import_planet_roads(&db_path, &job),
-            OsmFeatureKind::Water     => import_planet_water(&db_path, &job),
+            OsmFeatureKind::Roads => import_planet_roads(&db_path, &job),
+            OsmFeatureKind::Water => import_planet_water(&db_path, &job),
             OsmFeatureKind::Buildings => {
                 Err("Planet building import is not implemented yet.".to_owned())
             }
@@ -916,7 +922,17 @@ fn ensure_runtime_schema(connection: &Connection) -> rusqlite::Result<()> {
             PRIMARY KEY (zoom, tile_x, tile_y, way_id)
         );
         CREATE INDEX IF NOT EXISTS idx_water_tiles_lookup
-            ON water_tiles(zoom, tile_x, tile_y);",
+            ON water_tiles(zoom, tile_x, tile_y);
+        CREATE TABLE IF NOT EXISTS osm_focus_cell_cache (
+            feature_kind TEXT NOT NULL,
+            source_path TEXT NOT NULL,
+            cell_lat INTEGER NOT NULL,
+            cell_lon INTEGER NOT NULL,
+            imported_at_unix INTEGER NOT NULL,
+            PRIMARY KEY (feature_kind, source_path, cell_lat, cell_lon)
+        );
+        CREATE INDEX IF NOT EXISTS idx_osm_focus_cell_cache_lookup
+            ON osm_focus_cell_cache(feature_kind, source_path);",
     )?;
     let _ = connection.execute(
         "ALTER TABLE osm_ingest_jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
@@ -943,6 +959,52 @@ fn has_job_note(selected_root: Option<&Path>, note: &str) -> Result<bool, String
     Ok(count > 0)
 }
 
+fn focus_cell_cached(
+    connection: &Connection,
+    feature_kind: OsmFeatureKind,
+    source_path: &str,
+    cell_lat: i32,
+    cell_lon: i32,
+) -> rusqlite::Result<bool> {
+    let count: usize = connection.query_row(
+        "SELECT COUNT(*) FROM osm_focus_cell_cache
+         WHERE feature_kind = ?1 AND source_path = ?2 AND cell_lat = ?3 AND cell_lon = ?4",
+        params![
+            feature_kind.as_str(),
+            source_path,
+            i64::from(cell_lat),
+            i64::from(cell_lon),
+        ],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn mark_focus_cell_cached(
+    db_path: &Path,
+    feature_kind: OsmFeatureKind,
+    source_path: &str,
+    cell_lat: i32,
+    cell_lon: i32,
+) -> Result<(), String> {
+    let connection = open_runtime_db(db_path).map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "INSERT OR REPLACE INTO osm_focus_cell_cache (
+                feature_kind, source_path, cell_lat, cell_lon, imported_at_unix
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                feature_kind.as_str(),
+                source_path,
+                i64::from(cell_lat),
+                i64::from(cell_lon),
+                unix_timestamp(),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn fetch_next_job(connection: &Connection) -> rusqlite::Result<Option<OsmJob>> {
     let mut statement = connection.prepare(
         "SELECT id, feature_kind, source_path, min_lat, max_lat, min_lon, max_lon, note
@@ -955,10 +1017,10 @@ fn fetch_next_job(connection: &Connection) -> rusqlite::Result<Option<OsmJob>> {
     let job = statement
         .query_row([], |row| {
             let feature_kind = match row.get::<_, String>(1)?.as_str() {
-                "roads"     => OsmFeatureKind::Roads,
+                "roads" => OsmFeatureKind::Roads,
                 "buildings" => OsmFeatureKind::Buildings,
-                "water"     => OsmFeatureKind::Water,
-                _           => OsmFeatureKind::Roads,
+                "water" => OsmFeatureKind::Water,
+                _ => OsmFeatureKind::Roads,
             };
             Ok(OsmJob {
                 id: row.get(0)?,
@@ -1043,14 +1105,16 @@ fn import_planet_roads(db_path: &Path, job: &OsmJob) -> Result<String, String> {
         return import_focus_roads_via_osmium(db_path, job)
             .or_else(|osmium_err| {
                 let _ = update_job_note(
-                    db_path, job.id,
+                    db_path,
+                    job.id,
                     &format!("osmium unavailable ({osmium_err}); trying stream scan…"),
                 );
                 import_focus_roads_via_stream_scan(db_path, job)
             })
             .or_else(|scan_err| {
                 let _ = update_job_note(
-                    db_path, job.id,
+                    db_path,
+                    job.id,
                     &format!("Stream scan failed ({scan_err}); falling back to Overpass…"),
                 );
                 import_focus_roads_via_overpass(db_path, job)
@@ -1178,57 +1242,95 @@ fn import_focus_roads_via_osmium(db_path: &Path, job: &OsmJob) -> Result<String,
         .join("osm_extracts");
     fs::create_dir_all(&extract_dir).map_err(|e| e.to_string())?;
 
-    // Enumerate every 1°×1° cell that overlaps the job's bounding box.
-    let min_lat_c = job.bounds.min_lat.floor() as i32;
-    let max_lat_c = job.bounds.max_lat.floor() as i32;
-    let min_lon_c = job.bounds.min_lon.floor() as i32;
-    let max_lon_c = job.bounds.max_lon.floor() as i32;
-    let cells: Vec<(i32, i32)> = (min_lat_c..=max_lat_c)
-        .flat_map(|lat| (min_lon_c..=max_lon_c).map(move |lon| (lat, lon)))
-        .collect();
+    let metadata_connection = open_runtime_db(db_path).map_err(|error| error.to_string())?;
+    let source_key = job.source_path.display().to_string();
+    let cells = focus_cells_for_bounds(job.bounds);
     let total = cells.len() as u32;
     set_cell_progress(0, total);
 
-    let mut combined = String::new();
-    for (idx, (lat_c, lon_c)) in cells.iter().enumerate() {
+    let mut imported_cells = 0usize;
+    let mut reused_cells = 0usize;
+    for (idx, &(lat_c, lon_c)) in cells.iter().enumerate() {
         let done = idx as u32;
         set_cell_progress(done, total);
+
+        if focus_cell_cached(
+            &metadata_connection,
+            OsmFeatureKind::Roads,
+            &source_key,
+            lat_c,
+            lon_c,
+        )
+        .map_err(|error| error.to_string())?
+        {
+            reused_cells += 1;
+            update_job_note(
+                db_path,
+                job.id,
+                &format!(
+                    "Reusing imported road cell {}/{total} ({lat_c}°,{lon_c}°)…",
+                    done + 1
+                ),
+            )?;
+            set_cell_progress(done + 1, total);
+            continue;
+        }
 
         let extract_path = extract_dir.join(format!("cell_{:+04}_{:+05}.osm.pbf", lat_c, lon_c));
         if !extract_path.exists() {
             let bbox = format!("{},{},{},{}", lon_c, lat_c, lon_c + 1, lat_c + 1);
-            update_job_note(db_path, job.id,
-                &format!("Osmium extract cell {}/{total} ({lat_c}°,{lon_c}°) — one-time, ~2-5 min…",
-                         done + 1))?;
+            update_job_note(
+                db_path,
+                job.id,
+                &format!(
+                    "Osmium extract cell {}/{total} ({lat_c}°,{lon_c}°) — one-time, ~2-5 min…",
+                    done + 1
+                ),
+            )?;
             let status = Command::new(&osmium)
-                .arg("extract").arg("-b").arg(&bbox)
-                .arg(&job.source_path).arg("-o").arg(&extract_path).arg("--overwrite")
+                .arg("extract")
+                .arg("-b")
+                .arg(&bbox)
+                .arg(&job.source_path)
+                .arg("-o")
+                .arg(&extract_path)
+                .arg("--overwrite")
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .status().map_err(|e| format!("Failed to launch osmium: {e}"))?;
+                .status()
+                .map_err(|e| format!("Failed to launch osmium: {e}"))?;
             if !status.success() {
                 let _ = fs::remove_file(&extract_path);
                 clear_cell_progress();
                 return Err(format!("osmium extract failed for cell ({lat_c},{lon_c})"));
             }
         } else {
-            update_job_note(db_path, job.id,
-                &format!("Scanning cached cell {}/{total} ({lat_c}°,{lon_c}°)…", done + 1))?;
+            update_job_note(
+                db_path,
+                job.id,
+                &format!(
+                    "Scanning cached cell {}/{total} ({lat_c}°,{lon_c}°)…",
+                    done + 1
+                ),
+            )?;
         }
 
         let mut scan_job = job.clone();
         scan_job.source_path = extract_path;
-        let result = import_focus_roads_via_stream_scan(db_path, &scan_job)?;
-        if !combined.is_empty() { combined.push_str("; "); }
-        combined.push_str(&result);
-        // Increment gen so the render cache picks up each cell's data immediately.
+        scan_job.bounds = focus_cell_bounds(lat_c, lon_c);
+        import_focus_roads_via_stream_scan(db_path, &scan_job)?;
+        mark_focus_cell_cached(db_path, OsmFeatureKind::Roads, &source_key, lat_c, lon_c)?;
+        imported_cells += 1;
         road_data_gen().fetch_add(1, Ordering::Relaxed);
         crate::app::request_repaint();
         set_cell_progress(done + 1, total);
     }
 
     clear_cell_progress();
-    Ok(combined)
+    Ok(format!(
+        "Focused road osmium import: {} new cells scanned, {} cached cells reused",
+        imported_cells, reused_cells
+    ))
 }
 
 fn import_focus_roads_via_overpass(db_path: &Path, job: &OsmJob) -> Result<String, String> {
@@ -1263,8 +1365,14 @@ fn import_focus_roads_via_overpass(db_path: &Path, job: &OsmJob) -> Result<Strin
         return Err(format!("Overpass returned HTTP {}", response.status()));
     }
 
-    let text = response.text().map_err(|e| format!("Reading Overpass response: {e}"))?;
-    update_job_note(db_path, job.id, "Parsing road geometry from Overpass response…")?;
+    let text = response
+        .text()
+        .map_err(|e| format!("Reading Overpass response: {e}"))?;
+    update_job_note(
+        db_path,
+        job.id,
+        "Parsing road geometry from Overpass response…",
+    )?;
 
     let json: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("Overpass JSON parse error: {e}"))?;
@@ -1304,9 +1412,7 @@ fn import_focus_roads_via_overpass(db_path: &Path, job: &OsmJob) -> Result<Strin
             continue;
         };
 
-        let road_name = tags
-            .and_then(|t| t.get("name"))
-            .and_then(|v| v.as_str());
+        let road_name = tags.and_then(|t| t.get("name")).and_then(|v| v.as_str());
 
         // `out geom` puts node coordinates directly in a "geometry" array.
         let geometry = element.get("geometry").and_then(|v| v.as_array());
@@ -1775,9 +1881,15 @@ pub fn load_water_for_bounds(
     bounds: GeoBounds,
     tile_zoom: u8,
 ) -> Vec<WaterPolyline> {
-    let Some(db_path) = runtime_db_path(selected_root) else { return Vec::new() };
-    if !db_path.exists() { return Vec::new() }
-    let Ok(conn) = open_runtime_db(&db_path) else { return Vec::new() };
+    let Some(db_path) = runtime_db_path(selected_root) else {
+        return Vec::new();
+    };
+    if !db_path.exists() {
+        return Vec::new();
+    }
+    let Ok(conn) = open_runtime_db(&db_path) else {
+        return Vec::new();
+    };
 
     let (x0, y0) = lat_lon_to_tile(bounds.max_lat, bounds.min_lon, tile_zoom);
     let (x1, y1) = lat_lon_to_tile(bounds.min_lat, bounds.max_lon, tile_zoom);
@@ -1785,31 +1897,46 @@ pub fn load_water_for_bounds(
         "SELECT way_id, class, name, is_area, geom_wkb
          FROM water_tiles
          WHERE zoom=?1 AND tile_x BETWEEN ?2 AND ?3 AND tile_y BETWEEN ?4 AND ?5",
-    ) else { return Vec::new() };
+    ) else {
+        return Vec::new();
+    };
 
     let rows = match stmt.query_map(
         params![
             i64::from(tile_zoom),
-            i64::from(x0.min(x1)), i64::from(x0.max(x1)),
-            i64::from(y0.min(y1)), i64::from(y0.max(y1)),
+            i64::from(x0.min(x1)),
+            i64::from(x0.max(x1)),
+            i64::from(y0.min(y1)),
+            i64::from(y0.max(y1)),
         ],
-        |row| Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, i64>(3)?,
-            row.get::<_, Vec<u8>>(4)?,
-        )),
-    ) { Ok(r) => r, Err(_) => return Vec::new() };
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Vec<u8>>(4)?,
+            ))
+        },
+    ) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
 
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for row in rows.filter_map(Result::ok) {
         let (way_id, water_class, name, is_area, wkb) = row;
-        if !seen.insert(way_id) { continue; }
-        let Some(points) = decode_linestring_wkb(&wkb) else { continue };
+        if !seen.insert(way_id) {
+            continue;
+        }
+        let Some(points) = decode_linestring_wkb(&wkb) else {
+            continue;
+        };
         let poly_bounds = polyline_bounds(&points);
-        if !bounds_intersect(poly_bounds, bounds) { continue; }
+        if !bounds_intersect(poly_bounds, bounds) {
+            continue;
+        }
         out.push(WaterPolyline {
             way_id,
             water_class,
@@ -1835,17 +1962,23 @@ pub fn queue_focus_water_import(
         focus.lat, focus.lon, radius_bucket
     );
 
-    if known_notes().lock().map(|g| g.contains(&note)).unwrap_or(false) {
+    if known_notes()
+        .lock()
+        .map(|g| g.contains(&note))
+        .unwrap_or(false)
+    {
         return Ok(false);
     }
 
-    let source_path = if find_planet_pbf(selected_root).is_some()
-        && !settings_store::prefer_overpass()
-    {
-        find_planet_pbf(selected_root).unwrap().to_string_lossy().into_owned()
-    } else {
-        OVERPASS_SOURCE.to_owned()
-    };
+    let source_path =
+        if find_planet_pbf(selected_root).is_some() && !settings_store::prefer_overpass() {
+            find_planet_pbf(selected_root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            OVERPASS_SOURCE.to_owned()
+        };
 
     let db_path = ensure_runtime_store(selected_root)?;
     let connection = open_runtime_db(&db_path).map_err(|e| e.to_string())?;
@@ -1859,7 +1992,9 @@ pub fn queue_focus_water_import(
         )
         .map_err(|e| e.to_string())?;
     if existing_count > 0 {
-        if let Ok(mut notes) = known_notes().lock() { notes.insert(note.clone()); }
+        if let Ok(mut notes) = known_notes().lock() {
+            notes.insert(note.clone());
+        }
         return Ok(false);
     }
 
@@ -1872,14 +2007,22 @@ pub fn queue_focus_water_import(
                 requested_at_unix, updated_at_unix, note
              ) VALUES (?1,'queued',?2,?3,?4,?5,?6,?7,?8,?8,?9)",
             params![
-                OsmFeatureKind::Water.as_str(), source_path,
-                bounds.min_lat, bounds.max_lat, bounds.min_lon, bounds.max_lon,
-                100_i64, now, &note,
+                OsmFeatureKind::Water.as_str(),
+                source_path,
+                bounds.min_lat,
+                bounds.max_lat,
+                bounds.min_lon,
+                bounds.max_lon,
+                100_i64,
+                now,
+                &note,
             ],
         )
         .map_err(|e| e.to_string())?;
 
-    if let Ok(mut notes) = known_notes().lock() { notes.insert(note); }
+    if let Ok(mut notes) = known_notes().lock() {
+        notes.insert(note);
+    }
     active_jobs_flag().store(true, Ordering::Relaxed);
     Ok(true)
 }
@@ -1892,82 +2035,134 @@ fn import_planet_water(db_path: &Path, job: &OsmJob) -> Result<String, String> {
     if settings_store::prefer_overpass() {
         return import_focus_water_via_overpass(db_path, job);
     }
-    import_focus_water_via_osmium(db_path, job)
-        .or_else(|e| {
-            let _ = update_job_note(db_path, job.id,
-                &format!("osmium unavailable ({e}); falling back to Overpass…"));
-            import_focus_water_via_overpass(db_path, job)
-        })
+    import_focus_water_via_osmium(db_path, job).or_else(|e| {
+        let _ = update_job_note(
+            db_path,
+            job.id,
+            &format!("osmium unavailable ({e}); falling back to Overpass…"),
+        );
+        import_focus_water_via_overpass(db_path, job)
+    })
 }
 
 fn import_focus_water_via_osmium(db_path: &Path, job: &OsmJob) -> Result<String, String> {
     let osmium = settings_store::resolve_osmium();
-    if std::process::Command::new(&osmium).arg("--version").output().is_err() {
+    if std::process::Command::new(&osmium)
+        .arg("--version")
+        .output()
+        .is_err()
+    {
         return Err(format!("osmium not found at {}", osmium.display()));
     }
 
-    let extract_dir = db_path.parent().ok_or("no parent dir")?.join("osm_extracts");
+    let extract_dir = db_path
+        .parent()
+        .ok_or("no parent dir")?
+        .join("osm_extracts");
     fs::create_dir_all(&extract_dir).map_err(|e| e.to_string())?;
 
-    // Enumerate every 1°×1° cell that overlaps the job's bounding box.
-    let min_lat_c = job.bounds.min_lat.floor() as i32;
-    let max_lat_c = job.bounds.max_lat.floor() as i32;
-    let min_lon_c = job.bounds.min_lon.floor() as i32;
-    let max_lon_c = job.bounds.max_lon.floor() as i32;
-    let cells: Vec<(i32, i32)> = (min_lat_c..=max_lat_c)
-        .flat_map(|lat| (min_lon_c..=max_lon_c).map(move |lon| (lat, lon)))
-        .collect();
+    let metadata_connection = open_runtime_db(db_path).map_err(|error| error.to_string())?;
+    let source_key = job.source_path.display().to_string();
+    let cells = focus_cells_for_bounds(job.bounds);
     let total = cells.len() as u32;
     set_cell_progress(0, total);
 
-    let mut combined = String::new();
-    for (idx, (lat_c, lon_c)) in cells.iter().enumerate() {
+    let mut imported_cells = 0usize;
+    let mut reused_cells = 0usize;
+    for (idx, &(lat_c, lon_c)) in cells.iter().enumerate() {
         let done = idx as u32;
         set_cell_progress(done, total);
+
+        if focus_cell_cached(
+            &metadata_connection,
+            OsmFeatureKind::Water,
+            &source_key,
+            lat_c,
+            lon_c,
+        )
+        .map_err(|error| error.to_string())?
+        {
+            reused_cells += 1;
+            update_job_note(
+                db_path,
+                job.id,
+                &format!(
+                    "Reusing imported water cell {}/{total} ({lat_c}°,{lon_c}°)…",
+                    done + 1
+                ),
+            )?;
+            set_cell_progress(done + 1, total);
+            continue;
+        }
 
         let extract_path = extract_dir.join(format!("cell_{:+04}_{:+05}.osm.pbf", lat_c, lon_c));
         if !extract_path.exists() {
             let bbox = format!("{},{},{},{}", lon_c, lat_c, lon_c + 1, lat_c + 1);
-            update_job_note(db_path, job.id,
-                &format!("Osmium extract cell {}/{total} ({lat_c}°,{lon_c}°) — one-time, ~2-5 min…",
-                         done + 1))?;
+            update_job_note(
+                db_path,
+                job.id,
+                &format!(
+                    "Osmium extract cell {}/{total} ({lat_c}°,{lon_c}°) — one-time, ~2-5 min…",
+                    done + 1
+                ),
+            )?;
             let status = Command::new(&osmium)
-                .arg("extract").arg("-b").arg(&bbox)
-                .arg(&job.source_path).arg("-o").arg(&extract_path).arg("--overwrite")
+                .arg("extract")
+                .arg("-b")
+                .arg(&bbox)
+                .arg(&job.source_path)
+                .arg("-o")
+                .arg(&extract_path)
+                .arg("--overwrite")
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .status().map_err(|e| format!("osmium launch failed: {e}"))?;
+                .status()
+                .map_err(|e| format!("osmium launch failed: {e}"))?;
             if !status.success() {
                 let _ = fs::remove_file(&extract_path);
                 clear_cell_progress();
                 return Err(format!("osmium extract failed for cell ({lat_c},{lon_c})"));
             }
         } else {
-            update_job_note(db_path, job.id,
-                &format!("Scanning cached cell {}/{total} ({lat_c}°,{lon_c}°)…", done + 1))?;
+            update_job_note(
+                db_path,
+                job.id,
+                &format!(
+                    "Scanning cached cell {}/{total} ({lat_c}°,{lon_c}°)…",
+                    done + 1
+                ),
+            )?;
         }
 
         let mut scan_job = job.clone();
         scan_job.source_path = extract_path;
-        let result = import_focus_water_via_stream_scan(db_path, &scan_job)?;
-        if !combined.is_empty() { combined.push_str("; "); }
-        combined.push_str(&result);
-        // Increment gen so the render cache picks up each cell's data immediately.
+        scan_job.bounds = focus_cell_bounds(lat_c, lon_c);
+        import_focus_water_via_stream_scan(db_path, &scan_job)?;
+        mark_focus_cell_cached(db_path, OsmFeatureKind::Water, &source_key, lat_c, lon_c)?;
+        imported_cells += 1;
         water_data_gen().fetch_add(1, Ordering::Relaxed);
         crate::app::request_repaint();
         set_cell_progress(done + 1, total);
     }
 
     clear_cell_progress();
-    Ok(combined)
+    Ok(format!(
+        "Focused water osmium import: {} new cells scanned, {} cached cells reused",
+        imported_cells, reused_cells
+    ))
 }
 
 fn import_focus_water_via_stream_scan(db_path: &Path, job: &OsmJob) -> Result<String, String> {
-    update_job_note(db_path, job.id, "Scanning water features from planet source…")?;
+    update_job_note(
+        db_path,
+        job.id,
+        "Scanning water features from planet source…",
+    )?;
 
     let expanded = expand_bounds(job.bounds, FOCUS_NODE_MARGIN_DEGREES);
     let conn = open_runtime_db(db_path).map_err(|e| e.to_string())?;
-    conn.execute_batch("BEGIN IMMEDIATE;").map_err(|e| e.to_string())?;
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(|e| e.to_string())?;
     let mut writer = WaterTileWriter::new(conn);
 
     let reader = ElementReader::from_path(&job.source_path)
@@ -1978,58 +2173,89 @@ fn import_focus_water_via_stream_scan(db_path: &Path, job: &OsmJob) -> Result<St
     let mut imported = 0usize;
     let mut import_error: Option<String> = None;
 
-    reader.for_each(|element| {
-        if import_error.is_some() { return; }
-        match element {
-            Element::Node(n) => {
-                let pt = GeoPoint { lat: n.lat() as f32, lon: n.lon() as f32 };
-                if point_in_bounds(pt, expanded) { candidate_nodes.insert(n.id(), pt); }
+    reader
+        .for_each(|element| {
+            if import_error.is_some() {
+                return;
             }
-            Element::DenseNode(n) => {
-                let pt = GeoPoint { lat: n.lat() as f32, lon: n.lon() as f32 };
-                if point_in_bounds(pt, expanded) { candidate_nodes.insert(n.id(), pt); }
-            }
-            Element::Way(way) => {
-                let mut water_class: Option<(&'static str, bool)> = None;
-                let mut feat_name = None;
-                for (k, v) in way.tags() {
-                    if water_class.is_none() {
-                        water_class = canonical_water_class(k, v);
-                    }
-                    if k == "name" && feat_name.is_none() {
-                        feat_name = Some(v.to_owned());
+            match element {
+                Element::Node(n) => {
+                    let pt = GeoPoint {
+                        lat: n.lat() as f32,
+                        lon: n.lon() as f32,
+                    };
+                    if point_in_bounds(pt, expanded) {
+                        candidate_nodes.insert(n.id(), pt);
                     }
                 }
-                let Some((class, is_area)) = water_class else { return };
-                if !seen_way_ids.insert(way.id()) { return; }
-
-                let refs: Vec<i64> = way.refs().collect();
-                let closed = refs.first() == refs.last() && refs.len() > 2;
-                let is_area = is_area || closed;
-
-                let points: Vec<GeoPoint> = refs.iter()
-                    .filter_map(|&id| candidate_nodes.get(&id).copied())
-                    .collect();
-                if points.len() < 2 { return; }
-
-                let bounds = polyline_bounds(&points);
-                if !bounds_intersect(bounds, job.bounds) { return; }
-
-                imported += 1;
-                if let Err(e) = writer.insert_water(way.id(), class, feat_name.as_deref(),
-                                                     is_area, &points) {
-                    import_error = Some(e);
+                Element::DenseNode(n) => {
+                    let pt = GeoPoint {
+                        lat: n.lat() as f32,
+                        lon: n.lon() as f32,
+                    };
+                    if point_in_bounds(pt, expanded) {
+                        candidate_nodes.insert(n.id(), pt);
+                    }
                 }
-                if imported % PROGRESS_FLUSH_INTERVAL == 0 { let _ = writer.flush_progress(); }
-            }
-            Element::Relation(_) => {}
-        }
-    }).map_err(|e| e.to_string())?;
+                Element::Way(way) => {
+                    let mut water_class: Option<(&'static str, bool)> = None;
+                    let mut feat_name = None;
+                    for (k, v) in way.tags() {
+                        if water_class.is_none() {
+                            water_class = canonical_water_class(k, v);
+                        }
+                        if k == "name" && feat_name.is_none() {
+                            feat_name = Some(v.to_owned());
+                        }
+                    }
+                    let Some((class, is_area)) = water_class else {
+                        return;
+                    };
+                    if !seen_way_ids.insert(way.id()) {
+                        return;
+                    }
 
-    if let Some(e) = import_error { let _ = writer.rollback(); return Err(e); }
+                    let refs: Vec<i64> = way.refs().collect();
+                    let closed = refs.first() == refs.last() && refs.len() > 2;
+                    let is_area = is_area || closed;
+
+                    let points: Vec<GeoPoint> = refs
+                        .iter()
+                        .filter_map(|&id| candidate_nodes.get(&id).copied())
+                        .collect();
+                    if points.len() < 2 {
+                        return;
+                    }
+
+                    let bounds = polyline_bounds(&points);
+                    if !bounds_intersect(bounds, job.bounds) {
+                        return;
+                    }
+
+                    imported += 1;
+                    if let Err(e) =
+                        writer.insert_water(way.id(), class, feat_name.as_deref(), is_area, &points)
+                    {
+                        import_error = Some(e);
+                    }
+                    if imported % PROGRESS_FLUSH_INTERVAL == 0 {
+                        let _ = writer.flush_progress();
+                    }
+                }
+                Element::Relation(_) => {}
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
+    if let Some(e) = import_error {
+        let _ = writer.rollback();
+        return Err(e);
+    }
     let total = writer.inserted_features;
     writer.finish_simple().map_err(|e| e.to_string())?;
-    Ok(format!("Water stream scan: {imported} features → {total} tile entries"))
+    Ok(format!(
+        "Water stream scan: {imported} features → {total} tile entries"
+    ))
 }
 
 fn import_focus_water_via_overpass(db_path: &Path, job: &OsmJob) -> Result<String, String> {
@@ -2047,8 +2273,10 @@ fn import_focus_water_via_overpass(db_path: &Path, job: &OsmJob) -> Result<Strin
              ({min_lat},{min_lon},{max_lat},{max_lon});\
          );\
          out geom;",
-        min_lat = b.min_lat, min_lon = b.min_lon,
-        max_lat = b.max_lat, max_lon = b.max_lon,
+        min_lat = b.min_lat,
+        min_lon = b.min_lon,
+        max_lat = b.max_lat,
+        max_lon = b.max_lon,
     );
 
     let response = reqwest::blocking::Client::builder()
@@ -2064,11 +2292,14 @@ fn import_focus_water_via_overpass(db_path: &Path, job: &OsmJob) -> Result<Strin
         return Err(format!("Overpass returned HTTP {}", response.status()));
     }
 
-    let text = response.text().map_err(|e| format!("Failed to read Overpass response: {e}"))?;
+    let text = response
+        .text()
+        .map_err(|e| format!("Failed to read Overpass response: {e}"))?;
     let json: Value = serde_json::from_str(&text).map_err(|e| format!("Invalid JSON: {e}"))?;
 
     let conn = open_runtime_db(db_path).map_err(|e| e.to_string())?;
-    conn.execute_batch("BEGIN IMMEDIATE;").map_err(|e| e.to_string())?;
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .map_err(|e| e.to_string())?;
     let mut writer = WaterTileWriter::new(conn);
     let mut imported = 0usize;
     let mut skipped = 0usize;
@@ -2086,32 +2317,52 @@ fn import_focus_water_via_overpass(db_path: &Path, job: &OsmJob) -> Result<Strin
                     }
                     None
                 })
-                .unwrap_or_else(|| { skipped += 1; ("", false) });
-            if class.is_empty() { continue; }
+                .unwrap_or_else(|| {
+                    skipped += 1;
+                    ("", false)
+                });
+            if class.is_empty() {
+                continue;
+            }
 
-            let name = tags.and_then(|t| t.get("name")).and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty()).map(str::to_owned);
+            let name = tags
+                .and_then(|t| t.get("name"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
 
             let points: Vec<GeoPoint> = element
-                .get("geometry").and_then(|g| g.as_array())
-                .map(|pts| pts.iter().filter_map(|p| {
-                    Some(GeoPoint {
-                        lat: p.get("lat")?.as_f64()? as f32,
-                        lon: p.get("lon")?.as_f64()? as f32,
-                    })
-                }).collect())
+                .get("geometry")
+                .and_then(|g| g.as_array())
+                .map(|pts| {
+                    pts.iter()
+                        .filter_map(|p| {
+                            Some(GeoPoint {
+                                lat: p.get("lat")?.as_f64()? as f32,
+                                lon: p.get("lon")?.as_f64()? as f32,
+                            })
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
 
-            if points.len() < 2 { skipped += 1; continue; }
+            if points.len() < 2 {
+                skipped += 1;
+                continue;
+            }
 
             let closed = points.first().map(|p| p.lat) == points.last().map(|p| p.lat)
                 && points.first().map(|p| p.lon) == points.last().map(|p| p.lon)
                 && points.len() > 2;
             let is_area = is_area_hint || closed;
 
-            let way_id = element.get("id").and_then(|v| v.as_i64()).unwrap_or_else(|| {
-                synthetic_id -= 1; synthetic_id
-            });
+            let way_id = element
+                .get("id")
+                .and_then(|v| v.as_i64())
+                .unwrap_or_else(|| {
+                    synthetic_id -= 1;
+                    synthetic_id
+                });
 
             if let Err(e) = writer.insert_water(way_id, class, name.as_deref(), is_area, &points) {
                 let _ = writer.rollback();
@@ -2121,15 +2372,20 @@ fn import_focus_water_via_overpass(db_path: &Path, job: &OsmJob) -> Result<Strin
 
             if imported % PROGRESS_FLUSH_INTERVAL == 0 {
                 let _ = writer.flush_progress();
-                let _ = update_job_note(db_path, job.id,
-                    &format!("Overpass water import… {imported} written"));
+                let _ = update_job_note(
+                    db_path,
+                    job.id,
+                    &format!("Overpass water import… {imported} written"),
+                );
             }
         }
     }
 
     writer.finish_simple().map_err(|e| e.to_string())?;
     crate::app::request_repaint();
-    Ok(format!("Overpass water import: {imported} features, {skipped} skipped"))
+    Ok(format!(
+        "Overpass water import: {imported} features, {skipped} skipped"
+    ))
 }
 
 // ── WaterTileWriter ────────────────────────────────────────────────────────
@@ -2141,11 +2397,20 @@ struct WaterTileWriter {
 
 impl WaterTileWriter {
     fn new(connection: Connection) -> Self {
-        Self { connection, inserted_features: 0 }
+        Self {
+            connection,
+            inserted_features: 0,
+        }
     }
 
-    fn insert_water(&mut self, way_id: i64, class: &str, name: Option<&str>,
-                    is_area: bool, points: &[GeoPoint]) -> Result<(), String> {
+    fn insert_water(
+        &mut self,
+        way_id: i64,
+        class: &str,
+        name: Option<&str>,
+        is_area: bool,
+        points: &[GeoPoint],
+    ) -> Result<(), String> {
         let bounds = polyline_bounds(points);
         let wkb = encode_linestring_wkb(points);
         for &zoom in ROAD_TILE_ZOOMS {
@@ -2153,19 +2418,28 @@ impl WaterTileWriter {
             let (max_x, max_y) = lat_lon_to_tile(bounds.min_lat, bounds.max_lon, zoom);
             for tile_x in min_x.min(max_x)..=min_x.max(max_x) {
                 for tile_y in min_y.min(max_y)..=min_y.max(max_y) {
-                    self.connection.execute(
-                        "INSERT OR REPLACE INTO water_tiles (
+                    self.connection
+                        .execute(
+                            "INSERT OR REPLACE INTO water_tiles (
                             zoom, tile_x, tile_y, way_id, class, name, is_area,
                             geom_wkb, min_lat, max_lat, min_lon, max_lon
                          ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-                        params![
-                            i64::from(zoom), i64::from(tile_x), i64::from(tile_y),
-                            way_id, class, name.unwrap_or(""),
-                            if is_area { 1i64 } else { 0i64 },
-                            &wkb,
-                            bounds.min_lat, bounds.max_lat, bounds.min_lon, bounds.max_lon,
-                        ],
-                    ).map_err(|e| e.to_string())?;
+                            params![
+                                i64::from(zoom),
+                                i64::from(tile_x),
+                                i64::from(tile_y),
+                                way_id,
+                                class,
+                                name.unwrap_or(""),
+                                if is_area { 1i64 } else { 0i64 },
+                                &wkb,
+                                bounds.min_lat,
+                                bounds.max_lat,
+                                bounds.min_lon,
+                                bounds.max_lon,
+                            ],
+                        )
+                        .map_err(|e| e.to_string())?;
                     self.inserted_features += 1;
                 }
             }
@@ -2174,7 +2448,9 @@ impl WaterTileWriter {
     }
 
     fn flush_progress(&self) -> Result<(), String> {
-        self.connection.execute_batch("COMMIT; BEGIN IMMEDIATE;").map_err(|e| e.to_string())
+        self.connection
+            .execute_batch("COMMIT; BEGIN IMMEDIATE;")
+            .map_err(|e| e.to_string())
     }
 
     fn finish_simple(self) -> rusqlite::Result<()> {
@@ -2183,22 +2459,21 @@ impl WaterTileWriter {
     }
 
     fn rollback(&self) -> Result<(), String> {
-        self.connection.execute_batch("ROLLBACK;").map_err(|e| e.to_string())
+        self.connection
+            .execute_batch("ROLLBACK;")
+            .map_err(|e| e.to_string())
     }
 }
 
 fn canonical_water_class(key: &str, value: &str) -> Option<(&'static str, bool)> {
     match (key, value) {
-        ("waterway", "river")               => Some(("river",     false)),
-        ("waterway", "stream")
-        | ("waterway", "creek")             => Some(("stream",    false)),
-        ("waterway", "canal")               => Some(("canal",     false)),
-        ("waterway", "drain")
-        | ("waterway", "ditch")             => Some(("drain",     false)),
-        ("natural",  "water")               => Some(("lake",      true)),
-        ("landuse",  "reservoir")
-        | ("landuse",  "basin")             => Some(("reservoir", true)),
-        _                                   => None,
+        ("waterway", "river") => Some(("river", false)),
+        ("waterway", "stream") | ("waterway", "creek") => Some(("stream", false)),
+        ("waterway", "canal") => Some(("canal", false)),
+        ("waterway", "drain") | ("waterway", "ditch") => Some(("drain", false)),
+        ("natural", "water") => Some(("lake", true)),
+        ("landuse", "reservoir") | ("landuse", "basin") => Some(("reservoir", true)),
+        _ => None,
     }
 }
 
@@ -2367,6 +2642,25 @@ fn focus_bounds(focus: GeoPoint, radius_miles: f32) -> GeoBounds {
         max_lat: (focus.lat + lat_delta).clamp(-85.0511, 85.0511),
         min_lon: (focus.lon - lon_delta).clamp(-180.0, 180.0),
         max_lon: (focus.lon + lon_delta).clamp(-180.0, 180.0),
+    }
+}
+
+fn focus_cells_for_bounds(bounds: GeoBounds) -> Vec<(i32, i32)> {
+    let min_lat_c = bounds.min_lat.floor() as i32;
+    let max_lat_c = bounds.max_lat.floor() as i32;
+    let min_lon_c = bounds.min_lon.floor() as i32;
+    let max_lon_c = bounds.max_lon.floor() as i32;
+    (min_lat_c..=max_lat_c)
+        .flat_map(|lat| (min_lon_c..=max_lon_c).map(move |lon| (lat, lon)))
+        .collect()
+}
+
+fn focus_cell_bounds(cell_lat: i32, cell_lon: i32) -> GeoBounds {
+    GeoBounds {
+        min_lat: (cell_lat as f32).clamp(-85.0511, 85.0511),
+        max_lat: ((cell_lat + 1) as f32).clamp(-85.0511, 85.0511),
+        min_lon: (cell_lon as f32).clamp(-180.0, 180.0),
+        max_lon: ((cell_lon + 1) as f32).clamp(-180.0, 180.0),
     }
 }
 

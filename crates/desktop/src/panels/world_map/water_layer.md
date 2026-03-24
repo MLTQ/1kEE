@@ -31,4 +31,4 @@ Builds and renders the local-terrain water overlay. It caches waterway and water
 
 ## Notes
 - Like the road layer, water enrichment now happens in the background cache build instead of on the first render frame.
-- The draw path also drops near-duplicate screen points before submitting shapes to egui so dense shorelines and waterways stay cheaper to paint.
+- Waterways and shorelines now keep per-vertex elevation sampling and full projected linework, so the overlay retains its terrain-wrapped shape while the expensive prep still happens off the render thread.
