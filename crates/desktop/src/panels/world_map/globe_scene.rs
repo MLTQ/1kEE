@@ -75,7 +75,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         egui::StrokeKind::Outside,
     );
 
-    if !model.cinematic_mode && model.show_reticle {
+    if model.show_reticle {
         draw_hud_frame(painter, rect);
     }
     if model.show_bathymetry {
@@ -87,7 +87,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     draw_global_topo(painter, &layout, &model.globe_view, selected_root);
 
     draw_srtm_on_globe(painter, &layout, &model.globe_view, &lod, selected_root);
-    if !model.cinematic_mode && model.show_reticle {
+    if model.show_reticle {
         draw_zoom_crosshair(painter, &layout, &model.globe_view, time);
     }
 
@@ -100,7 +100,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let selected_camera_id = model.selected_camera_id.as_deref();
     let nearby = model.nearby_cameras(250.0);
 
-    let event_markers: Vec<_> = if model.cinematic_mode || !model.show_event_markers {
+    let event_markers: Vec<_> = if !model.show_event_markers {
         Vec::new()
     } else {
         model
@@ -143,9 +143,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             .collect()
     };
 
-    let camera_markers: Vec<_> = if model.cinematic_mode {
-        Vec::new()
-    } else {
+    let camera_markers: Vec<_> = {
         nearby
             .iter()
             .filter_map(|camera| {
@@ -204,15 +202,13 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         Vec::new()
     };
 
-    if !model.cinematic_mode {
-        if let Some((_, event_marker)) = event_markers
-            .iter()
-            .find(|(event_id, _)| selected_event_id == Some(event_id.as_str()))
-        {
-            draw_camera_links(painter, *event_marker, &camera_markers);
-        }
-        draw_legend(painter, rect, &layout, &model.globe_view, &lod);
+    if let Some((_, event_marker)) = event_markers
+        .iter()
+        .find(|(event_id, _)| selected_event_id == Some(event_id.as_str()))
+    {
+        draw_camera_links(painter, *event_marker, &camera_markers);
     }
+    draw_legend(painter, rect, &layout, &model.globe_view, &lod);
 
     let flight_markers: Vec<(String, egui::Pos2)> =
         if model.show_flights && !model.globe_view.local_mode {
