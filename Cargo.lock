@@ -2257,6 +2257,7 @@ dependencies = [
  "eframe",
  "egui",
  "osmpbf",
+ "rusqlite",
  "serde",
  "serde_json",
 ]

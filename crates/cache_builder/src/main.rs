@@ -2,6 +2,7 @@ mod app;
 mod args;
 mod geojson;
 mod job;
+mod node_store;
 mod roads;
 mod util;
 
