@@ -2,8 +2,58 @@ use crate::city_catalog;
 use crate::osm_ingest::{self, OsmInventory};
 use crate::settings_store;
 use crate::terrain_assets::{self, TerrainInventory};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
+
+/// A layer discovered from an ArcGIS FeatureServer.
+#[derive(Clone, Debug)]
+pub struct ArcGisLayerDef {
+    pub id: u32,
+    pub name: String,
+    pub geometry_type: String,
+    pub color: egui::Color32,
+}
+
+/// A single feature fetched from an ArcGIS FeatureServer layer.
+#[derive(Clone, Debug)]
+pub struct ArcGisFeature {
+    pub object_id: i64,
+    pub source_url: String,
+    pub layer_id: u32,
+    pub location: GeoPoint,
+    /// All non-empty attributes as ordered key-value string pairs.
+    pub attributes: Vec<(String, String)>,
+    /// Unix-millisecond timestamp if a Date field is present.
+    pub date_ms: Option<i64>,
+}
+
+impl ArcGisFeature {
+    pub fn get_attr(&self, key: &str) -> Option<&str> {
+        self.attributes.iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(key))
+            .map(|(_, v)| v.as_str())
+    }
+    pub fn get_attr_i32(&self, key: &str) -> Option<i32> {
+        self.get_attr(key)?.parse().ok()
+    }
+    /// True if any standard casualty field is > 0.
+    pub fn has_casualties(&self) -> bool {
+        ["CivilianKilled","FriendlyKilled","EnemyKilled",
+         "CivilianWounded","FriendlyWounded","EnemyWounded"]
+            .iter()
+            .any(|k| self.get_attr_i32(k).unwrap_or(0) > 0)
+    }
+}
+
+/// A reference to an ArcGIS source stored in the model (lightweight; actual
+/// cached data lives in arcgis_source static storage).
+#[derive(Clone, Debug)]
+pub struct ArcGisSourceRef {
+    /// Canonical FeatureServer base URL.
+    pub url: String,
+    /// Which layer IDs the user has enabled.
+    pub enabled_layer_ids: std::collections::HashSet<u32>,
+}
 
 const GLOBE_PITCH_LIMIT_RAD: f32 = 1.53;
 
@@ -369,50 +419,6 @@ impl MovingTrack {
     }
 }
 
-/// An incident record from the S2Underground ArcGIS Feature Services.
-#[derive(Clone, Debug)]
-pub struct S2Event {
-    pub object_id: i64,
-    /// Key matching one of `s2_underground::LAYERS[*].key`.
-    pub layer_key: String,
-    pub location: GeoPoint,
-    /// Unix milliseconds timestamp; None if not set.
-    pub date_ms: Option<i64>,
-    pub attack_type: Option<String>,
-    pub motive: Option<String>,
-    pub notes: Option<String>,
-    pub address: Option<String>,
-    pub civilian_killed: Option<i32>,
-    pub civilian_wounded: Option<i32>,
-    pub friendly_killed: Option<i32>,
-    pub friendly_wounded: Option<i32>,
-    pub enemy_killed: Option<i32>,
-    pub enemy_wounded: Option<i32>,
-}
-
-impl S2Event {
-    pub fn display_type(&self) -> &str {
-        self.attack_type.as_deref().unwrap_or("Unknown Event")
-    }
-    pub fn total_killed(&self) -> i32 {
-        [self.civilian_killed, self.friendly_killed, self.enemy_killed]
-            .iter()
-            .filter_map(|&c| c)
-            .filter(|&v| v > 0)
-            .sum()
-    }
-    pub fn total_wounded(&self) -> i32 {
-        [self.civilian_wounded, self.friendly_wounded, self.enemy_wounded]
-            .iter()
-            .filter_map(|&c| c)
-            .filter(|&v| v > 0)
-            .sum()
-    }
-    pub fn has_casualties(&self) -> bool {
-        self.total_killed() > 0 || self.total_wounded() > 0
-    }
-}
-
 pub struct AppModel {
     pub events: Vec<EventRecord>,
     pub cameras: Vec<CameraFeed>,
@@ -442,12 +448,12 @@ pub struct AppModel {
     pub show_bathymetry: bool,
     pub show_ships: bool,
     pub show_flights: bool,
-    /// Merged events from all enabled S2Underground layers.
-    pub s2_events: Vec<S2Event>,
-    /// Which S2 layers are enabled; keyed by S2LayerDef.key.
-    pub s2_layer_enabled: HashMap<String, bool>,
-    /// Currently selected S2Underground event (by object_id), if any.
-    pub selected_s2_event_id: Option<i64>,
+    /// ArcGIS FeatureServer sources added by the user.
+    pub arcgis_sources: Vec<ArcGisSourceRef>,
+    /// Merged features from all enabled source/layer combos (refreshed each frame).
+    pub arcgis_features: Vec<ArcGisFeature>,
+    /// Selected feature for the detail panel: (source_url, object_id).
+    pub selected_arcgis_feature: Option<(String, i64)>,
     pub selected_root: Option<PathBuf>,
     pub factal_settings_open: bool,
     pub factal_brief_open: bool,
@@ -641,9 +647,9 @@ impl AppModel {
             show_bathymetry: true,
             show_ships: false,
             show_flights: false,
-            s2_events: Vec::new(),
-            s2_layer_enabled: HashMap::new(),
-            selected_s2_event_id: None,
+            arcgis_sources: Vec::new(),
+            arcgis_features: Vec::new(),
+            selected_arcgis_feature: None,
             selected_root,
             factal_settings_open: false,
             factal_brief_open: false,

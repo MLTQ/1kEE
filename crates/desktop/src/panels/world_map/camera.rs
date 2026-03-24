@@ -157,6 +157,42 @@ pub fn apply_interaction(
     // multiples), so the path never visibly repeats on any typical session length.
     // Velocities are lerped in gently (τ ≈ 1 s) so a user drag cleanly overrides
     // the meander and the view coasts back into it when released.
+    // ── Cinematic meander — local terrain mode ────────────────────────────────
+    // Drives a gentle orbit (yaw), subtle tilt (pitch), and a slow pan drift
+    // around the focus area so the terrain keeps slowly revealing itself.
+    // Frequencies are incommensurate (φ, √2) so the path never repeats.
+    if view.meander_mode && !response.dragged() && view.local_mode {
+        let t = ctx.input(|i| i.time) as f32;
+        const PHI: f32 = 1.618_034;
+        const SQRT2: f32 = 1.414_213;
+        let s = view.meander_speed;
+
+        // Slow yaw orbit — circles around the scene.
+        let yaw_sum = (t * 0.035).sin() * 0.75
+                    + (t * 0.063 * PHI).sin() * 0.45
+                    + (t * 0.098 * SQRT2).sin() * 0.30;
+        let yaw_target = s * 0.10 * yaw_sum / 1.50;
+
+        // Subtle pitch oscillation — tilts the camera gently.
+        let pitch_sum = (t * 0.027 + 1.3).sin() * 0.55
+                      + (t * 0.050 * PHI + 2.5).sin() * 0.35;
+        let pitch_target = s * 0.025 * pitch_sum / 0.90;
+
+        // Very slow pan drift — wanders across the terrain.
+        let pan_lat_sum = (t * 0.020 + 1.7).sin() * 0.60
+                        + (t * 0.038 * SQRT2 + 0.8).sin() * 0.40;
+        let pan_lon_sum = (t * 0.018 + 2.5).sin() * 0.60
+                        + (t * 0.035 * PHI + 1.4).sin() * 0.40;
+        let half_ext = local_terrain_scene::visual_half_extent_for_zoom(view.local_zoom);
+        let pan_scale = s * 0.002 * half_ext; // tiny fraction of viewport / second
+
+        view.vel_local_yaw   = lerp(view.vel_local_yaw,   yaw_target,            0.03);
+        view.vel_local_pitch = lerp(view.vel_local_pitch, pitch_target,           0.03);
+        view.vel_local_lat   = lerp(view.vel_local_lat,   pan_lat_sum * pan_scale, 0.015);
+        view.vel_local_lon   = lerp(view.vel_local_lon,   pan_lon_sum * pan_scale, 0.015);
+        input_active = true;
+    }
+
     if view.meander_mode && !response.dragged() && !view.local_mode {
         let t = ctx.input(|i| i.time) as f32;
 

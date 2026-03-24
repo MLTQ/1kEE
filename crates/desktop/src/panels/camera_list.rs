@@ -1,5 +1,5 @@
+use crate::arcgis_source;
 use crate::model::AppModel;
-use crate::s2_underground;
 use crate::theme;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -126,85 +126,116 @@ fn tab_items(ui: &mut egui::Ui, model: &mut AppModel) {
     ui.heading("Map Items");
     ui.colored_label(
         theme::text_muted(),
-        "S2Underground open-access intelligence layers.",
-    );
-    ui.add_space(2.0);
-    ui.small(
-        egui::RichText::new("Data: S2Underground \u{00B7} CC BY-NC-SA 4.0")
-            .color(theme::text_muted()),
+        "ArcGIS FeatureServer sources — paste any URL to add a new source.",
     );
     ui.add_space(8.0);
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        for layer in s2_underground::LAYERS {
-            let col = egui::Color32::from_rgb(layer.color.0, layer.color.1, layer.color.2);
-            let enabled = model
-                .s2_layer_enabled
-                .entry(layer.key.to_owned())
-                .or_insert(false);
+    // URL input
+    let url_id = ui.id().with("arcgis_url_input");
+    let mut url_buf: String = ui.data(|d| d.get_temp(url_id).unwrap_or_default());
 
-            egui::Frame::new()
-                .fill(if *enabled {
-                    theme::selected_item_fill()
-                } else {
-                    theme::item_fill()
-                })
-                .corner_radius(6.0)
-                .inner_margin(egui::Margin::symmetric(10, 8))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        // Colour swatch dot
-                        let (rect, _) = ui.allocate_exact_size(
-                            egui::vec2(10.0, 10.0),
-                            egui::Sense::hover(),
-                        );
-                        ui.painter().circle_filled(rect.center(), 5.0, col);
-
-                        ui.checkbox(enabled, layer.display_name);
-
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                let status = s2_underground::layer_status(layer.key);
-                                ui.small(
-                                    egui::RichText::new(&status).color(
-                                        if status.starts_with("error") || status.starts_with("HTTP") {
-                                            egui::Color32::from_rgb(210, 80, 80)
-                                        } else if status == "loading\u{2026}" {
-                                            theme::text_muted()
-                                        } else {
-                                            col.gamma_multiply(0.85)
-                                        },
-                                    ),
-                                );
-                            },
-                        );
-                    });
+    ui.horizontal(|ui| {
+        let te = ui.add(
+            egui::TextEdit::singleline(&mut url_buf)
+                .hint_text("ArcGIS FeatureServer URL\u{2026}")
+                .desired_width(ui.available_width() - 90.0),
+        );
+        let add_clicked = ui.button("Add Source").clicked();
+        if (add_clicked || (te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))))
+            && !url_buf.trim().is_empty()
+        {
+            let canonical = arcgis_source::normalize_url(&url_buf);
+            if !model.arcgis_sources.iter().any(|s| arcgis_source::normalize_url(&s.url) == canonical) {
+                let color_offset = model.arcgis_sources.len() * 2;
+                arcgis_source::add_source(canonical.clone(), color_offset, ui.ctx().clone());
+                model.arcgis_sources.push(crate::model::ArcGisSourceRef {
+                    url: canonical,
+                    enabled_layer_ids: std::collections::HashSet::new(),
                 });
-
-            ui.add_space(4.0);
+                url_buf.clear();
+            }
         }
+        ui.data_mut(|d| d.insert_temp(url_id, url_buf.clone()));
+    });
 
-        // Summary count of total loaded events
-        let total: usize = s2_underground::LAYERS
-            .iter()
-            .filter(|l| model.s2_layer_enabled.get(l.key).copied().unwrap_or(false))
-            .map(|l| {
-                let status = s2_underground::layer_status(l.key);
-                // Parse "N events" from status
-                status
-                    .split_whitespace()
-                    .next()
-                    .and_then(|n| n.parse::<usize>().ok())
-                    .unwrap_or(0)
-            })
-            .sum();
+    ui.add_space(6.0);
 
-        if total > 0 {
-            ui.add_space(8.0);
+    // Source list
+    let mut to_remove: Option<usize> = None;
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for (si, src_ref) in model.arcgis_sources.iter_mut().enumerate() {
+            let snap = arcgis_source::source_snapshot(&src_ref.url);
+
+            ui.horizontal(|ui| {
+                // Source name / status
+                if let Some(ref s) = snap {
+                    if s.discovering {
+                        ui.label("Discovering\u{2026}");
+                    } else if let Some(ref e) = s.discover_error {
+                        ui.colored_label(egui::Color32::from_rgb(200, 80, 80), format!("Error: {e}"));
+                    } else {
+                        let layer_count = s.layers.as_ref().map(|l| l.len()).unwrap_or(0);
+                        ui.strong(format!(
+                            "{} ({} layer{})",
+                            s.display_name,
+                            layer_count,
+                            if layer_count == 1 { "" } else { "s" }
+                        ));
+                    }
+                } else {
+                    ui.label(&src_ref.url);
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("\u{2715}").clicked() {
+                        to_remove = Some(si);
+                    }
+                });
+            });
+
+            // Layer checkboxes
+            if let Some(ref s) = snap {
+                if let Some(ref layers) = s.layers {
+                    for layer in layers {
+                        let mut enabled = src_ref.enabled_layer_ids.contains(&layer.id);
+                        ui.horizontal(|ui| {
+                            ui.add_space(12.0);
+                            // Color swatch
+                            let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                            ui.painter().circle_filled(rect.center(), 4.0, layer.color);
+
+                            if ui.checkbox(&mut enabled, &layer.name).changed() {
+                                if enabled {
+                                    src_ref.enabled_layer_ids.insert(layer.id);
+                                } else {
+                                    src_ref.enabled_layer_ids.remove(&layer.id);
+                                }
+                            }
+
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let status = s.layer_status.get(&layer.id).cloned().unwrap_or_default();
+                                if !status.is_empty() {
+                                    ui.colored_label(theme::text_muted(), status);
+                                }
+                            });
+                        });
+                    }
+                }
+            }
+
             ui.separator();
-            ui.add_space(4.0);
-            ui.colored_label(theme::text_muted(), format!("{total} total events loaded"));
         }
     });
+
+    if let Some(i) = to_remove {
+        let url = model.arcgis_sources[i].url.clone();
+        arcgis_source::remove_source(&url);
+        model.arcgis_sources.remove(i);
+    }
+
+    // Footer count
+    let total = model.arcgis_features.len();
+    if total > 0 {
+        ui.label(egui::RichText::new(format!("{total} features loaded")).small().color(theme::text_muted()));
+    }
 }

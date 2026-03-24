@@ -7,7 +7,7 @@ mod factal_stream;
 mod model;
 mod flight_tracks;
 mod moving_tracks;
-mod s2_underground;
+mod arcgis_source;
 mod osm_ingest;
 mod panels;
 mod settings_store;

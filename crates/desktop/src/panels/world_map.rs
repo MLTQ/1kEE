@@ -10,10 +10,10 @@ mod srtm_stream;
 mod terrain_field;
 mod terrain_raster;
 
+use crate::arcgis_source;
 use crate::flight_tracks;
 use crate::model::{AppModel, FlightCategory};
 use crate::moving_tracks;
-use crate::s2_underground;
 use crate::osm_ingest;
 use crate::theme;
 use std::sync::{Mutex, OnceLock};
@@ -64,10 +64,12 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
             );
         }
 
-        // Poll S2Underground layers
-        if !model.globe_view.local_mode {
-            model.s2_events =
-                s2_underground::poll_enabled(&model.s2_layer_enabled.clone(), ui.ctx().clone());
+        // Poll ArcGIS sources (non-blocking)
+        {
+            let source_refs: Vec<(String, std::collections::HashSet<u32>)> = model.arcgis_sources.iter()
+                .map(|s| (s.url.clone(), s.enabled_layer_ids.clone()))
+                .collect();
+            model.arcgis_features = arcgis_source::poll(&source_refs, ui.ctx().clone());
         }
 
         let local_terrain_mode = local_terrain_scene::is_active(model);
@@ -137,15 +139,16 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
                     .find(|(_, marker)| marker.distance(pointer) <= 11.0)
                 {
                     model.select_event(event_id);
-                } else if let Some((s2_id, _)) = scene
-                    .s2_event_markers
+                } else if let Some((src_url, obj_id, _)) = scene
+                    .arcgis_feature_markers
                     .iter()
-                    .find(|(_, marker)| marker.distance(pointer) <= 10.0)
+                    .find(|(_, _, marker_pos)| marker_pos.distance(pointer) <= 10.0)
                 {
-                    if model.selected_s2_event_id == Some(*s2_id) {
-                        model.selected_s2_event_id = None;
+                    let key = (src_url.clone(), *obj_id);
+                    if model.selected_arcgis_feature.as_ref() == Some(&key) {
+                        model.selected_arcgis_feature = None;
                     } else {
-                        model.selected_s2_event_id = Some(*s2_id);
+                        model.selected_arcgis_feature = Some(key);
                     }
                 }
             }
@@ -156,7 +159,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         draw_flight_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
         draw_ship_detail_panel(ui.ctx(), model);
         draw_flight_detail_panel(ui.ctx(), model);
-        draw_s2_detail_panel(ui.ctx(), model);
+        draw_arcgis_detail_panel(ui.ctx(), model);
         if let Some(hover) = response.hover_pos() {
             if !model.globe_view.local_mode {
                 if let Some(geo) = globe_scene::screen_to_latlon(rect, &model.globe_view, hover) {
@@ -1006,121 +1009,81 @@ fn draw_globe_coord_overlay(ctx: &egui::Context, geo: crate::model::GeoPoint, re
         });
 }
 
-fn draw_s2_detail_panel(ctx: &egui::Context, model: &mut AppModel) {
-    let Some(selected_id) = model.selected_s2_event_id else {
+fn draw_arcgis_detail_panel(ctx: &egui::Context, model: &mut AppModel) {
+    let Some((ref src_url, obj_id)) = model.selected_arcgis_feature.clone() else {
         return;
     };
-    let Some(event) = model.s2_events.iter().find(|e| e.object_id == selected_id) else {
+    let Some(feat) = model.arcgis_features.iter()
+        .find(|f| f.source_url == *src_url && f.object_id == obj_id)
+        .cloned()
+    else {
         return;
     };
-    // Clone what we need to avoid borrow issues
-    let event = event.clone();
-    let col = crate::s2_underground::layer_color(&event.layer_key);
-    let layer_name = crate::s2_underground::LAYERS
-        .iter()
-        .find(|l| l.key == event.layer_key)
-        .map(|l| l.display_name)
-        .unwrap_or("S2Underground Event");
+
+    let col = arcgis_source::feature_color(&feat);
+
+    // Get source/layer name for the title
+    let snap = arcgis_source::source_snapshot(&feat.source_url);
+    let source_name = snap.as_ref().map(|s| s.display_name.as_str()).unwrap_or("ArcGIS Feature");
+    let layer_name = snap.as_ref()
+        .and_then(|s| s.layers.as_ref())
+        .and_then(|ls| ls.iter().find(|l| l.id == feat.layer_id))
+        .map(|l| l.name.as_str())
+        .unwrap_or("")
+        .to_owned();
 
     let mut open = true;
-    egui::Window::new("S2 Event Detail")
-        .id("s2_detail_panel".into())
+    egui::Window::new("Feature Detail")
+        .id("arcgis_detail_panel".into())
         .open(&mut open)
-        .resizable(false)
+        .resizable(true)
         .min_width(280.0)
-        .frame(
-            egui::Frame::window(&ctx.style())
-                .stroke(egui::Stroke::new(1.5, col)),
-        )
+        .frame(egui::Frame::window(&ctx.style()).stroke(egui::Stroke::new(1.5, col)))
         .show(ctx, |ui| {
-            ui.colored_label(col, layer_name);
+            ui.colored_label(col, source_name);
+            if !layer_name.is_empty() {
+                ui.small(&layer_name);
+            }
             ui.separator();
 
-            // Date
-            if let Some(ms) = event.date_ms {
+            if let Some(ms) = feat.date_ms {
                 ui.horizontal(|ui| {
                     ui.strong("Date:");
-                    ui.label(crate::s2_underground::format_date(ms));
+                    ui.label(arcgis_source::format_date(ms));
                 });
             }
 
-            // Location
-            let ns = if event.location.lat >= 0.0 { 'N' } else { 'S' };
-            let ew = if event.location.lon >= 0.0 { 'E' } else { 'W' };
+            let ns = if feat.location.lat >= 0.0 { 'N' } else { 'S' };
+            let ew = if feat.location.lon >= 0.0 { 'E' } else { 'W' };
             ui.horizontal(|ui| {
                 ui.strong("Location:");
                 ui.label(egui::RichText::new(format!(
                     "{:.4}°{}  {:.4}°{}",
-                    event.location.lat.abs(), ns,
-                    event.location.lon.abs(), ew,
+                    feat.location.lat.abs(), ns, feat.location.lon.abs(), ew,
                 )).monospace().small());
             });
 
-            if let Some(addr) = &event.address {
-                if !addr.is_empty() {
-                    ui.horizontal(|ui| {
-                        ui.strong("Address:");
-                        ui.label(addr);
-                    });
-                }
-            }
-
             ui.add_space(4.0);
 
-            if let Some(attack) = &event.attack_type {
-                ui.horizontal(|ui| {
-                    ui.strong("Type:");
-                    ui.label(attack);
-                });
-            }
-            if let Some(motive) = &event.motive {
-                if !motive.is_empty() {
-                    ui.horizontal(|ui| {
-                        ui.strong("Motive:");
-                        ui.label(motive);
+            // All attributes as key-value pairs
+            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                egui::Grid::new("arcgis_attr_grid")
+                    .num_columns(2)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for (key, val) in &feat.attributes {
+                            // Skip date fields already shown above
+                            if key.eq_ignore_ascii_case("Date") || key.eq_ignore_ascii_case("date") {
+                                continue;
+                            }
+                            ui.strong(key);
+                            ui.label(val);
+                            ui.end_row();
+                        }
                     });
-                }
-            }
-            if let Some(notes) = &event.notes {
-                if !notes.is_empty() {
-                    ui.add_space(4.0);
-                    ui.strong("Notes:");
-                    ui.label(notes);
-                }
-            }
-
-            // Casualties section
-            if event.has_casualties() {
-                ui.add_space(4.0);
-                ui.separator();
-                ui.colored_label(egui::Color32::from_rgb(220, 60, 60), "Casualties");
-                egui::Grid::new("casualties_grid").num_columns(3).show(ui, |ui| {
-                    ui.label("");
-                    ui.strong("Killed");
-                    ui.strong("Wounded");
-                    ui.end_row();
-                    if event.civilian_killed.unwrap_or(0) > 0 || event.civilian_wounded.unwrap_or(0) > 0 {
-                        ui.label("Civilian");
-                        ui.label(event.civilian_killed.unwrap_or(0).to_string());
-                        ui.label(event.civilian_wounded.unwrap_or(0).to_string());
-                        ui.end_row();
-                    }
-                    if event.friendly_killed.unwrap_or(0) > 0 || event.friendly_wounded.unwrap_or(0) > 0 {
-                        ui.label("Friendly");
-                        ui.label(event.friendly_killed.unwrap_or(0).to_string());
-                        ui.label(event.friendly_wounded.unwrap_or(0).to_string());
-                        ui.end_row();
-                    }
-                    if event.enemy_killed.unwrap_or(0) > 0 || event.enemy_wounded.unwrap_or(0) > 0 {
-                        ui.label("Enemy");
-                        ui.label(event.enemy_killed.unwrap_or(0).to_string());
-                        ui.label(event.enemy_wounded.unwrap_or(0).to_string());
-                        ui.end_row();
-                    }
-                });
-            }
+            });
         });
     if !open {
-        model.selected_s2_event_id = None;
+        model.selected_arcgis_feature = None;
     }
 }

@@ -1,5 +1,5 @@
-use crate::model::{AppModel, EventRecord, FlightCategory, FlightTrack, GeoPoint, GlobeViewState, MovingTrack, S2Event};
-use crate::s2_underground;
+use crate::arcgis_source;
+use crate::model::{AppModel, ArcGisFeature, EventRecord, FlightCategory, FlightTrack, GeoPoint, GlobeViewState, MovingTrack};
 use crate::theme;
 
 use super::camera::{self, GlobeLod};
@@ -15,8 +15,8 @@ pub struct GlobeScene {
     pub ship_markers: Vec<(u64, egui::Pos2)>,
     /// ICAO24 → screen position for hover detection.
     pub flight_markers: Vec<(String, egui::Pos2)>,
-    /// object_id → screen position for S2Underground click detection.
-    pub s2_event_markers: Vec<(i64, egui::Pos2)>,
+    /// (source_url, object_id, screen_pos) for ArcGIS feature click detection.
+    pub arcgis_feature_markers: Vec<(String, i64, egui::Pos2)>,
     /// Terrain elevation (metres) at the beam contact point, if available.
     pub beam_elevation_m: Option<f32>,
 }
@@ -182,9 +182,10 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         );
     }
 
-    // ── S2Underground event markers ────────────────────────────────────────
-    let s2_event_markers = if !model.globe_view.local_mode && !model.s2_events.is_empty() {
-        draw_s2_events(painter, &layout, &model.globe_view, &model.s2_events, model.selected_s2_event_id)
+    // ── ArcGIS feature markers ─────────────────────────────────────────────
+    let arcgis_feature_markers = if !model.globe_view.local_mode && !model.arcgis_features.is_empty() {
+        draw_arcgis_features(painter, &layout, &model.globe_view, &model.arcgis_features,
+            model.selected_arcgis_feature.as_ref())
     } else {
         Vec::new()
     };
@@ -231,37 +232,39 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         camera_markers,
         ship_markers,
         flight_markers,
-        s2_event_markers,
+        arcgis_feature_markers,
         beam_elevation_m: None,
     }
 }
 
-/// Draw S2Underground incident markers as filled circles with glow halos.
-/// Color is per-layer (distinct from Factal event beams and flight triangles).
-/// Events with casualties get a larger outer ring.
-/// Returns a list of (object_id, screen_pos) pairs for click detection.
-fn draw_s2_events(
+/// Draw ArcGIS feature markers as filled circles with glow halos.
+/// Color is per-layer. Features with casualties get a larger outer ring.
+/// Returns a list of (source_url, object_id, screen_pos) for click detection.
+fn draw_arcgis_features(
     painter: &egui::Painter,
     layout: &GlobeLayout,
     view: &GlobeViewState,
-    events: &[S2Event],
-    selected_s2_event_id: Option<i64>,
-) -> Vec<(i64, egui::Pos2)> {
+    features: &[ArcGisFeature],
+    selected: Option<&(String, i64)>,
+) -> Vec<(String, i64, egui::Pos2)> {
     let mut markers = Vec::new();
-    for event in events {
-        let Some(proj) = project_geo(layout, view, event.location, 0.0) else {
+    for feat in features {
+        let Some(proj) = project_geo(layout, view, feat.location, 0.0) else {
             continue;
         };
         if !proj.front_facing {
             continue;
         }
 
-        let col = s2_underground::layer_color(&event.layer_key);
+        let col = arcgis_source::feature_color(feat);
         let pos = proj.pos;
-        let has_cas = event.has_casualties();
+        let has_cas = feat.has_casualties();
 
-        // White selection ring around the selected event
-        if selected_s2_event_id == Some(event.object_id) {
+        // White selection ring around the selected feature
+        let is_selected = selected
+            .map(|(u, id)| u == &feat.source_url && *id == feat.object_id)
+            .unwrap_or(false);
+        if is_selected {
             painter.circle_stroke(
                 pos,
                 if has_cas { 13.0 } else { 11.0 },
@@ -284,7 +287,7 @@ fn draw_s2_events(
         // Bright centre spot
         painter.circle_filled(pos, 1.2, col.gamma_multiply(1.4));
 
-        markers.push((event.object_id, pos));
+        markers.push((feat.source_url.clone(), feat.object_id, pos));
     }
     markers
 }
