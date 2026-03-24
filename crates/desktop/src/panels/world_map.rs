@@ -3,21 +3,25 @@ pub(crate) mod contour_asset;
 pub(crate) mod gebco_depth_fill;
 pub(crate) mod globe_pass;
 mod globe_scene;
+mod graticule;
 pub(crate) mod local_terrain_pass;
 mod local_terrain_scene;
+mod road_layer;
+mod water_layer;
 pub(crate) mod srtm_focus_cache;
 mod srtm_stream;
 mod terrain_field;
 mod terrain_raster;
+mod map_tooltips;
+mod map_detail_panels;
+mod layer_import;
 
 use crate::arcgis_source;
 use crate::flight_tracks;
-use crate::model::{AppModel, FlightCategory};
+use crate::model::AppModel;
 use crate::moving_tracks;
 use crate::osm_ingest;
 use crate::theme;
-use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
 
 pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
     let panel_frame = egui::Frame::new()
@@ -73,8 +77,8 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         }
 
         let local_terrain_mode = local_terrain_scene::is_active(model);
-        ensure_visible_road_layers(model, local_terrain_mode);
-        ensure_visible_water_layers(model, local_terrain_mode);
+        layer_import::ensure_visible_road_layers(model, local_terrain_mode);
+        layer_import::ensure_visible_water_layers(model, local_terrain_mode);
         draw_layer_bar(ui, model);
 
         ui.add_space(8.0);
@@ -154,11 +158,11 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
             }
         }
 
-        draw_event_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
-        draw_ship_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
-        draw_flight_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
-        draw_ship_detail_panel(ui.ctx(), model);
-        draw_flight_detail_panel(ui.ctx(), model);
+        map_tooltips::draw_event_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
+        map_tooltips::draw_ship_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
+        map_tooltips::draw_flight_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
+        map_detail_panels::draw_ship_detail_panel(ui.ctx(), model);
+        map_detail_panels::draw_flight_detail_panel(ui.ctx(), model);
         draw_arcgis_detail_panel(ui.ctx(), model);
         if let Some(hover) = response.hover_pos() {
             if !model.globe_view.local_mode {
@@ -272,7 +276,7 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                             model.globe_view.local_zoom,
                         );
                         let r = (half_deg * 69.0 * 1.25).clamp(10.0, 150.0);
-                        queue_road_focus_import(
+                        layer_import::queue_road_focus_import(
                             model,
                             model.globe_view.local_center,
                             r,
@@ -287,7 +291,7 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                             model.globe_view.local_zoom,
                         );
                         let r = (half_deg * 69.0 * 1.25).clamp(10.0, 150.0);
-                        queue_water_focus_import(
+                        layer_import::queue_water_focus_import(
                             model,
                             model.globe_view.local_center,
                             r,
@@ -382,472 +386,6 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                 });
             });
         });
-}
-
-fn draw_event_hover_tooltip(
-    ctx: &egui::Context,
-    model: &AppModel,
-    scene: &globe_scene::GlobeScene,
-    hover_pos: Option<egui::Pos2>,
-) {
-    let Some(pointer) = hover_pos else {
-        return;
-    };
-
-    let Some((event_id, marker_pos)) = scene
-        .event_markers
-        .iter()
-        .find(|(_, marker)| marker.distance(pointer) <= 12.0)
-    else {
-        return;
-    };
-
-    let Some(event) = model.events.iter().find(|event| event.id == *event_id) else {
-        return;
-    };
-
-    egui::Area::new("event_hover_tooltip".into())
-        .fixed_pos(*marker_pos + egui::vec2(14.0, -8.0))
-        .interactable(false)
-        .show(ctx, |ui| {
-            egui::Frame::new()
-                .fill(theme::panel_fill(238))
-                .stroke(egui::Stroke::new(1.0, theme::panel_stroke()))
-                .corner_radius(8.0)
-                .inner_margin(egui::Margin::same(8))
-                .show(ui, |ui| {
-                    ui.colored_label(event.severity.color(), event.severity.label());
-                    ui.strong(event.title.as_str());
-                    ui.small(event.location_name.as_str());
-                });
-        });
-}
-
-fn draw_ship_hover_tooltip(
-    ctx: &egui::Context,
-    model: &AppModel,
-    scene: &globe_scene::GlobeScene,
-    hover_pos: Option<egui::Pos2>,
-) {
-    let Some(pointer) = hover_pos else { return };
-
-    // Don't show hover tooltip if a ship is already selected (detail panel visible).
-    if model.selected_track_mmsi.is_some() { return; }
-
-    let Some(&(mmsi, marker_pos)) = scene
-        .ship_markers
-        .iter()
-        .find(|(_, marker)| marker.distance(pointer) <= 12.0)
-    else {
-        return;
-    };
-
-    let Some(track) = model.tracks.iter().find(|t| t.mmsi == mmsi) else {
-        return;
-    };
-
-    egui::Area::new("ship_hover_tooltip".into())
-        .fixed_pos(marker_pos + egui::vec2(14.0, -8.0))
-        .interactable(false)
-        .show(ctx, |ui| {
-            egui::Frame::new()
-                .fill(theme::panel_fill(238))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 210, 180).gamma_multiply(0.5)))
-                .corner_radius(8.0)
-                .inner_margin(egui::Margin::same(8))
-                .show(ui, |ui| {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(40, 210, 180),
-                        track.ship_type_label(),
-                    );
-                    ui.strong(&track.name);
-                    ui.small(format!("MMSI {}", track.mmsi));
-                    if let Some(spd) = track.speed_knots {
-                        ui.small(format!("{:.1} kn", spd));
-                    }
-                });
-        });
-}
-
-fn draw_flight_hover_tooltip(
-    ctx: &egui::Context,
-    model: &AppModel,
-    scene: &globe_scene::GlobeScene,
-    hover_pos: Option<egui::Pos2>,
-) {
-    // Suppress hover tooltip while a flight detail panel is open.
-    if model.selected_flight_icao24.is_some() { return; }
-
-    let Some(pointer) = hover_pos else { return };
-    let Some((icao24, marker_pos)) = scene
-        .flight_markers
-        .iter()
-        .find(|(_, pos)| pos.distance(pointer) <= 12.0)
-    else {
-        return;
-    };
-    let Some(flight) = model.flights.iter().find(|f| &f.icao24 == icao24) else {
-        return;
-    };
-
-    let col = match flight.category() {
-        FlightCategory::Airline  => theme::flight_airline_color(),
-        FlightCategory::Cargo    => theme::flight_cargo_color(),
-        FlightCategory::Military => theme::flight_military_color(),
-        FlightCategory::GA       => theme::flight_ga_color(),
-        FlightCategory::Unknown  => theme::flight_unknown_color(),
-    };
-    let cat_label = match flight.category() {
-        FlightCategory::Airline  => "Airline",
-        FlightCategory::Cargo    => "Cargo",
-        FlightCategory::Military => "Military",
-        FlightCategory::GA       => "General Aviation",
-        FlightCategory::Unknown  => "",
-    };
-
-    egui::Area::new("flight_hover_tooltip".into())
-        .fixed_pos(*marker_pos + egui::vec2(14.0, -8.0))
-        .interactable(false)
-        .show(ctx, |ui| {
-            egui::Frame::new()
-                .fill(theme::panel_fill(238))
-                .stroke(egui::Stroke::new(1.0, col.gamma_multiply(0.5)))
-                .corner_radius(8.0)
-                .inner_margin(egui::Margin::same(8))
-                .show(ui, |ui| {
-                    ui.colored_label(col, format!("✈ {}", flight.label()));
-                    if !cat_label.is_empty() {
-                        ui.small(egui::RichText::new(cat_label).color(col.gamma_multiply(0.75)));
-                    }
-                    ui.small(format!(
-                        "{} {} {}",
-                        flight.altitude_label(),
-                        flight.trend_symbol(),
-                        flight.origin_country.as_deref().unwrap_or(""),
-                    ));
-                    if let Some(spd) = flight.speed_knots {
-                        ui.small(format!("{:.0} kn", spd));
-                    }
-                    ui.small(egui::RichText::new("click for details")
-                        .color(theme::text_muted()));
-                });
-        });
-}
-
-fn draw_ship_detail_panel(ctx: &egui::Context, model: &mut AppModel) {
-    let Some(mmsi) = model.selected_track_mmsi else { return };
-
-    // Clone the data we need so we don't hold a borrow on model.
-    let track = model.tracks.iter().find(|t| t.mmsi == mmsi).cloned();
-
-    let Some(track) = track else {
-        // Vessel has left the cache — deselect.
-        model.selected_track_mmsi = None;
-        return;
-    };
-
-    let mut open = true;
-    let ship_accent = egui::Color32::from_rgb(40, 210, 180);
-
-    egui::Window::new("Vessel Detail")
-        .id("ship_detail_panel".into())
-        .open(&mut open)
-        .default_size(egui::vec2(320.0, 360.0))
-        .resizable(true)
-        .collapsible(false)
-        .frame(
-            egui::Frame::window(&ctx.style())
-                .fill(theme::window_fill())
-                .stroke(egui::Stroke::new(1.0, ship_accent.gamma_multiply(0.5))),
-        )
-        .show(ctx, |ui| {
-            ui.colored_label(ship_accent, track.ship_type_label());
-            ui.heading(&track.name);
-            ui.add_space(6.0);
-
-            egui::Grid::new("vessel_fields")
-                .num_columns(2)
-                .spacing([12.0, 4.0])
-                .show(ui, |ui| {
-                    let mut row = |label: &str, value: &str| {
-                        ui.colored_label(theme::text_muted(), label);
-                        ui.label(value);
-                        ui.end_row();
-                    };
-
-                    row("MMSI", &track.mmsi.to_string());
-
-                    if let Some(imo) = track.imo {
-                        row("IMO", &imo.to_string());
-                    }
-                    if let Some(cs) = &track.callsign {
-                        row("Callsign", cs);
-                    }
-                    row(
-                        "Position",
-                        &format!(
-                            "{:.4}°N  {:.4}°E",
-                            track.location.lat, track.location.lon
-                        ),
-                    );
-                    if let Some(spd) = track.speed_knots {
-                        row("Speed", &format!("{spd:.1} kn"));
-                    }
-                    if let Some(hdg) = track.heading_deg {
-                        row("Heading", &format!("{hdg:.0}°"));
-                    }
-                    if let Some(dest) = &track.destination {
-                        row("Destination", dest);
-                    }
-                    if let Some(eta) = &track.eta_str {
-                        row("ETA", eta);
-                    }
-                    if let Some(d) = track.draught_m {
-                        row("Draught", &format!("{d:.1} m"));
-                    }
-                });
-        });
-
-    if !open {
-        model.selected_track_mmsi = None;
-    }
-}
-
-fn draw_flight_detail_panel(ctx: &egui::Context, model: &mut AppModel) {
-    let Some(ref icao24) = model.selected_flight_icao24.clone() else { return };
-
-    // Deselect if the flight has left the active list.
-    let flight = model.flights.iter().find(|f| f.icao24 == *icao24).cloned();
-    let Some(flight) = flight else {
-        model.selected_flight_icao24 = None;
-        return;
-    };
-
-    let accent = match flight.category() {
-        FlightCategory::Airline  => theme::flight_airline_color(),
-        FlightCategory::Cargo    => theme::flight_cargo_color(),
-        FlightCategory::Military => theme::flight_military_color(),
-        FlightCategory::GA       => theme::flight_ga_color(),
-        FlightCategory::Unknown  => theme::flight_unknown_color(),
-    };
-    let cat_label = match flight.category() {
-        FlightCategory::Airline  => "Scheduled Airline",
-        FlightCategory::Cargo    => "Cargo / Freight",
-        FlightCategory::Military => "Military / Government",
-        FlightCategory::GA       => "General Aviation",
-        FlightCategory::Unknown  => "Unknown",
-    };
-
-    let mut open = true;
-    egui::Window::new("Flight Detail")
-        .id("flight_detail_panel".into())
-        .open(&mut open)
-        .default_size(egui::vec2(300.0, 340.0))
-        .resizable(true)
-        .collapsible(false)
-        .frame(
-            egui::Frame::window(&ctx.style())
-                .fill(theme::window_fill())
-                .stroke(egui::Stroke::new(1.0, accent.gamma_multiply(0.5))),
-        )
-        .show(ctx, |ui| {
-            ui.colored_label(accent, cat_label);
-            ui.heading(format!("✈ {}", flight.label()));
-            ui.add_space(6.0);
-
-            egui::Grid::new("flight_fields")
-                .num_columns(2)
-                .spacing([12.0, 4.0])
-                .show(ui, |ui| {
-                    let mut row = |label: &str, value: &str| {
-                        ui.colored_label(theme::text_muted(), label);
-                        ui.label(value);
-                        ui.end_row();
-                    };
-
-                    row("ICAO24", &flight.icao24);
-                    if let Some(cs) = &flight.callsign {
-                        row("Callsign", cs);
-                    }
-                    if let Some(country) = &flight.origin_country {
-                        row("Origin", country);
-                    }
-                    row(
-                        "Position",
-                        &format!("{:.4}°N  {:.4}°E", flight.location.lat, flight.location.lon),
-                    );
-                    row(
-                        "Altitude",
-                        &format!("{} {}", flight.altitude_label(), flight.trend_symbol()),
-                    );
-                    if let Some(spd) = flight.speed_knots {
-                        row("Speed", &format!("{spd:.0} kn"));
-                    }
-                    if let Some(hdg) = flight.heading_deg {
-                        row("Heading", &format!("{hdg:.0}°"));
-                    }
-                    if let Some(vr) = flight.vertical_rate_fpm {
-                        row("Vert. rate", &format!("{vr:+.0} fpm"));
-                    }
-                });
-
-            ui.add_space(8.0);
-            ui.separator();
-            ui.add_space(4.0);
-
-            // ── Metadata section ───────────────────────────────────────────
-            if flight_tracks::is_meta_loading(&flight.icao24) {
-                ui.colored_label(theme::text_muted(), "⏳ Loading aircraft data…");
-            } else if let Some(meta) = flight_tracks::get_metadata(&flight.icao24) {
-                egui::Grid::new("meta_fields")
-                    .num_columns(2)
-                    .spacing([12.0, 4.0])
-                    .show(ui, |ui| {
-                        let mut row = |label: &str, value: &str| {
-                            ui.colored_label(theme::text_muted(), label);
-                            ui.label(value);
-                            ui.end_row();
-                        };
-                        if let Some(reg) = &meta.registration {
-                            row("Registration", reg);
-                        }
-                        if let Some(mfr) = &meta.manufacturer {
-                            row("Manufacturer", mfr);
-                        }
-                        if let Some(mdl) = &meta.model {
-                            row("Model", mdl);
-                        }
-                        if let Some(tc) = &meta.typecode {
-                            row("Type", tc);
-                        }
-                        if let Some(op) = &meta.operator {
-                            row("Operator", op);
-                        }
-                        if let Some(opc) = &meta.operator_callsign {
-                            row("Op. callsign", opc);
-                        }
-                        if let Some(own) = &meta.owner {
-                            row("Owner", own);
-                        }
-                    });
-            } else {
-                ui.colored_label(theme::text_muted(), "No aircraft record found.");
-            }
-        });
-
-    if !open {
-        model.selected_flight_icao24 = None;
-    }
-}
-
-fn ensure_visible_road_layers(model: &mut AppModel, local_terrain_mode: bool) {
-    if !local_terrain_mode || (!model.show_major_roads && !model.show_minor_roads) {
-        return;
-    }
-
-    // Rate-limit: only attempt queue checks twice per second.  The actual
-    // queue check is now O(1) thanks to in-memory caches, but calling
-    // ensure_runtime_store (which opens SQLite) on every frame is still
-    // wasteful when nothing has changed.
-    static LAST_CHECK: OnceLock<Mutex<Instant>> = OnceLock::new();
-    {
-        let mut last = LAST_CHECK
-            .get_or_init(|| Mutex::new(Instant::now() - std::time::Duration::from_secs(10)))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if last.elapsed() < std::time::Duration::from_millis(500) {
-            return;
-        }
-        *last = Instant::now();
-    }
-
-    if osm_ingest::has_active_jobs(model.selected_root.as_deref()) {
-        return;
-    }
-
-    // Radius = viewport half-extent in miles, so the import always covers
-    // the full visible area regardless of zoom level.
-    let half_deg = local_terrain_scene::visual_half_extent_for_zoom(model.globe_view.local_zoom);
-    let radius_miles = (half_deg * 69.0 * 1.25).clamp(10.0, 150.0);
-
-    if let Some(focus) = model.terrain_focus_location() {
-        queue_road_focus_import(model, focus, radius_miles, "terrain focus");
-    }
-
-    let center = model.globe_view.local_center;
-    if model
-        .terrain_focus_location()
-        .map(|focus| (focus.lat - center.lat).abs() > 0.15 || (focus.lon - center.lon).abs() > 0.15)
-        .unwrap_or(true)
-    {
-        queue_road_focus_import(model, center, radius_miles, "map viewport");
-    }
-}
-
-fn ensure_visible_water_layers(model: &mut AppModel, local_terrain_mode: bool) {
-    if !local_terrain_mode || !model.show_water {
-        return;
-    }
-
-    static LAST_WATER_CHECK: OnceLock<Mutex<Instant>> = OnceLock::new();
-    {
-        let mut last = LAST_WATER_CHECK
-            .get_or_init(|| Mutex::new(Instant::now() - std::time::Duration::from_secs(10)))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if last.elapsed() < std::time::Duration::from_millis(500) {
-            return;
-        }
-        *last = Instant::now();
-    }
-
-    if osm_ingest::has_active_jobs(model.selected_root.as_deref()) {
-        return;
-    }
-
-    let half_deg = local_terrain_scene::visual_half_extent_for_zoom(model.globe_view.local_zoom);
-    let radius_miles = (half_deg * 69.0 * 1.25).clamp(10.0, 150.0);
-
-    if let Some(focus) = model.terrain_focus_location() {
-        queue_water_focus_import(model, focus, radius_miles, "terrain focus");
-    }
-
-    let center = model.globe_view.local_center;
-    if model
-        .terrain_focus_location()
-        .map(|focus| (focus.lat - center.lat).abs() > 0.15 || (focus.lon - center.lon).abs() > 0.15)
-        .unwrap_or(true)
-    {
-        queue_water_focus_import(model, center, radius_miles, "map viewport");
-    }
-}
-
-fn queue_road_focus_import(model: &mut AppModel, point: crate::model::GeoPoint, radius_miles: f32, label: &str) {
-    match osm_ingest::queue_focus_roads_import(model.selected_root.as_deref(), point, radius_miles) {
-        Ok(true) => {
-            model.push_log(format!("Queued focused road import for the {label}."));
-            model.osm_inventory =
-                osm_ingest::OsmInventory::detect_from(model.selected_root.as_deref());
-        }
-        Ok(false) => {}
-        Err(error) => {
-            model.push_log(format!("Focused road import failed: {error}"));
-        }
-    }
-}
-
-fn queue_water_focus_import(model: &mut AppModel, point: crate::model::GeoPoint, radius_miles: f32, label: &str) {
-    match osm_ingest::queue_focus_water_import(model.selected_root.as_deref(), point, radius_miles) {
-        Ok(true) => {
-            model.push_log(format!("Queued focused water import for the {label}."));
-            model.osm_inventory =
-                osm_ingest::OsmInventory::detect_from(model.selected_root.as_deref());
-        }
-        Ok(false) => {}
-        Err(error) => {
-            model.push_log(format!("Focused water import failed: {error}"));
-        }
-    }
 }
 
 fn draw_focus_card(ui: &mut egui::Ui, model: &AppModel, local_terrain_mode: bool) {

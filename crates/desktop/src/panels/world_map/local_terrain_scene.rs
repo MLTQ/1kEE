@@ -1,9 +1,8 @@
 use crate::model::{AppModel, EventRecord, GeoPoint, GlobeViewState, NearbyCamera};
-use crate::osm_ingest::{self, GeoBounds as OsmGeoBounds, RoadLayerKind, RoadPolyline, WaterPolyline};
+use crate::osm_ingest::{self, GeoBounds as OsmGeoBounds};
 use crate::terrain_assets;
 use crate::theme;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
 
 use super::contour_asset;
 use super::globe_scene::GlobeScene;
@@ -16,9 +15,9 @@ pub const LOCAL_TRANSITION_START_ZOOM: f32 = 4.0;
 #[allow(dead_code)]
 pub const LOCAL_MODE_MIN_ZOOM: f32 = 25.0;
 const LOCAL_STREAM_RADIUS: i32 = 2;
-const BASE_VERTICAL_EXAGGERATION: f32 = 2.1;
+pub(super) const BASE_VERTICAL_EXAGGERATION: f32 = 2.1;
 
-struct LocalLayout {
+pub(super) struct LocalLayout {
     center: egui::Pos2,
     focus_center: egui::Pos2,
     width: f32,
@@ -27,9 +26,9 @@ struct LocalLayout {
 }
 
 #[derive(Clone, Copy)]
-struct ProjectedLocalPoint {
-    pos: egui::Pos2,
-    depth: f32,
+pub(super) struct ProjectedLocalPoint {
+    pub(super) pos: egui::Pos2,
+    pub(super) depth: f32,
 }
 
 pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: f64) -> GlobeScene {
@@ -109,7 +108,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             contours_slice,
             1.0,
         );
-        draw_roads(
+        super::road_layer::draw_roads(
             painter,
             &layout,
             &model.globe_view,
@@ -119,7 +118,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             model.show_major_roads,
             model.show_minor_roads,
         );
-        draw_water(
+        super::water_layer::draw_water(
             painter,
             &layout,
             &model.globe_view,
@@ -842,461 +841,28 @@ fn draw_contour_stack(
     }
 }
 
-// ── Road tile cache ────────────────────────────────────────────────────────
-// Road geometry is fetched from SQLite and cached until the tile coverage
-// actually changes.  Opening a DB connection + running a query on every
-// frame was the source of the 2-5 FPS regression.
 
-/// A road polyline with elevation pre-sampled for every vertex.
-/// Elevation is computed once at cache-load time so `draw_road_layer`
-/// only has to do fast projection math on each frame.
-struct ElevatedRoad {
-    points: Vec<(GeoPoint, f32)>, // (position, elevation_m above ground)
-}
-
-impl ElevatedRoad {
-    /// Build an elevated road, sampling SRTM elevation at every `elev_step`-th
-    /// vertex and linearly interpolating the rest.  Use `elev_step = 1` for
-    /// major roads (full fidelity) and a larger value for minor roads to cap
-    /// the number of expensive per-point SRTM lookups.
-    fn from_polyline(
-        poly: &osm_ingest::RoadPolyline,
-        selected_root: Option<&Path>,
-        elev_step: usize,
-    ) -> Self {
-        let pts = &poly.points;
-        let n = pts.len();
-        if n == 0 {
-            return Self { points: Vec::new() };
-        }
-        let step = elev_step.max(1);
-
-        // Sample elevation at every `step`-th index (always including last).
-        let mut sampled: Vec<(usize, f32)> = (0..n)
-            .step_by(step)
-            .map(|i| {
-                let e = srtm_stream::sample_elevation_m(selected_root, pts[i]).unwrap_or(0.0) + 3.0;
-                (i, e)
-            })
-            .collect();
-        if sampled.last().map(|&(i, _)| i) != Some(n - 1) {
-            let e = srtm_stream::sample_elevation_m(selected_root, pts[n - 1]).unwrap_or(0.0) + 3.0;
-            sampled.push((n - 1, e));
-        }
-
-        // Linearly interpolate elevations for skipped vertices.
-        let mut elevations = vec![0.0f32; n];
-        for w in sampled.windows(2) {
-            let (i0, e0) = w[0];
-            let (i1, e1) = w[1];
-            for i in i0..=i1 {
-                let t = if i1 > i0 { (i - i0) as f32 / (i1 - i0) as f32 } else { 0.0 };
-                elevations[i] = e0 + (e1 - e0) * t;
-            }
-        }
-
-        let points = pts.iter().zip(elevations).map(|(&pt, e)| (pt, e)).collect();
-        Self { points }
-    }
-}
+// ── Road / Water cache public API ─────────────────────────────────────────
+// The implementations live in the sibling modules road_layer and water_layer.
 
 /// Clear the road tile cache so the next draw reloads from SQLite.
-/// Call this whenever the road layer checkboxes change.
 pub fn invalidate_road_cache() {
-    if let Ok(mut g) = road_cache().lock() {
-        g.cache = None;
-        // Leave `building` alone — any in-flight thread will finish and
-        // write a result; the stale check will then trigger a fresh build.
-    }
+    super::road_layer::invalidate_road_cache();
 }
 
 /// True while a background road-cache build is in progress.
 pub fn road_cache_building() -> bool {
-    road_cache().lock().map(|g| g.building).unwrap_or(false)
-}
-
-struct RoadCache {
-    tile_zoom: u8,
-    tile_x_min: u32,
-    tile_x_max: u32,
-    tile_y_min: u32,
-    tile_y_max: u32,
-    road_gen: u64,
-    had_major: bool,
-    had_minor: bool,
-    /// Raw geometry from SQLite — built in a background thread (no SRTM I/O).
-    major_polys: Vec<RoadPolyline>,
-    minor_polys: Vec<RoadPolyline>,
-    /// Elevation-enriched roads, populated lazily on first render so that SRTM
-    /// tiles are guaranteed to be in the hot tile-LRU when we sample them.
-    major_elevated: Option<Vec<ElevatedRoad>>,
-    minor_elevated: Option<Vec<ElevatedRoad>>,
-}
-
-struct RoadCacheStore {
-    cache: Option<RoadCache>,
-    /// True while a background thread is building new geometry.
-    building: bool,
-}
-
-fn road_cache() -> &'static Mutex<RoadCacheStore> {
-    static CACHE: OnceLock<Mutex<RoadCacheStore>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(RoadCacheStore { cache: None, building: false }))
-}
-
-fn draw_roads(
-    painter: &egui::Painter,
-    layout: &LocalLayout,
-    view: &GlobeViewState,
-    selected_root: Option<&Path>,
-    viewport_center: GeoPoint,
-    render_zoom: f32,
-    show_major_roads: bool,
-    show_minor_roads: bool,
-) {
-    if !show_major_roads && !show_minor_roads {
-        if let Ok(mut g) = road_cache().lock() { g.cache = None; }
-        return;
-    }
-
-    let bounds = local_geo_bounds(viewport_center, view.local_zoom);
-    let tile_zoom = road_tile_zoom(render_zoom);
-    let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
-    let km_per_deg_lat = 111.32f32;
-    let km_per_deg_lon = km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
-    let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
-    let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
-
-    let (x0, y0) = osm_ingest::lat_lon_to_tile(bounds.max_lat, bounds.min_lon, tile_zoom);
-    let (x1, y1) = osm_ingest::lat_lon_to_tile(bounds.min_lat, bounds.max_lon, tile_zoom);
-    let (txmin, txmax) = (x0.min(x1), x0.max(x1));
-    let (tymin, tymax) = (y0.min(y1), y0.max(y1));
-    const MARGIN: u32 = 1;
-    let current_gen = osm_ingest::road_data_generation();
-
-    // ── Stale check + background build launch ─────────────────────────────
-    {
-        let mut store = match road_cache().lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-        let stale = store.cache.as_ref().map_or(true, |c| {
-            c.tile_zoom != tile_zoom
-                || c.road_gen != current_gen
-                || c.had_major != show_major_roads
-                || c.had_minor != show_minor_roads
-                || c.tile_x_min > txmin
-                || c.tile_x_max < txmax
-                || c.tile_y_min > tymin
-                || c.tile_y_max < tymax
-        });
-
-        if stale && !store.building {
-            let (lxmin, lxmax) = (txmin.saturating_sub(MARGIN), txmax + MARGIN);
-            let (lymin, lymax) = (tymin.saturating_sub(MARGIN), tymax + MARGIN);
-            store.building = true;
-            drop(store); // release lock before spawning
-
-            // No SRTM I/O in the background thread — geometry only.
-            // Elevation is sampled lazily on the first render call so that the
-            // SRTM tile LRU is guaranteed warm (contours have already loaded tiles).
-            let root_buf = selected_root.map(|p| p.to_path_buf());
-            std::thread::spawn(move || {
-                let root_ref = root_buf.as_deref();
-                let major_polys = if show_major_roads {
-                    osm_ingest::load_roads_for_bounds(root_ref, bounds, tile_zoom, RoadLayerKind::Major)
-                } else { Vec::new() };
-                let minor_polys = if show_minor_roads {
-                    osm_ingest::load_roads_for_bounds(root_ref, bounds, tile_zoom, RoadLayerKind::Minor)
-                } else { Vec::new() };
-
-                if let Ok(mut store) = road_cache().lock() {
-                    store.cache = Some(RoadCache {
-                        tile_zoom,
-                        tile_x_min: lxmin, tile_x_max: lxmax,
-                        tile_y_min: lymin, tile_y_max: lymax,
-                        road_gen: current_gen,
-                        had_major: show_major_roads,
-                        had_minor: show_minor_roads,
-                        major_polys,
-                        minor_polys,
-                        major_elevated: None,
-                        minor_elevated: None,
-                    });
-                    store.building = false;
-                }
-                crate::app::request_repaint();
-            });
-        }
-        // `store` dropped here (or already explicitly dropped above)
-    }
-
-    // ── Render from whatever cache is currently ready ───────────────────
-    // Lazily build elevation-enriched roads on first render after a cache
-    // update.  By now the SRTM tile LRU is warm (contour rendering already
-    // loaded the tiles), so every sample_elevation_m call hits the in-memory
-    // tile cache instead of disk.
-    let mut store = match road_cache().lock() {
-        Ok(g) => g,
-        Err(_) => return,
-    };
-    let Some(cache) = &mut store.cache else { return };
-
-    if show_major_roads && cache.major_elevated.is_none() {
-        cache.major_elevated = Some(
-            cache.major_polys.iter()
-                .map(|p| ElevatedRoad::from_polyline(p, selected_root, 1))
-                .collect(),
-        );
-    }
-    if show_minor_roads && cache.minor_elevated.is_none() {
-        cache.minor_elevated = Some(
-            cache.minor_polys.iter()
-                .map(|p| ElevatedRoad::from_polyline(p, selected_root, 5))
-                .collect(),
-        );
-    }
-
-    if show_minor_roads {
-        if let Some(minor) = &cache.minor_elevated {
-            draw_road_layer(painter, layout, view, viewport_center,
-                extent_x_km, extent_y_km, minor,
-                egui::Stroke::new(0.8, egui::Color32::from_rgb(116, 132, 142)));
-        }
-    }
-    if show_major_roads {
-        if let Some(major) = &cache.major_elevated {
-            draw_road_layer(painter, layout, view, viewport_center,
-                extent_x_km, extent_y_km, major,
-                egui::Stroke::new(1.35, egui::Color32::from_rgb(255, 210, 92)));
-        }
-    }
-}
-
-fn draw_road_layer(
-    painter: &egui::Painter,
-    layout: &LocalLayout,
-    view: &GlobeViewState,
-    viewport_center: GeoPoint,
-    extent_x_km: f32,
-    extent_y_km: f32,
-    roads: &[ElevatedRoad],
-    stroke: egui::Stroke,
-) {
-    for road in roads {
-        let points: Vec<_> = road
-            .points
-            .iter()
-            .filter_map(|&(pt, elev)| {
-                // Elevation is already pre-sampled — this is pure projection math.
-                project_local(layout, view, viewport_center, pt, elev,
-                              extent_x_km, extent_y_km)
-                    .map(|p| p.pos)
-            })
-            .collect();
-
-        if points.len() >= 2 {
-            painter.add(egui::Shape::line(points, stroke));
-        }
-    }
-}
-
-// ── Water layer ────────────────────────────────────────────────────────────────
-//
-// Mirrors the road layer architecture: a static WaterCache holds pre-projected
-// vertices so that `draw_water` is pure painter calls on every frame.
-
-/// A water feature with elevation pre-sampled at every vertex.
-struct ElevatedWater {
-    points: Vec<(GeoPoint, f32)>, // (position, elevation_m)
-    is_area: bool,
-}
-
-impl ElevatedWater {
-    fn from_polyline(poly: &WaterPolyline, selected_root: Option<&Path>) -> Self {
-        let pts = &poly.points;
-        let n = pts.len();
-        if n == 0 {
-            return Self { points: Vec::new(), is_area: poly.is_area };
-        }
-        // Sample every 4th vertex for water (large polygons can be huge).
-        let step = 4usize;
-        let mut sampled: Vec<(usize, f32)> = (0..n)
-            .step_by(step)
-            .map(|i| {
-                let e = srtm_stream::sample_elevation_m(selected_root, pts[i]).unwrap_or(0.0) + 1.5;
-                (i, e)
-            })
-            .collect();
-        if sampled.last().map(|&(i, _)| i) != Some(n - 1) {
-            let e = srtm_stream::sample_elevation_m(selected_root, pts[n - 1]).unwrap_or(0.0) + 1.5;
-            sampled.push((n - 1, e));
-        }
-        let mut elevations = vec![0.0f32; n];
-        for w in sampled.windows(2) {
-            let (i0, e0) = w[0];
-            let (i1, e1) = w[1];
-            for i in i0..=i1 {
-                let t = if i1 > i0 { (i - i0) as f32 / (i1 - i0) as f32 } else { 0.0 };
-                elevations[i] = e0 + (e1 - e0) * t;
-            }
-        }
-        let points = pts.iter().zip(elevations).map(|(&pt, e)| (pt, e)).collect();
-        Self { points, is_area: poly.is_area }
-    }
-}
-
-struct WaterCache {
-    tile_zoom: u8,
-    tile_x_min: u32,
-    tile_x_max: u32,
-    tile_y_min: u32,
-    tile_y_max: u32,
-    water_gen: u64,
-    /// Raw geometry from SQLite — built in a background thread (no SRTM I/O).
-    polys: Vec<WaterPolyline>,
-    /// Elevation-enriched features, populated lazily on first render.
-    features_elevated: Option<Vec<ElevatedWater>>,
-}
-
-struct WaterCacheStore {
-    cache: Option<WaterCache>,
-    building: bool,
-}
-
-fn water_cache() -> &'static Mutex<WaterCacheStore> {
-    static CACHE: OnceLock<Mutex<WaterCacheStore>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(WaterCacheStore { cache: None, building: false }))
+    super::road_layer::road_cache_building()
 }
 
 /// Clear the water tile cache so the next draw reloads from SQLite.
 pub fn invalidate_water_cache() {
-    if let Ok(mut g) = water_cache().lock() {
-        g.cache = None;
-    }
+    super::water_layer::invalidate_water_cache();
 }
 
 /// True while a background water-cache build is in progress.
 pub fn water_cache_building() -> bool {
-    water_cache().lock().map(|g| g.building).unwrap_or(false)
-}
-
-fn draw_water(
-    painter: &egui::Painter,
-    layout: &LocalLayout,
-    view: &GlobeViewState,
-    selected_root: Option<&Path>,
-    viewport_center: GeoPoint,
-    render_zoom: f32,
-    show_water: bool,
-) {
-    if !show_water {
-        if let Ok(mut g) = water_cache().lock() { g.cache = None; }
-        return;
-    }
-
-    let bounds = local_geo_bounds(viewport_center, view.local_zoom);
-    let tile_zoom = road_tile_zoom(render_zoom);
-    let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
-    let km_per_deg_lat = 111.32f32;
-    let km_per_deg_lon = km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
-    let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
-    let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
-
-    let (x0, y0) = osm_ingest::lat_lon_to_tile(bounds.max_lat, bounds.min_lon, tile_zoom);
-    let (x1, y1) = osm_ingest::lat_lon_to_tile(bounds.min_lat, bounds.max_lon, tile_zoom);
-    let (txmin, txmax) = (x0.min(x1), x0.max(x1));
-    let (tymin, tymax) = (y0.min(y1), y0.max(y1));
-    const MARGIN: u32 = 1;
-    let current_gen = osm_ingest::water_data_generation();
-
-    // ── Stale check + background build launch ─────────────────────────────
-    {
-        let mut store = match water_cache().lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-        let stale = store.cache.as_ref().map_or(true, |c| {
-            c.tile_zoom != tile_zoom
-                || c.water_gen != current_gen
-                || c.tile_x_min > txmin
-                || c.tile_x_max < txmax
-                || c.tile_y_min > tymin
-                || c.tile_y_max < tymax
-        });
-
-        if stale && !store.building {
-            let (lxmin, lxmax) = (txmin.saturating_sub(MARGIN), txmax + MARGIN);
-            let (lymin, lymax) = (tymin.saturating_sub(MARGIN), tymax + MARGIN);
-            store.building = true;
-            drop(store);
-
-            // No SRTM I/O in the background thread — geometry only.
-            let root_buf = selected_root.map(|p| p.to_path_buf());
-            std::thread::spawn(move || {
-                let root_ref = root_buf.as_deref();
-                let polys = osm_ingest::load_water_for_bounds(root_ref, bounds, tile_zoom);
-
-                if let Ok(mut store) = water_cache().lock() {
-                    store.cache = Some(WaterCache {
-                        tile_zoom,
-                        tile_x_min: lxmin, tile_x_max: lxmax,
-                        tile_y_min: lymin, tile_y_max: lymax,
-                        water_gen: current_gen,
-                        polys,
-                        features_elevated: None,
-                    });
-                    store.building = false;
-                }
-                crate::app::request_repaint();
-            });
-        }
-    }
-
-    // ── Render from whatever cache is currently ready ───────────────────
-    // Lazily enrich with SRTM elevation on first render after a cache update.
-    let mut store = match water_cache().lock() {
-        Ok(g) => g,
-        Err(_) => return,
-    };
-    let Some(cache) = &mut store.cache else { return };
-
-    if cache.features_elevated.is_none() {
-        cache.features_elevated = Some(
-            cache.polys.iter()
-                .map(|p| ElevatedWater::from_polyline(p, selected_root))
-                .collect(),
-        );
-    }
-    let Some(features) = &cache.features_elevated else { return };
-
-    let water_col = crate::theme::water_color();
-    let line_stroke = egui::Stroke::new(1.2, water_col);
-
-    for feat in features {
-        let mut pts: Vec<_> = feat
-            .points
-            .iter()
-            .filter_map(|&(pt, elev)| {
-                project_local(layout, view, viewport_center, pt, elev,
-                              extent_x_km, extent_y_km)
-                    .map(|p| p.pos)
-            })
-            .collect();
-
-        if pts.len() < 2 {
-            continue;
-        }
-
-        // For area features (lakes, reservoirs) close the ring so it draws as a
-        // loop.  Do NOT use convex_polygon — OSM shorelines are non-convex and
-        // the fan triangulation produces the sharp spike artifacts seen in the
-        // screenshots.
-        if feat.is_area && pts.len() >= 3 {
-            pts.push(pts[0]);
-        }
-        painter.add(egui::Shape::line(pts, line_stroke));
-    }
+    super::water_layer::water_cache_building()
 }
 
 #[allow(dead_code)]
@@ -1736,7 +1302,7 @@ fn marker_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> f32 {
     terrain_elevation_m + 18.0
 }
 
-fn local_geo_bounds(center: GeoPoint, view_zoom: f32) -> OsmGeoBounds {
+pub(super) fn local_geo_bounds(center: GeoPoint, view_zoom: f32) -> OsmGeoBounds {
     let half_extent_deg = visual_half_extent_for_zoom(view_zoom);
     OsmGeoBounds {
         min_lat: (center.lat - half_extent_deg).clamp(-85.0511, 85.0511),
@@ -1746,7 +1312,7 @@ fn local_geo_bounds(center: GeoPoint, view_zoom: f32) -> OsmGeoBounds {
     }
 }
 
-fn road_tile_zoom(render_zoom: f32) -> u8 {
+pub(super) fn road_tile_zoom(render_zoom: f32) -> u8 {
     if render_zoom >= 10.0 {
         10
     } else if render_zoom >= 6.0 {
@@ -1758,7 +1324,7 @@ fn road_tile_zoom(render_zoom: f32) -> u8 {
     }
 }
 
-fn project_local(
+pub(super) fn project_local(
     layout: &LocalLayout,
     view: &GlobeViewState,
     focus: GeoPoint,
