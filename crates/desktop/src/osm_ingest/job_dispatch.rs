@@ -542,7 +542,6 @@ fn import_planet_roads_dispatch(db_path: &Path, job: &OsmJob) -> Result<String, 
     use super::roads_global::import_planet_roads;
     use super::roads_osmium::import_focus_roads_via_osmium;
     use super::roads_overpass::import_focus_roads_via_overpass;
-    use super::roads_stream::import_focus_roads_via_stream_scan;
     use super::{FOCUS_ROADS_NOTE_PREFIX, OVERPASS_SOURCE};
 
     if job.note.starts_with(FOCUS_ROADS_NOTE_PREFIX) {
@@ -559,15 +558,7 @@ fn import_planet_roads_dispatch(db_path: &Path, job: &OsmJob) -> Result<String, 
                 let _ = update_job_note(
                     db_path,
                     job.id,
-                    &format!("osmium unavailable ({osmium_err}); trying stream scan…"),
-                );
-                import_focus_roads_via_stream_scan(db_path, job)
-            })
-            .or_else(|scan_err| {
-                let _ = update_job_note(
-                    db_path,
-                    job.id,
-                    &format!("Stream scan failed ({scan_err}); falling back to Overpass…"),
+                    &format!("osmium/vector-cache path failed ({osmium_err}); falling back to Overpass…"),
                 );
                 import_focus_roads_via_overpass(db_path, job)
             });

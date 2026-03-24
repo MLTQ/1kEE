@@ -2,15 +2,17 @@ use crate::settings_store;
 use std::fs;
 use std::path::Path;
 
-use super::OsmFeatureKind;
 use super::OsmJob;
 use super::db::update_job_note;
 use super::job_dispatch::{
-    clear_cell_progress, focus_batch_extract_path, focus_cell_bounds, focus_cell_cached,
-    focus_cell_extract_path, focus_cells_bounds, focus_cells_for_bounds, mark_focus_cell_cached,
-    road_data_gen, run_osmium_extract, set_cell_progress,
+    clear_cell_progress, focus_batch_extract_path, focus_cell_bounds, focus_cell_extract_path,
+    focus_cells_bounds, focus_cells_for_bounds, road_data_gen, run_osmium_extract,
+    set_cell_progress,
 };
-use super::roads_stream::import_focus_roads_via_stream_scan;
+use super::OsmFeatureKind;
+use super::roads_vector_cache::{
+    ensure_cell_geojson_from_extract, vector_cache_dir, vector_cell_path,
+};
 
 pub(super) fn import_focus_roads_via_osmium(
     db_path: &Path,
@@ -30,45 +32,32 @@ pub(super) fn import_focus_roads_via_osmium(
         .ok_or("OSM runtime DB has no parent directory")?
         .join("osm_extracts");
     fs::create_dir_all(&extract_dir).map_err(|e| e.to_string())?;
-
-    let metadata_connection =
-        super::db::open_runtime_db(db_path).map_err(|error| error.to_string())?;
-    let source_key = job.source_path.display().to_string();
+    let vector_dir = vector_cache_dir(db_path)?;
     let cells = focus_cells_for_bounds(job.bounds);
     let total = cells.len() as u32;
     set_cell_progress(0, total);
 
-    let mut reused_cells = 0usize;
-    let mut import_cells = Vec::new();
+    let mut ready_cells = 0usize;
     let mut missing_extract_cells = Vec::new();
+    let mut vector_build_cells = Vec::new();
     for &(lat_c, lon_c) in &cells {
         let extract_path = focus_cell_extract_path(&extract_dir, lat_c, lon_c);
-        let imported = focus_cell_cached(
-            &metadata_connection,
-            OsmFeatureKind::Roads,
-            &source_key,
-            lat_c,
-            lon_c,
-        )
-        .map_err(|error| error.to_string())?;
-
-        if imported {
-            reused_cells += 1;
-        } else {
-            import_cells.push((lat_c, lon_c));
-        }
-
-        if !extract_path.exists() {
+        let vector_path = vector_cell_path(&vector_dir, lat_c, lon_c);
+        if vector_path.exists() {
+            ready_cells += 1;
+        } else if !extract_path.exists() {
             missing_extract_cells.push((lat_c, lon_c));
+        } else {
+            vector_build_cells.push((lat_c, lon_c));
         }
     }
 
-    set_cell_progress(reused_cells as u32, total);
-    if import_cells.is_empty() && missing_extract_cells.is_empty() {
+    set_cell_progress(ready_cells as u32, total);
+    if vector_build_cells.is_empty() && missing_extract_cells.is_empty() {
         clear_cell_progress();
         return Ok(format!(
-            "Focused road osmium import: 0 new cells scanned, {} cached cells reused",
-            reused_cells
+            "Focused road osmium import: 0 new cells scanned, {} direct vector cells reused",
+            ready_cells
         ));
     }
 
@@ -110,23 +99,25 @@ pub(super) fn import_focus_roads_via_osmium(
         );
         let _ = fs::remove_file(&batch_path);
         split_result?;
+
+        vector_build_cells.extend(missing_extract_cells.iter().copied());
     }
 
-    let imported_cells = import_cells_from_cache(
+    let built_vectors = ensure_vector_cells(
         db_path,
         job,
         &extract_dir,
-        &source_key,
-        &import_cells,
-        reused_cells,
+        &vector_dir,
+        &vector_build_cells,
+        ready_cells,
         total,
     )?;
 
     clear_cell_progress();
     Ok(format!(
-        "Focused road osmium import: {} cells imported, {} cached cells reused, {} durable extracts available",
-        imported_cells,
-        reused_cells,
+        "Focused road osmium import: {} vector cells built, {} direct vector cells reused, {} durable extracts available",
+        built_vectors,
+        ready_cells,
         cells.len()
     ))
 }
@@ -163,24 +154,24 @@ fn extract_focus_cells_from_batch(
     Ok(())
 }
 
-fn import_cells_from_cache(
+fn ensure_vector_cells(
     db_path: &Path,
     job: &OsmJob,
     extract_dir: &Path,
-    source_key: &str,
+    vector_dir: &Path,
     cells: &[(i32, i32)],
-    reused_cells: usize,
+    ready_cells: usize,
     total: u32,
 ) -> Result<usize, String> {
-    let mut imported = 0usize;
+    let mut built = 0usize;
     for (idx, &(lat_c, lon_c)) in cells.iter().enumerate() {
-        let done = (reused_cells + idx) as u32;
+        let done = (ready_cells + idx) as u32;
         set_cell_progress(done, total);
         update_job_note(
             db_path,
             job.id,
             &format!(
-                "Importing cached road cell {}/{} ({lat_c}°,{lon_c}°)…",
+                "Building direct road vectors {}/{} ({lat_c}°,{lon_c}°)…",
                 done + 1,
                 total
             ),
@@ -194,15 +185,27 @@ fn import_cells_from_cache(
             ));
         }
 
-        let mut scan_job = job.clone();
-        scan_job.source_path = extract_path;
-        scan_job.bounds = focus_cell_bounds(lat_c, lon_c);
-        import_focus_roads_via_stream_scan(db_path, &scan_job)?;
-        mark_focus_cell_cached(db_path, OsmFeatureKind::Roads, source_key, lat_c, lon_c)?;
-        imported += 1;
+        let vector_path = vector_cell_path(vector_dir, lat_c, lon_c);
+        let feature_count = ensure_cell_geojson_from_extract(
+            &extract_path,
+            &vector_path,
+            focus_cell_bounds(lat_c, lon_c),
+        )?;
+        update_job_note(
+            db_path,
+            job.id,
+            &format!(
+                "Cached direct road vectors for cell {}/{} ({lat_c}°,{lon_c}°) — {} features",
+                done + 1,
+                total,
+                feature_count
+            ),
+        )?;
+
+        built += 1;
         road_data_gen().fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         crate::app::request_repaint();
-        set_cell_progress((reused_cells + imported) as u32, total);
+        set_cell_progress((ready_cells + built) as u32, total);
     }
-    Ok(imported)
+    Ok(built)
 }

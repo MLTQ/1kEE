@@ -7,7 +7,7 @@ Owns the OSM ingest queue, worker lifecycle, focus-job scheduling, and the small
 
 ### `queue_focus_roads_import`
 - **Does**: Queues a focused road import for the current view, but now keys dedupe by the covered focus-cell bounds instead of raw focus latitude/longitude
-- **Interacts with**: `roads_osmium.rs`, `roads_stream.rs`, `roads_overpass.rs`
+- **Interacts with**: `roads_osmium.rs`, `roads_overpass.rs`
 - **Rationale**: Nearby pans should reuse the same focused-cell import instead of spawning a fresh road job for every small camera nudge
 
 ### `queue_focus_water_import`
@@ -37,3 +37,4 @@ Owns the OSM ingest queue, worker lifecycle, focus-job scheduling, and the small
 ## Notes
 - Focused road jobs are now deduped by the 1° cell envelope they cover plus the radius bucket. That is less precise than the raw focus point, but much better aligned with the actual cached extract units.
 - Startup now clears abandoned `running` jobs once, before the in-memory active-job flag is seeded. That prevents old crashed imports from blocking new focused-road work indefinitely.
+- Focused road jobs no longer fall back to the full-planet stream scan when the osmium path fails. For nearby roads, that fallback was far too expensive and made cached areas feel broken. The fallback is now Overpass only.
