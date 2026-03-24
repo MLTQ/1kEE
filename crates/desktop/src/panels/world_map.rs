@@ -4,17 +4,17 @@ pub(crate) mod gebco_depth_fill;
 pub(crate) mod globe_pass;
 mod globe_scene;
 mod graticule;
+mod layer_import;
 pub(crate) mod local_terrain_pass;
 mod local_terrain_scene;
+mod map_detail_panels;
+mod map_tooltips;
 mod road_layer;
-mod water_layer;
 pub(crate) mod srtm_focus_cache;
 mod srtm_stream;
 mod terrain_field;
 mod terrain_raster;
-mod map_tooltips;
-mod map_detail_panels;
-mod layer_import;
+mod water_layer;
 
 use crate::arcgis_source;
 use crate::flight_tracks;
@@ -30,9 +30,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         .inner_margin(egui::Margin::same(14));
 
     panel_frame.show(ui, |ui| {
-        if model.globe_view.auto_spin
-            || (model.cinematic_mode && model.globe_view.meander_mode)
-        {
+        if model.globe_view.auto_spin || (model.cinematic_mode && model.globe_view.meander_mode) {
             ui.ctx().request_repaint();
         } else if local_terrain_scene::has_pending_cache(model) {
             // Faster repaint while tile pulse animation is running (~30 fps)
@@ -62,15 +60,15 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
 
         // Refresh ADS-B flight cache (OpenSky Network, no key required).
         if model.show_flights && !model.globe_view.local_mode {
-            model.flights = flight_tracks::poll(
-                model.globe_view.globe_center_latlon(),
-                ui.ctx().clone(),
-            );
+            model.flights =
+                flight_tracks::poll(model.globe_view.globe_center_latlon(), ui.ctx().clone());
         }
 
         // Poll ArcGIS sources (non-blocking)
         {
-            let source_refs: Vec<(String, std::collections::HashSet<u32>)> = model.arcgis_sources.iter()
+            let source_refs: Vec<(String, std::collections::HashSet<u32>)> = model
+                .arcgis_sources
+                .iter()
                 .map(|s| (s.url.clone(), s.enabled_layer_ids.clone()))
                 .collect();
             model.arcgis_features = arcgis_source::poll(&source_refs, ui.ctx().clone());
@@ -244,9 +242,12 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                     } else {
                         "Configure AISStream key in Settings".into()
                     };
-                    ui.add_enabled(ships_enabled, egui::Checkbox::new(&mut model.show_ships, "Ships"))
-                        .on_hover_text(hint)
-                        .on_disabled_hover_text("Configure AISStream key in Settings");
+                    ui.add_enabled(
+                        ships_enabled,
+                        egui::Checkbox::new(&mut model.show_ships, "Ships"),
+                    )
+                    .on_hover_text(hint)
+                    .on_disabled_hover_text("Configure AISStream key in Settings");
                 }
                 ui.checkbox(&mut model.show_flights, "Flights")
                     .on_hover_text(flight_tracks::status());
@@ -263,9 +264,7 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                     .checkbox(&mut model.show_minor_roads, "Minor roads")
                     .changed();
 
-                let water_changed = ui
-                    .checkbox(&mut model.show_water, "Water")
-                    .changed();
+                let water_changed = ui.checkbox(&mut model.show_water, "Water").changed();
 
                 if major_changed || minor_changed {
                     // Always clear so the next draw_roads reloads from SQLite
@@ -468,31 +467,31 @@ fn draw_local_footer(ui: &mut egui::Ui, model: &mut AppModel, beam_elevation_m: 
                 }
 
                 ui.separator();
-                ui.colored_label(theme::hot_color(), "ORANGE");
-                ui.label("major contours (50m)");
+                ui.colored_label(theme::hot_color(), "MAJOR CONTOURS");
+                ui.label("(50m)");
 
                 ui.separator();
-                ui.colored_label(theme::topo_color(), "BLUE");
-                ui.label("minor contours");
+                ui.colored_label(theme::topo_color(), "MINOR CONTOURS");
+                ui.label("terrain grid");
 
                 if model.show_coastlines {
                     ui.separator();
-                    ui.colored_label(theme::contour_color(), "CYAN");
-                    ui.label("coastline");
+                    ui.colored_label(theme::contour_color(), "COASTLINE");
+                    ui.label("outline");
                 }
 
                 ui.separator();
-                ui.colored_label(egui::Color32::from_rgb(255, 210, 92), "YELLOW");
-                ui.label("major roads");
+                ui.colored_label(theme::road_major_color(), "MAJOR ROADS");
+                ui.label("primary network");
 
                 ui.separator();
-                ui.colored_label(egui::Color32::from_rgb(116, 132, 142), "SLATE");
-                ui.label("minor roads");
+                ui.colored_label(theme::road_minor_color(), "MINOR ROADS");
+                ui.label("secondary network");
 
                 if model.show_water {
                     ui.separator();
-                    ui.colored_label(theme::water_color(), "BLUE");
-                    ui.label("water");
+                    ui.colored_label(theme::water_color(), "WATER");
+                    ui.label("hydrology");
                 }
 
                 if local_terrain_scene::is_active(model) {
@@ -505,7 +504,14 @@ fn draw_local_footer(ui: &mut egui::Ui, model: &mut AppModel, beam_elevation_m: 
                         model.globe_view.local_zoom,
                     );
                     let side_ns_km = half_deg * 2.0 * 111.32_f32;
-                    let cos_lat = model.globe_view.local_center.lat.to_radians().cos().abs().max(0.2);
+                    let cos_lat = model
+                        .globe_view
+                        .local_center
+                        .lat
+                        .to_radians()
+                        .cos()
+                        .abs()
+                        .max(0.2);
                     let side_ew_km = half_deg * 2.0 * 111.32_f32 * cos_lat;
                     let side_ns_mi = side_ns_km * 0.621_371;
                     let side_ew_mi = side_ew_km * 0.621_371;
@@ -523,15 +529,9 @@ fn draw_local_footer(ui: &mut egui::Ui, model: &mut AppModel, beam_elevation_m: 
 fn draw_globe_coord_overlay(ctx: &egui::Context, geo: crate::model::GeoPoint, rect: egui::Rect) {
     let ns = if geo.lat >= 0.0 { 'N' } else { 'S' };
     let ew = if geo.lon >= 0.0 { 'E' } else { 'W' };
-    let text = format!(
-        "{:.4}°{}  {:.4}°{}",
-        geo.lat.abs(), ns, geo.lon.abs(), ew
-    );
+    let text = format!("{:.4}°{}  {:.4}°{}", geo.lat.abs(), ns, geo.lon.abs(), ew);
     egui::Area::new("globe_coord_overlay".into())
-        .fixed_pos(egui::pos2(
-            rect.center().x - 80.0,
-            rect.bottom() - 28.0,
-        ))
+        .fixed_pos(egui::pos2(rect.center().x - 80.0, rect.bottom() - 28.0))
         .interactable(false)
         .show(ctx, |ui| {
             egui::Frame::new()
@@ -551,7 +551,9 @@ fn draw_arcgis_detail_panel(ctx: &egui::Context, model: &mut AppModel) {
     let Some((ref src_url, obj_id)) = model.selected_arcgis_feature.clone() else {
         return;
     };
-    let Some(feat) = model.arcgis_features.iter()
+    let Some(feat) = model
+        .arcgis_features
+        .iter()
         .find(|f| f.source_url == *src_url && f.object_id == obj_id)
         .cloned()
     else {
@@ -562,8 +564,12 @@ fn draw_arcgis_detail_panel(ctx: &egui::Context, model: &mut AppModel) {
 
     // Get source/layer name for the title
     let snap = arcgis_source::source_snapshot(&feat.source_url);
-    let source_name = snap.as_ref().map(|s| s.display_name.as_str()).unwrap_or("ArcGIS Feature");
-    let layer_name = snap.as_ref()
+    let source_name = snap
+        .as_ref()
+        .map(|s| s.display_name.as_str())
+        .unwrap_or("ArcGIS Feature");
+    let layer_name = snap
+        .as_ref()
         .and_then(|s| s.layers.as_ref())
         .and_then(|ls| ls.iter().find(|l| l.id == feat.layer_id))
         .map(|l| l.name.as_str())
@@ -595,31 +601,42 @@ fn draw_arcgis_detail_panel(ctx: &egui::Context, model: &mut AppModel) {
             let ew = if feat.location.lon >= 0.0 { 'E' } else { 'W' };
             ui.horizontal(|ui| {
                 ui.strong("Location:");
-                ui.label(egui::RichText::new(format!(
-                    "{:.4}°{}  {:.4}°{}",
-                    feat.location.lat.abs(), ns, feat.location.lon.abs(), ew,
-                )).monospace().small());
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{:.4}°{}  {:.4}°{}",
+                        feat.location.lat.abs(),
+                        ns,
+                        feat.location.lon.abs(),
+                        ew,
+                    ))
+                    .monospace()
+                    .small(),
+                );
             });
 
             ui.add_space(4.0);
 
             // All attributes as key-value pairs
-            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                egui::Grid::new("arcgis_attr_grid")
-                    .num_columns(2)
-                    .striped(true)
-                    .show(ui, |ui| {
-                        for (key, val) in &feat.attributes {
-                            // Skip date fields already shown above
-                            if key.eq_ignore_ascii_case("Date") || key.eq_ignore_ascii_case("date") {
-                                continue;
+            egui::ScrollArea::vertical()
+                .max_height(320.0)
+                .show(ui, |ui| {
+                    egui::Grid::new("arcgis_attr_grid")
+                        .num_columns(2)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for (key, val) in &feat.attributes {
+                                // Skip date fields already shown above
+                                if key.eq_ignore_ascii_case("Date")
+                                    || key.eq_ignore_ascii_case("date")
+                                {
+                                    continue;
+                                }
+                                ui.strong(key);
+                                ui.label(val);
+                                ui.end_row();
                             }
-                            ui.strong(key);
-                            ui.label(val);
-                            ui.end_row();
-                        }
-                    });
-            });
+                        });
+                });
         });
     if !open {
         model.selected_arcgis_feature = None;

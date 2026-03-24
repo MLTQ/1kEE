@@ -1,5 +1,6 @@
 use crate::model::{GeoPoint, GlobeViewState};
 use crate::osm_ingest::{self, RoadLayerKind, RoadPolyline};
+use crate::theme;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
@@ -56,7 +57,11 @@ impl ElevatedRoad {
             let (i0, e0) = w[0];
             let (i1, e1) = w[1];
             for i in i0..=i1 {
-                let t = if i1 > i0 { (i - i0) as f32 / (i1 - i0) as f32 } else { 0.0 };
+                let t = if i1 > i0 {
+                    (i - i0) as f32 / (i1 - i0) as f32
+                } else {
+                    0.0
+                };
                 elevations[i] = e0 + (e1 - e0) * t;
             }
         }
@@ -107,7 +112,12 @@ struct RoadCacheStore {
 
 fn road_cache() -> &'static Mutex<RoadCacheStore> {
     static CACHE: OnceLock<Mutex<RoadCacheStore>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(RoadCacheStore { cache: None, building: false }))
+    CACHE.get_or_init(|| {
+        Mutex::new(RoadCacheStore {
+            cache: None,
+            building: false,
+        })
+    })
 }
 
 pub(super) fn draw_roads(
@@ -121,7 +131,9 @@ pub(super) fn draw_roads(
     show_minor_roads: bool,
 ) {
     if !show_major_roads && !show_minor_roads {
-        if let Ok(mut g) = road_cache().lock() { g.cache = None; }
+        if let Ok(mut g) = road_cache().lock() {
+            g.cache = None;
+        }
         return;
     }
 
@@ -170,17 +182,33 @@ pub(super) fn draw_roads(
             std::thread::spawn(move || {
                 let root_ref = root_buf.as_deref();
                 let major_polys = if show_major_roads {
-                    osm_ingest::load_roads_for_bounds(root_ref, bounds, tile_zoom, RoadLayerKind::Major)
-                } else { Vec::new() };
+                    osm_ingest::load_roads_for_bounds(
+                        root_ref,
+                        bounds,
+                        tile_zoom,
+                        RoadLayerKind::Major,
+                    )
+                } else {
+                    Vec::new()
+                };
                 let minor_polys = if show_minor_roads {
-                    osm_ingest::load_roads_for_bounds(root_ref, bounds, tile_zoom, RoadLayerKind::Minor)
-                } else { Vec::new() };
+                    osm_ingest::load_roads_for_bounds(
+                        root_ref,
+                        bounds,
+                        tile_zoom,
+                        RoadLayerKind::Minor,
+                    )
+                } else {
+                    Vec::new()
+                };
 
                 if let Ok(mut store) = road_cache().lock() {
                     store.cache = Some(RoadCache {
                         tile_zoom,
-                        tile_x_min: lxmin, tile_x_max: lxmax,
-                        tile_y_min: lymin, tile_y_max: lymax,
+                        tile_x_min: lxmin,
+                        tile_x_max: lxmax,
+                        tile_y_min: lymin,
+                        tile_y_max: lymax,
                         road_gen: current_gen,
                         had_major: show_major_roads,
                         had_minor: show_minor_roads,
@@ -206,18 +234,24 @@ pub(super) fn draw_roads(
         Ok(g) => g,
         Err(_) => return,
     };
-    let Some(cache) = &mut store.cache else { return };
+    let Some(cache) = &mut store.cache else {
+        return;
+    };
 
     if show_major_roads && cache.major_elevated.is_none() {
         cache.major_elevated = Some(
-            cache.major_polys.iter()
+            cache
+                .major_polys
+                .iter()
                 .map(|p| ElevatedRoad::from_polyline(p, selected_root, 1))
                 .collect(),
         );
     }
     if show_minor_roads && cache.minor_elevated.is_none() {
         cache.minor_elevated = Some(
-            cache.minor_polys.iter()
+            cache
+                .minor_polys
+                .iter()
                 .map(|p| ElevatedRoad::from_polyline(p, selected_root, 5))
                 .collect(),
         );
@@ -225,16 +259,30 @@ pub(super) fn draw_roads(
 
     if show_minor_roads {
         if let Some(minor) = &cache.minor_elevated {
-            draw_road_layer(painter, layout, view, viewport_center,
-                extent_x_km, extent_y_km, minor,
-                egui::Stroke::new(0.8, egui::Color32::from_rgb(116, 132, 142)));
+            draw_road_layer(
+                painter,
+                layout,
+                view,
+                viewport_center,
+                extent_x_km,
+                extent_y_km,
+                minor,
+                egui::Stroke::new(0.8, theme::road_minor_color()),
+            );
         }
     }
     if show_major_roads {
         if let Some(major) = &cache.major_elevated {
-            draw_road_layer(painter, layout, view, viewport_center,
-                extent_x_km, extent_y_km, major,
-                egui::Stroke::new(1.35, egui::Color32::from_rgb(255, 210, 92)));
+            draw_road_layer(
+                painter,
+                layout,
+                view,
+                viewport_center,
+                extent_x_km,
+                extent_y_km,
+                major,
+                egui::Stroke::new(1.35, theme::road_major_color()),
+            );
         }
     }
 }
@@ -255,9 +303,16 @@ pub(super) fn draw_road_layer(
             .iter()
             .filter_map(|&(pt, elev)| {
                 // Elevation is already pre-sampled — this is pure projection math.
-                project_local(layout, view, viewport_center, pt, elev,
-                              extent_x_km, extent_y_km)
-                    .map(|p| p.pos)
+                project_local(
+                    layout,
+                    view,
+                    viewport_center,
+                    pt,
+                    elev,
+                    extent_x_km,
+                    extent_y_km,
+                )
+                .map(|p| p.pos)
             })
             .collect();
 
