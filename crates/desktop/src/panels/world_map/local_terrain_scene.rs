@@ -275,6 +275,17 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             model.selected_root.as_deref(),
         );
     }
+    if !model.geojson_layers.is_empty() {
+        draw_geojson_layers_local(
+            painter,
+            &layout,
+            &model.globe_view,
+            viewport_center,
+            extent_x_km,
+            extent_y_km,
+            &model.geojson_layers,
+        );
+    }
     draw_legend(painter, rect, "LOCAL EVENT TERRAIN", render_zoom);
     draw_progress_overlay(
         painter,
@@ -1284,6 +1295,130 @@ fn draw_coastlines_local(
         if points.len() >= 2 {
             painter.add(egui::Shape::line(points, stroke));
         }
+    }
+}
+
+/// Draw all visible GeoJSON layers in the local oblique terrain view.
+fn draw_geojson_layers_local(
+    painter: &egui::Painter,
+    layout: &LocalLayout,
+    view: &GlobeViewState,
+    focus: GeoPoint,
+    extent_x_km: f32,
+    extent_y_km: f32,
+    layers: &[crate::model::GeoJsonLayer],
+) {
+    use crate::model::{GeoJsonGeometry, ring_centroid};
+
+    // Coarse viewport cull bounds (generous margin for lines crossing the border)
+    let half_deg_lat = extent_y_km / 111.32 * 1.5;
+    let half_deg_lon =
+        (extent_x_km / (111.32 * focus.lat.to_radians().cos().abs().max(0.2))) * 1.5;
+    let min_lat = focus.lat - half_deg_lat;
+    let max_lat = focus.lat + half_deg_lat;
+    let min_lon = focus.lon - half_deg_lon;
+    let max_lon = focus.lon + half_deg_lon;
+
+    let in_view_pt = |p: &GeoPoint| {
+        p.lat >= min_lat && p.lat <= max_lat && p.lon >= min_lon && p.lon <= max_lon
+    };
+
+    for layer in layers {
+        if !layer.visible {
+            continue;
+        }
+        let [r, g, b, a] = layer.color;
+        let color = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
+        let stroke = egui::Stroke::new(1.5, color);
+
+        for feature in &layer.features {
+            // ── Draw geometry ─────────────────────────────────────────────
+            match &feature.geometry {
+                GeoJsonGeometry::Point(pt) => {
+                    if in_view_pt(pt) {
+                        if let Some(pp) = project_local(layout, view, focus, *pt, 0.0, extent_x_km, extent_y_km) {
+                            painter.circle_filled(pp.pos, 4.0, color);
+                            painter.circle_stroke(pp.pos, 6.5, egui::Stroke::new(1.0, color.gamma_multiply(0.4)));
+                        }
+                    }
+                }
+                GeoJsonGeometry::LineString(pts) => {
+                    project_and_draw_line(painter, layout, view, focus, pts, extent_x_km, extent_y_km, stroke);
+                }
+                GeoJsonGeometry::MultiLineString(lines) => {
+                    for line in lines {
+                        project_and_draw_line(painter, layout, view, focus, line, extent_x_km, extent_y_km, stroke);
+                    }
+                }
+                GeoJsonGeometry::Polygon(rings) => {
+                    for ring in rings {
+                        project_and_draw_line(painter, layout, view, focus, ring, extent_x_km, extent_y_km, stroke);
+                    }
+                }
+                GeoJsonGeometry::MultiPolygon(polys) => {
+                    for poly in polys {
+                        for ring in poly {
+                            project_and_draw_line(painter, layout, view, focus, ring, extent_x_km, extent_y_km, stroke);
+                        }
+                    }
+                }
+            }
+
+            // ── Draw label ────────────────────────────────────────────────
+            let Some(label) = &feature.label else { continue };
+            let anchor = match &feature.geometry {
+                GeoJsonGeometry::Point(pt) => Some(*pt),
+                GeoJsonGeometry::LineString(pts) if !pts.is_empty() => {
+                    Some(pts[pts.len() / 2])
+                }
+                GeoJsonGeometry::MultiLineString(lines) if !lines.is_empty() && !lines[0].is_empty() => {
+                    Some(lines[0][lines[0].len() / 2])
+                }
+                GeoJsonGeometry::Polygon(rings) if !rings.is_empty() => {
+                    ring_centroid(&rings[0])
+                }
+                GeoJsonGeometry::MultiPolygon(polys)
+                    if !polys.is_empty() && !polys[0].is_empty() =>
+                {
+                    ring_centroid(&polys[0][0])
+                }
+                _ => None,
+            };
+            if let Some(pt) = anchor {
+                if in_view_pt(&pt) {
+                    if let Some(pp) = project_local(layout, view, focus, pt, 0.0, extent_x_km, extent_y_km) {
+                        painter.text(
+                            egui::pos2(pp.pos.x, pp.pos.y - 9.0),
+                            egui::Align2::CENTER_BOTTOM,
+                            label,
+                            egui::FontId::proportional(9.5),
+                            color,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Project a polyline into local-terrain screen space and add a line shape.
+fn project_and_draw_line(
+    painter: &egui::Painter,
+    layout: &LocalLayout,
+    view: &GlobeViewState,
+    focus: GeoPoint,
+    pts: &[GeoPoint],
+    extent_x_km: f32,
+    extent_y_km: f32,
+    stroke: egui::Stroke,
+) {
+    let projected: Vec<egui::Pos2> = pts
+        .iter()
+        .filter_map(|p| project_local(layout, view, focus, *p, 0.0, extent_x_km, extent_y_km))
+        .map(|pp| pp.pos)
+        .collect();
+    if projected.len() >= 2 {
+        painter.add(egui::Shape::line(projected, stroke));
     }
 }
 

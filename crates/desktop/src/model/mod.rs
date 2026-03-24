@@ -4,6 +4,7 @@ mod events;
 mod cameras;
 mod flights;
 mod vessels;
+mod geojson_layer;
 
 pub use geo::*;
 pub use arcgis::*;
@@ -11,6 +12,7 @@ pub use events::*;
 pub use cameras::*;
 pub use flights::*;
 pub use vessels::*;
+pub use geojson_layer::*;
 
 use crate::city_catalog;
 use crate::osm_ingest::{self, OsmInventory};
@@ -48,6 +50,8 @@ pub struct AppModel {
     pub show_bathymetry: bool,
     pub show_ships: bool,
     pub show_flights: bool,
+    /// GeoJSON layers uploaded by the user.
+    pub geojson_layers: Vec<GeoJsonLayer>,
     /// ArcGIS FeatureServer sources added by the user.
     pub arcgis_sources: Vec<ArcGisSourceRef>,
     /// Merged features from all enabled source/layer combos (refreshed each frame).
@@ -247,6 +251,7 @@ impl AppModel {
             show_bathymetry: true,
             show_ships: false,
             show_flights: false,
+            geojson_layers: Vec::new(),
             arcgis_sources: Vec::new(),
             arcgis_features: Vec::new(),
             selected_arcgis_feature: None,

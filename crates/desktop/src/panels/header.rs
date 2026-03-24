@@ -1,4 +1,4 @@
-use crate::model::AppModel;
+use crate::model::{AppModel, GeoJsonLayer};
 use crate::osm_ingest;
 use crate::terrain_assets;
 use crate::theme;
@@ -34,6 +34,10 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
 
                 if ui.button("Terrain Library").clicked() {
                     model.terrain_library_open = true;
+                }
+
+                if ui.button("Import GeoJSON").clicked() {
+                    import_geojson(model);
                 }
 
                 let blast_btn = egui::Button::new(
@@ -77,6 +81,35 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
             });
             ui.add_space(4.0);
         });
+}
+
+fn import_geojson(model: &mut AppModel) {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("GeoJSON", &["geojson", "json"])
+        .set_title("Import GeoJSON layer")
+        .pick_file()
+    else {
+        return;
+    };
+
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "GeoJSON layer".into());
+
+    match std::fs::read_to_string(&path) {
+        Err(e) => model.push_log(format!("GeoJSON read error: {e}")),
+        Ok(text) => match GeoJsonLayer::parse(name.clone(), &text) {
+            Err(e) => model.push_log(format!("GeoJSON parse error in \"{name}\": {e}")),
+            Ok(layer) => {
+                model.push_log(format!(
+                    "GeoJSON layer \"{name}\" loaded — {} feature(s).",
+                    layer.features.len()
+                ));
+                model.geojson_layers.push(layer);
+            }
+        },
+    }
 }
 
 fn metric_chip(ui: &mut egui::Ui, label: &str, value: &str) {

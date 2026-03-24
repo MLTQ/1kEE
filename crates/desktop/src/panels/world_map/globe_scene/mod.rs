@@ -93,6 +93,12 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     geography::draw_global_topo(painter, &layout, &model.globe_view, selected_root);
 
     geography::draw_srtm_on_globe(painter, &layout, &model.globe_view, &lod, selected_root);
+
+    // ── GeoJSON user overlay layers ────────────────────────────────────────
+    if !model.geojson_layers.is_empty() {
+        geography::draw_geojson_layers(painter, &layout, &model.globe_view, &model.geojson_layers);
+    }
+
     if model.show_reticle {
         draw_zoom_crosshair(painter, &layout, &model.globe_view, time);
     }
