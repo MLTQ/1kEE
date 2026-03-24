@@ -1,7 +1,7 @@
 use crate::model::GeoPoint;
 use crate::settings_store;
 use osmpbf::{BlobDecode, BlobReader, Element, ElementReader};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -1227,9 +1227,9 @@ fn import_planet_roads(db_path: &Path, job: &OsmJob) -> Result<String, String> {
 /// Fetch roads for `job.bounds` from the Overpass API and insert them into
 /// the local SQLite cache using the same `RoadTileWriter` machinery as the
 /// planet-file path.  No local OSM data is required.
-/// Extract a 1°×1° cell from the planet file with `osmium extract`, cache
-/// the resulting small .osm.pbf, then hand it to the stream scanner.
-/// Subsequent visits to the same cell skip the osmium step entirely.
+/// For focused planet-backed imports, reuse already-cached feature cells and
+/// collapse any still-missing cells into one bounded `osmium extract` instead
+/// of rescanning the whole planet once per 1° cell.
 fn import_focus_roads_via_osmium(db_path: &Path, job: &OsmJob) -> Result<String, String> {
     let osmium = settings_store::resolve_osmium();
     if Command::new(&osmium).arg("--version").output().is_err() {
@@ -1248,12 +1248,9 @@ fn import_focus_roads_via_osmium(db_path: &Path, job: &OsmJob) -> Result<String,
     let total = cells.len() as u32;
     set_cell_progress(0, total);
 
-    let mut imported_cells = 0usize;
     let mut reused_cells = 0usize;
-    for (idx, &(lat_c, lon_c)) in cells.iter().enumerate() {
-        let done = idx as u32;
-        set_cell_progress(done, total);
-
+    let mut pending_cells = Vec::new();
+    for &(lat_c, lon_c) in &cells {
         if focus_cell_cached(
             &metadata_connection,
             OsmFeatureKind::Roads,
@@ -1264,67 +1261,90 @@ fn import_focus_roads_via_osmium(db_path: &Path, job: &OsmJob) -> Result<String,
         .map_err(|error| error.to_string())?
         {
             reused_cells += 1;
-            update_job_note(
-                db_path,
-                job.id,
-                &format!(
-                    "Reusing imported road cell {}/{total} ({lat_c}°,{lon_c}°)…",
-                    done + 1
-                ),
-            )?;
-            set_cell_progress(done + 1, total);
-            continue;
-        }
-
-        let extract_path = extract_dir.join(format!("cell_{:+04}_{:+05}.osm.pbf", lat_c, lon_c));
-        if !extract_path.exists() {
-            let bbox = format!("{},{},{},{}", lon_c, lat_c, lon_c + 1, lat_c + 1);
-            update_job_note(
-                db_path,
-                job.id,
-                &format!(
-                    "Osmium extract cell {}/{total} ({lat_c}°,{lon_c}°) — one-time, ~2-5 min…",
-                    done + 1
-                ),
-            )?;
-            let status = Command::new(&osmium)
-                .arg("extract")
-                .arg("-b")
-                .arg(&bbox)
-                .arg(&job.source_path)
-                .arg("-o")
-                .arg(&extract_path)
-                .arg("--overwrite")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map_err(|e| format!("Failed to launch osmium: {e}"))?;
-            if !status.success() {
-                let _ = fs::remove_file(&extract_path);
-                clear_cell_progress();
-                return Err(format!("osmium extract failed for cell ({lat_c},{lon_c})"));
-            }
         } else {
-            update_job_note(
-                db_path,
-                job.id,
-                &format!(
-                    "Scanning cached cell {}/{total} ({lat_c}°,{lon_c}°)…",
-                    done + 1
-                ),
-            )?;
+            pending_cells.push((lat_c, lon_c));
+        }
+    }
+
+    set_cell_progress(reused_cells as u32, total);
+    if pending_cells.is_empty() {
+        clear_cell_progress();
+        return Ok(format!(
+            "Focused road osmium import: 0 new cells scanned, {} cached cells reused",
+            reused_cells
+        ));
+    }
+
+    let imported_cells = if pending_cells
+        .iter()
+        .any(|&(lat_c, lon_c)| !focus_cell_extract_path(&extract_dir, lat_c, lon_c).exists())
+    {
+        let pending_bounds = focus_cells_bounds(&pending_cells);
+        let batch_path = focus_batch_extract_path(&extract_dir, job.id, OsmFeatureKind::Roads);
+        update_job_note(
+            db_path,
+            job.id,
+            &format!(
+                "Osmium extract {} road cells as one batch — one-time, ~2-5 min…",
+                pending_cells.len()
+            ),
+        )?;
+        if let Err(error) =
+            run_osmium_extract(&osmium, &job.source_path, &batch_path, pending_bounds)
+        {
+            let _ = fs::remove_file(&batch_path);
+            clear_cell_progress();
+            return Err(error);
         }
 
+        update_job_note(
+            db_path,
+            job.id,
+            &format!(
+                "Scanning batched road extract for {} focused cells…",
+                pending_cells.len()
+            ),
+        )?;
         let mut scan_job = job.clone();
-        scan_job.source_path = extract_path;
-        scan_job.bounds = focus_cell_bounds(lat_c, lon_c);
-        import_focus_roads_via_stream_scan(db_path, &scan_job)?;
-        mark_focus_cell_cached(db_path, OsmFeatureKind::Roads, &source_key, lat_c, lon_c)?;
-        imported_cells += 1;
+        scan_job.source_path = batch_path.clone();
+        scan_job.bounds = pending_bounds;
+        let result = import_focus_roads_via_stream_scan(db_path, &scan_job);
+        let _ = fs::remove_file(&batch_path);
+        result?;
+
+        for (idx, &(lat_c, lon_c)) in pending_cells.iter().enumerate() {
+            mark_focus_cell_cached(db_path, OsmFeatureKind::Roads, &source_key, lat_c, lon_c)?;
+            set_cell_progress((reused_cells + idx + 1) as u32, total);
+        }
         road_data_gen().fetch_add(1, Ordering::Relaxed);
         crate::app::request_repaint();
-        set_cell_progress(done + 1, total);
-    }
+        pending_cells.len()
+    } else {
+        let mut imported = 0usize;
+        for (idx, &(lat_c, lon_c)) in pending_cells.iter().enumerate() {
+            let done = (reused_cells + idx) as u32;
+            set_cell_progress(done, total);
+            update_job_note(
+                db_path,
+                job.id,
+                &format!(
+                    "Scanning cached road cell {}/{} ({lat_c}°,{lon_c}°)…",
+                    done + 1,
+                    total
+                ),
+            )?;
+            let mut scan_job = job.clone();
+            scan_job.source_path = focus_cell_extract_path(&extract_dir, lat_c, lon_c);
+            scan_job.bounds = focus_cell_bounds(lat_c, lon_c);
+            import_focus_roads_via_stream_scan(db_path, &scan_job)?;
+            mark_focus_cell_cached(db_path, OsmFeatureKind::Roads, &source_key, lat_c, lon_c)?;
+            imported += 1;
+            road_data_gen().fetch_add(1, Ordering::Relaxed);
+            crate::app::request_repaint();
+            set_cell_progress((reused_cells + imported) as u32, total);
+        }
+        imported
+    };
 
     clear_cell_progress();
     Ok(format!(
@@ -2067,12 +2087,9 @@ fn import_focus_water_via_osmium(db_path: &Path, job: &OsmJob) -> Result<String,
     let total = cells.len() as u32;
     set_cell_progress(0, total);
 
-    let mut imported_cells = 0usize;
     let mut reused_cells = 0usize;
-    for (idx, &(lat_c, lon_c)) in cells.iter().enumerate() {
-        let done = idx as u32;
-        set_cell_progress(done, total);
-
+    let mut pending_cells = Vec::new();
+    for &(lat_c, lon_c) in &cells {
         if focus_cell_cached(
             &metadata_connection,
             OsmFeatureKind::Water,
@@ -2083,67 +2100,90 @@ fn import_focus_water_via_osmium(db_path: &Path, job: &OsmJob) -> Result<String,
         .map_err(|error| error.to_string())?
         {
             reused_cells += 1;
-            update_job_note(
-                db_path,
-                job.id,
-                &format!(
-                    "Reusing imported water cell {}/{total} ({lat_c}°,{lon_c}°)…",
-                    done + 1
-                ),
-            )?;
-            set_cell_progress(done + 1, total);
-            continue;
-        }
-
-        let extract_path = extract_dir.join(format!("cell_{:+04}_{:+05}.osm.pbf", lat_c, lon_c));
-        if !extract_path.exists() {
-            let bbox = format!("{},{},{},{}", lon_c, lat_c, lon_c + 1, lat_c + 1);
-            update_job_note(
-                db_path,
-                job.id,
-                &format!(
-                    "Osmium extract cell {}/{total} ({lat_c}°,{lon_c}°) — one-time, ~2-5 min…",
-                    done + 1
-                ),
-            )?;
-            let status = Command::new(&osmium)
-                .arg("extract")
-                .arg("-b")
-                .arg(&bbox)
-                .arg(&job.source_path)
-                .arg("-o")
-                .arg(&extract_path)
-                .arg("--overwrite")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map_err(|e| format!("osmium launch failed: {e}"))?;
-            if !status.success() {
-                let _ = fs::remove_file(&extract_path);
-                clear_cell_progress();
-                return Err(format!("osmium extract failed for cell ({lat_c},{lon_c})"));
-            }
         } else {
-            update_job_note(
-                db_path,
-                job.id,
-                &format!(
-                    "Scanning cached cell {}/{total} ({lat_c}°,{lon_c}°)…",
-                    done + 1
-                ),
-            )?;
+            pending_cells.push((lat_c, lon_c));
+        }
+    }
+
+    set_cell_progress(reused_cells as u32, total);
+    if pending_cells.is_empty() {
+        clear_cell_progress();
+        return Ok(format!(
+            "Focused water osmium import: 0 new cells scanned, {} cached cells reused",
+            reused_cells
+        ));
+    }
+
+    let imported_cells = if pending_cells
+        .iter()
+        .any(|&(lat_c, lon_c)| !focus_cell_extract_path(&extract_dir, lat_c, lon_c).exists())
+    {
+        let pending_bounds = focus_cells_bounds(&pending_cells);
+        let batch_path = focus_batch_extract_path(&extract_dir, job.id, OsmFeatureKind::Water);
+        update_job_note(
+            db_path,
+            job.id,
+            &format!(
+                "Osmium extract {} water cells as one batch — one-time, ~2-5 min…",
+                pending_cells.len()
+            ),
+        )?;
+        if let Err(error) =
+            run_osmium_extract(&osmium, &job.source_path, &batch_path, pending_bounds)
+        {
+            let _ = fs::remove_file(&batch_path);
+            clear_cell_progress();
+            return Err(error);
         }
 
+        update_job_note(
+            db_path,
+            job.id,
+            &format!(
+                "Scanning batched water extract for {} focused cells…",
+                pending_cells.len()
+            ),
+        )?;
         let mut scan_job = job.clone();
-        scan_job.source_path = extract_path;
-        scan_job.bounds = focus_cell_bounds(lat_c, lon_c);
-        import_focus_water_via_stream_scan(db_path, &scan_job)?;
-        mark_focus_cell_cached(db_path, OsmFeatureKind::Water, &source_key, lat_c, lon_c)?;
-        imported_cells += 1;
+        scan_job.source_path = batch_path.clone();
+        scan_job.bounds = pending_bounds;
+        let result = import_focus_water_via_stream_scan(db_path, &scan_job);
+        let _ = fs::remove_file(&batch_path);
+        result?;
+
+        for (idx, &(lat_c, lon_c)) in pending_cells.iter().enumerate() {
+            mark_focus_cell_cached(db_path, OsmFeatureKind::Water, &source_key, lat_c, lon_c)?;
+            set_cell_progress((reused_cells + idx + 1) as u32, total);
+        }
         water_data_gen().fetch_add(1, Ordering::Relaxed);
         crate::app::request_repaint();
-        set_cell_progress(done + 1, total);
-    }
+        pending_cells.len()
+    } else {
+        let mut imported = 0usize;
+        for (idx, &(lat_c, lon_c)) in pending_cells.iter().enumerate() {
+            let done = (reused_cells + idx) as u32;
+            set_cell_progress(done, total);
+            update_job_note(
+                db_path,
+                job.id,
+                &format!(
+                    "Scanning cached water cell {}/{} ({lat_c}°,{lon_c}°)…",
+                    done + 1,
+                    total
+                ),
+            )?;
+            let mut scan_job = job.clone();
+            scan_job.source_path = focus_cell_extract_path(&extract_dir, lat_c, lon_c);
+            scan_job.bounds = focus_cell_bounds(lat_c, lon_c);
+            import_focus_water_via_stream_scan(db_path, &scan_job)?;
+            mark_focus_cell_cached(db_path, OsmFeatureKind::Water, &source_key, lat_c, lon_c)?;
+            imported += 1;
+            water_data_gen().fetch_add(1, Ordering::Relaxed);
+            crate::app::request_repaint();
+            set_cell_progress((reused_cells + imported) as u32, total);
+        }
+        imported
+    };
 
     clear_cell_progress();
     Ok(format!(
@@ -2655,12 +2695,76 @@ fn focus_cells_for_bounds(bounds: GeoBounds) -> Vec<(i32, i32)> {
         .collect()
 }
 
+fn focus_cells_bounds(cells: &[(i32, i32)]) -> GeoBounds {
+    let mut min_lat = i32::MAX;
+    let mut max_lat = i32::MIN;
+    let mut min_lon = i32::MAX;
+    let mut max_lon = i32::MIN;
+    for &(cell_lat, cell_lon) in cells {
+        min_lat = min_lat.min(cell_lat);
+        max_lat = max_lat.max(cell_lat);
+        min_lon = min_lon.min(cell_lon);
+        max_lon = max_lon.max(cell_lon);
+    }
+    GeoBounds {
+        min_lat: (min_lat as f32).clamp(-85.0511, 85.0511),
+        max_lat: ((max_lat + 1) as f32).clamp(-85.0511, 85.0511),
+        min_lon: (min_lon as f32).clamp(-180.0, 180.0),
+        max_lon: ((max_lon + 1) as f32).clamp(-180.0, 180.0),
+    }
+}
+
 fn focus_cell_bounds(cell_lat: i32, cell_lon: i32) -> GeoBounds {
     GeoBounds {
         min_lat: (cell_lat as f32).clamp(-85.0511, 85.0511),
         max_lat: ((cell_lat + 1) as f32).clamp(-85.0511, 85.0511),
         min_lon: (cell_lon as f32).clamp(-180.0, 180.0),
         max_lon: ((cell_lon + 1) as f32).clamp(-180.0, 180.0),
+    }
+}
+
+fn focus_cell_extract_path(extract_dir: &Path, cell_lat: i32, cell_lon: i32) -> PathBuf {
+    extract_dir.join(format!("cell_{:+04}_{:+05}.osm.pbf", cell_lat, cell_lon))
+}
+
+fn focus_batch_extract_path(
+    extract_dir: &Path,
+    job_id: i64,
+    feature_kind: OsmFeatureKind,
+) -> PathBuf {
+    extract_dir.join(format!(
+        "focus_{}_job_{}.osm.pbf",
+        feature_kind.as_str(),
+        job_id
+    ))
+}
+
+fn run_osmium_extract(
+    osmium: &Path,
+    source_path: &Path,
+    output_path: &Path,
+    bounds: GeoBounds,
+) -> Result<(), String> {
+    let bbox = format!(
+        "{},{},{},{}",
+        bounds.min_lon, bounds.min_lat, bounds.max_lon, bounds.max_lat
+    );
+    let status = Command::new(osmium)
+        .arg("extract")
+        .arg("-b")
+        .arg(&bbox)
+        .arg(source_path)
+        .arg("-o")
+        .arg(output_path)
+        .arg("--overwrite")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|error| format!("Failed to launch osmium: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("osmium extract failed for bbox {bbox}"))
     }
 }
 
@@ -2750,5 +2854,9 @@ fn human_bytes(bytes: u64) -> String {
 }
 
 fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
 }

@@ -30,9 +30,9 @@ Tracks the planet-scale OSM source, owns the shared runtime schema, and runs bac
 - **Rationale**: Gives the operator visible payoff near the current map focus before the slower global backfill has completed
 
 ### `import_focus_roads_via_osmium` / `import_focus_water_via_osmium`
-- **Does**: Extracts 1° planet cells on demand, imports whole-cell road or water data into the shared tile store, and records which source-backed cells are already cached
+- **Does**: Reuses already-cached feature cells, collapses still-missing focused cells into one bounded `osmium` extract when needed, imports the result into the shared tile store, and records which source-backed cells are now cached
 - **Interacts with**: `osmium`, `osm_focus_cell_cache`, `load_roads_for_bounds`, `load_water_for_bounds`
-- **Rationale**: Splitting focused ingest into reusable degree cells avoids reparsing the same planet data every time the operator revisits a nearby viewport
+- **Rationale**: Reusable degree-cell cache keeps revisits cheap, and batched extracts avoid rescanning the whole planet once per missing cell on first visit
 
 ### `load_roads_for_bounds`
 - **Does**: Reads already-imported road polylines back out of the shared SQLite tile store for one viewport bounds + zoom band + layer kind
@@ -86,7 +86,7 @@ Tracks the planet-scale OSM source, owns the shared runtime schema, and runs bac
 - Focused-region road imports are intentionally prioritized above the global bootstrap job.
 - The road-layer toggles in the map UI rely on focused imports first: enabling a road layer queues a focused OSM extraction around the current viewport centre and then renders whatever matching roads are already present in the shared tile store.
 - Once a road layer is enabled, the map can keep queuing additional focused imports for the current local terrain focus / viewport as the operator moves, without touching the unfinished global planet bootstrap path.
-- Focused `osmium` imports now promote viewport requests to whole cached 1° cells and record successful road/water cell ingests in `osm_focus_cell_cache`, so revisiting nearby terrain can reuse already-imported cell data instead of rescanning the same extract again.
+- Focused `osmium` imports now promote viewport requests to whole cached 1° cells, record successful road/water cell ingests in `osm_focus_cell_cache`, and batch any still-missing cells into one extract per focused job so first-visit warmup does not rescan the planet once per cell.
 - The runtime store is separate from terrain because the OSM ingest path will need different tile semantics, metadata, and job scheduling than the contour cache.
 - `queue_region_job` is still the seam for future work: current-focus road/building prefetch can insert jobs here long before the renderer consumes those layers.
 - `validate_reader` uses the Rust-native `osmpbf` stack so the eventual “download the planet file and it just works” workflow does not depend on an external `osmium-tool` install.
