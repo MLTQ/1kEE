@@ -134,10 +134,6 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     // Rendered on top of contours/roads so the shaded mesh occludes the line
     // work within the terrain quad — outside the quad the contours remain fully
     // visible, giving a high-contrast look everywhere else.
-    // The callback is always added when terrain is enabled so that prepare()
-    // runs every frame (kicking off / uploading the heightmap).  The paint()
-    // step inside LocalTerrainCallback silently no-ops until the GPU texture
-    // matches the requested key, so nothing renders until ready.
     if model.show_terrain_surface {
         let half_extent_deg = visual_half_extent_for_zoom(model.globe_view.local_zoom);
         let terrain_layout = local_terrain_pass::LocalTerrainLayout {
