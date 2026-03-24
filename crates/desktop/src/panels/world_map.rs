@@ -2,7 +2,7 @@ mod camera;
 pub(crate) mod contour_asset;
 pub(crate) mod gebco_depth_fill;
 pub(crate) mod globe_pass;
-#[path = "world_map/globe_scene.rs"]
+#[path = "world_map/globe_scene/mod.rs"]
 mod globe_scene;
 mod graticule;
 mod layer_import;
@@ -11,7 +11,7 @@ mod local_terrain_scene;
 mod map_detail_panels;
 mod map_tooltips;
 mod road_layer;
-#[path = "world_map/srtm_focus_cache.rs"]
+#[path = "world_map/srtm_focus_cache/mod.rs"]
 pub(crate) mod srtm_focus_cache;
 mod srtm_stream;
 mod terrain_field;
