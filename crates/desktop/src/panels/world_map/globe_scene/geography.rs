@@ -1,4 +1,4 @@
-use crate::model::{GeoPoint, GlobeViewState};
+use crate::model::{GeoJsonFeature, GeoJsonGeometry, GeoJsonLayer, GeoPoint, GlobeViewState};
 use crate::theme;
 
 use super::camera::GlobeLod;
@@ -126,6 +126,116 @@ pub(super) fn draw_global_bathymetry(
 #[inline]
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
+}
+
+// ── GeoJSON overlay ───────────────────────────────────────────────────────────
+
+/// Draw all visible GeoJSON layers onto the globe.
+/// Lines and polygon rings are projected via `draw_geo_path`; points become
+/// filled circles; labels float above their anchor position.
+pub(super) fn draw_geojson_layers(
+    painter: &egui::Painter,
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    layers: &[GeoJsonLayer],
+) {
+    for layer in layers {
+        if !layer.visible {
+            continue;
+        }
+        let [r, g, b, a] = layer.color;
+        let color = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
+        for feature in &layer.features {
+            draw_geojson_feature(painter, layout, view, &feature.geometry, color);
+            draw_feature_label(painter, layout, view, feature, color);
+        }
+    }
+}
+
+fn draw_geojson_feature(
+    painter: &egui::Painter,
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    geometry: &GeoJsonGeometry,
+    color: egui::Color32,
+) {
+    match geometry {
+        GeoJsonGeometry::Point(pt) => {
+            if let Some(proj) = project_geo(layout, view, *pt, 0.0) {
+                if proj.front_facing {
+                    painter.circle_filled(proj.pos, 3.5, color);
+                    painter.circle_stroke(
+                        proj.pos,
+                        6.0,
+                        egui::Stroke::new(1.0, color.gamma_multiply(0.4)),
+                    );
+                }
+            }
+        }
+        GeoJsonGeometry::LineString(pts) => {
+            draw_geo_path(painter, layout, view, pts, 0.012, color, 0.25);
+        }
+        GeoJsonGeometry::MultiLineString(lines) => {
+            for line in lines {
+                draw_geo_path(painter, layout, view, line, 0.012, color, 0.25);
+            }
+        }
+        GeoJsonGeometry::Polygon(rings) => {
+            for ring in rings {
+                draw_geo_path(painter, layout, view, ring, 0.012, color, 0.25);
+            }
+        }
+        GeoJsonGeometry::MultiPolygon(polys) => {
+            for poly in polys {
+                for ring in poly {
+                    draw_geo_path(painter, layout, view, ring, 0.012, color, 0.25);
+                }
+            }
+        }
+    }
+}
+
+fn draw_feature_label(
+    painter: &egui::Painter,
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    feature: &GeoJsonFeature,
+    color: egui::Color32,
+) {
+    let Some(label) = &feature.label else { return };
+    let anchor_pt = label_anchor(&feature.geometry);
+    let Some(pt) = anchor_pt else { return };
+    let Some(proj) = project_geo(layout, view, pt, 0.0) else { return };
+    if !proj.front_facing {
+        return;
+    }
+    let text_pos = egui::pos2(proj.pos.x, proj.pos.y - 9.0);
+    painter.text(
+        text_pos,
+        egui::Align2::CENTER_BOTTOM,
+        label,
+        egui::FontId::proportional(9.5),
+        color,
+    );
+}
+
+fn label_anchor(geometry: &GeoJsonGeometry) -> Option<GeoPoint> {
+    match geometry {
+        GeoJsonGeometry::Point(pt) => Some(*pt),
+        GeoJsonGeometry::LineString(pts) if !pts.is_empty() => Some(pts[pts.len() / 2]),
+        GeoJsonGeometry::MultiLineString(lines) if !lines.is_empty() && !lines[0].is_empty() => {
+            Some(lines[0][lines[0].len() / 2])
+        }
+        GeoJsonGeometry::Polygon(rings) if !rings.is_empty() => {
+            crate::model::ring_centroid(&rings[0])
+        }
+        GeoJsonGeometry::MultiPolygon(polys)
+            if !polys.is_empty() && !polys[0].is_empty() =>
+        {
+            crate::model::ring_centroid(&polys[0][0])
+        }
+        _ => None,
+    }
 }
 
 pub(super) fn draw_global_topo(

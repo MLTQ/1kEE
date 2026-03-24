@@ -317,6 +317,37 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                     }
                 }
 
+                // ── GeoJSON layer toggles ─────────────────────────────────
+                if !model.geojson_layers.is_empty() {
+                    ui.separator();
+                    ui.colored_label(theme::text_muted(), "GeoJSON");
+                    let mut remove_idx: Option<usize> = None;
+                    for (idx, layer) in model.geojson_layers.iter_mut().enumerate() {
+                        let [r, g, b, _] = layer.color;
+                        let dot_color = egui::Color32::from_rgb(r, g, b);
+                        egui::Frame::new()
+                            .corner_radius(3.0)
+                            .inner_margin(egui::Margin::symmetric(4, 2))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    // Colour swatch
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(8.0, 8.0),
+                                        egui::Sense::hover(),
+                                    );
+                                    ui.painter().circle_filled(rect.center(), 4.0, dot_color);
+                                    ui.checkbox(&mut layer.visible, &layer.name);
+                                    if ui.small_button("×").on_hover_text("Remove layer").clicked() {
+                                        remove_idx = Some(idx);
+                                    }
+                                });
+                            });
+                    }
+                    if let Some(idx) = remove_idx {
+                        model.geojson_layers.remove(idx);
+                    }
+                }
+
                 ui.separator();
                 ui.small(model.terrain_focus_location_name());
 
