@@ -25,8 +25,9 @@ Parses the cache-builder CLI without pulling in a heavier argument framework yet
 
 | Dependent | Expects | Breaking changes |
 |-----------|---------|------------------|
-| `main.rs` | returns a `Command` or a readable usage/error string | Changing the return contract |
+| `main.rs` | returns `Command::Gui` when launched without arguments and a readable usage/error string for invalid CLI input | Changing the no-arg behavior or return contract |
 | users / scripts | stable `roads-bbox` flag names | Renaming flags without migration |
 
 ## Notes
 - This is intentionally simple for the first slice. If the cache-builder grows more commands, switching to `clap` will probably be worth it.
+- The parser now treats no-arg launch as a GUI request so the compiled binary can behave like a normal desktop companion app.

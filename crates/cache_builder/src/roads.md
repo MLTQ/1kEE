@@ -9,6 +9,14 @@ Implements the first offline OSM cache-building command: generate direct per-cel
 - **Does**: Validates inputs, runs the two-pass planet scan, and writes the resulting road-cell caches
 - **Interacts with**: `args.rs`, `geojson.rs`, `util.rs`
 
+### `RoadBuildProgress`
+- **Does**: Carries stage/fraction/message updates from the offline road builder to the GUI worker
+- **Interacts with**: `job.rs`, `app.rs`
+
+### `build_bbox_cache_with_progress`
+- **Does**: Runs the same offline road export while emitting coarse progress updates for UI consumers
+- **Interacts with**: `job.rs`, `geojson.rs`
+
 ### `collect_candidate_nodes`
 - **Does**: First pass over the planet file, retaining only nodes inside the expanded requested bbox
 - **Interacts with**: `util.rs`
@@ -23,6 +31,7 @@ Implements the first offline OSM cache-building command: generate direct per-cel
 | Dependent | Expects | Breaking changes |
 |-----------|---------|------------------|
 | `main.rs` | `build_bbox_cache` returns `Result<(), String>` with readable failures | Changing the return contract |
+| `job.rs` | progress updates use `RoadBuildProgress` with `stage`, `fraction`, and `message` fields | Renaming or removing progress fields |
 | desktop road loader | emitted road classes and GeoJSON schema match the direct vector cache it already reads | Renaming road classes or changing the file format |
 
 ## Notes

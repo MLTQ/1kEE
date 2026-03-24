@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 #[derive(Debug)]
 pub enum Command {
+    Gui,
     RoadsBbox(RoadsBboxCommand),
 }
 
@@ -22,10 +23,11 @@ where
 {
     let mut args = args.into_iter();
     let Some(command) = args.next() else {
-        return Err(usage());
+        return Ok(Command::Gui);
     };
 
     match command.as_str() {
+        "gui" => Ok(Command::Gui),
         "roads-bbox" => parse_roads_bbox(args).map(Command::RoadsBbox),
         "--help" | "-h" | "help" => Err(usage()),
         other => Err(format!("Unknown command '{other}'.\n\n{}", usage())),
@@ -85,5 +87,5 @@ fn parse_f32(flag: &str, value: &str) -> Result<f32, String> {
 }
 
 fn usage() -> String {
-    "Usage:\n  one-thousand-electric-eye-cache-builder roads-bbox --planet <planet.osm.pbf> --cache-dir <Derived/osm/road_cells> --min-lat <f32> --max-lat <f32> --min-lon <f32> --max-lon <f32> [--margin-deg <f32>]".to_owned()
+    "Usage:\n  one-thousand-electric-eye-cache-builder\n  one-thousand-electric-eye-cache-builder gui\n  one-thousand-electric-eye-cache-builder roads-bbox --planet <planet.osm.pbf> --cache-dir <Derived/osm/road_cells> --min-lat <f32> --max-lat <f32> --min-lon <f32> --max-lon <f32> [--margin-deg <f32>]".to_owned()
 }

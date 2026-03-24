@@ -9,7 +9,10 @@ pub fn ensure_cache_dir(path: &Path) -> Result<(), String> {
 }
 
 pub fn vector_cell_path(cache_dir: &Path, cell_lat: i32, cell_lon: i32) -> PathBuf {
-    cache_dir.join(format!("road_cell_{:+04}_{:+05}.geojson", cell_lat, cell_lon))
+    cache_dir.join(format!(
+        "road_cell_{:+04}_{:+05}.geojson",
+        cell_lat, cell_lon
+    ))
 }
 
 pub fn merge_write_cells(
@@ -40,7 +43,10 @@ pub fn merge_write_cells(
     Ok(written_cells)
 }
 
-fn feature_collection_for_cell(bounds: GeoBounds, roads: Vec<RoadPolyline>) -> Result<String, String> {
+fn feature_collection_for_cell(
+    bounds: GeoBounds,
+    roads: Vec<RoadPolyline>,
+) -> Result<String, String> {
     let mut features = Vec::new();
     for road in roads {
         if !bounds_intersect(crate::util::polyline_bounds(&road.points), bounds) {
@@ -80,7 +86,10 @@ fn load_all_roads_from_vector_cell(path: &Path) -> Option<Vec<RoadPolyline>> {
 
     for feature in features {
         let props = feature.get("properties").unwrap_or(&Value::Null);
-        let way_id = props.get("way_id").and_then(Value::as_i64).unwrap_or_default();
+        let way_id = props
+            .get("way_id")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
         let road_class = props
             .get("class")
             .and_then(Value::as_str)
