@@ -5,7 +5,20 @@ use crate::util::{
     focus_cells_for_bounds, point_in_bounds, polyline_bounds,
 };
 use osmpbf::{Element, ElementReader};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::path::{Path, PathBuf};
+
+const ROAD_FLUSH_THRESHOLD: usize = 10_000;
+
+#[derive(Serialize, Deserialize)]
+struct CandidateNodeRecord {
+    id: i64,
+    lat: f32,
+    lon: f32,
+}
 
 pub fn build_bbox_cache(command: RoadsBboxCommand) -> Result<(), String> {
     build_bbox_cache_with_progress(command, &mut |_| {}).map(|_| ())
@@ -37,6 +50,7 @@ pub fn build_bbox_cache_with_progress(
         max_lon: command.max_lon,
     };
     let expanded = expand_bounds(bounds, command.margin_degrees);
+    let checkpoint_path = candidate_node_checkpoint_path(&command.cache_dir, bounds);
     progress(RoadBuildProgress {
         stage: "Scanning Nodes".to_owned(),
         fraction: 0.02,
@@ -46,31 +60,38 @@ pub fn build_bbox_cache_with_progress(
         ),
     });
 
-    let candidate_nodes = collect_candidate_nodes(&command.planet_path, expanded, progress)?;
+    let candidate_nodes = load_or_collect_candidate_nodes(
+        &command.planet_path,
+        expanded,
+        &checkpoint_path,
+        progress,
+    )?;
     progress(RoadBuildProgress {
         stage: "Scanning Ways".to_owned(),
         fraction: 0.40,
         message: format!("Collected {} candidate nodes", candidate_nodes.len()),
     });
 
-    let roads_by_cell =
-        collect_roads_by_cell(&command.planet_path, bounds, &candidate_nodes, progress)?;
-    let cell_count = roads_by_cell.len();
-    let road_count: usize = roads_by_cell.values().map(Vec::len).sum();
+    let build_stats = collect_roads_by_cell(
+        &command.planet_path,
+        &command.cache_dir,
+        bounds,
+        &candidate_nodes,
+        progress,
+    )?;
     progress(RoadBuildProgress {
         stage: "Writing Cache".to_owned(),
         fraction: 0.82,
         message: format!(
             "Writing {} road polylines across {} populated cells",
-            road_count, cell_count
+            build_stats.road_count, build_stats.cell_count
         ),
     });
-    let written_cells = merge_write_cells(&command.cache_dir, &roads_by_cell)?;
     let summary = format!(
         "Built {} road polylines across {} populated cells; wrote {} cache files into {}",
-        road_count,
-        cell_count,
-        written_cells,
+        build_stats.road_count,
+        build_stats.cell_count,
+        build_stats.written_cells,
         command.cache_dir.display()
     );
     progress(RoadBuildProgress {
@@ -81,8 +102,42 @@ pub fn build_bbox_cache_with_progress(
     Ok(summary)
 }
 
+fn load_or_collect_candidate_nodes(
+    planet_path: &Path,
+    bounds: GeoBounds,
+    checkpoint_path: &Path,
+    progress: &mut dyn FnMut(RoadBuildProgress),
+) -> Result<HashMap<i64, GeoPoint>, String> {
+    if checkpoint_path.exists() {
+        let nodes = load_candidate_nodes_checkpoint(checkpoint_path)?;
+        progress(RoadBuildProgress {
+            stage: "Loaded Node Cache".to_owned(),
+            fraction: 0.32,
+            message: format!(
+                "Loaded {} candidate nodes from {}",
+                nodes.len(),
+                checkpoint_path.display()
+            ),
+        });
+        return Ok(nodes);
+    }
+
+    let nodes = collect_candidate_nodes(planet_path, bounds, progress)?;
+    save_candidate_nodes_checkpoint(checkpoint_path, &nodes)?;
+    progress(RoadBuildProgress {
+        stage: "Saved Node Cache".to_owned(),
+        fraction: 0.35,
+        message: format!(
+            "Saved {} candidate nodes to {}",
+            nodes.len(),
+            checkpoint_path.display()
+        ),
+    });
+    Ok(nodes)
+}
+
 fn collect_candidate_nodes(
-    planet_path: &std::path::Path,
+    planet_path: &Path,
     bounds: GeoBounds,
     progress: &mut dyn FnMut(RoadBuildProgress),
 ) -> Result<HashMap<i64, GeoPoint>, String> {
@@ -134,12 +189,19 @@ fn collect_candidate_nodes(
     Ok(nodes)
 }
 
+struct RoadBuildStats {
+    road_count: usize,
+    cell_count: usize,
+    written_cells: usize,
+}
+
 fn collect_roads_by_cell(
-    planet_path: &std::path::Path,
+    planet_path: &Path,
+    cache_dir: &Path,
     bounds: GeoBounds,
     candidate_nodes: &HashMap<i64, GeoPoint>,
     progress: &mut dyn FnMut(RoadBuildProgress),
-) -> Result<HashMap<(i32, i32), Vec<RoadPolyline>>, String> {
+) -> Result<RoadBuildStats, String> {
     let reader = ElementReader::from_path(planet_path).map_err(|error| {
         format!(
             "Failed to reopen planet source {}: {error}",
@@ -149,6 +211,10 @@ fn collect_roads_by_cell(
     let mut seen_way_ids = HashSet::new();
     let mut roads_by_cell: HashMap<(i32, i32), Vec<RoadPolyline>> = HashMap::new();
     let mut scanned_ways = 0usize;
+    let mut road_count = 0usize;
+    let mut touched_cells = HashSet::new();
+    let mut written_cells = 0usize;
+    let mut buffered_roads = 0usize;
 
     reader
         .for_each(|element| {
@@ -195,26 +261,109 @@ fn collect_roads_by_cell(
             let mut assigned_cells = HashSet::new();
             for cell in focus_cells_for_bounds(road_bounds) {
                 if assigned_cells.insert(cell) {
+                    touched_cells.insert(cell);
                     roads_by_cell.entry(cell).or_default().push(road.clone());
                 }
             }
 
+            road_count += 1;
+            buffered_roads += 1;
             scanned_ways += 1;
+            if buffered_roads >= ROAD_FLUSH_THRESHOLD {
+                if let Ok(count) = flush_road_chunk(cache_dir, &mut roads_by_cell) {
+                    written_cells += count;
+                    buffered_roads = 0;
+                    progress(RoadBuildProgress {
+                        stage: "Writing Cache".to_owned(),
+                        fraction: 0.76,
+                        message: format!("Flushed roads to {} cache files so far", written_cells),
+                    });
+                }
+            }
             if scanned_ways % 250_000 == 0 {
-                let roads: usize = roads_by_cell.values().map(Vec::len).sum();
                 progress(RoadBuildProgress {
                     stage: "Scanning Ways".to_owned(),
                     fraction: 0.45 + 0.30,
                     message: format!(
                         "Scanned {} ways; kept {} roads across {} cells",
                         scanned_ways,
-                        roads,
-                        roads_by_cell.len()
+                        road_count,
+                        touched_cells.len()
                     ),
                 });
             }
         })
         .map_err(|error| error.to_string())?;
 
-    Ok(roads_by_cell)
+    written_cells += flush_road_chunk(cache_dir, &mut roads_by_cell)?;
+    Ok(RoadBuildStats {
+        road_count,
+        cell_count: touched_cells.len(),
+        written_cells,
+    })
+}
+
+fn flush_road_chunk(
+    cache_dir: &Path,
+    roads_by_cell: &mut HashMap<(i32, i32), Vec<RoadPolyline>>,
+) -> Result<usize, String> {
+    if roads_by_cell.is_empty() {
+        return Ok(0);
+    }
+    let batch = std::mem::take(roads_by_cell);
+    merge_write_cells(cache_dir, &batch)
+}
+
+fn candidate_node_checkpoint_path(cache_dir: &Path, bounds: GeoBounds) -> PathBuf {
+    cache_dir.join(".builder_state").join(format!(
+        "candidate_nodes_{:+08.4}_{:+08.4}_{:+09.4}_{:+09.4}.jsonl",
+        bounds.min_lat, bounds.max_lat, bounds.min_lon, bounds.max_lon
+    ))
+}
+
+fn save_candidate_nodes_checkpoint(
+    checkpoint_path: &Path,
+    nodes: &HashMap<i64, GeoPoint>,
+) -> Result<(), String> {
+    if let Some(parent) = checkpoint_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let temp_path = checkpoint_path.with_extension("jsonl.tmp");
+    let file = File::create(&temp_path).map_err(|error| error.to_string())?;
+    let mut writer = BufWriter::new(file);
+    for (&id, point) in nodes {
+        let record = CandidateNodeRecord {
+            id,
+            lat: point.lat,
+            lon: point.lon,
+        };
+        serde_json::to_writer(&mut writer, &record).map_err(|error| error.to_string())?;
+        writer.write_all(b"\n").map_err(|error| error.to_string())?;
+    }
+    writer.flush().map_err(|error| error.to_string())?;
+    fs::rename(&temp_path, checkpoint_path).map_err(|error| error.to_string())
+}
+
+fn load_candidate_nodes_checkpoint(
+    checkpoint_path: &Path,
+) -> Result<HashMap<i64, GeoPoint>, String> {
+    let file = File::open(checkpoint_path).map_err(|error| error.to_string())?;
+    let reader = BufReader::new(file);
+    let mut nodes = HashMap::new();
+    for line in reader.lines() {
+        let line = line.map_err(|error| error.to_string())?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record: CandidateNodeRecord =
+            serde_json::from_str(&line).map_err(|error| error.to_string())?;
+        nodes.insert(
+            record.id,
+            GeoPoint {
+                lat: record.lat,
+                lon: record.lon,
+            },
+        );
+    }
+    Ok(nodes)
 }

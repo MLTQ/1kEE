@@ -30,4 +30,4 @@ Provides the minimal egui desktop shell for the offline cache-builder. It is the
 
 ## Notes
 - Roads are the only implemented export asset today. Water, buildings, and boundaries are present as disabled planned toggles so the intended builder shape is visible immediately.
-- The inspector intentionally stays lightweight: it reports road-cell count, approximate cache size, and the most recently touched files so users can sanity-check output directories without opening another tool.
+- The inspector intentionally stays lightweight: it reports road-cell count, node-checkpoint count, approximate cache size, and the most recently touched files so users can sanity-check output directories without opening another tool.

@@ -39,6 +39,7 @@ struct AssetSelection {
 #[derive(Default)]
 struct CacheInspector {
     road_cell_count: usize,
+    checkpoint_count: usize,
     total_bytes: u64,
     latest_files: Vec<String>,
     last_refresh_label: String,
@@ -181,6 +182,7 @@ impl BuilderApp {
         let cache_dir = PathBuf::from(self.form.cache_dir.trim());
         let mut files = Vec::new();
         let mut total_bytes = 0u64;
+        let mut checkpoint_count = 0usize;
         if let Ok(entries) = fs::read_dir(&cache_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -198,9 +200,19 @@ impl BuilderApp {
                 files.push((modified, path));
             }
         }
+        let state_dir = cache_dir.join(".builder_state");
+        if let Ok(entries) = fs::read_dir(state_dir) {
+            checkpoint_count = entries
+                .flatten()
+                .filter(|entry| {
+                    entry.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+                })
+                .count();
+        }
         files.sort_by(|left, right| right.0.cmp(&left.0));
 
         self.inspector.road_cell_count = files.len();
+        self.inspector.checkpoint_count = checkpoint_count;
         self.inspector.total_bytes = total_bytes;
         self.inspector.latest_files = files
             .into_iter()
@@ -312,6 +324,10 @@ impl eframe::App for BuilderApp {
                 columns[0].label(format!(
                     "Road cell files: {}",
                     self.inspector.road_cell_count
+                ));
+                columns[0].label(format!(
+                    "Node checkpoints: {}",
+                    self.inspector.checkpoint_count
                 ));
                 columns[0].label(format!(
                     "Approx size: {:.2} MiB",
