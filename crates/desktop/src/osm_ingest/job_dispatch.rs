@@ -1,5 +1,5 @@
 use crate::settings_store;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -7,7 +7,6 @@ use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::{GeoBounds, OsmFeatureKind, OsmJob, OsmJobSnapshot, ActiveWorker};
 use super::db::{
     fetch_next_job, mark_job_completed, mark_job_failed, open_runtime_db,
     recover_orphaned_running_jobs, runtime_db_path, update_job_note,
@@ -15,6 +14,7 @@ use super::db::{
 use super::inventory::find_planet_pbf;
 use super::util::unix_timestamp;
 use super::water::import_planet_water;
+use super::{ActiveWorker, GeoBounds, OsmFeatureKind, OsmJob, OsmJobSnapshot};
 
 // ---------------------------------------------------------------------------
 // In-memory caches — eliminate per-frame SQLite hits on the render thread
@@ -96,6 +96,7 @@ pub(super) fn initialize_caches(db_path: &Path) {
     if caches_initialized().swap(true, Ordering::SeqCst) {
         return;
     }
+    let _ = recover_orphaned_running_jobs(db_path);
     let Ok(connection) = open_runtime_db(db_path) else {
         return;
     };
@@ -278,15 +279,21 @@ pub fn queue_focus_roads_import(
     focus: crate::model::GeoPoint,
     radius_miles: f32,
 ) -> Result<bool, String> {
-    use super::{FOCUS_ROADS_NOTE_PREFIX, OVERPASS_SOURCE};
     use super::util::focus_bounds;
+    use super::{FOCUS_ROADS_NOTE_PREFIX, OVERPASS_SOURCE};
 
     let radius_miles = radius_miles.clamp(5.0, 150.0);
     let bounds = focus_bounds(focus, radius_miles);
     let radius_bucket = ((radius_miles / 5.0).ceil() as u32) * 5;
+    let cells = focus_cells_for_bounds(bounds);
+    let cell_bounds = focus_cells_bounds(&cells);
     let note = format!(
-        "{FOCUS_ROADS_NOTE_PREFIX}_{:.3}_{:.3}_r{}",
-        focus.lat, focus.lon, radius_bucket
+        "{FOCUS_ROADS_NOTE_PREFIX}_cells_{}_{}_{}_{}_r{}",
+        cell_bounds.min_lat.floor() as i32,
+        cell_bounds.min_lon.floor() as i32,
+        cell_bounds.max_lat.ceil() as i32,
+        cell_bounds.max_lon.ceil() as i32,
+        radius_bucket
     );
 
     if known_notes()
@@ -361,8 +368,8 @@ pub fn queue_focus_water_import(
     focus: crate::model::GeoPoint,
     radius_miles: f32,
 ) -> Result<bool, String> {
-    use super::{FOCUS_WATER_NOTE_PREFIX, OVERPASS_SOURCE};
     use super::util::focus_bounds;
+    use super::{FOCUS_WATER_NOTE_PREFIX, OVERPASS_SOURCE};
 
     let radius_miles = radius_miles.clamp(5.0, 150.0);
     let bounds = focus_bounds(focus, radius_miles);
@@ -532,11 +539,11 @@ pub fn tick(selected_root: Option<&Path>) {
 }
 
 fn import_planet_roads_dispatch(db_path: &Path, job: &OsmJob) -> Result<String, String> {
-    use super::{FOCUS_ROADS_NOTE_PREFIX, OVERPASS_SOURCE};
     use super::roads_global::import_planet_roads;
     use super::roads_osmium::import_focus_roads_via_osmium;
     use super::roads_overpass::import_focus_roads_via_overpass;
     use super::roads_stream::import_focus_roads_via_stream_scan;
+    use super::{FOCUS_ROADS_NOTE_PREFIX, OVERPASS_SOURCE};
 
     if job.note.starts_with(FOCUS_ROADS_NOTE_PREFIX) {
         if job.source_path == std::path::Path::new(OVERPASS_SOURCE) {

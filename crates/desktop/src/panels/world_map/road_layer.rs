@@ -9,6 +9,10 @@ use super::local_terrain_scene::{
 };
 use super::srtm_stream;
 
+const MAX_SOURCE_POINTS_PER_ROAD: usize = 192;
+const MAX_RENDER_POINTS_TOTAL: usize = 120_000;
+const MIN_SCREEN_POINT_DISTANCE: f32 = 1.5;
+
 // ── Road tile cache ────────────────────────────────────────────────────────
 // Road geometry is fetched from SQLite and cached until the tile coverage
 // actually changes.  Opening a DB connection + running a query on every
@@ -24,7 +28,8 @@ struct ElevatedRoad {
 impl ElevatedRoad {
     /// Build an elevated road with a terrain sample for every vertex.
     fn from_polyline(poly: &osm_ingest::RoadPolyline, selected_root: Option<&Path>) -> Self {
-        let pts = &poly.points;
+        let simplified = simplify_source_points(&poly.points, MAX_SOURCE_POINTS_PER_ROAD);
+        let pts = &simplified;
         if pts.is_empty() {
             return Self { points: Vec::new() };
         }
@@ -201,6 +206,7 @@ pub(super) fn draw_roads(
     let Some(cache) = &mut store.cache else {
         return;
     };
+    let mut remaining_points = MAX_RENDER_POINTS_TOTAL;
 
     if show_minor_roads {
         draw_road_layer(
@@ -212,6 +218,7 @@ pub(super) fn draw_roads(
             extent_y_km,
             &cache.minor_elevated,
             egui::Stroke::new(0.8, theme::road_minor_color()),
+            &mut remaining_points,
         );
     }
     if show_major_roads {
@@ -224,6 +231,7 @@ pub(super) fn draw_roads(
             extent_y_km,
             &cache.major_elevated,
             egui::Stroke::new(1.35, theme::road_major_color()),
+            &mut remaining_points,
         );
     }
 }
@@ -237,10 +245,19 @@ fn draw_road_layer(
     extent_y_km: f32,
     roads: &[ElevatedRoad],
     stroke: egui::Stroke,
+    remaining_points: &mut usize,
 ) {
     for road in roads {
-        let mut points = Vec::with_capacity(road.points.len());
+        if *remaining_points < 2 {
+            break;
+        }
+
+        let mut points = Vec::with_capacity(road.points.len().min(*remaining_points));
+        let mut last_kept: Option<egui::Pos2> = None;
         for &(pt, elev) in &road.points {
+            if *remaining_points == 0 {
+                break;
+            }
             let Some(pos) = project_local(
                 layout,
                 view,
@@ -253,11 +270,44 @@ fn draw_road_layer(
             .map(|p| p.pos) else {
                 continue;
             };
-            points.push(pos);
+
+            let should_keep = points.is_empty()
+                || last_kept
+                    .map(|prev| prev.distance(pos) >= MIN_SCREEN_POINT_DISTANCE)
+                    .unwrap_or(true);
+
+            if should_keep {
+                points.push(pos);
+                last_kept = Some(pos);
+                *remaining_points = remaining_points.saturating_sub(1);
+            }
         }
 
         if points.len() >= 2 {
             painter.add(egui::Shape::line(points, stroke));
         }
     }
+}
+
+fn simplify_source_points(points: &[GeoPoint], max_points: usize) -> Vec<GeoPoint> {
+    if points.len() <= max_points {
+        return points.to_vec();
+    }
+
+    let mut simplified = Vec::with_capacity(max_points);
+    simplified.push(points[0]);
+
+    let stride = ((points.len() - 1) as f32 / (max_points - 1) as f32).ceil() as usize;
+    let mut idx = stride;
+    while idx + 1 < points.len() {
+        simplified.push(points[idx]);
+        idx += stride;
+    }
+
+    let last = *points.last().unwrap();
+    if simplified.last().copied() != Some(last) {
+        simplified.push(last);
+    }
+
+    simplified
 }

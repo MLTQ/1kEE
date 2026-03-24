@@ -1,8 +1,8 @@
+use super::local_terrain_scene;
 use crate::model::AppModel;
 use crate::osm_ingest;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
-use super::local_terrain_scene;
 
 pub(super) fn ensure_visible_road_layers(model: &mut AppModel, local_terrain_mode: bool) {
     if !local_terrain_mode || (!model.show_major_roads && !model.show_minor_roads) {
@@ -32,7 +32,7 @@ pub(super) fn ensure_visible_road_layers(model: &mut AppModel, local_terrain_mod
     // Radius = viewport half-extent in miles, so the import always covers
     // the full visible area regardless of zoom level.
     let half_deg = local_terrain_scene::visual_half_extent_for_zoom(model.globe_view.local_zoom);
-    let radius_miles = (half_deg * 69.0 * 1.25).clamp(10.0, 150.0);
+    let radius_miles = (half_deg * 69.0).clamp(8.0, 60.0);
 
     if let Some(focus) = model.terrain_focus_location() {
         queue_road_focus_import(model, focus, radius_miles, "terrain focus");
@@ -48,8 +48,14 @@ pub(super) fn ensure_visible_road_layers(model: &mut AppModel, local_terrain_mod
     }
 }
 
-pub(super) fn queue_road_focus_import(model: &mut AppModel, point: crate::model::GeoPoint, radius_miles: f32, label: &str) {
-    match osm_ingest::queue_focus_roads_import(model.selected_root.as_deref(), point, radius_miles) {
+pub(super) fn queue_road_focus_import(
+    model: &mut AppModel,
+    point: crate::model::GeoPoint,
+    radius_miles: f32,
+    label: &str,
+) {
+    match osm_ingest::queue_focus_roads_import(model.selected_root.as_deref(), point, radius_miles)
+    {
         Ok(true) => {
             model.push_log(format!("Queued focused road import for the {label}."));
             model.osm_inventory =
@@ -100,8 +106,14 @@ pub(super) fn ensure_visible_water_layers(model: &mut AppModel, local_terrain_mo
     }
 }
 
-pub(super) fn queue_water_focus_import(model: &mut AppModel, point: crate::model::GeoPoint, radius_miles: f32, label: &str) {
-    match osm_ingest::queue_focus_water_import(model.selected_root.as_deref(), point, radius_miles) {
+pub(super) fn queue_water_focus_import(
+    model: &mut AppModel,
+    point: crate::model::GeoPoint,
+    radius_miles: f32,
+    label: &str,
+) {
+    match osm_ingest::queue_focus_water_import(model.selected_root.as_deref(), point, radius_miles)
+    {
         Ok(true) => {
             model.push_log(format!("Queued focused water import for the {label}."));
             model.osm_inventory =
