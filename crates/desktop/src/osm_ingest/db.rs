@@ -106,7 +106,17 @@ pub(super) fn ensure_runtime_schema(connection: &Connection) -> rusqlite::Result
             PRIMARY KEY (zoom, tile_x, tile_y, way_id)
         );
         CREATE INDEX IF NOT EXISTS idx_water_tiles_lookup
-            ON water_tiles(zoom, tile_x, tile_y);",
+            ON water_tiles(zoom, tile_x, tile_y);
+        CREATE TABLE IF NOT EXISTS osm_focus_cell_cache (
+            feature_kind TEXT NOT NULL,
+            source_path TEXT NOT NULL,
+            cell_lat INTEGER NOT NULL,
+            cell_lon INTEGER NOT NULL,
+            imported_at_unix INTEGER NOT NULL,
+            PRIMARY KEY (feature_kind, source_path, cell_lat, cell_lon)
+        );
+        CREATE INDEX IF NOT EXISTS idx_osm_focus_cell_cache_lookup
+            ON osm_focus_cell_cache(feature_kind, source_path);",
     )?;
     let _ = connection.execute(
         "ALTER TABLE osm_ingest_jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0",
