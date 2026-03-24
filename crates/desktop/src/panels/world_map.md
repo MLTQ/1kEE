@@ -36,6 +36,7 @@ Implements the main geographic canvas for the demo. The current version wraps an
 - Local terrain mode now uses a footer control strip below the map for layer spread, terrain zoom readout, and a contour color legend instead of placing those controls over the rendered scene.
 - That footer now exposes a much wider `LAYER SPREAD` range (`0.15..=100.0`), so operators can intentionally reintroduce extremely strong vertical exaggeration after the projection was made zoom-stable.
 - The same footer now also explains the road overlay palette so enabling road layers does not introduce unexplained linework, and it uses semantic labels instead of hard-coded color names so alternate themes read correctly.
+- `world_map.rs` now pins `globe_scene` and `srtm_focus_cache` to their single-file module paths explicitly so unfinished directory-module refactors in the working tree do not break normal builds.
 - While a road layer is enabled, the panel now keeps repainting during active OSM jobs and re-queues focused road imports around the current terrain focus / local viewport instead of leaving the renderer pointed at a stale older region.
 - Mock geography has been removed; if the terrain pipeline has no real data to show for a view, the globe stays minimal.
 - Preserve the same event-selection and nearby-camera interaction semantics if the renderer is upgraded again.
