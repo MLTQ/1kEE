@@ -134,7 +134,14 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     // Rendered on top of contours/roads so the shaded mesh occludes the line
     // work within the terrain quad — outside the quad the contours remain fully
     // visible, giving a high-contrast look everywhere else.
-    if model.show_terrain_surface {
+    // Only added when the GPU heightmap is actually uploaded; while building
+    // we let the contours + loading animation show through unobstructed.
+    let terrain_ready = local_terrain_pass::is_heightmap_ready(
+        viewport_center,
+        visual_half_extent_for_zoom(model.globe_view.local_zoom),
+        model.selected_root.as_deref(),
+    );
+    if model.show_terrain_surface && terrain_ready {
         let half_extent_deg = visual_half_extent_for_zoom(model.globe_view.local_zoom);
         let terrain_layout = local_terrain_pass::LocalTerrainLayout {
             focus_center:    layout.focus_center,

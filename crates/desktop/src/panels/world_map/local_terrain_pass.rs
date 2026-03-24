@@ -50,6 +50,23 @@ fn pending_hmap_slot() -> &'static Mutex<Option<PendingHeightmap>> {
 
 static BUILDING: AtomicBool = AtomicBool::new(false);
 
+/// Tracks the HeightmapKey that is currently uploaded and valid on the GPU.
+/// Stored as a flat tuple (lat_q, lon_q, extent_q, root_hash) to avoid leaking
+/// the private `HeightmapKey` type.
+fn ready_key_slot() -> &'static Mutex<Option<(i32, i32, i32, u64)>> {
+    static SLOT: OnceLock<Mutex<Option<(i32, i32, i32, u64)>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// Returns `true` if the GPU heightmap for the given viewport is already
+/// uploaded and ready to render.  When `false` the terrain callback should
+/// be skipped so the loading animation and contour lines remain visible.
+pub fn is_heightmap_ready(center: GeoPoint, half_extent_deg: f32, selected_root: Option<&std::path::Path>) -> bool {
+    let key = HeightmapKey::new(center, half_extent_deg, selected_root);
+    let tuple = (key.lat_q, key.lon_q, key.extent_q, key.root_hash);
+    ready_key_slot().lock().map(|g| *g == Some(tuple)).unwrap_or(false)
+}
+
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 /// Side length of the heightmap texture (pixels).
@@ -497,7 +514,23 @@ impl egui_wgpu::CallbackTrait for LocalTerrainCallback {
         if let Ok(mut slot) = pending_hmap_slot().lock() {
             if let Some(pending) = slot.take() {
                 upload_heightmap(queue, &res.heightmap_tex, &pending.data);
-                res.cached_key = Some(pending.key);
+                res.cached_key = Some(pending.key.clone());
+                // Mark this key as ready so the scene layer can skip the
+                // callback (and keep contours + loading animation visible)
+                // until the texture is actually uploaded.
+                if let Ok(mut rk) = ready_key_slot().lock() {
+                    *rk = Some((pending.key.lat_q, pending.key.lon_q, pending.key.extent_q, pending.key.root_hash));
+                }
+            }
+        }
+
+        // If the already-cached key matches, ensure the ready slot reflects it
+        // (covers the case where terrain was toggled off then back on).
+        if res.cached_key.as_ref() == Some(&key) {
+            if let Ok(mut rk) = ready_key_slot().lock() {
+                if rk.is_none() {
+                    *rk = Some((key.lat_q, key.lon_q, key.extent_q, key.root_hash));
+                }
             }
         }
 
@@ -506,6 +539,8 @@ impl egui_wgpu::CallbackTrait for LocalTerrainCallback {
         if res.cached_key.as_ref() != Some(&key)
             && !BUILDING.load(Ordering::Relaxed)
         {
+            // Invalidate the ready key — we're about to build a new heightmap.
+            if let Ok(mut rk) = ready_key_slot().lock() { *rk = None; }
             BUILDING.store(true, Ordering::Relaxed);
             let center       = self.center;
             let half_extent  = self.half_extent_deg;
