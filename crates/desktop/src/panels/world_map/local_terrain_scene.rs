@@ -54,33 +54,6 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let viewport_center = model.globe_view.local_center;
     let render_zoom = local_render_zoom(model.globe_view.local_zoom);
 
-    // ── GPU terrain surface ────────────────────────────────────────────────
-    // Renders a smooth shaded mesh as an underlayer; CPU contours/roads/markers
-    // are drawn on top by the remainder of this function.
-    if model.show_terrain_surface {
-        let half_extent_deg = visual_half_extent_for_zoom(model.globe_view.local_zoom);
-        let terrain_layout = local_terrain_pass::LocalTerrainLayout {
-            focus_center:    layout.focus_center,
-            horizontal_scale: layout.horizontal_scale,
-            height:          layout.height,
-        };
-        let callback = local_terrain_pass::LocalTerrainCallback::new(
-            viewport_center,
-            half_extent_deg,
-            &terrain_layout,
-            model.globe_view.local_yaw,
-            model.globe_view.local_pitch,
-            model.globe_view.local_layer_spread,
-            0.92,
-            model.selected_root.as_deref(),
-            theme::scene_backdrop(),  // sea / deep
-            theme::topo_color(),      // low land
-            theme::contour_color(),   // mid / high land
-            theme::hot_color(),       // peaks
-        );
-        painter.add(callback.into_paint_callback(rect));
-    }
-
     let contours = contour_asset::load_srtm_region_for_view(
         model.selected_root.as_deref(),
         focus,
@@ -155,6 +128,34 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             render_zoom,
             model.show_water,
         );
+    }
+
+    // ── GPU terrain surface ────────────────────────────────────────────────
+    // Rendered on top of contours/roads so the shaded mesh occludes the line
+    // work within the terrain quad — outside the quad the contours remain fully
+    // visible, giving a high-contrast look everywhere else.
+    if model.show_terrain_surface {
+        let half_extent_deg = visual_half_extent_for_zoom(model.globe_view.local_zoom);
+        let terrain_layout = local_terrain_pass::LocalTerrainLayout {
+            focus_center:    layout.focus_center,
+            horizontal_scale: layout.horizontal_scale,
+            height:          layout.height,
+        };
+        let callback = local_terrain_pass::LocalTerrainCallback::new(
+            viewport_center,
+            half_extent_deg,
+            &terrain_layout,
+            model.globe_view.local_yaw,
+            model.globe_view.local_pitch,
+            model.globe_view.local_layer_spread,
+            0.95,
+            model.selected_root.as_deref(),
+            theme::scene_backdrop(),  // sea / deep
+            theme::topo_color(),      // low land
+            theme::contour_color(),   // mid / high land
+            theme::hot_color(),       // peaks
+        );
+        painter.add(callback.into_paint_callback(rect));
     }
 
     // Beam, markers, legend and progress bar always render regardless of load state.
