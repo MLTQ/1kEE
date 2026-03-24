@@ -212,6 +212,76 @@ pub fn load_roads_for_bounds_from_vector_cache(
     if any_file { Some(roads) } else { None }
 }
 
+pub(super) fn write_roads_to_vector_cells(
+    db_path: &Path,
+    bounds: GeoBounds,
+    roads: &[RoadPolyline],
+) -> Result<usize, String> {
+    let cache_dir = vector_cache_dir(db_path)?;
+    let cells = focus_cells_for_bounds(bounds);
+    let mut written_cells = 0usize;
+
+    for (cell_lat, cell_lon) in cells {
+        let cell_bounds = GeoBounds {
+            min_lat: cell_lat as f32,
+            max_lat: (cell_lat + 1) as f32,
+            min_lon: cell_lon as f32,
+            max_lon: (cell_lon + 1) as f32,
+        };
+        let path = vector_cell_path(&cache_dir, cell_lat, cell_lon);
+        let mut merged: HashMap<i64, RoadPolyline> = load_all_roads_from_vector_cell(&path)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|road| (road.way_id, road))
+            .collect();
+
+        let mut changed = false;
+        for road in roads {
+            if !bounds_intersect(polyline_bounds(&road.points), cell_bounds) {
+                continue;
+            }
+            if merged.insert(road.way_id, road.clone()).is_none() {
+                changed = true;
+            }
+        }
+
+        if !changed && path.exists() {
+            continue;
+        }
+
+        let mut features = Vec::with_capacity(merged.len());
+        for road in merged.values() {
+            let coordinates: Vec<Value> = road
+                .points
+                .iter()
+                .map(|point| json!([point.lon as f64, point.lat as f64]))
+                .collect();
+            features.push(json!({
+                "type": "Feature",
+                "properties": {
+                    "way_id": road.way_id,
+                    "class": road.road_class,
+                    "name": road.name,
+                },
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": coordinates,
+                }
+            }));
+        }
+
+        let body = serde_json::to_string(&json!({
+            "type": "FeatureCollection",
+            "features": features,
+        }))
+        .map_err(|error| error.to_string())?;
+        fs::write(&path, body).map_err(|error| error.to_string())?;
+        written_cells += 1;
+    }
+
+    Ok(written_cells)
+}
+
 fn focus_cells_for_bounds(bounds: GeoBounds) -> Vec<(i32, i32)> {
     let min_lat_c = bounds.min_lat.floor() as i32;
     let max_lat_c = bounds.max_lat.floor() as i32;
@@ -220,4 +290,43 @@ fn focus_cells_for_bounds(bounds: GeoBounds) -> Vec<(i32, i32)> {
     (min_lat_c..=max_lat_c)
         .flat_map(|lat| (min_lon_c..=max_lon_c).map(move |lon| (lat, lon)))
         .collect()
+}
+
+fn load_all_roads_from_vector_cell(path: &Path) -> Option<Vec<RoadPolyline>> {
+    let body = fs::read_to_string(path).ok()?;
+    let payload = serde_json::from_str::<Value>(&body).ok()?;
+    let features = payload.get("features").and_then(Value::as_array)?;
+    let mut roads = Vec::new();
+
+    for feature in features {
+        let props = feature.get("properties").unwrap_or(&Value::Null);
+        let way_id = props.get("way_id").and_then(Value::as_i64).unwrap_or_default();
+        let road_class = props
+            .get("class")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let geometry = feature.get("geometry")?;
+        let points = match geometry.get("type").and_then(Value::as_str) {
+            Some("LineString") => parse_geojson_linestring(geometry),
+            Some("MultiLineString") => parse_geojson_multilinestring(geometry)
+                .and_then(|mut lines| lines.drain(..).next()),
+            _ => None,
+        }?;
+        if points.len() < 2 {
+            continue;
+        }
+        roads.push(RoadPolyline {
+            way_id,
+            road_class,
+            name: props
+                .get("name")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .filter(|name| !name.is_empty()),
+            points,
+        });
+    }
+
+    Some(roads)
 }

@@ -1,12 +1,16 @@
 use crate::model::GeoPoint;
 use std::path::Path;
 
-use super::{OsmJob, OVERPASS_ENDPOINT, PROGRESS_FLUSH_INTERVAL};
 use super::db::{open_runtime_db, update_job_note};
 use super::roads_global::RoadTileWriter;
+use super::roads_vector_cache::write_roads_to_vector_cells;
 use super::util::canonical_road_class;
+use super::{OVERPASS_ENDPOINT, OsmJob, PROGRESS_FLUSH_INTERVAL, RoadPolyline};
 
-pub(super) fn import_focus_roads_via_overpass(db_path: &Path, job: &OsmJob) -> Result<String, String> {
+pub(super) fn import_focus_roads_via_overpass(
+    db_path: &Path,
+    job: &OsmJob,
+) -> Result<String, String> {
     update_job_note(db_path, job.id, "Querying Overpass API for road geometry…")?;
 
     let b = job.bounds;
@@ -38,8 +42,14 @@ pub(super) fn import_focus_roads_via_overpass(db_path: &Path, job: &OsmJob) -> R
         return Err(format!("Overpass returned HTTP {}", response.status()));
     }
 
-    let text = response.text().map_err(|e| format!("Reading Overpass response: {e}"))?;
-    update_job_note(db_path, job.id, "Parsing road geometry from Overpass response…")?;
+    let text = response
+        .text()
+        .map_err(|e| format!("Reading Overpass response: {e}"))?;
+    update_job_note(
+        db_path,
+        job.id,
+        "Parsing road geometry from Overpass response…",
+    )?;
 
     let json: serde_json::Value =
         serde_json::from_str(&text).map_err(|e| format!("Overpass JSON parse error: {e}"))?;
@@ -54,6 +64,7 @@ pub(super) fn import_focus_roads_via_overpass(db_path: &Path, job: &OsmJob) -> R
         .execute_batch("BEGIN IMMEDIATE;")
         .map_err(|e| e.to_string())?;
     let mut writer = RoadTileWriter::new(connection);
+    let mut cached_roads = Vec::new();
 
     let mut imported = 0usize;
     let mut skipped = 0usize;
@@ -79,9 +90,7 @@ pub(super) fn import_focus_roads_via_overpass(db_path: &Path, job: &OsmJob) -> R
             continue;
         };
 
-        let road_name = tags
-            .and_then(|t| t.get("name"))
-            .and_then(|v| v.as_str());
+        let road_name = tags.and_then(|t| t.get("name")).and_then(|v| v.as_str());
 
         // `out geom` puts node coordinates directly in a "geometry" array.
         let geometry = element.get("geometry").and_then(|v| v.as_array());
@@ -104,6 +113,12 @@ pub(super) fn import_focus_roads_via_overpass(db_path: &Path, job: &OsmJob) -> R
             continue;
         }
 
+        cached_roads.push(RoadPolyline {
+            way_id,
+            road_class: road_class.to_owned(),
+            name: road_name.map(ToOwned::to_owned),
+            points: points.clone(),
+        });
         writer
             .insert_road(way_id, road_class, road_name, &points)
             .map_err(|e| format!("DB insert error: {e}"))?;
@@ -120,9 +135,15 @@ pub(super) fn import_focus_roads_via_overpass(db_path: &Path, job: &OsmJob) -> R
     }
 
     writer.finish().map_err(|e| e.to_string())?;
+    update_job_note(
+        db_path,
+        job.id,
+        "Writing focused road vector cache from Overpass response…",
+    )?;
+    let cached_cells = write_roads_to_vector_cells(db_path, job.bounds, &cached_roads)?;
     crate::app::request_repaint();
 
     Ok(format!(
-        "Overpass import complete: {imported} roads written, {skipped} skipped"
+        "Overpass import complete: {imported} roads written, {skipped} skipped, {cached_cells} vector cells cached"
     ))
 }

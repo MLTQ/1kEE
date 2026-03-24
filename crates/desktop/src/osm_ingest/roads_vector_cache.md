@@ -13,6 +13,10 @@ Provides a directly streamable focused-road cache format on disk. Focused OSM ro
 - **Does**: Parses one focused `.osm.pbf` cell extract and writes a compact road `FeatureCollection` GeoJSON for that cell
 - **Interacts with**: `roads_osmium.rs`, `util.rs`
 
+### `write_roads_to_vector_cells`
+- **Does**: Merges already-normalized road polylines into the direct per-cell GeoJSON cache, preserving existing cached roads in the same 1° cells
+- **Interacts with**: `roads_overpass.rs`
+
 ### `load_roads_for_bounds_from_vector_cache`
 - **Does**: Loads and filters cached road-cell GeoJSON files covering the current bounds, returning normalized `RoadPolyline` records
 - **Interacts with**: `mod.rs`, `road_layer.rs`
@@ -22,6 +26,7 @@ Provides a directly streamable focused-road cache format on disk. Focused OSM ro
 | Dependent | Expects | Breaking changes |
 |-----------|---------|------------------|
 | `roads_osmium.rs` | Cell extracts can be converted into durable GeoJSON road cells | Renaming the cache path format |
+| `roads_overpass.rs` | Focused Overpass road results can be merged into the same on-disk vector-cell cache without losing prior roads in the cell | Making writes destructive instead of merge-based |
 | `mod.rs` | Vector-cache loads can return `Some(Vec<_>)` even when the list is empty if matching cell files exist | Changing the return contract |
 | `road_layer.rs` | Focused road loads become available as soon as matching GeoJSON cells exist on disk | Removing the direct vector-cache load path |
 
