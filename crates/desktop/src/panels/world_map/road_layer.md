@@ -14,12 +14,12 @@ Builds and renders the local-terrain road overlays. The file caches road geometr
 - **Interacts with**: `world_map.rs`
 
 ### `draw_roads`
-- **Does**: Detects stale tile coverage, launches background road-geometry loads, lazily samples elevations, and draws major/minor road layers with theme-aware colors
+- **Does**: Detects stale tile coverage, launches background road-geometry plus elevation-enrichment work, and draws major/minor road layers with theme-aware colors
 - **Interacts with**: `osm_ingest.rs`, `srtm_stream.rs`, `theme.rs`, `local_terrain_scene.rs`
 - **Rationale**: Keeps heavy I/O and elevation prep out of the per-frame hot path while still matching the active palette
 
 ### `draw_road_layer`
-- **Does**: Projects elevated road polylines into screen space and submits the line shapes to egui
+- **Does**: Projects elevated road polylines into screen space, drops near-duplicate screen points, and submits the line shapes to egui
 - **Interacts with**: `project_local` in `local_terrain_scene.rs`
 
 ## Contracts
@@ -29,3 +29,7 @@ Builds and renders the local-terrain road overlays. The file caches road geometr
 | `local_terrain_scene.rs` | Road drawing can be requested per frame without blocking on SQLite when cache coverage is already valid | Reintroducing synchronous geometry loads into the draw path |
 | `world_map.rs` | `road_cache_building` is cheap and `draw_roads` respects the major/minor visibility flags | Changing repaint-signalling behavior or ignoring the toggles |
 | `theme.rs` | Major/minor road colors are provided as semantic tokens rather than hard-coded legend colors | Removing the theme helper integration |
+
+## Notes
+- Elevation enrichment now happens in the background cache-build thread instead of on the first render frame, which avoids a visible hitch when enabling road layers or panning into uncached tiles.
+- The draw path now applies a tiny screen-space decimation step before handing lines to egui so dense polylines do not waste work on sub-pixel duplicates.

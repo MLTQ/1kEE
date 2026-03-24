@@ -24,7 +24,10 @@ impl ElevatedWater {
         let pts = &poly.points;
         let n = pts.len();
         if n == 0 {
-            return Self { points: Vec::new(), is_area: poly.is_area };
+            return Self {
+                points: Vec::new(),
+                is_area: poly.is_area,
+            };
         }
         // Sample every 4th vertex for water (large polygons can be huge).
         let step = 4usize;
@@ -44,12 +47,19 @@ impl ElevatedWater {
             let (i0, e0) = w[0];
             let (i1, e1) = w[1];
             for i in i0..=i1 {
-                let t = if i1 > i0 { (i - i0) as f32 / (i1 - i0) as f32 } else { 0.0 };
+                let t = if i1 > i0 {
+                    (i - i0) as f32 / (i1 - i0) as f32
+                } else {
+                    0.0
+                };
                 elevations[i] = e0 + (e1 - e0) * t;
             }
         }
         let points = pts.iter().zip(elevations).map(|(&pt, e)| (pt, e)).collect();
-        Self { points, is_area: poly.is_area }
+        Self {
+            points,
+            is_area: poly.is_area,
+        }
     }
 }
 
@@ -60,10 +70,8 @@ struct WaterCache {
     tile_y_min: u32,
     tile_y_max: u32,
     water_gen: u64,
-    /// Raw geometry from SQLite — built in a background thread (no SRTM I/O).
-    polys: Vec<WaterPolyline>,
-    /// Elevation-enriched features, populated lazily on first render.
-    features_elevated: Option<Vec<ElevatedWater>>,
+    /// Elevation-enriched features, built off the render thread.
+    features_elevated: Vec<ElevatedWater>,
 }
 
 struct WaterCacheStore {
@@ -73,7 +81,12 @@ struct WaterCacheStore {
 
 fn water_cache() -> &'static Mutex<WaterCacheStore> {
     static CACHE: OnceLock<Mutex<WaterCacheStore>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(WaterCacheStore { cache: None, building: false }))
+    CACHE.get_or_init(|| {
+        Mutex::new(WaterCacheStore {
+            cache: None,
+            building: false,
+        })
+    })
 }
 
 /// Clear the water tile cache so the next draw reloads from SQLite.
@@ -98,7 +111,9 @@ pub(super) fn draw_water(
     show_water: bool,
 ) {
     if !show_water {
-        if let Ok(mut g) = water_cache().lock() { g.cache = None; }
+        if let Ok(mut g) = water_cache().lock() {
+            g.cache = None;
+        }
         return;
     }
 
@@ -138,20 +153,24 @@ pub(super) fn draw_water(
             store.building = true;
             drop(store);
 
-            // No SRTM I/O in the background thread — geometry only.
             let root_buf = selected_root.map(|p| p.to_path_buf());
             std::thread::spawn(move || {
                 let root_ref = root_buf.as_deref();
-                let polys = osm_ingest::load_water_for_bounds(root_ref, bounds, tile_zoom);
+                let features_elevated =
+                    osm_ingest::load_water_for_bounds(root_ref, bounds, tile_zoom)
+                        .into_iter()
+                        .map(|poly| ElevatedWater::from_polyline(&poly, root_ref))
+                        .collect();
 
                 if let Ok(mut store) = water_cache().lock() {
                     store.cache = Some(WaterCache {
                         tile_zoom,
-                        tile_x_min: lxmin, tile_x_max: lxmax,
-                        tile_y_min: lymin, tile_y_max: lymax,
+                        tile_x_min: lxmin,
+                        tile_x_max: lxmax,
+                        tile_y_min: lymin,
+                        tile_y_max: lymax,
                         water_gen: current_gen,
-                        polys,
-                        features_elevated: None,
+                        features_elevated,
                     });
                     store.building = false;
                 }
@@ -160,36 +179,44 @@ pub(super) fn draw_water(
         }
     }
 
-    // ── Render from whatever cache is currently ready ───────────────────
-    // Lazily enrich with SRTM elevation on first render after a cache update.
     let mut store = match water_cache().lock() {
         Ok(g) => g,
         Err(_) => return,
     };
-    let Some(cache) = &mut store.cache else { return };
-
-    if cache.features_elevated.is_none() {
-        cache.features_elevated = Some(
-            cache.polys.iter()
-                .map(|p| ElevatedWater::from_polyline(p, selected_root))
-                .collect(),
-        );
-    }
-    let Some(features) = &cache.features_elevated else { return };
+    let Some(cache) = &mut store.cache else {
+        return;
+    };
+    let features = &cache.features_elevated;
 
     let water_col = crate::theme::water_color();
     let line_stroke = egui::Stroke::new(1.2, water_col);
+    let min_screen_step_sq = (line_stroke.width.max(1.0) * 1.1).powi(2);
 
     for feat in features {
-        let mut pts: Vec<_> = feat
-            .points
-            .iter()
-            .filter_map(|&(pt, elev)| {
-                project_local(layout, view, viewport_center, pt, elev,
-                              extent_x_km, extent_y_km)
-                    .map(|p| p.pos)
-            })
-            .collect();
+        let mut pts = Vec::with_capacity(feat.points.len());
+        let mut last_kept: Option<egui::Pos2> = None;
+        for &(pt, elev) in &feat.points {
+            let Some(pos) = project_local(
+                layout,
+                view,
+                viewport_center,
+                pt,
+                elev,
+                extent_x_km,
+                extent_y_km,
+            )
+            .map(|p| p.pos) else {
+                continue;
+            };
+
+            let keep = last_kept
+                .map(|prev| prev.distance_sq(pos) >= min_screen_step_sq)
+                .unwrap_or(true);
+            if keep {
+                last_kept = Some(pos);
+                pts.push(pos);
+            }
+        }
 
         if pts.len() < 2 {
             continue;

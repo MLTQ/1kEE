@@ -1,5 +1,5 @@
 use crate::model::{GeoPoint, GlobeViewState};
-use crate::osm_ingest::{self, RoadLayerKind, RoadPolyline};
+use crate::osm_ingest::{self, RoadLayerKind};
 use crate::theme;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -95,13 +95,10 @@ struct RoadCache {
     road_gen: u64,
     had_major: bool,
     had_minor: bool,
-    /// Raw geometry from SQLite — built in a background thread (no SRTM I/O).
-    major_polys: Vec<RoadPolyline>,
-    minor_polys: Vec<RoadPolyline>,
-    /// Elevation-enriched roads, populated lazily on first render so that SRTM
-    /// tiles are guaranteed to be in the hot tile-LRU when we sample them.
-    major_elevated: Option<Vec<ElevatedRoad>>,
-    minor_elevated: Option<Vec<ElevatedRoad>>,
+    /// Elevation-enriched roads, built off the render thread so enabling
+    /// layers or panning into uncached tiles does not hitch the UI.
+    major_elevated: Vec<ElevatedRoad>,
+    minor_elevated: Vec<ElevatedRoad>,
 }
 
 struct RoadCacheStore {
@@ -175,29 +172,32 @@ pub(super) fn draw_roads(
             store.building = true;
             drop(store); // release lock before spawning
 
-            // No SRTM I/O in the background thread — geometry only.
-            // Elevation is sampled lazily on the first render call so that the
-            // SRTM tile LRU is guaranteed warm (contours have already loaded tiles).
             let root_buf = selected_root.map(|p| p.to_path_buf());
             std::thread::spawn(move || {
                 let root_ref = root_buf.as_deref();
-                let major_polys = if show_major_roads {
+                let major_elevated = if show_major_roads {
                     osm_ingest::load_roads_for_bounds(
                         root_ref,
                         bounds,
                         tile_zoom,
                         RoadLayerKind::Major,
                     )
+                    .into_iter()
+                    .map(|poly| ElevatedRoad::from_polyline(&poly, root_ref, 1))
+                    .collect()
                 } else {
                     Vec::new()
                 };
-                let minor_polys = if show_minor_roads {
+                let minor_elevated = if show_minor_roads {
                     osm_ingest::load_roads_for_bounds(
                         root_ref,
                         bounds,
                         tile_zoom,
                         RoadLayerKind::Minor,
                     )
+                    .into_iter()
+                    .map(|poly| ElevatedRoad::from_polyline(&poly, root_ref, 5))
+                    .collect()
                 } else {
                     Vec::new()
                 };
@@ -212,10 +212,8 @@ pub(super) fn draw_roads(
                         road_gen: current_gen,
                         had_major: show_major_roads,
                         had_minor: show_minor_roads,
-                        major_polys,
-                        minor_polys,
-                        major_elevated: None,
-                        minor_elevated: None,
+                        major_elevated,
+                        minor_elevated,
                     });
                     store.building = false;
                 }
@@ -225,11 +223,6 @@ pub(super) fn draw_roads(
         // `store` dropped here (or already explicitly dropped above)
     }
 
-    // ── Render from whatever cache is currently ready ───────────────────
-    // Lazily build elevation-enriched roads on first render after a cache
-    // update.  By now the SRTM tile LRU is warm (contour rendering already
-    // loaded the tiles), so every sample_elevation_m call hits the in-memory
-    // tile cache instead of disk.
     let mut store = match road_cache().lock() {
         Ok(g) => g,
         Err(_) => return,
@@ -238,56 +231,33 @@ pub(super) fn draw_roads(
         return;
     };
 
-    if show_major_roads && cache.major_elevated.is_none() {
-        cache.major_elevated = Some(
-            cache
-                .major_polys
-                .iter()
-                .map(|p| ElevatedRoad::from_polyline(p, selected_root, 1))
-                .collect(),
-        );
-    }
-    if show_minor_roads && cache.minor_elevated.is_none() {
-        cache.minor_elevated = Some(
-            cache
-                .minor_polys
-                .iter()
-                .map(|p| ElevatedRoad::from_polyline(p, selected_root, 5))
-                .collect(),
-        );
-    }
-
     if show_minor_roads {
-        if let Some(minor) = &cache.minor_elevated {
-            draw_road_layer(
-                painter,
-                layout,
-                view,
-                viewport_center,
-                extent_x_km,
-                extent_y_km,
-                minor,
-                egui::Stroke::new(0.8, theme::road_minor_color()),
-            );
-        }
+        draw_road_layer(
+            painter,
+            layout,
+            view,
+            viewport_center,
+            extent_x_km,
+            extent_y_km,
+            &cache.minor_elevated,
+            egui::Stroke::new(0.8, theme::road_minor_color()),
+        );
     }
     if show_major_roads {
-        if let Some(major) = &cache.major_elevated {
-            draw_road_layer(
-                painter,
-                layout,
-                view,
-                viewport_center,
-                extent_x_km,
-                extent_y_km,
-                major,
-                egui::Stroke::new(1.35, theme::road_major_color()),
-            );
-        }
+        draw_road_layer(
+            painter,
+            layout,
+            view,
+            viewport_center,
+            extent_x_km,
+            extent_y_km,
+            &cache.major_elevated,
+            egui::Stroke::new(1.35, theme::road_major_color()),
+        );
     }
 }
 
-pub(super) fn draw_road_layer(
+fn draw_road_layer(
     painter: &egui::Painter,
     layout: &LocalLayout,
     view: &GlobeViewState,
@@ -297,24 +267,32 @@ pub(super) fn draw_road_layer(
     roads: &[ElevatedRoad],
     stroke: egui::Stroke,
 ) {
+    let min_screen_step_sq = (stroke.width.max(0.9) * 0.95).powi(2);
     for road in roads {
-        let points: Vec<_> = road
-            .points
-            .iter()
-            .filter_map(|&(pt, elev)| {
-                // Elevation is already pre-sampled — this is pure projection math.
-                project_local(
-                    layout,
-                    view,
-                    viewport_center,
-                    pt,
-                    elev,
-                    extent_x_km,
-                    extent_y_km,
-                )
-                .map(|p| p.pos)
-            })
-            .collect();
+        let mut points = Vec::with_capacity(road.points.len());
+        let mut last_kept: Option<egui::Pos2> = None;
+        for &(pt, elev) in &road.points {
+            let Some(pos) = project_local(
+                layout,
+                view,
+                viewport_center,
+                pt,
+                elev,
+                extent_x_km,
+                extent_y_km,
+            )
+            .map(|p| p.pos) else {
+                continue;
+            };
+
+            let keep = last_kept
+                .map(|prev| prev.distance_sq(pos) >= min_screen_step_sq)
+                .unwrap_or(true);
+            if keep {
+                last_kept = Some(pos);
+                points.push(pos);
+            }
+        }
 
         if points.len() >= 2 {
             painter.add(egui::Shape::line(points, stroke));
