@@ -184,7 +184,8 @@ pub fn apply_interaction(
         let pan_lon_sum = (t * 0.018 + 2.5).sin() * 0.60
                         + (t * 0.035 * PHI + 1.4).sin() * 0.40;
         let half_ext = local_terrain_scene::visual_half_extent_for_zoom(view.local_zoom);
-        let pan_scale = s * 0.002 * half_ext; // tiny fraction of viewport / second
+        // ~0.5 view-widths per minute at full speed — visibly traverses the terrain.
+        let pan_scale = s * 0.015 * half_ext;
 
         view.vel_local_yaw   = lerp(view.vel_local_yaw,   yaw_target,            0.03);
         view.vel_local_pitch = lerp(view.vel_local_pitch, pitch_target,           0.03);
