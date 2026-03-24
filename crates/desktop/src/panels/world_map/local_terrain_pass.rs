@@ -566,6 +566,15 @@ impl egui_wgpu::CallbackTrait for LocalTerrainCallback {
         resources: &egui_wgpu::CallbackResources,
     ) {
         let Some(res) = resources.get::<LocalTerrainPassResources>() else { return };
+
+        // Skip the draw if the GPU texture doesn't yet hold this viewport's
+        // heightmap.  prepare() still ran (uploading data if available and
+        // kicking off background builds), so the terrain will appear as soon
+        // as the background thread finishes — without showing a black quad in
+        // the meantime or covering the loading animation beneath it.
+        let key = HeightmapKey::new(self.center, self.half_extent_deg, self.selected_root.as_deref());
+        if res.cached_key.as_ref() != Some(&key) { return; }
+
         render_pass.set_pipeline(&res.pipeline);
         render_pass.set_bind_group(0, &res.bind_group, &[]);
         render_pass.set_index_buffer(res.index_buf.slice(..), wgpu::IndexFormat::Uint16);
