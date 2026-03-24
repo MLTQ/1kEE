@@ -340,8 +340,8 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                         }
                     }
 
-                    // ── Meander controls (only while cinematic is active) ─────
-                    if model.cinematic_mode && !model.globe_view.local_mode {
+                    // ── Meander controls (while cinematic is active) ──────────
+                    if model.cinematic_mode {
                         let view = &mut model.globe_view;
 
                         let (mn_fill, mn_text) = if view.meander_mode {
