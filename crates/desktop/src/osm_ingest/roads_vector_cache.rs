@@ -142,13 +142,18 @@ pub fn load_roads_for_bounds_from_vector_cache(
     }
 
     let cells = focus_cells_for_bounds(bounds);
+    if cells.is_empty() {
+        return None;
+    }
     let mut any_file = false;
+    let mut missing_cell = false;
     let mut seen_way_ids = HashSet::new();
     let mut roads = Vec::new();
 
     for (cell_lat, cell_lon) in cells {
         let path = vector_cell_path(&cache_dir, cell_lat, cell_lon);
         if !path.exists() {
+            missing_cell = true;
             continue;
         }
         any_file = true;
@@ -210,7 +215,11 @@ pub fn load_roads_for_bounds_from_vector_cache(
         }
     }
 
-    if any_file { Some(roads) } else { None }
+    if !any_file || missing_cell {
+        None
+    } else {
+        Some(roads)
+    }
 }
 
 pub(super) fn write_roads_to_vector_cells(

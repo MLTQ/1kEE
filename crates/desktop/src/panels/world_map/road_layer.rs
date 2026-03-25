@@ -70,8 +70,6 @@ pub fn road_cache_building() -> bool {
 
 struct RoadCache {
     road_gen: u64,
-    had_major: bool,
-    had_minor: bool,
     /// The selected_root active when this cache was built.
     /// A root change (different event) immediately invalidates the cache.
     last_root: Option<std::path::PathBuf>,
@@ -140,8 +138,6 @@ pub(super) fn draw_roads(
         // geo coverage.  Zooming IN never triggers a rebuild.
         let stale = store.cache.as_ref().map_or(true, |c| {
             c.road_gen != current_gen
-                || c.had_major != show_major_roads
-                || c.had_minor != show_minor_roads
                 || c.last_root.as_deref() != selected_root
                 || bounds.min_lat < c.covered_min_lat
                 || bounds.max_lat > c.covered_max_lat
@@ -169,39 +165,31 @@ pub(super) fn draw_roads(
             let root_buf = selected_root.map(|p| p.to_path_buf());
             std::thread::spawn(move || {
                 let root_ref = root_buf.as_deref();
-                // tile_zoom=10 is a hint only; the GeoJSON cell path ignores it
-                let major_elevated = if show_major_roads {
-                    osm_ingest::load_roads_for_bounds(
-                        root_ref,
-                        load_bounds,
-                        10,
-                        RoadLayerKind::Major,
-                    )
-                    .into_iter()
-                    .map(|poly| ElevatedRoad::from_polyline(&poly, root_ref))
-                    .collect()
-                } else {
-                    Vec::new()
-                };
-                let minor_elevated = if show_minor_roads {
-                    osm_ingest::load_roads_for_bounds(
-                        root_ref,
-                        load_bounds,
-                        10,
-                        RoadLayerKind::Minor,
-                    )
-                    .into_iter()
-                    .map(|poly| ElevatedRoad::from_polyline(&poly, root_ref))
-                    .collect()
-                } else {
-                    Vec::new()
-                };
+                // Load both classes whenever any road layer is enabled so the
+                // cache survives checkbox toggles and only drawing changes.
+                // tile_zoom=10 is a hint only; the GeoJSON cell path ignores it.
+                let major_elevated = osm_ingest::load_roads_for_bounds(
+                    root_ref,
+                    load_bounds,
+                    10,
+                    RoadLayerKind::Major,
+                )
+                .into_iter()
+                .map(|poly| ElevatedRoad::from_polyline(&poly, root_ref))
+                .collect();
+                let minor_elevated = osm_ingest::load_roads_for_bounds(
+                    root_ref,
+                    load_bounds,
+                    10,
+                    RoadLayerKind::Minor,
+                )
+                .into_iter()
+                .map(|poly| ElevatedRoad::from_polyline(&poly, root_ref))
+                .collect();
 
                 if let Ok(mut store) = road_cache().lock() {
                     store.cache = Some(RoadCache {
                         road_gen: current_gen,
-                        had_major: show_major_roads,
-                        had_minor: show_minor_roads,
                         last_root: root_buf.clone(),
                         covered_min_lat,
                         covered_max_lat,

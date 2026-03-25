@@ -18,7 +18,7 @@ Provides a directly streamable focused-road cache format on disk. Focused OSM ro
 - **Interacts with**: `roads_overpass.rs`
 
 ### `load_roads_for_bounds_from_vector_cache`
-- **Does**: Loads and filters cached road-cell GeoJSON files covering the current bounds, returning normalized `RoadPolyline` records
+- **Does**: Loads and filters cached road-cell GeoJSON files covering the current bounds, returning normalized `RoadPolyline` records only when the full requested cell envelope is present on disk
 - **Interacts with**: `mod.rs`, `road_layer.rs`
 
 ## Contracts
@@ -27,9 +27,10 @@ Provides a directly streamable focused-road cache format on disk. Focused OSM ro
 |-----------|---------|------------------|
 | `roads_osmium.rs` | Cell extracts can be converted into durable GeoJSON road cells | Renaming the cache path format |
 | `roads_overpass.rs` | Focused Overpass road results can be merged into the same on-disk vector-cell cache without losing prior roads in the cell | Making writes destructive instead of merge-based |
-| `mod.rs` | Vector-cache loads can return `Some(Vec<_>)` even when the list is empty if matching cell files exist | Changing the return contract |
+| `mod.rs` | Vector-cache loads return `Some(Vec<_>)` only when every requested cell exists; partial coverage must fall back to the slower runtime sources | Treating a partial cell set as cache success |
 | `road_layer.rs` | Focused road loads become available as soon as matching GeoJSON cells exist on disk | Removing the direct vector-cache load path |
 
 ## Notes
 - This is intentionally focused-road only. Global road bootstraps still use the SQLite tile store.
 - GeoJSON is the first directly streamable format because it is easy to inspect and matches the user’s current fast local assets. A future follow-up can replace it with FlatGeobuf or another denser vector-cell format.
+- Partial cell coverage is intentionally treated as a cache miss. That keeps fragmented road chunks from masquerading as a fully loaded road layer while a focus import is still incomplete.

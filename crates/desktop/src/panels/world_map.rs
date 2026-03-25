@@ -1,4 +1,7 @@
+mod admin_layer;
+mod building_layer;
 mod camera;
+mod cell_loader;
 pub(crate) mod contour_asset;
 pub(crate) mod gebco_depth_fill;
 pub(crate) mod globe_pass;
@@ -10,9 +13,6 @@ pub(crate) mod local_terrain_pass;
 mod local_terrain_scene;
 mod map_detail_panels;
 mod map_tooltips;
-mod admin_layer;
-mod building_layer;
-mod cell_loader;
 mod road_layer;
 #[path = "world_map/srtm_focus_cache/mod.rs"]
 pub(crate) mod srtm_focus_cache;
@@ -280,9 +280,13 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                 }
 
                 if major_changed || minor_changed {
-                    // Always clear so the next draw_roads reloads from SQLite
-                    // with the correct show-flags, not stale cached geometry.
-                    local_terrain_scene::invalidate_road_cache();
+                    // Keep the loaded road cache when toggles change; the
+                    // renderer now loads both classes together and uses the
+                    // checkboxes only as draw filters. Only clear when all
+                    // road layers have been turned off.
+                    if !model.show_major_roads && !model.show_minor_roads {
+                        local_terrain_scene::invalidate_road_cache();
+                    }
                     if model.show_major_roads || model.show_minor_roads {
                         let half_deg = local_terrain_scene::visual_half_extent_for_zoom(
                             model.globe_view.local_zoom,

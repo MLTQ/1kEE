@@ -6,9 +6,9 @@ Loads OSM road geometry from the runtime store, enriches it with terrain elevati
 ## Components
 
 ### `draw_roads`
-- **Does**: Refreshes the cached elevated road set when tile coverage or road data generation changes, then renders the current major/minor road overlays
+- **Does**: Refreshes the cached elevated road set when tile coverage, root, or road data generation changes, then renders the current major/minor road overlays
 - **Interacts with**: `osm_ingest`, `srtm_stream`, `local_terrain_scene`
-- **Rationale**: Keeps SQLite reads and terrain sampling off the main render loop while still reacting to new OSM imports
+- **Rationale**: Keeps SQLite/direct-cache reads and terrain sampling off the main render loop while still reacting to new OSM imports
 
 ### `draw_road_layer`
 - **Does**: Projects cached elevated polylines into the local scene with screen-space thinning and a global point budget
@@ -28,3 +28,4 @@ Loads OSM road geometry from the runtime store, enriches it with terrain elevati
 
 ## Notes
 - The local road overlay now enforces both a per-road source simplification cap and a per-frame render-point budget. This intentionally trades some road detail for stability when the focused import covers a very dense region.
+- The road cache always loads both major and minor classes together for the covered viewport. Layer toggles only decide what gets drawn, which keeps checkbox changes from blowing away the loaded road geometry.
