@@ -201,7 +201,13 @@ pub(super) fn road_class_matches(road_class: &str, layer_kind: super::RoadLayerK
         super::RoadLayerKind::Major => {
             matches!(road_class, "motorway" | "trunk" | "primary" | "secondary")
         }
-        super::RoadLayerKind::Minor => matches!(road_class, "tertiary" | "residential" | "service"),
+        // "minor" is the canonical class emitted by the cache-builder pipeline
+        // (residential / living_street / unclassified / service all collapse to it).
+        // The older osmium pipeline emits "residential" and "service" separately, so
+        // we match all three names so both pipelines work.
+        super::RoadLayerKind::Minor => {
+            matches!(road_class, "tertiary" | "minor" | "residential" | "service")
+        }
     }
 }
 

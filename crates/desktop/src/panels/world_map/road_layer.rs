@@ -71,6 +71,9 @@ struct RoadCache {
     road_gen: u64,
     had_major: bool,
     had_minor: bool,
+    /// The selected_root that was active when this cache was built.
+    /// A root change (user switches events) immediately invalidates the cache.
+    last_root: Option<std::path::PathBuf>,
     /// Elevation-enriched roads, built off the render thread so enabling
     /// layers or panning into uncached tiles does not hitch the UI.
     major_elevated: Vec<ElevatedRoad>,
@@ -136,6 +139,7 @@ pub(super) fn draw_roads(
                 || c.road_gen != current_gen
                 || c.had_major != show_major_roads
                 || c.had_minor != show_minor_roads
+                || c.last_root.as_deref() != selected_root
                 || c.tile_x_min > txmin
                 || c.tile_x_max < txmax
                 || c.tile_y_min > tymin
@@ -188,6 +192,7 @@ pub(super) fn draw_roads(
                         road_gen: current_gen,
                         had_major: show_major_roads,
                         had_minor: show_minor_roads,
+                        last_root: root_buf.clone(),
                         major_elevated,
                         minor_elevated,
                     });

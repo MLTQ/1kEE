@@ -46,6 +46,7 @@ struct BuildingCache {
     tile_y_min: u32,
     tile_y_max: u32,
     data_gen: u64,
+    last_root: std::path::PathBuf,
     features: Vec<ElevatedBuilding>,
 }
 
@@ -107,6 +108,7 @@ pub(super) fn draw_buildings(
         let stale = store.cache.as_ref().map_or(true, |c| {
             c.tile_zoom != tile_zoom
                 || c.data_gen != current_gen
+                || c.last_root != *root
                 || c.tile_x_min > txmin
                 || c.tile_x_max < txmax
                 || c.tile_y_min > tymin
@@ -135,6 +137,7 @@ pub(super) fn draw_buildings(
                         tile_y_min: lymin,
                         tile_y_max: lymax,
                         data_gen: current_gen,
+                        last_root: root_buf.clone(),
                         features,
                     });
                     store.building = false;
