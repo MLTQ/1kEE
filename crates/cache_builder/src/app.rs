@@ -4,8 +4,69 @@ use eframe::egui;
 use eframe::egui::Color32;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, SystemTime};
+
+// ── Natural Earth 110m country outlines (embedded at compile time) ────────────
+const NE_COUNTRIES_JSON: &str = include_str!("../assets/ne_110m_countries.json");
+static COASTLINES: OnceLock<Vec<Vec<[f32; 2]>>> = OnceLock::new();
+
+/// Returns all outer/inner rings from the Natural Earth 110m FeatureCollection.
+/// Parsed once and cached for the lifetime of the process.
+fn coastline_rings() -> &'static Vec<Vec<[f32; 2]>> {
+    COASTLINES.get_or_init(|| parse_ne_rings(NE_COUNTRIES_JSON))
+}
+
+fn parse_ne_rings(json: &str) -> Vec<Vec<[f32; 2]>> {
+    let mut rings: Vec<Vec<[f32; 2]>> = Vec::new();
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(json) else {
+        return rings;
+    };
+    let Some(features) = val["features"].as_array() else {
+        return rings;
+    };
+    for feat in features {
+        let geom = &feat["geometry"];
+        match geom["type"].as_str().unwrap_or("") {
+            "Polygon" => {
+                if let Some(coords) = geom["coordinates"].as_array() {
+                    for ring in coords {
+                        rings.push(extract_ring(ring));
+                    }
+                }
+            }
+            "MultiPolygon" => {
+                if let Some(polys) = geom["coordinates"].as_array() {
+                    for poly in polys {
+                        if let Some(poly_rings) = poly.as_array() {
+                            for ring in poly_rings {
+                                rings.push(extract_ring(ring));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    rings
+}
+
+fn extract_ring(ring: &serde_json::Value) -> Vec<[f32; 2]> {
+    ring.as_array()
+        .map(|pts| {
+            pts.iter()
+                .filter_map(|pt| {
+                    let arr = pt.as_array()?;
+                    let lon = arr.first()?.as_f64()? as f32;
+                    let lat = arr.get(1)?.as_f64()? as f32;
+                    Some([lon, lat])
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 pub struct BuilderApp {
     form: BuilderForm,
@@ -36,6 +97,7 @@ struct AssetSelection {
     water: bool,
     buildings: bool,
     trees: bool,
+    admin: bool,
 }
 
 #[derive(Default)]
@@ -81,6 +143,7 @@ impl BuilderApp {
                 water: false,
                 buildings: false,
                 trees: false,
+                admin: false,
             },
             log_lines: vec!["Ready.".to_owned()],
             status: "Idle".to_owned(),
@@ -135,6 +198,7 @@ impl BuilderApp {
             build_waterways: self.assets.water,
             build_buildings: self.assets.buildings,
             build_trees: self.assets.trees,
+            build_admin: self.assets.admin,
         };
         if command.min_lat >= command.max_lat || command.min_lon >= command.max_lon {
             return Err("Invalid bbox: minimums must be less than maximums.".to_owned());
@@ -336,6 +400,18 @@ impl eframe::App for BuilderApp {
                     );
                 }
 
+                // Country outlines (Natural Earth 110m)
+                let coast_color = Color32::from_rgb(70, 100, 120);
+                for ring in coastline_rings() {
+                    let pts: Vec<egui::Pos2> = ring
+                        .iter()
+                        .map(|[lon, lat]| egui::pos2(lon_to_x(rect, *lon), lat_to_y(rect, *lat)))
+                        .collect();
+                    if pts.len() >= 2 {
+                        painter.add(egui::Shape::line(pts, egui::Stroke::new(0.5, coast_color)));
+                    }
+                }
+
                 // Equator label
                 let eq_y = lat_to_y(rect, 0.0);
                 painter.text(
@@ -408,6 +484,7 @@ impl eframe::App for BuilderApp {
                 ui.checkbox(&mut self.assets.water, "Waterways");
                 ui.checkbox(&mut self.assets.buildings, "Buildings");
                 ui.checkbox(&mut self.assets.trees, "Trees / Forest");
+                ui.checkbox(&mut self.assets.admin, "Admin Boundaries");
 
                 ui.separator();
                 ui.add(

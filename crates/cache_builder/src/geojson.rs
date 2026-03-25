@@ -1,4 +1,4 @@
-use crate::util::{GeoBounds, RoadPolyline, WayFeature, bounds_intersect, focus_cell_bounds};
+use crate::util::{GeoBounds, GeoPoint, RoadPolyline, WayFeature, bounds_intersect, focus_cell_bounds};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs;
@@ -157,6 +157,56 @@ fn way_feature_collection_for_cell(
         "features": out_features,
     }))
     .map_err(|error| error.to_string())
+}
+
+/// Write (or overwrite) a per-admin-level GeoJSON file containing LineString features
+/// for each ring in each relation.
+///
+/// `features`: Vec of (relation_id, name, rings) where each ring is a Vec<GeoPoint>.
+/// Writes to `{cache_dir}/admin_cells/admin_level_{admin_level}.geojson`.
+/// Returns the number of GeoJSON Feature objects written.
+pub fn write_admin_level_file(
+    cache_dir: &Path,
+    admin_level: u8,
+    features: &[(i64, Option<String>, Vec<Vec<GeoPoint>>)],
+) -> Result<usize, String> {
+    let admin_dir = cache_dir.join("admin_cells");
+    fs::create_dir_all(&admin_dir).map_err(|error| error.to_string())?;
+    let path = admin_dir.join(format!("admin_level_{admin_level}.geojson"));
+
+    let mut out_features: Vec<serde_json::Value> = Vec::new();
+    for (relation_id, name, rings) in features {
+        for ring in rings {
+            if ring.len() < 2 {
+                continue;
+            }
+            let coordinates: Vec<serde_json::Value> = ring
+                .iter()
+                .map(|pt| json!([pt.lon as f64, pt.lat as f64]))
+                .collect();
+            out_features.push(json!({
+                "type": "Feature",
+                "properties": {
+                    "relation_id": relation_id,
+                    "name": name,
+                    "admin_level": admin_level,
+                },
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": coordinates,
+                }
+            }));
+        }
+    }
+
+    let count = out_features.len();
+    let body = serde_json::to_string(&json!({
+        "type": "FeatureCollection",
+        "features": out_features,
+    }))
+    .map_err(|error| error.to_string())?;
+    fs::write(&path, body).map_err(|error| error.to_string())?;
+    Ok(count)
 }
 
 fn load_all_roads_from_vector_cell(path: &Path) -> Option<Vec<RoadPolyline>> {

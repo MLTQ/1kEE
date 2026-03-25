@@ -10,6 +10,7 @@ pub(crate) mod local_terrain_pass;
 mod local_terrain_scene;
 mod map_detail_panels;
 mod map_tooltips;
+mod admin_layer;
 mod building_layer;
 mod cell_loader;
 mod road_layer;
@@ -275,6 +276,7 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                     ui.checkbox(&mut model.show_contours, "Contours");
                     ui.checkbox(&mut model.show_trees, "Trees");
                     ui.checkbox(&mut model.show_buildings, "Buildings");
+                    ui.checkbox(&mut model.show_admin, "Admin Boundaries");
                 }
 
                 if major_changed || minor_changed {

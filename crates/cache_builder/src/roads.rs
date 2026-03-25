@@ -24,7 +24,7 @@ const NODE_INSERT_BATCH:    usize = 50_000;
 // per iterator step, `bytes_read` equals the file offset of the *start of the
 // next* blob after each `next()` call — a safe resume point.
 
-struct PosReader {
+pub(crate) struct PosReader {
     inner: File,
     pos:   Arc<AtomicU64>,
 }
@@ -43,7 +43,7 @@ unsafe impl Send for PosReader {}
 /// Open `planet_path` seeked to `start_offset` and wrap in a `BlobReader`.
 /// Returns the reader plus an `Arc` that is updated as bytes are consumed,
 /// so callers can checkpoint the file position without needing the reader back.
-fn open_planet_at(
+pub(crate) fn open_planet_at(
     planet_path: &Path,
     start_offset: u64,
 ) -> Result<(BlobReader<PosReader>, Arc<AtomicU64>), String> {
@@ -119,6 +119,21 @@ pub fn build_bbox_cache_with_progress(
         &mut candidate_nodes,
         progress,
     )?;
+
+    if command.build_admin {
+        progress(RoadBuildProgress {
+            stage:    "Scanning Relations".to_owned(),
+            fraction: 0.83,
+            message:  "Scanning admin boundary relations…".to_owned(),
+        });
+        crate::admin::load_or_build_admin_boundaries(
+            &command,
+            bounds,
+            &mut candidate_nodes,
+            progress,
+        )?;
+    }
+
     progress(RoadBuildProgress {
         stage:    "Writing Cache".to_owned(),
         fraction: 0.82,

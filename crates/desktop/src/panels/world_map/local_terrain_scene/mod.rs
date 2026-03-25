@@ -189,6 +189,53 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         );
     }
 
+    // ── Admin boundaries ───────────────────────────────────────────────────
+    // Rendered outside the contour guard so they appear at any zoom level,
+    // matching coastlines/bathymetry which also skip the contour check.
+    if model.show_admin {
+        if let Some(root) = model.selected_root.as_deref() {
+            let half_extent_deg = visual_half_extent_for_zoom(model.globe_view.local_zoom);
+            let km_per_deg_lat = 111.32f32;
+            let km_per_deg_lon =
+                km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
+            let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
+            let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
+
+            // Load once, then render lowest-priority levels first so level 2
+            // (country) draws last and sits on top.
+            let boundaries =
+                super::admin_layer::get_or_load_admin_boundaries(root, &[2, 4, 6, 8]);
+
+            for &level in &[8u8, 6, 4, 2] {
+                let stroke = egui::Stroke::new(
+                    theme::admin_stroke_width(level),
+                    theme::admin_color(level),
+                );
+                for boundary in boundaries.iter().filter(|b| b.admin_level == level) {
+                    let pts: Vec<egui::Pos2> = boundary
+                        .points
+                        .iter()
+                        .filter_map(|&pt| {
+                            projection::project_local(
+                                &layout,
+                                &model.globe_view,
+                                viewport_center,
+                                pt,
+                                0.0,
+                                extent_x_km,
+                                extent_y_km,
+                            )
+                            .map(|p| p.pos)
+                        })
+                        .collect();
+                    if pts.len() >= 2 {
+                        painter.add(egui::Shape::line(pts, stroke));
+                    }
+                }
+            }
+        }
+    }
+
     // ── GPU terrain surface ────────────────────────────────────────────────
     // Rendered on top of contours/roads so the shaded mesh occludes the line
     // work within the terrain quad — outside the quad the contours remain fully

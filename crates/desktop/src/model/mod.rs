@@ -51,6 +51,7 @@ pub struct AppModel {
     pub show_contours: bool,
     pub show_trees: bool,
     pub show_buildings: bool,
+    pub show_admin: bool,
     pub show_ships: bool,
     pub show_flights: bool,
     /// GeoJSON layers uploaded by the user.
@@ -255,6 +256,7 @@ impl AppModel {
             show_contours: true,
             show_trees: false,
             show_buildings: false,
+            show_admin: false,
             show_ships: false,
             show_flights: false,
             geojson_layers: Vec::new(),

@@ -19,6 +19,7 @@ pub struct BboxCommand {
     pub build_waterways: bool,
     pub build_buildings: bool,
     pub build_trees: bool,
+    pub build_admin: bool,
 }
 
 pub type RoadsBboxCommand = BboxCommand;
@@ -55,6 +56,7 @@ where
     let mut build_waterways = false;
     let mut build_buildings = false;
     let mut build_trees = false;
+    let mut build_admin = false;
 
     let mut iter = args.into_iter();
     while let Some(flag) = iter.next() {
@@ -77,6 +79,7 @@ where
                         "waterways" => build_waterways = true,
                         "buildings" => build_buildings = true,
                         "trees" => build_trees = true,
+                        "admin" => build_admin = true,
                         other => return Err(format!("Unknown feature '{other}'.\n\n{}", usage())),
                     }
                 }
@@ -97,6 +100,7 @@ where
         build_waterways,
         build_buildings,
         build_trees,
+        build_admin,
     };
 
     if command.min_lat >= command.max_lat || command.min_lon >= command.max_lon {
@@ -113,5 +117,5 @@ fn parse_f32(flag: &str, value: &str) -> Result<f32, String> {
 }
 
 fn usage() -> String {
-    "Usage:\n  one-thousand-electric-eye-cache-builder\n  one-thousand-electric-eye-cache-builder gui\n  one-thousand-electric-eye-cache-builder roads-bbox --planet <planet.osm.pbf> --cache-dir <Derived/osm> --min-lat <f32> --max-lat <f32> --min-lon <f32> --max-lon <f32> [--margin-deg <f32>] [--features roads,waterways,buildings,trees]".to_owned()
+    "Usage:\n  one-thousand-electric-eye-cache-builder\n  one-thousand-electric-eye-cache-builder gui\n  one-thousand-electric-eye-cache-builder roads-bbox --planet <planet.osm.pbf> --cache-dir <Derived/osm> --min-lat <f32> --max-lat <f32> --min-lon <f32> --max-lon <f32> [--margin-deg <f32>] [--features roads,waterways,buildings,trees,admin]".to_owned()
 }
