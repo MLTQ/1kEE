@@ -7,6 +7,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+const FACTAL_BASE_URL: &str = "https://www.factal.com/api/v2/item/";
 const FACTAL_LATEST_URL: &str = "https://www.factal.com/api/v2/item/?severity__gte=2";
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
@@ -130,6 +131,8 @@ fn apply_outcome(model: &mut AppModel, generation: u64, outcome: PollOutcome) {
         PollOutcome::Success(events) => {
             let count = events.len();
             let should_log = model.factal_stream_status != "live" || model.events.len() != count;
+            // Persist to history store before replacing live events.
+            crate::event_store::upsert_events(&events);
             model.replace_factal_events(events);
             model.factal_stream_status = "live".into();
             if should_log {
@@ -425,4 +428,154 @@ fn value_as_f32(value: Option<&Value>) -> Option<f32> {
     } else {
         None
     }
+}
+
+// ── History backfill ──────────────────────────────────────────────────────────
+
+struct HistoryManager {
+    active: Option<JoinHandle<HistoryOutcome>>,
+}
+
+enum HistoryOutcome {
+    Success(usize),
+    AuthError,
+    Error(String),
+}
+
+fn history_manager() -> &'static Mutex<HistoryManager> {
+    static MANAGER: OnceLock<Mutex<HistoryManager>> = OnceLock::new();
+    MANAGER.get_or_init(|| Mutex::new(HistoryManager { active: None }))
+}
+
+/// Spawn a background thread to page through Factal history and persist it.
+/// No-ops if a fetch is already in progress.
+pub fn trigger_history_fetch(api_key: String, days_back: u32) {
+    let mut mgr = history_manager().lock().unwrap();
+    if mgr.active.is_some() {
+        return;
+    }
+    let handle = thread::spawn(move || fetch_and_store_history(&api_key, days_back));
+    mgr.active = Some(handle);
+}
+
+/// Poll the history fetch thread; updates model status when it finishes.
+/// Call each frame from `app.rs`.
+pub fn history_tick(model: &mut AppModel) {
+    let finished = {
+        let mut mgr = history_manager().lock().unwrap();
+        if mgr.active.as_ref().is_some_and(|h| h.is_finished()) {
+            mgr.active.take()
+        } else {
+            None
+        }
+    };
+
+    if let Some(handle) = finished {
+        match handle.join() {
+            Ok(HistoryOutcome::Success(n)) => {
+                let msg = format!("{n} historical events loaded");
+                model.replay_history_status = msg.clone();
+                model.push_log(format!("Factal history fetch complete: {n} event(s) stored."));
+                // If replay is open, rebuild now that we have data.
+                if model.replay_mode && model.replay_state.is_none() {
+                    model.rebuild_replay_state();
+                }
+            }
+            Ok(HistoryOutcome::AuthError) => {
+                model.replay_history_status = "Auth error during history fetch".into();
+            }
+            Ok(HistoryOutcome::Error(e)) => {
+                model.replay_history_status = format!("History fetch error: {e}");
+            }
+            Err(_) => {
+                model.replay_history_status = "History fetch panicked".into();
+            }
+        }
+    }
+}
+
+pub fn is_history_fetching() -> bool {
+    history_manager().lock().unwrap().active.is_some()
+}
+
+fn fetch_and_store_history(api_key: &str, days_back: u32) -> HistoryOutcome {
+    let client = match Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return HistoryOutcome::Error(e.to_string()),
+    };
+
+    let mut headers = HeaderMap::new();
+    let token = format!("Token {}", api_key.trim());
+    let token_value = match HeaderValue::from_str(&token) {
+        Ok(v) => v,
+        Err(e) => return HistoryOutcome::Error(e.to_string()),
+    };
+    headers.insert(AUTHORIZATION, token_value);
+
+    let from_unix = crate::event_store::now_unix() - (days_back as i64) * 86_400;
+    let date_gte = crate::event_store::unix_to_date_str(from_unix);
+    let mut url = format!("{FACTAL_BASE_URL}?severity__gte=2&date__gte={date_gte}");
+    let mut total = 0usize;
+
+    loop {
+        let response = match client.get(&url).headers(headers.clone()).send() {
+            Ok(r) => r,
+            Err(e) => return HistoryOutcome::Error(e.to_string()),
+        };
+
+        match response.status().as_u16() {
+            200 => {}
+            401 | 403 => return HistoryOutcome::AuthError,
+            429 => {
+                // Back off for 60 s before retrying the same page.
+                thread::sleep(Duration::from_secs(60));
+                continue;
+            }
+            code => return HistoryOutcome::Error(format!("HTTP {code}")),
+        }
+
+        let body = match response.text() {
+            Ok(b) => b,
+            Err(e) => return HistoryOutcome::Error(e.to_string()),
+        };
+        let payload: Value = match serde_json::from_str(&body) {
+            Ok(v) => v,
+            Err(e) => return HistoryOutcome::Error(e.to_string()),
+        };
+
+        let mut ids: HashSet<String> = HashSet::new();
+        let mut page_events: Vec<EventRecord> = Vec::new();
+        for raw in payload
+            .get("results")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(ev) = parse_event(raw) {
+                if ids.insert(ev.id.clone()) {
+                    page_events.push(ev);
+                }
+            }
+        }
+        total += page_events.len();
+        crate::event_store::upsert_events(&page_events);
+
+        match payload
+            .get("next")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            Some(next) => {
+                url = next.to_owned();
+                // Polite inter-page delay to avoid hammering the API.
+                thread::sleep(Duration::from_millis(600));
+            }
+            None => break,
+        }
+    }
+
+    HistoryOutcome::Success(total)
 }

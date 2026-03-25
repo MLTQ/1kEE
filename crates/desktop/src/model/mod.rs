@@ -4,6 +4,7 @@ mod events;
 mod flights;
 mod geo;
 mod geojson_layer;
+pub mod replay;
 mod vessels;
 
 pub use arcgis::*;
@@ -12,6 +13,7 @@ pub use events::*;
 pub use flights::*;
 pub use geo::*;
 pub use geojson_layer::*;
+pub use replay::{ActiveFlare, ReplayState};
 pub use vessels::*;
 
 use crate::city_catalog;
@@ -84,6 +86,15 @@ pub struct AppModel {
     pub log_collapsed: bool,
     pub factal_stream_status: String,
     pub camera_registry_status: String,
+    // ── Replay mode ──────────────────────────────────────────────────────────
+    pub replay_mode: bool,
+    /// How many days of history to replay (1–365).
+    pub replay_days: u32,
+    /// Wall-clock duration of the full replay in seconds (60–300).
+    pub replay_duration_secs: u32,
+    pub replay_state: Option<ReplayState>,
+    /// Human-readable status for the history backfill fetch.
+    pub replay_history_status: String,
     pub terrain_inventory: TerrainInventory,
     pub osm_inventory: OsmInventory,
 }
@@ -307,6 +318,11 @@ impl AppModel {
                 }
                 lines
             },
+            replay_mode: false,
+            replay_days: 30,
+            replay_duration_secs: 120,
+            replay_state: None,
+            replay_history_status: String::new(),
             log_collapsed: false,
             factal_stream_status: if factal_api_key.is_empty() {
                 "demo".into()
@@ -667,6 +683,43 @@ impl AppModel {
 
         nearby.sort_by(|left, right| left.distance_km.total_cmp(&right.distance_km));
         nearby
+    }
+
+    /// Enter or exit replay mode.  On enter: loads history from the local
+    /// store for the configured window and starts playback.  If the store is
+    /// empty and an API key is set, triggers a background history fetch.
+    pub fn toggle_replay(&mut self) {
+        if self.replay_mode {
+            // Exit replay
+            self.replay_mode = false;
+            self.replay_state = None;
+            return;
+        }
+        // Enter replay
+        self.replay_mode = true;
+        // Trigger history fetch if store is empty and a key is configured.
+        if crate::event_store::event_count() == 0 && self.has_factal_api_key() {
+            crate::factal_stream::trigger_history_fetch(
+                self.factal_api_key.clone(),
+                365,
+            );
+            self.replay_history_status = "Fetching history…".into();
+            self.push_log("Replay: fetching 1 year of Factal event history…".into());
+        }
+        self.rebuild_replay_state();
+    }
+
+    /// Reload the replay state from the event store with current settings.
+    pub fn rebuild_replay_state(&mut self) {
+        let to_unix = crate::event_store::now_unix();
+        let from_unix = to_unix - (self.replay_days as i64) * 86_400;
+        let events = crate::event_store::load_events_in_range(from_unix, to_unix);
+        let wall_duration = self.replay_duration_secs as f64;
+        if events.is_empty() {
+            self.replay_state = None;
+        } else {
+            self.replay_state = Some(ReplayState::new(events, from_unix, to_unix, wall_duration));
+        }
     }
 
     pub fn push_log(&mut self, line: String) {

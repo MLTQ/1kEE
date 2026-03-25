@@ -163,6 +163,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
             }
         }
 
+        super::render_replay_controls(ui, model);
         map_tooltips::draw_event_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
         map_tooltips::draw_ship_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
         map_tooltips::draw_flight_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
@@ -187,7 +188,6 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
         .inner_margin(egui::Margin::symmetric(12, 10))
         .show(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.heading("Operations Globe");
                 ui.separator();
 
                 // GLOBE / LOCAL mode toggle
@@ -329,6 +329,31 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                     ui.separator();
                     if ui.button("Brief").clicked() {
                         model.factal_brief_open = true;
+                    }
+                }
+
+                // ── REPLAY toggle ─────────────────────────────────────────
+                if model.has_factal_api_key() {
+                    ui.separator();
+                    let (r_fill, r_text) = if model.replay_mode {
+                        (
+                            egui::Color32::from_rgb(20, 80, 140),
+                            egui::Color32::from_rgb(100, 195, 255),
+                        )
+                    } else {
+                        (egui::Color32::TRANSPARENT, theme::text_muted())
+                    };
+                    let r_btn = egui::Button::new(
+                        egui::RichText::new("REPLAY").color(r_text).small(),
+                    )
+                    .fill(r_fill)
+                    .corner_radius(4.0);
+                    if ui
+                        .add(r_btn)
+                        .on_hover_text("Replay historical Factal events as animated flares")
+                        .clicked()
+                    {
+                        model.toggle_replay();
                     }
                 }
 

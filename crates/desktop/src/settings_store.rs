@@ -185,6 +185,11 @@ fn settings_path() -> Option<PathBuf> {
     Some(executable_dir()?.join(SETTINGS_FILE))
 }
 
+/// Path for the event history SQLite database — sibling of the settings file.
+pub fn event_db_path() -> Option<PathBuf> {
+    Some(executable_dir()?.join(".1kee_events.sqlite"))
+}
+
 fn settings_cache() -> &'static Mutex<Option<AppSettings>> {
     static CACHE: OnceLock<Mutex<Option<AppSettings>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(None))

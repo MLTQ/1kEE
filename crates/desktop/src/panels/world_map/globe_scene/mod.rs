@@ -112,7 +112,38 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let selected_camera_id = model.selected_camera_id.as_deref();
     let nearby = model.nearby_cameras(250.0);
 
-    let event_markers: Vec<_> = if !model.show_event_markers {
+    // ── Replay flares (shown instead of live markers while replay is active) ──
+    if model.replay_mode {
+        if let Some(state) = &model.replay_state {
+            let wall_elapsed = state.wall_elapsed();
+            for flare in &state.active_flares {
+                let Some(base) = projection::project_geo(
+                    &layout,
+                    &model.globe_view,
+                    flare.event.location,
+                    lod.altitude_scale * 0.7,
+                ) else {
+                    continue;
+                };
+                if !base.front_facing {
+                    continue;
+                }
+                let extra_r = (135.0 / layout.radius).clamp(0.060, 0.220);
+                let tip = projection::project_geo_elevated(
+                    &layout,
+                    &model.globe_view,
+                    flare.event.location,
+                    lod.altitude_scale * 0.7,
+                    extra_r,
+                )
+                .map(|p| p.pos)
+                .unwrap_or(base.pos);
+                markers::draw_replay_flare(painter, base, tip, flare, wall_elapsed);
+            }
+        }
+    }
+
+    let event_markers: Vec<_> = if !model.show_event_markers || model.replay_mode {
         Vec::new()
     } else {
         model

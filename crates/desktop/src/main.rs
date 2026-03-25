@@ -4,6 +4,7 @@ mod camera_registry;
 mod camera_scrape_catalog;
 mod camera_source_catalog;
 mod city_catalog;
+mod event_store;
 mod factal_stream;
 mod flight_tracks;
 mod model;

@@ -1,6 +1,7 @@
 use crate::arcgis_source;
 use crate::model::{
-    ArcGisFeature, EventRecord, FlightCategory, FlightTrack, GeoPoint, GlobeViewState, MovingTrack,
+    ActiveFlare, ArcGisFeature, EventRecord, FlightCategory, FlightTrack, GeoPoint,
+    GlobeViewState, MovingTrack,
 };
 use crate::theme;
 
@@ -180,59 +181,7 @@ pub(super) fn draw_event_marker(
     time: f64,
 ) {
     let col = event.severity.color();
-    let dx = tip.x - base.pos.x;
-    let dy = tip.y - base.pos.y;
-
-    // ── Atmospheric halos — taper in both width and alpha toward the tip ─────
-    // Fewer segments needed since halos are soft and low-alpha.
-    const HALO_SEGS: u32 = 7;
-    for i in 0..HALO_SEGS {
-        let t0 = i as f32 / HALO_SEGS as f32;
-        let t1 = (i + 1) as f32 / HALO_SEGS as f32;
-        let tm = (t0 + t1) * 0.5;
-        // Quadratic falloff for halos — they should fade a bit slower than the
-        // core so the diffuse glow reaches the upper portion of the beam.
-        let a = (1.0 - tm).powi(2);
-        let p0 = egui::pos2(base.pos.x + dx * t0, base.pos.y + dy * t0);
-        let p1 = egui::pos2(base.pos.x + dx * t1, base.pos.y + dy * t1);
-        painter.line_segment(
-            [p0, p1],
-            egui::Stroke::new((22.0 * a).max(0.5), col.gamma_multiply(0.04 * a)),
-        );
-        painter.line_segment(
-            [p0, p1],
-            egui::Stroke::new((11.0 * a).max(0.5), col.gamma_multiply(0.08 * a)),
-        );
-        painter.line_segment(
-            [p0, p1],
-            egui::Stroke::new((4.5 * a).max(0.5), col.gamma_multiply(0.16 * a)),
-        );
-    }
-
-    // ── Tapering core — bright and wide at the base, tapers to a sharp point ─
-    // Cubic alpha gives a steep, dramatic fade that stays bright through the
-    // lower two-thirds of the beam then quickly collapses to nothing.
-    // Width narrows in parallel so the tip forms a visual spike, not a blunt end.
-    const SEGS: u32 = 14;
-    for i in 0..SEGS {
-        let t0 = i as f32 / SEGS as f32;
-        let t1 = (i + 1) as f32 / SEGS as f32;
-        let tm = (t0 + t1) * 0.5;
-        let falloff = 1.0 - tm;
-        let alpha = falloff.powi(3); // cubic: steep near tip
-        let w_glow = (4.0 * falloff.powf(0.7)).max(0.4); // wide glow, tapers fast
-        let w_core = (1.7 * falloff.powf(0.7)).max(0.3); // crisp inner core
-        let p0 = egui::pos2(base.pos.x + dx * t0, base.pos.y + dy * t0);
-        let p1 = egui::pos2(base.pos.x + dx * t1, base.pos.y + dy * t1);
-        painter.line_segment(
-            [p0, p1],
-            egui::Stroke::new(w_glow, col.gamma_multiply(alpha * 0.30)),
-        );
-        painter.line_segment(
-            [p0, p1],
-            egui::Stroke::new(w_core, col.gamma_multiply(alpha * 0.96)),
-        );
-    }
+    draw_beam(painter, base.pos, tip, col, 1.0);
 
     // ── Ground strike ────────────────────────────────────────────────────────
     if is_selected {
@@ -243,17 +192,101 @@ pub(super) fn draw_event_marker(
             egui::Stroke::new(1.3, theme::marker_glow_warm()),
         );
     }
-    painter.circle_stroke(
-        base.pos,
-        6.5,
-        egui::Stroke::new(9.0, col.gamma_multiply(0.06)),
-    );
-    painter.circle_stroke(
-        base.pos,
-        4.8,
-        egui::Stroke::new(1.1, col.gamma_multiply(0.60)),
-    );
-    painter.circle_filled(base.pos, 2.5, col);
+    draw_ground_strike(painter, base.pos, col, 1.0);
+}
+
+/// Draw a replay flare: same beam geometry but alpha-faded, plus a one-shot
+/// expanding spawn ring.
+pub(super) fn draw_replay_flare(
+    painter: &egui::Painter,
+    base: ProjectedPoint,
+    tip: egui::Pos2,
+    flare: &ActiveFlare,
+    wall_elapsed: f64,
+) {
+    let alpha = flare.alpha(wall_elapsed);
+    if alpha <= 0.005 {
+        return;
+    }
+    let col = flare.event.severity.color();
+    draw_beam(painter, base.pos, tip, col, alpha);
+    draw_ground_strike(painter, base.pos, col, alpha);
+
+    // Expanding spawn ring — one-shot, fades and grows outward.
+    let ring_a = flare.ring_alpha(wall_elapsed);
+    if ring_a > 0.005 {
+        let ring_r = flare.ring_radius(wall_elapsed);
+        painter.circle_stroke(
+            base.pos,
+            ring_r,
+            egui::Stroke::new(1.8 * ring_a, col.gamma_multiply(ring_a * 0.75)),
+        );
+        // Second inner ring for more pop on Critical.
+        if matches!(
+            flare.event.severity,
+            crate::model::EventSeverity::Critical
+        ) {
+            painter.circle_stroke(
+                base.pos,
+                ring_r * 0.6,
+                egui::Stroke::new(1.2 * ring_a, col.gamma_multiply(ring_a * 0.5)),
+            );
+        }
+    }
+}
+
+// ── Shared beam primitives ────────────────────────────────────────────────────
+
+fn draw_beam(
+    painter: &egui::Painter,
+    base: egui::Pos2,
+    tip: egui::Pos2,
+    col: egui::Color32,
+    alpha: f32,
+) {
+    let dx = tip.x - base.x;
+    let dy = tip.y - base.y;
+
+    // Atmospheric halos — taper in both width and alpha toward the tip.
+    const HALO_SEGS: u32 = 7;
+    for i in 0..HALO_SEGS {
+        let t0 = i as f32 / HALO_SEGS as f32;
+        let t1 = (i + 1) as f32 / HALO_SEGS as f32;
+        let tm = (t0 + t1) * 0.5;
+        let a = (1.0 - tm).powi(2) * alpha;
+        let p0 = egui::pos2(base.x + dx * t0, base.y + dy * t0);
+        let p1 = egui::pos2(base.x + dx * t1, base.y + dy * t1);
+        painter.line_segment([p0, p1], egui::Stroke::new((22.0 * a).max(0.5), col.gamma_multiply(0.04 * a)));
+        painter.line_segment([p0, p1], egui::Stroke::new((11.0 * a).max(0.5), col.gamma_multiply(0.08 * a)));
+        painter.line_segment([p0, p1], egui::Stroke::new((4.5 * a).max(0.5), col.gamma_multiply(0.16 * a)));
+    }
+
+    // Tapering core — cubic alpha, narrows to a spike.
+    const SEGS: u32 = 14;
+    for i in 0..SEGS {
+        let t0 = i as f32 / SEGS as f32;
+        let t1 = (i + 1) as f32 / SEGS as f32;
+        let tm = (t0 + t1) * 0.5;
+        let falloff = 1.0 - tm;
+        let a = falloff.powi(3) * alpha;
+        let w_glow = (4.0 * falloff.powf(0.7)).max(0.4);
+        let w_core = (1.7 * falloff.powf(0.7)).max(0.3);
+        let p0 = egui::pos2(base.x + dx * t0, base.y + dy * t0);
+        let p1 = egui::pos2(base.x + dx * t1, base.y + dy * t1);
+        painter.line_segment([p0, p1], egui::Stroke::new(w_glow, col.gamma_multiply(a * 0.30)));
+        painter.line_segment([p0, p1], egui::Stroke::new(w_core, col.gamma_multiply(a * 0.96)));
+    }
+}
+
+fn draw_ground_strike(
+    painter: &egui::Painter,
+    pos: egui::Pos2,
+    col: egui::Color32,
+    alpha: f32,
+) {
+    painter.circle_stroke(pos, 6.5, egui::Stroke::new(9.0, col.gamma_multiply(0.06 * alpha)));
+    painter.circle_stroke(pos, 4.8, egui::Stroke::new(1.1, col.gamma_multiply(0.60 * alpha)));
+    painter.circle_filled(pos, 2.5, col.gamma_multiply(alpha));
 }
 
 pub(super) fn draw_camera_marker(

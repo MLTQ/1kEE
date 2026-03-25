@@ -50,6 +50,9 @@ impl DashboardApp {
             renderer.callback_resources.insert(terrain_res);
         }
 
+        // Open the event history store (creates DB if not present).
+        crate::event_store::open();
+
         let model = AppModel::seed_demo();
         Self {
             last_theme: model.map_theme,
@@ -69,7 +72,16 @@ impl Drop for DashboardApp {
 impl eframe::App for DashboardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         factal_stream::tick(&mut self.model);
+        factal_stream::history_tick(&mut self.model);
         camera_registry::tick(&mut self.model);
+
+        // Advance the replay playhead and request a repaint while running.
+        if let Some(state) = &mut self.model.replay_state {
+            let needs_repaint = state.tick();
+            if needs_repaint {
+                ctx.request_repaint();
+            }
+        }
 
         if self.model.map_theme != self.last_theme {
             theme::set_theme(ctx, self.model.map_theme);
