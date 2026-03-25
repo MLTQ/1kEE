@@ -10,13 +10,17 @@ pub(crate) mod local_terrain_pass;
 mod local_terrain_scene;
 mod map_detail_panels;
 mod map_tooltips;
+mod building_layer;
+mod cell_loader;
 mod road_layer;
 #[path = "world_map/srtm_focus_cache/mod.rs"]
 pub(crate) mod srtm_focus_cache;
 mod srtm_stream;
 mod terrain_field;
 mod terrain_raster;
+mod tree_layer;
 mod water_layer;
+mod waterway_layer;
 
 use crate::arcgis_source;
 use crate::flight_tracks;
@@ -267,6 +271,11 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                     .changed();
 
                 let water_changed = ui.checkbox(&mut model.show_water, "Water").changed();
+                if model.globe_view.local_mode {
+                    ui.checkbox(&mut model.show_contours, "Contours");
+                    ui.checkbox(&mut model.show_trees, "Trees");
+                    ui.checkbox(&mut model.show_buildings, "Buildings");
+                }
 
                 if major_changed || minor_changed {
                     // Always clear so the next draw_roads reloads from SQLite

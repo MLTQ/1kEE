@@ -129,7 +129,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     }
 
     let contours_slice = contours.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
-    if !contours_slice.is_empty() {
+    if !contours_slice.is_empty() && model.show_contours {
         draw_contour_stack(
             painter,
             &layout,
@@ -139,6 +139,8 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             contours_slice,
             1.0,
         );
+    }
+    if !contours_slice.is_empty() {
         super::road_layer::draw_roads(
             painter,
             &layout,
@@ -157,6 +159,33 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             viewport_center,
             render_zoom,
             model.show_water,
+        );
+        super::waterway_layer::draw_waterways(
+            painter,
+            &layout,
+            &model.globe_view,
+            model.selected_root.as_deref(),
+            viewport_center,
+            render_zoom,
+            model.show_water,
+        );
+        super::tree_layer::draw_trees(
+            painter,
+            &layout,
+            &model.globe_view,
+            model.selected_root.as_deref(),
+            viewport_center,
+            render_zoom,
+            model.show_trees,
+        );
+        super::building_layer::draw_buildings(
+            painter,
+            &layout,
+            &model.globe_view,
+            model.selected_root.as_deref(),
+            viewport_center,
+            render_zoom,
+            model.show_buildings,
         );
     }
 

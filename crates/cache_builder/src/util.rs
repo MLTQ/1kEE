@@ -20,6 +20,15 @@ pub struct RoadPolyline {
     pub points: Vec<GeoPoint>,
 }
 
+#[derive(Clone, Debug)]
+pub struct WayFeature {
+    pub way_id: i64,
+    pub feature_class: String,
+    pub name: Option<String>,
+    pub points: Vec<GeoPoint>,
+    pub is_polygon: bool,  // true = close ring for Polygon geometry
+}
+
 pub fn canonical_road_class(value: &str) -> Option<&'static str> {
     match value {
         "motorway" | "motorway_link" => Some("motorway"),
@@ -28,6 +37,25 @@ pub fn canonical_road_class(value: &str) -> Option<&'static str> {
         "secondary" | "secondary_link" => Some("secondary"),
         "tertiary" | "tertiary_link" => Some("tertiary"),
         "residential" | "living_street" | "unclassified" | "service" => Some("minor"),
+        _ => None,
+    }
+}
+
+pub fn canonical_waterway_class(value: &str) -> Option<&'static str> {
+    match value {
+        "river" | "canal" => Some("river"),
+        "stream" | "drain" | "ditch" => Some("stream"),
+        _ => None,
+    }
+}
+
+pub fn canonical_building_class(value: &str) -> Option<&'static str> {
+    if value.is_empty() || value == "no" { None } else { Some("building") }
+}
+
+pub fn canonical_tree_class(key: &str, value: &str) -> Option<&'static str> {
+    match (key, value) {
+        ("natural", "wood") | ("landuse", "forest") => Some("forest"),
         _ => None,
     }
 }

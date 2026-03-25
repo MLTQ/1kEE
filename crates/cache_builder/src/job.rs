@@ -1,10 +1,10 @@
-use crate::args::RoadsBboxCommand;
+use crate::args::BboxCommand;
 use crate::roads::{RoadBuildProgress, build_bbox_cache_with_progress};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 pub enum BuildJob {
-    Roads(RoadsBboxCommand),
+    Bbox(BboxCommand),
 }
 
 pub struct JobHandle {
@@ -20,7 +20,7 @@ pub enum BuildEvent {
 pub fn spawn_job(job: BuildJob) -> JobHandle {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || match job {
-        BuildJob::Roads(command) => {
+        BuildJob::Bbox(command) => {
             let mut reporter = |progress: RoadBuildProgress| {
                 let _ = tx.send(BuildEvent::Progress(progress));
             };

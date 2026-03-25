@@ -504,6 +504,21 @@ pub fn road_major_color() -> egui::Color32 {
     }
 }
 
+/// Waterway overlay color (rivers, streams, canals).
+pub fn waterway_color() -> egui::Color32 {
+    egui::Color32::from_rgb(40, 110, 180)
+}
+
+/// Tree / forest area fill color.
+pub fn tree_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(30, 100, 40, 160)
+}
+
+/// Building footprint fill color.
+pub fn building_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(120, 100, 80, 140)
+}
+
 /// Minor road overlay color.
 pub fn road_minor_color() -> egui::Color32 {
     match current() {
