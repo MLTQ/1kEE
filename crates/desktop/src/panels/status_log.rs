@@ -16,7 +16,11 @@ pub fn render_status_log(ctx: &egui::Context, model: &mut AppModel) {
                 let icon = if collapsed { "▲" } else { "▼" };
                 if ui
                     .small_button(icon)
-                    .on_hover_text(if collapsed { "Expand log" } else { "Collapse log" })
+                    .on_hover_text(if collapsed {
+                        "Expand log"
+                    } else {
+                        "Collapse log"
+                    })
                     .clicked()
                 {
                     model.log_collapsed = !model.log_collapsed;

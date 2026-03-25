@@ -41,7 +41,7 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
             ui.horizontal(|ui| {
                 for (t, label) in [
                     (SettingsTab::Theme, "Theme"),
-                    (SettingsTab::Apis,  "APIs"),
+                    (SettingsTab::Apis, "APIs"),
                     (SettingsTab::Paths, "Paths"),
                 ] {
                     let active = tab == t;
@@ -55,11 +55,9 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
                     } else {
                         theme::text_muted()
                     };
-                    let btn = egui::Button::new(
-                        egui::RichText::new(label).color(color),
-                    )
-                    .fill(fill)
-                    .corner_radius(4.0);
+                    let btn = egui::Button::new(egui::RichText::new(label).color(color))
+                        .fill(fill)
+                        .corner_radius(4.0);
                     if ui.add(btn).clicked() {
                         tab = t;
                     }
@@ -73,12 +71,10 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
             // grows → ScrollArea requests more space → window grows → repeat.
             egui::ScrollArea::vertical()
                 .max_height(400.0)
-                .show(ui, |ui| {
-                    match tab {
-                        SettingsTab::Theme => tab_theme(ui, model),
-                        SettingsTab::Apis  => tab_apis(ui, model),
-                        SettingsTab::Paths => tab_paths(ui, model),
-                    }
+                .show(ui, |ui| match tab {
+                    SettingsTab::Theme => tab_theme(ui, model),
+                    SettingsTab::Apis => tab_apis(ui, model),
+                    SettingsTab::Paths => tab_paths(ui, model),
                 });
 
             // ── Always-visible action buttons ─────────────────────────────
@@ -190,11 +186,9 @@ fn tab_theme(ui: &mut egui::Ui, model: &mut AppModel) {
             } else {
                 theme::text_muted()
             };
-            let btn = egui::Button::new(
-                egui::RichText::new(t.label()).color(label_color).small(),
-            )
-            .fill(fill)
-            .corner_radius(4.0);
+            let btn = egui::Button::new(egui::RichText::new(t.label()).color(label_color).small())
+                .fill(fill)
+                .corner_radius(4.0);
             if ui.add(btn).clicked() {
                 model.map_theme = t;
             }
@@ -256,7 +250,10 @@ fn tab_apis(ui: &mut egui::Ui, model: &mut AppModel) {
             .hint_text("Windy Webcams API key"),
     );
     ui.add_space(4.0);
-    ui.small(format!("Camera registry status: {}", model.camera_registry_status));
+    ui.small(format!(
+        "Camera registry status: {}",
+        model.camera_registry_status
+    ));
     ui.small(
         "Optional no-key sources can be declared in Data/camera_sources/public_sources.json \
          and Data/camera_sources/scrape_sources.json under the asset root.",
@@ -320,13 +317,43 @@ fn tab_paths(ui: &mut egui::Ui, model: &mut AppModel) {
     });
     ui.add_space(6.0);
 
-    path_row(ui, "Asset Root",    &mut model.settings_asset_root,    true,  false);
-    path_row(ui, "Data Root",     &mut model.settings_data_root,     true,  true);
-    path_row(ui, "Derived Root",  &mut model.settings_derived_root,  true,  true);
-    path_row(ui, "SRTM Root",     &mut model.settings_srtm_root,     true,  true);
-    path_row(ui, "Planet PBF",    &mut model.settings_planet_path,   false, true);
-    path_row(ui, "GDAL Bin Dir",  &mut model.settings_gdal_bin_dir,  true,  true);
-    path_row(ui, "Osmium Bin Dir",&mut model.settings_osmium_bin_dir,true,  true);
+    path_row(
+        ui,
+        "Asset Root",
+        &mut model.settings_asset_root,
+        true,
+        false,
+    );
+    path_row(ui, "Data Root", &mut model.settings_data_root, true, true);
+    path_row(
+        ui,
+        "Derived Root",
+        &mut model.settings_derived_root,
+        true,
+        true,
+    );
+    path_row(ui, "SRTM Root", &mut model.settings_srtm_root, true, true);
+    path_row(
+        ui,
+        "Planet PBF",
+        &mut model.settings_planet_path,
+        false,
+        true,
+    );
+    path_row(
+        ui,
+        "GDAL Bin Dir",
+        &mut model.settings_gdal_bin_dir,
+        true,
+        true,
+    );
+    path_row(
+        ui,
+        "Osmium Bin Dir",
+        &mut model.settings_osmium_bin_dir,
+        true,
+        true,
+    );
     ui.add_space(4.0);
     ui.checkbox(&mut model.settings_prefer_overpass, "Prefer Overpass API")
         .on_hover_text(

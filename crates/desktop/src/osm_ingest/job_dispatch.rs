@@ -553,15 +553,16 @@ fn import_planet_roads_dispatch(db_path: &Path, job: &OsmJob) -> Result<String, 
             return import_focus_roads_via_overpass(db_path, job);
         }
 
-        return import_focus_roads_via_osmium(db_path, job)
-            .or_else(|osmium_err| {
-                let _ = update_job_note(
-                    db_path,
-                    job.id,
-                    &format!("osmium/vector-cache path failed ({osmium_err}); falling back to Overpass…"),
-                );
-                import_focus_roads_via_overpass(db_path, job)
-            });
+        return import_focus_roads_via_osmium(db_path, job).or_else(|osmium_err| {
+            let _ = update_job_note(
+                db_path,
+                job.id,
+                &format!(
+                    "osmium/vector-cache path failed ({osmium_err}); falling back to Overpass…"
+                ),
+            );
+            import_focus_roads_via_overpass(db_path, job)
+        });
     }
 
     import_planet_roads(db_path, job)

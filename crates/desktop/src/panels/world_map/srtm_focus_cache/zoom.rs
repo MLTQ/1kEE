@@ -1,5 +1,5 @@
-use crate::model::GeoPoint;
 use super::{FocusContourSpec, GeoBounds};
+use crate::model::GeoPoint;
 
 pub fn feature_budget_for_zoom(zoom: f32) -> usize {
     spec_for_zoom(zoom).feature_budget

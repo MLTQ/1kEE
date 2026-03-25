@@ -18,8 +18,8 @@ pub enum FlightCategory {
 fn classify_callsign(cs: &str) -> FlightCategory {
     // Military prefixes first (takes priority over everything else).
     const MILITARY: &[&str] = &[
-        "RCH", "SAM", "DUKE", "MAGMA", "REACH", "NAVY", "ARMY", "USAF",
-        "NATO", "CLAM", "JAKE", "CASEY", "WOLF", "LOBO", "PETE", "DARKSTAR",
+        "RCH", "SAM", "DUKE", "MAGMA", "REACH", "NAVY", "ARMY", "USAF", "NATO", "CLAM", "JAKE",
+        "CASEY", "WOLF", "LOBO", "PETE", "DARKSTAR",
     ];
     if MILITARY.iter().any(|m| cs.starts_with(m)) {
         return FlightCategory::Military;
@@ -27,8 +27,8 @@ fn classify_callsign(cs: &str) -> FlightCategory {
 
     // Known cargo ICAO operator prefixes.
     const CARGO: &[&str] = &[
-        "FDX", "UPS", "GTI", "ABX", "ATN", "DHL", "TNT", "CKS", "PAC",
-        "NCR", "CLX", "KMF", "WOA", "AMC", "CGE", "AIJ",
+        "FDX", "UPS", "GTI", "ABX", "ATN", "DHL", "TNT", "CKS", "PAC", "NCR", "CLX", "KMF", "WOA",
+        "AMC", "CGE", "AIJ",
     ];
     if CARGO.iter().any(|c| cs.starts_with(c)) {
         return FlightCategory::Cargo;
@@ -100,9 +100,9 @@ impl FlightTrack {
     /// Vertical trend symbol.
     pub fn trend_symbol(&self) -> &'static str {
         match self.vertical_rate_fpm {
-            Some(r) if r > 100.0  => "↑",
+            Some(r) if r > 100.0 => "↑",
             Some(r) if r < -100.0 => "↓",
-            _                      => "→",
+            _ => "→",
         }
     }
 
@@ -110,7 +110,7 @@ impl FlightTrack {
     pub fn category(&self) -> FlightCategory {
         match self.callsign.as_deref().filter(|s| !s.is_empty()) {
             Some(cs) => classify_callsign(cs),
-            None     => FlightCategory::Unknown,
+            None => FlightCategory::Unknown,
         }
     }
 }

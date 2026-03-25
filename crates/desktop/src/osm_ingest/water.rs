@@ -1,12 +1,11 @@
 use crate::model::GeoPoint;
 use osmpbf::{Element, ElementReader};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
-use super::{GeoBounds, OsmFeatureKind, OsmJob, FOCUS_NODE_MARGIN_DEGREES, OVERPASS_ENDPOINT, PROGRESS_FLUSH_INTERVAL, ROAD_TILE_ZOOMS, WaterPolyline};
 use super::db::{open_runtime_db, update_job_note};
 use super::job_dispatch::{
     clear_cell_progress, focus_batch_extract_path, focus_cell_bounds, focus_cell_cached,
@@ -14,8 +13,12 @@ use super::job_dispatch::{
     run_osmium_extract, set_cell_progress, water_data_gen,
 };
 use super::util::{
-    bounds_intersect, canonical_water_class, encode_linestring_wkb, expand_bounds,
-    lat_lon_to_tile, point_in_bounds, polyline_bounds, unix_timestamp,
+    bounds_intersect, canonical_water_class, encode_linestring_wkb, expand_bounds, lat_lon_to_tile,
+    point_in_bounds, polyline_bounds, unix_timestamp,
+};
+use super::{
+    FOCUS_NODE_MARGIN_DEGREES, GeoBounds, OVERPASS_ENDPOINT, OsmFeatureKind, OsmJob,
+    PROGRESS_FLUSH_INTERVAL, ROAD_TILE_ZOOMS, WaterPolyline,
 };
 
 /// Top-level water import dispatcher (called from tick()).

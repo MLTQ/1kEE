@@ -14,7 +14,6 @@
 /// the texture.  GPU bilinear interpolation (`TextureOptions::LINEAR`)
 /// gives smooth depth gradients that follow the actual bathymetry — no
 /// rectangular grid artefacts, no land bleed.
-
 use std::{
     path::Path,
     sync::{Mutex, OnceLock},
@@ -68,10 +67,14 @@ pub fn ensure_texture(
 /// Clear all caches (Cache Blast button).
 pub fn clear() {
     if let Some(c) = DEPTH_GRID.get() {
-        if let Ok(mut g) = c.lock() { *g = None; }
+        if let Ok(mut g) = c.lock() {
+            *g = None;
+        }
     }
     if let Some(c) = TEXTURE_HANDLE.get() {
-        if let Ok(mut g) = c.lock() { *g = None; }
+        if let Ok(mut g) = c.lock() {
+            *g = None;
+        }
     }
 }
 
@@ -87,14 +90,17 @@ fn ensure_grid_loaded(selected_root: Option<&Path>) -> Option<()> {
     let cache = DEPTH_GRID.get_or_init(|| Mutex::new(None));
     {
         let guard = cache.lock().ok()?;
-        if guard.is_some() { return Some(()); }
+        if guard.is_some() {
+            return Some(());
+        }
     }
     let path = bil_path(selected_root)?;
     let bytes = std::fs::read(&path).ok()?;
     if bytes.len() != GRID_W * GRID_H * 2 {
         eprintln!(
             "gebco_depth_fill: expected {} bytes, got {}",
-            GRID_W * GRID_H * 2, bytes.len()
+            GRID_W * GRID_H * 2,
+            bytes.len()
         );
         return None;
     }
@@ -140,7 +146,7 @@ pub fn depth_color(depth_m: i16) -> egui::Color32 {
     let d = (-depth_m as f32).clamp(1.0, 11_000.0);
     // powf(0.35): concentrates perceptual variation in shallow zone
     let t = (d / 11_000.0).powf(0.35);
-    let r = lerp(8.0,  1.0, t) as u8;
+    let r = lerp(8.0, 1.0, t) as u8;
     let g = lerp(22.0, 3.0, t) as u8;
     let b = lerp(62.0, 6.0, t) as u8;
     let a = lerp(210.0, 250.0, t) as u8;
@@ -148,4 +154,6 @@ pub fn depth_color(depth_m: i16) -> egui::Color32 {
 }
 
 #[inline]
-fn lerp(a: f32, b: f32, t: f32) -> f32 { a + (b - a) * t }
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}

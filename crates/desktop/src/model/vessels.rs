@@ -30,18 +30,18 @@ impl MovingTrack {
     /// Short descriptive label for the ship type.
     pub fn ship_type_label(&self) -> &'static str {
         match self.ship_type_code {
-            Some(30)      => "Fishing",
-            Some(36)      => "Sailing",
-            Some(37)      => "Pleasure craft",
-            Some(50)      => "Pilot",
-            Some(51)      => "SAR",
-            Some(52)      => "Tug",
-            Some(53)      => "Port tender",
-            Some(35)      => "Military",
+            Some(30) => "Fishing",
+            Some(36) => "Sailing",
+            Some(37) => "Pleasure craft",
+            Some(50) => "Pilot",
+            Some(51) => "SAR",
+            Some(52) => "Tug",
+            Some(53) => "Port tender",
+            Some(35) => "Military",
             Some(60..=69) => "Passenger",
             Some(70..=79) => "Cargo",
             Some(80..=89) => "Tanker",
-            _             => "Vessel",
+            _ => "Vessel",
         }
     }
 }

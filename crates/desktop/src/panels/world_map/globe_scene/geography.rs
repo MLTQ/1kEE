@@ -1,10 +1,10 @@
 use crate::model::{GeoJsonFeature, GeoJsonGeometry, GeoJsonLayer, GeoPoint, GlobeViewState};
 use crate::theme;
 
+use super::GlobeLayout;
 use super::camera::GlobeLod;
 use super::contour_asset;
 use super::gebco_depth_fill;
-use super::{GlobeLayout};
 use super::projection::{draw_geo_path, project_geo};
 
 pub(super) fn draw_global_coastlines(
@@ -13,7 +13,9 @@ pub(super) fn draw_global_coastlines(
     view: &GlobeViewState,
     selected_root: Option<&std::path::Path>,
 ) {
-    let Some(coastlines) = contour_asset::load_global_coastlines(selected_root, view.zoom, painter.ctx().clone()) else {
+    let Some(coastlines) =
+        contour_asset::load_global_coastlines(selected_root, view.zoom, painter.ctx().clone())
+    else {
         return;
     };
 
@@ -70,30 +72,44 @@ pub(super) fn draw_global_bathymetry(
                 ];
 
                 // UV: equirectangular — u=0 at 180°W, v=0 at 90°N.
-                let uvs: [(f32, f32); 4] = corners.map(|(clat, clon)| {
-                    ((clon + 180.0) / 360.0, (90.0 - clat) / 180.0)
-                });
+                let uvs: [(f32, f32); 4] =
+                    corners.map(|(clat, clon)| ((clon + 180.0) / 360.0, (90.0 - clat) / 180.0));
 
                 // Project all four corners; skip if any is back-facing.
                 let mut positions = [egui::Pos2::ZERO; 4];
                 let mut ok = true;
                 for (k, &(clat, clon)) in corners.iter().enumerate() {
-                    match project_geo(layout, view, GeoPoint { lat: clat, lon: clon }, 0.0) {
+                    match project_geo(
+                        layout,
+                        view,
+                        GeoPoint {
+                            lat: clat,
+                            lon: clon,
+                        },
+                        0.0,
+                    ) {
                         Some(p) if p.front_facing => positions[k] = p.pos,
-                        _ => { ok = false; break; }
+                        _ => {
+                            ok = false;
+                            break;
+                        }
                     }
                 }
-                if !ok { lon += STEP; continue; }
+                if !ok {
+                    lon += STEP;
+                    continue;
+                }
 
                 let i = mesh.vertices.len() as u32;
                 for k in 0..4 {
                     mesh.vertices.push(egui::epaint::Vertex {
                         pos: positions[k],
-                        uv:  egui::pos2(uvs[k].0, uvs[k].1),
+                        uv: egui::pos2(uvs[k].0, uvs[k].1),
                         color: egui::Color32::WHITE, // texture carries the colour
                     });
                 }
-                mesh.indices.extend_from_slice(&[i, i+1, i+2, i, i+2, i+3]);
+                mesh.indices
+                    .extend_from_slice(&[i, i + 1, i + 2, i, i + 2, i + 3]);
                 lon += STEP;
             }
             lat += STEP;
@@ -105,7 +121,9 @@ pub(super) fn draw_global_bathymetry(
     }
 
     // ── Layer 2: isobath contour lines on top ────────────────────────────────
-    let Some(bathy) = contour_asset::load_global_bathymetry(selected_root, view.zoom, painter.ctx().clone()) else {
+    let Some(bathy) =
+        contour_asset::load_global_bathymetry(selected_root, view.zoom, painter.ctx().clone())
+    else {
         return;
     };
 
@@ -205,7 +223,9 @@ fn draw_feature_label(
     let Some(label) = &feature.label else { return };
     let anchor_pt = label_anchor(&feature.geometry);
     let Some(pt) = anchor_pt else { return };
-    let Some(proj) = project_geo(layout, view, pt, 0.0) else { return };
+    let Some(proj) = project_geo(layout, view, pt, 0.0) else {
+        return;
+    };
     if !proj.front_facing {
         return;
     }
@@ -229,9 +249,7 @@ fn label_anchor(geometry: &GeoJsonGeometry) -> Option<GeoPoint> {
         GeoJsonGeometry::Polygon(rings) if !rings.is_empty() => {
             crate::model::ring_centroid(&rings[0])
         }
-        GeoJsonGeometry::MultiPolygon(polys)
-            if !polys.is_empty() && !polys[0].is_empty() =>
-        {
+        GeoJsonGeometry::MultiPolygon(polys) if !polys.is_empty() && !polys[0].is_empty() => {
             crate::model::ring_centroid(&polys[0][0])
         }
         _ => None,
@@ -252,7 +270,9 @@ pub(super) fn draw_global_topo(
         return;
     }
 
-    let Some(topo) = contour_asset::load_global_topo(selected_root, view.zoom, painter.ctx().clone()) else {
+    let Some(topo) =
+        contour_asset::load_global_topo(selected_root, view.zoom, painter.ctx().clone())
+    else {
         return;
     };
 
@@ -294,9 +314,12 @@ pub(super) fn draw_srtm_on_globe(
     // globe grows rather than shrinking with each zoom step.
     let alpha = ((view.zoom - 1.5) / 1.5).clamp(0.0, 1.0);
 
-    let Some(contours) =
-        contour_asset::load_srtm_for_globe(selected_root, view.local_center, view.zoom, painter.ctx().clone())
-    else {
+    let Some(contours) = contour_asset::load_srtm_for_globe(
+        selected_root,
+        view.local_center,
+        view.zoom,
+        painter.ctx().clone(),
+    ) else {
         return;
     };
 

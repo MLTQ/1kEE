@@ -2,9 +2,9 @@ use std::path::Path;
 
 use crate::model::{GeoPoint, GlobeViewState};
 
-use super::{LocalLayout, visual_half_extent_for_zoom};
-use super::projection::project_local;
 use super::super::contour_asset;
+use super::projection::project_local;
+use super::{LocalLayout, visual_half_extent_for_zoom};
 
 pub(super) fn draw_bathymetry_local(
     painter: &egui::Painter,
@@ -16,7 +16,9 @@ pub(super) fn draw_bathymetry_local(
 ) {
     // Use GEBCO bathymetry — same zoom/LOD approach as global coastline.
     let bathy_zoom = view.local_zoom.clamp(1.0, 8.0);
-    let Some(bathy) = contour_asset::load_global_bathymetry(selected_root, bathy_zoom, painter.ctx().clone()) else {
+    let Some(bathy) =
+        contour_asset::load_global_bathymetry(selected_root, bathy_zoom, painter.ctx().clone())
+    else {
         return;
     };
 
@@ -37,9 +39,10 @@ pub(super) fn draw_bathymetry_local(
     const BATHY_ELEV_OFFSET: f32 = -5.0; // project just below sea level
 
     for contour in bathy.iter() {
-        let in_view = contour.points.iter().any(|p| {
-            p.lat >= min_lat && p.lat <= max_lat && p.lon >= min_lon && p.lon <= max_lon
-        });
+        let in_view = contour
+            .points
+            .iter()
+            .any(|p| p.lat >= min_lat && p.lat <= max_lat && p.lon >= min_lon && p.lon <= max_lon);
         if !in_view {
             continue;
         }
@@ -55,10 +58,20 @@ pub(super) fn draw_bathymetry_local(
         let width = if major { 1.2 } else { 0.7 };
         let stroke = egui::Stroke::new(width, color);
 
-        let points: Vec<_> = contour.points.iter()
+        let points: Vec<_> = contour
+            .points
+            .iter()
             .filter_map(|p| {
-                project_local(layout, view, focus, *p, BATHY_ELEV_OFFSET, extent_x_km, extent_y_km)
-                    .map(|pp| pp.pos)
+                project_local(
+                    layout,
+                    view,
+                    focus,
+                    *p,
+                    BATHY_ELEV_OFFSET,
+                    extent_x_km,
+                    extent_y_km,
+                )
+                .map(|pp| pp.pos)
             })
             .collect();
 
@@ -92,23 +105,41 @@ pub(super) fn draw_coastlines_local(
 
     // GEBCO-derived global coastline (450m resolution).
     // Single LOD in load_global_coastlines so this never reloads on zoom change.
-    let Some(coastlines) = contour_asset::load_global_coastlines(selected_root, 1.0, painter.ctx().clone()) else {
+    let Some(coastlines) =
+        contour_asset::load_global_coastlines(selected_root, 1.0, painter.ctx().clone())
+    else {
         return;
     };
 
     // Single thin white line — same visual weight as the topo contours.
     const COAST_ELEV: f32 = -3.0;
-    let stroke = egui::Stroke::new(1.0, egui::Color32::from_rgba_premultiplied(220, 230, 255, 55));
+    let stroke = egui::Stroke::new(
+        1.0,
+        egui::Color32::from_rgba_premultiplied(220, 230, 255, 55),
+    );
 
     for coast in coastlines.iter() {
-        let in_view = coast.points.iter().any(|p| {
-            p.lat >= min_lat && p.lat <= max_lat && p.lon >= min_lon && p.lon <= max_lon
-        });
-        if !in_view { continue; }
-        let points: Vec<_> = coast.points.iter()
+        let in_view = coast
+            .points
+            .iter()
+            .any(|p| p.lat >= min_lat && p.lat <= max_lat && p.lon >= min_lon && p.lon <= max_lon);
+        if !in_view {
+            continue;
+        }
+        let points: Vec<_> = coast
+            .points
+            .iter()
             .filter_map(|p| {
-                project_local(layout, view, focus, *p, COAST_ELEV, extent_x_km, extent_y_km)
-                    .map(|pp| pp.pos)
+                project_local(
+                    layout,
+                    view,
+                    focus,
+                    *p,
+                    COAST_ELEV,
+                    extent_x_km,
+                    extent_y_km,
+                )
+                .map(|pp| pp.pos)
             })
             .collect();
         if points.len() >= 2 {

@@ -1,9 +1,9 @@
 use crate::model::{GeoPoint, GlobeViewState};
 use crate::theme;
 
-use super::{LocalLayout, visual_half_extent_for_zoom};
-use super::projection::project_local;
 use super::super::srtm_focus_cache;
+use super::projection::project_local;
+use super::{LocalLayout, visual_half_extent_for_zoom};
 
 /// Draws a pulsing glow over every tile footprint in the expected load grid.
 /// Each tile is projected as a quadrilateral matching its actual geo-extent so
@@ -25,17 +25,16 @@ pub(super) fn draw_tile_pulse_grid(
     time: f64,
     ready_buckets: &std::collections::HashSet<(i32, i32)>,
 ) {
-    const GRID: usize = 50;          // 50×50 = 2 500 cells per tile
+    const GRID: usize = 50; // 50×50 = 2 500 cells per tile
     const DISSOLVE_CYCLE: f64 = 7.0; // seconds for one full sweep
-    const EDGE_BAND: f32 = 0.14;    // fraction of cycle that counts as "burning"
-    const CELL_INSET: f32 = 0.10;   // fractional gap between cells (10% each side)
+    const EDGE_BAND: f32 = 0.14; // fraction of cycle that counts as "burning"
+    const CELL_INSET: f32 = 0.10; // fractional gap between cells (10% each side)
 
     let half_extent = srtm_focus_cache::half_extent_for_zoom(render_zoom);
     let bucket_step = half_extent * 0.45;
     let visual_half = visual_half_extent_for_zoom(view.local_zoom);
     let km_per_deg_lat = 111.32f32;
-    let km_per_deg_lon =
-        km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
+    let km_per_deg_lon = km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
     let extent_x_km = (visual_half * km_per_deg_lon).max(1.0);
     let extent_y_km = (visual_half * km_per_deg_lat).max(1.0);
 
@@ -72,16 +71,35 @@ pub(super) fn draw_tile_pulse_grid(
 
             // Project the 4 geo corners → screen space (NW, NE, SE, SW).
             let geo_corners = [
-                GeoPoint { lat: tile_lat + half, lon: tile_lon - half },
-                GeoPoint { lat: tile_lat + half, lon: tile_lon + half },
-                GeoPoint { lat: tile_lat - half, lon: tile_lon + half },
-                GeoPoint { lat: tile_lat - half, lon: tile_lon - half },
+                GeoPoint {
+                    lat: tile_lat + half,
+                    lon: tile_lon - half,
+                },
+                GeoPoint {
+                    lat: tile_lat + half,
+                    lon: tile_lon + half,
+                },
+                GeoPoint {
+                    lat: tile_lat - half,
+                    lon: tile_lon + half,
+                },
+                GeoPoint {
+                    lat: tile_lat - half,
+                    lon: tile_lon - half,
+                },
             ];
             let sc: Vec<egui::Pos2> = geo_corners
                 .iter()
                 .filter_map(|&c| {
-                    project_local(layout, view, viewport_center, c, 0.0,
-                                  extent_x_km, extent_y_km)
+                    project_local(
+                        layout,
+                        view,
+                        viewport_center,
+                        c,
+                        0.0,
+                        extent_x_km,
+                        extent_y_km,
+                    )
                 })
                 .map(|p| p.pos)
                 .collect();
@@ -120,8 +138,14 @@ pub(super) fn draw_tile_pulse_grid(
                     let g = lerp_u8(cg, hg, mix);
                     let b = lerp_u8(cb, hb, mix);
                     let alpha = (lerp_f32(8.0, 80.0, 1.0 - edge) * breath) as u8;
-                    quad(&mut mesh, p_nw, p_ne, p_se, p_sw,
-                         egui::Color32::from_rgba_unmultiplied(r, g, b, alpha));
+                    quad(
+                        &mut mesh,
+                        p_nw,
+                        p_ne,
+                        p_se,
+                        p_sw,
+                        egui::Color32::from_rgba_unmultiplied(r, g, b, alpha),
+                    );
 
                     // Chromatic-aberration fringe on burning-edge cells.
                     if edge < 0.4 {
@@ -130,24 +154,38 @@ pub(super) fn draw_tile_pulse_grid(
                         let offset = egui::Vec2::new(t * 1.8, 0.0);
 
                         // Hot ghost shifted one way
-                        quad(&mut mesh_hot,
-                             p_nw + offset, p_ne + offset,
-                             p_se + offset, p_sw + offset,
-                             egui::Color32::from_rgba_unmultiplied(hr, hg, hb, fa));
+                        quad(
+                            &mut mesh_hot,
+                            p_nw + offset,
+                            p_ne + offset,
+                            p_se + offset,
+                            p_sw + offset,
+                            egui::Color32::from_rgba_unmultiplied(hr, hg, hb, fa),
+                        );
                         // Contour ghost shifted the other way
-                        quad(&mut mesh_cnt,
-                             p_nw - offset, p_ne - offset,
-                             p_se - offset, p_sw - offset,
-                             egui::Color32::from_rgba_unmultiplied(cr, cg, cb, fa));
+                        quad(
+                            &mut mesh_cnt,
+                            p_nw - offset,
+                            p_ne - offset,
+                            p_se - offset,
+                            p_sw - offset,
+                            egui::Color32::from_rgba_unmultiplied(cr, cg, cb, fa),
+                        );
                     }
                 }
             }
         }
     }
 
-    if !mesh.vertices.is_empty()     { painter.add(egui::Shape::mesh(mesh)); }
-    if !mesh_hot.vertices.is_empty() { painter.add(egui::Shape::mesh(mesh_hot)); }
-    if !mesh_cnt.vertices.is_empty() { painter.add(egui::Shape::mesh(mesh_cnt)); }
+    if !mesh.vertices.is_empty() {
+        painter.add(egui::Shape::mesh(mesh));
+    }
+    if !mesh_hot.vertices.is_empty() {
+        painter.add(egui::Shape::mesh(mesh_hot));
+    }
+    if !mesh_cnt.vertices.is_empty() {
+        painter.add(egui::Shape::mesh(mesh_cnt));
+    }
 }
 
 pub(super) fn draw_frame(painter: &egui::Painter, rect: egui::Rect) {
@@ -180,16 +218,27 @@ pub(super) fn draw_frame(painter: &egui::Painter, rect: egui::Rect) {
 /// Bilinear interpolation across a screen-space quad.
 /// Corners: NW (u=0,v=0), NE (u=1,v=0), SW (u=0,v=1), SE (u=1,v=1).
 #[inline]
-fn bilerp(nw: egui::Pos2, ne: egui::Pos2, sw: egui::Pos2, se: egui::Pos2,
-          u: f32, v: f32) -> egui::Pos2 {
+fn bilerp(
+    nw: egui::Pos2,
+    ne: egui::Pos2,
+    sw: egui::Pos2,
+    se: egui::Pos2,
+    u: f32,
+    v: f32,
+) -> egui::Pos2 {
     nw.lerp(ne, u).lerp(sw.lerp(se, u), v)
 }
 
 /// Append a solid-colour quad (two triangles) to `mesh`.
 #[inline]
-fn quad(mesh: &mut egui::Mesh,
-        nw: egui::Pos2, ne: egui::Pos2, se: egui::Pos2, sw: egui::Pos2,
-        color: egui::Color32) {
+fn quad(
+    mesh: &mut egui::Mesh,
+    nw: egui::Pos2,
+    ne: egui::Pos2,
+    se: egui::Pos2,
+    sw: egui::Pos2,
+    color: egui::Color32,
+) {
     let i = mesh.vertices.len() as u32;
     mesh.colored_vertex(nw, color);
     mesh.colored_vertex(ne, color);

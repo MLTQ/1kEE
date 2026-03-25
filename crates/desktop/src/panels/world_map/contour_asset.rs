@@ -23,19 +23,31 @@ static GLOBAL_BATHYMETRY_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = 
 /// files are untouched and tiles will be re-read (not re-built) on demand.
 pub fn blast_tile_caches() {
     if let Some(c) = LOCAL_CONTOUR_CACHE.get() {
-        if let Ok(mut g) = c.lock() { g.scene_key = None; g.entries.clear(); g.in_flight.clear(); }
+        if let Ok(mut g) = c.lock() {
+            g.scene_key = None;
+            g.entries.clear();
+            g.in_flight.clear();
+        }
     }
     if let Some(c) = GLOBE_CONTOUR_CACHE.get() {
-        if let Ok(mut g) = c.lock() { *g = GlobeRegionCache::default(); }
+        if let Ok(mut g) = c.lock() {
+            *g = GlobeRegionCache::default();
+        }
     }
     if let Some(c) = GLOBAL_COASTLINE_CACHE.get() {
-        if let Ok(mut g) = c.lock() { *g = None; }
+        if let Ok(mut g) = c.lock() {
+            *g = None;
+        }
     }
     if let Some(c) = GLOBAL_TOPO_CACHE.get() {
-        if let Ok(mut g) = c.lock() { *g = None; }
+        if let Ok(mut g) = c.lock() {
+            *g = None;
+        }
     }
     if let Some(c) = GLOBAL_BATHYMETRY_CACHE.get() {
-        if let Ok(mut g) = c.lock() { *g = None; }
+        if let Ok(mut g) = c.lock() {
+            *g = None;
+        }
     }
     gebco_depth_fill::clear();
 }
@@ -122,7 +134,11 @@ pub fn load_srtm_region_for_view(
     const MAX_LOCAL_TILES: usize = 200;
 
     let cache: &'static Mutex<LocalRegionCache> = LOCAL_CONTOUR_CACHE.get_or_init(|| {
-        Mutex::new(LocalRegionCache { scene_key: None, entries: HashMap::new(), in_flight: HashSet::new() })
+        Mutex::new(LocalRegionCache {
+            scene_key: None,
+            entries: HashMap::new(),
+            in_flight: HashSet::new(),
+        })
     });
     let feature_budget = srtm_focus_cache::feature_budget_for_zoom(zoom);
     let per_asset_budget = (feature_budget / assets.len().max(1)).max(120);
@@ -192,7 +208,9 @@ pub fn load_srtm_region_for_view(
 
             if let Ok(mut g) = cache.lock() {
                 if let Some(contours) = result {
-                    g.entries.entry(key.clone()).or_insert_with(|| Arc::new(contours));
+                    g.entries
+                        .entry(key.clone())
+                        .or_insert_with(|| Arc::new(contours));
                 }
                 // Always clear in-flight so a failed tile can be retried next frame.
                 g.in_flight.remove(&key);
@@ -380,12 +398,13 @@ pub fn load_global_coastlines(
     if needs_reload {
         let old_result = guard.as_ref().map(|c| Arc::clone(&c.contours));
         drop(guard);
-        static LOADING: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
+        static LOADING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if !LOADING.swap(true, std::sync::atomic::Ordering::SeqCst) {
             let path_bg = path.clone();
             std::thread::spawn(move || {
-                if let Ok(contours) = query_global_coastlines(&path_bg, simplify_step, feature_budget) {
+                if let Ok(contours) =
+                    query_global_coastlines(&path_bg, simplify_step, feature_budget)
+                {
                     if let Ok(mut g) = cache.lock() {
                         *g = Some(CachedGlobalContours {
                             lod_bucket,
@@ -430,8 +449,7 @@ pub fn load_global_topo(
     if needs_reload {
         let old_result = guard.as_ref().map(|c| Arc::clone(&c.contours));
         drop(guard);
-        static LOADING: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
+        static LOADING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if !LOADING.swap(true, std::sync::atomic::Ordering::SeqCst) {
             let path_bg = path.clone();
             std::thread::spawn(move || {
@@ -478,14 +496,19 @@ pub fn load_global_bathymetry(
     if needs_reload {
         let old_result = guard.as_ref().map(|c| Arc::clone(&c.contours));
         drop(guard);
-        static LOADING: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
+        static LOADING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if !LOADING.swap(true, std::sync::atomic::Ordering::SeqCst) {
             let path_bg = path.clone();
             std::thread::spawn(move || {
-                if let Ok(contours) = query_global_bathymetry(&path_bg, simplify_step, feature_budget) {
+                if let Ok(contours) =
+                    query_global_bathymetry(&path_bg, simplify_step, feature_budget)
+                {
                     if let Ok(mut g) = cache.lock() {
-                        *g = Some(CachedGlobalContours { lod_bucket, path: path_bg, contours: Arc::new(contours) });
+                        *g = Some(CachedGlobalContours {
+                            lod_bucket,
+                            path: path_bg,
+                            contours: Arc::new(contours),
+                        });
                     }
                 }
                 LOADING.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -514,14 +537,14 @@ fn query_global_bathymetry(
     //
     // Budget split across depth levels (shelf gets the most):
     let depth_levels: &[(f32, usize)] = &[
-        (-200.0,  feature_budget * 22 / 100),  // continental shelf edge
-        (-500.0,  feature_budget * 12 / 100),  // upper slope
-        (-1000.0, feature_budget * 12 / 100),  // mid slope
-        (-2000.0, feature_budget * 16 / 100),  // ridge crests / lower slope
-        (-3000.0, feature_budget * 14 / 100),  // ridge flanks / abyssal rise
-        (-4000.0, feature_budget * 12 / 100),  // deep abyssal plains
-        (-5000.0, feature_budget *  8 / 100),  // hadal zone entry
-        (-6000.0, feature_budget *  4 / 100),  // trenches
+        (-200.0, feature_budget * 22 / 100),  // continental shelf edge
+        (-500.0, feature_budget * 12 / 100),  // upper slope
+        (-1000.0, feature_budget * 12 / 100), // mid slope
+        (-2000.0, feature_budget * 16 / 100), // ridge crests / lower slope
+        (-3000.0, feature_budget * 14 / 100), // ridge flanks / abyssal rise
+        (-4000.0, feature_budget * 12 / 100), // deep abyssal plains
+        (-5000.0, feature_budget * 8 / 100),  // hadal zone entry
+        (-6000.0, feature_budget * 4 / 100),  // trenches
     ];
 
     let mut all_contours: Vec<ContourPath> = Vec::new();
@@ -544,9 +567,7 @@ fn query_global_bathymetry(
              ORDER BY length(geom) DESC \
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![depth, budget], |row| {
-            row.get::<_, Vec<u8>>(0)
-        })?;
+        let rows = stmt.query_map(params![depth, budget], |row| row.get::<_, Vec<u8>>(0))?;
 
         for row in rows {
             let geometry = row?;
@@ -556,7 +577,10 @@ fn query_global_bathymetry(
                 }
                 let simplified = simplify_line(line, simplify_step);
                 if simplified.len() >= 3 {
-                    all_contours.push(ContourPath { elevation_m: depth, points: simplified });
+                    all_contours.push(ContourPath {
+                        elevation_m: depth,
+                        points: simplified,
+                    });
                 }
             }
         }
@@ -585,7 +609,11 @@ fn query_global_topo(
     // so a bare LIMIT returns only Arctic/northern features.  Stride-sample
     // across the full FID range to get globally-distributed land contours.
     let total: i64 = connection
-        .query_row("SELECT COUNT(*) FROM contour WHERE elevation_m > 0", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM contour WHERE elevation_m > 0",
+            [],
+            |r| r.get(0),
+        )
         .unwrap_or(0);
     let fetch_target = (feature_budget * 8).max(3_000) as i64;
     let stride = (total / fetch_target.max(1)).max(1);

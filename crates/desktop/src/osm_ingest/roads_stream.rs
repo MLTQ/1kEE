@@ -3,11 +3,14 @@ use osmpbf::{Element, ElementReader};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use super::{GeoBounds, OsmJob, FOCUS_NODE_MARGIN_DEGREES, FOCUS_SCAN_PROGRESS_INTERVAL, PROGRESS_FLUSH_INTERVAL};
 use super::db::{open_runtime_db, update_job_note};
 use super::roads_global::RoadTileWriter;
 use super::util::{
     bounds_intersect, canonical_road_class, expand_bounds, point_in_bounds, polyline_bounds,
+};
+use super::{
+    FOCUS_NODE_MARGIN_DEGREES, FOCUS_SCAN_PROGRESS_INTERVAL, GeoBounds, OsmJob,
+    PROGRESS_FLUSH_INTERVAL,
 };
 
 pub(super) fn import_focus_roads_via_stream_scan(

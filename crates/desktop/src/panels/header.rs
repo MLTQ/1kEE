@@ -1,8 +1,8 @@
 use crate::model::{AppModel, GeoJsonLayer};
 use crate::osm_ingest;
+use crate::panels::world_map::contour_asset;
 use crate::terrain_assets;
 use crate::theme;
-use crate::panels::world_map::contour_asset;
 
 pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
     egui::TopBottomPanel::top("header")

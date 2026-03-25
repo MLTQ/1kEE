@@ -9,9 +9,7 @@ use super::util::{
     bounds_intersect, canonical_road_class, expand_bounds, parse_geojson_linestring,
     parse_geojson_multilinestring, polyline_bounds, road_class_matches,
 };
-use super::{
-    FOCUS_NODE_MARGIN_DEGREES, GeoBounds, OsmFeatureKind, RoadLayerKind, RoadPolyline,
-};
+use super::{FOCUS_NODE_MARGIN_DEGREES, GeoBounds, OsmFeatureKind, RoadLayerKind, RoadPolyline};
 use osmpbf::{Element, ElementReader};
 
 pub(super) fn vector_cache_dir(db_path: &Path) -> Result<PathBuf, String> {
@@ -24,7 +22,10 @@ pub(super) fn vector_cache_dir(db_path: &Path) -> Result<PathBuf, String> {
 }
 
 pub(super) fn vector_cell_path(cache_dir: &Path, cell_lat: i32, cell_lon: i32) -> PathBuf {
-    cache_dir.join(format!("road_cell_{:+04}_{:+05}.geojson", cell_lat, cell_lon))
+    cache_dir.join(format!(
+        "road_cell_{:+04}_{:+05}.geojson",
+        cell_lat, cell_lon
+    ))
 }
 
 pub(super) fn ensure_cell_geojson_from_extract(
@@ -300,7 +301,10 @@ fn load_all_roads_from_vector_cell(path: &Path) -> Option<Vec<RoadPolyline>> {
 
     for feature in features {
         let props = feature.get("properties").unwrap_or(&Value::Null);
-        let way_id = props.get("way_id").and_then(Value::as_i64).unwrap_or_default();
+        let way_id = props
+            .get("way_id")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
         let road_class = props
             .get("class")
             .and_then(Value::as_str)
@@ -309,8 +313,9 @@ fn load_all_roads_from_vector_cell(path: &Path) -> Option<Vec<RoadPolyline>> {
         let geometry = feature.get("geometry")?;
         let points = match geometry.get("type").and_then(Value::as_str) {
             Some("LineString") => parse_geojson_linestring(geometry),
-            Some("MultiLineString") => parse_geojson_multilinestring(geometry)
-                .and_then(|mut lines| lines.drain(..).next()),
+            Some("MultiLineString") => {
+                parse_geojson_multilinestring(geometry).and_then(|mut lines| lines.drain(..).next())
+            }
             _ => None,
         }?;
         if points.len() < 2 {

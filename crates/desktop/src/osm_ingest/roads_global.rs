@@ -1,17 +1,17 @@
 use crate::model::GeoPoint;
 use osmpbf::{Element, ElementReader};
-use rusqlite::params;
 use rusqlite::Connection;
+use rusqlite::params;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use super::{GeoBounds, OsmJob, PROGRESS_FLUSH_INTERVAL, ROAD_TILE_ZOOMS};
 use super::db::{open_runtime_db, update_job_note};
 use super::inventory::supports_locations_on_ways_for_path;
 use super::util::{
     bounds_intersect, canonical_road_class, encode_linestring_wkb, lat_lon_to_tile,
     polyline_bounds, unix_timestamp,
 };
+use super::{GeoBounds, OsmJob, PROGRESS_FLUSH_INTERVAL, ROAD_TILE_ZOOMS};
 
 /// Global planet stream scan — imports all road ways from a planet.osm.pbf.
 pub(super) fn import_planet_roads(db_path: &Path, job: &OsmJob) -> Result<String, String> {
@@ -263,8 +263,8 @@ pub(super) fn load_roads_for_bounds_inner(
         Err(_) => return Vec::new(),
     };
 
-    use std::collections::HashSet;
     use super::util::{decode_linestring_wkb, road_class_matches};
+    use std::collections::HashSet;
     let mut seen_way_ids = HashSet::new();
     let mut roads = Vec::new();
     for row in rows.filter_map(Result::ok) {

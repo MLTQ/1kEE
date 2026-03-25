@@ -14,7 +14,10 @@
 ///   Its `prepare` step rebuilds/uploads the heightmap when the viewport changes and
 ///   writes the per-frame uniforms; its `paint` step issues one indexed draw call.
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    Mutex, OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
 
 use eframe::egui_wgpu;
 use eframe::wgpu;
@@ -107,46 +110,50 @@ const BASE_VERT_EXAG: f32 = 2.1;
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct LocalTerrainUniforms {
-    focus_lat:         f32,
-    focus_lon:         f32,
-    half_extent_deg:   f32,
-    km_per_deg_lon:    f32,
+    focus_lat: f32,
+    focus_lon: f32,
+    half_extent_deg: f32,
+    km_per_deg_lon: f32,
 
-    extent_x_km:       f32,
-    extent_y_km:       f32,
+    extent_x_km: f32,
+    extent_y_km: f32,
     reference_span_km: f32,
-    _pad0:             f32,
+    _pad0: f32,
 
-    focus_center_x:    f32,
-    focus_center_y:    f32,
-    horizontal_scale:  f32,
-    layout_height:     f32,
+    focus_center_x: f32,
+    focus_center_y: f32,
+    horizontal_scale: f32,
+    layout_height: f32,
 
-    yaw_cos:           f32,
-    yaw_sin:           f32,
-    pitch_cos:         f32,
-    pitch_sin:         f32,
+    yaw_cos: f32,
+    yaw_sin: f32,
+    pitch_cos: f32,
+    pitch_sin: f32,
 
-    layer_spread:      f32,
-    alpha:             f32,
-    screen_width:      f32,
-    screen_height:     f32,
+    layer_spread: f32,
+    alpha: f32,
+    screen_width: f32,
+    screen_height: f32,
 
-    elev_min_m:        f32,
-    elev_range_m:      f32,
-    _pad1:             f32,
-    _pad2:             f32,
+    elev_min_m: f32,
+    elev_range_m: f32,
+    _pad1: f32,
+    _pad2: f32,
 
-    backdrop_col:      [f32; 4],
-    low_col:           [f32; 4],
-    high_col:          [f32; 4],
-    peak_col:          [f32; 4],
+    backdrop_col: [f32; 4],
+    low_col: [f32; 4],
+    high_col: [f32; 4],
+    peak_col: [f32; 4],
 }
 
 fn color_to_linear(c: egui::Color32) -> [f32; 4] {
     fn s(v: u8) -> f32 {
         let f = v as f32 / 255.0;
-        if f <= 0.04045 { f / 12.92 } else { ((f + 0.055) / 1.055).powf(2.4) }
+        if f <= 0.04045 {
+            f / 12.92
+        } else {
+            ((f + 0.055) / 1.055).powf(2.4)
+        }
     }
     [s(c.r()), s(c.g()), s(c.b()), c.a() as f32 / 255.0]
 }
@@ -156,9 +163,9 @@ fn color_to_linear(c: egui::Color32) -> [f32; 4] {
 #[derive(PartialEq, Clone)]
 struct HeightmapKey {
     /// Quantized to 4 decimal places (~11 m) to avoid per-frame rebuilds.
-    lat_q:     i32,
-    lon_q:     i32,
-    extent_q:  i32,
+    lat_q: i32,
+    lon_q: i32,
+    extent_q: i32,
     root_hash: u64,
 }
 
@@ -173,9 +180,9 @@ impl HeightmapKey {
             })
             .unwrap_or(0);
         Self {
-            lat_q:     (center.lat * 1_000.0).round() as i32,
-            lon_q:     (center.lon * 1_000.0).round() as i32,
-            extent_q:  (half_extent_deg * 10_000.0).round() as i32,
+            lat_q: (center.lat * 1_000.0).round() as i32,
+            lon_q: (center.lon * 1_000.0).round() as i32,
+            extent_q: (half_extent_deg * 10_000.0).round() as i32,
             root_hash,
         }
     }
@@ -184,77 +191,81 @@ impl HeightmapKey {
 // ── Persistent GPU resources ──────────────────────────────────────────────────
 
 pub struct LocalTerrainPassResources {
-    pipeline:      wgpu::RenderPipeline,
-    uniform_buf:   wgpu::Buffer,
+    pipeline: wgpu::RenderPipeline,
+    uniform_buf: wgpu::Buffer,
     heightmap_tex: wgpu::Texture,
-    bind_group:    wgpu::BindGroup,
-    index_buf:     wgpu::Buffer,
-    cached_key:    Option<HeightmapKey>,
+    bind_group: wgpu::BindGroup,
+    index_buf: wgpu::Buffer,
+    cached_key: Option<HeightmapKey>,
 }
 
 impl LocalTerrainPassResources {
     pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label:  Some("local_terrain_shader"),
+            label: Some("local_terrain_shader"),
             source: wgpu::ShaderSource::Wgsl(LOCAL_TERRAIN_WGSL.into()),
         });
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label:              Some("local_terrain_uniforms"),
-            size:               std::mem::size_of::<LocalTerrainUniforms>() as u64,
-            usage:              wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            label: Some("local_terrain_uniforms"),
+            size: std::mem::size_of::<LocalTerrainUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let heightmap_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label:           Some("local_terrain_heightmap"),
-            size:            wgpu::Extent3d { width: HMAP_SIZE, height: HMAP_SIZE, depth_or_array_layers: 1 },
+            label: Some("local_terrain_heightmap"),
+            size: wgpu::Extent3d {
+                width: HMAP_SIZE,
+                height: HMAP_SIZE,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
-            sample_count:    1,
-            dimension:       wgpu::TextureDimension::D2,
-            format:          wgpu::TextureFormat::Rgba8Unorm,
-            usage:           wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats:    &[],
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
         });
         let heightmap_view = heightmap_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label:             Some("local_terrain_sampler"),
-            address_mode_u:    wgpu::AddressMode::ClampToEdge,
-            address_mode_v:    wgpu::AddressMode::ClampToEdge,
-            mag_filter:        wgpu::FilterMode::Linear,
-            min_filter:        wgpu::FilterMode::Linear,
+            label: Some("local_terrain_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label:   Some("local_terrain_bgl"),
+            label: Some("local_terrain_bgl"),
             entries: &[
                 // binding 0: uniform buffer
                 wgpu::BindGroupLayoutEntry {
-                    binding:    0,
+                    binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
-                        ty:                 wgpu::BufferBindingType::Uniform,
+                        ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size:   None,
+                        min_binding_size: None,
                     },
                     count: None,
                 },
                 // binding 1: heightmap texture
                 wgpu::BindGroupLayoutEntry {
-                    binding:    1,
+                    binding: 1,
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        sample_type:    wgpu::TextureSampleType::Float { filterable: true },
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled:   false,
+                        multisampled: false,
                     },
                     count: None,
                 },
                 // binding 2: sampler
                 wgpu::BindGroupLayoutEntry {
-                    binding:    2,
+                    binding: 2,
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
@@ -263,67 +274,77 @@ impl LocalTerrainPassResources {
         });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label:   Some("local_terrain_bg"),
-            layout:  &bgl,
+            label: Some("local_terrain_bg"),
+            layout: &bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: uniform_buf.as_entire_binding() },
                 wgpu::BindGroupEntry {
-                    binding:  1,
+                    binding: 0,
+                    resource: uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
                     resource: wgpu::BindingResource::TextureView(&heightmap_view),
                 },
                 wgpu::BindGroupEntry {
-                    binding:  2,
+                    binding: 2,
                     resource: wgpu::BindingResource::Sampler(&sampler),
                 },
             ],
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label:                Some("local_terrain_pl"),
-            bind_group_layouts:   &[&bgl],
+            label: Some("local_terrain_pl"),
+            bind_group_layouts: &[&bgl],
             push_constant_ranges: &[],
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label:  Some("local_terrain_pipeline"),
+            label: Some("local_terrain_pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
-                module:               &shader,
-                entry_point:          Some("vs_main"),
-                compilation_options:  Default::default(),
-                buffers:              &[],  // procedural vertices from vertex_index
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[], // procedural vertices from vertex_index
             },
             fragment: Some(wgpu::FragmentState {
-                module:              &shader,
-                entry_point:         Some("fs_main"),
+                module: &shader,
+                entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format:     target_format,
-                    blend:      Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    format: target_format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
             primitive: wgpu::PrimitiveState {
-                topology:           wgpu::PrimitiveTopology::TriangleList,
-                front_face:         wgpu::FrontFace::Ccw,
-                cull_mode:          None, // terrain can be seen from either side during tilt
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, // terrain can be seen from either side during tilt
                 ..Default::default()
             },
             depth_stencil: None,
-            multisample:   wgpu::MultisampleState::default(),
-            multiview:     None,
-            cache:         None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
         });
 
         // Pre-build the index buffer for a GRID_N×GRID_N quad mesh.
         let indices = build_grid_indices(GRID_N);
         let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label:    Some("local_terrain_indices"),
+            label: Some("local_terrain_indices"),
             contents: bytemuck::cast_slice(&indices),
-            usage:    wgpu::BufferUsages::INDEX,
+            usage: wgpu::BufferUsages::INDEX,
         });
 
-        Self { pipeline, uniform_buf, heightmap_tex, bind_group, index_buf, cached_key: None }
+        Self {
+            pipeline,
+            uniform_buf,
+            heightmap_tex,
+            bind_group,
+            index_buf,
+            cached_key: None,
+        }
     }
 }
 
@@ -331,9 +352,9 @@ fn build_grid_indices(n: u32) -> Vec<u16> {
     let mut idx = Vec::with_capacity((n * n * 6) as usize);
     for row in 0..n {
         for col in 0..n {
-            let tl = (row       * (n + 1) + col    ) as u16;
-            let tr = (row       * (n + 1) + col + 1) as u16;
-            let bl = ((row + 1) * (n + 1) + col    ) as u16;
+            let tl = (row * (n + 1) + col) as u16;
+            let tr = (row * (n + 1) + col + 1) as u16;
+            let bl = ((row + 1) * (n + 1) + col) as u16;
             let br = ((row + 1) * (n + 1) + col + 1) as u16;
             idx.extend_from_slice(&[tl, tr, bl, tr, br, bl]);
         }
@@ -363,8 +384,8 @@ fn build_heightmap(
             let normalized = ((elev - ELEV_MIN_M) / ELEV_RANGE_M).clamp(0.0, 1.0);
             let encoded = (normalized * 255.0).round() as u8;
             let base = (row * n + col) * 4;
-            data[base]     = encoded; // R = elevation
-            data[base + 3] = 255;     // A = opaque (unused but keeps format valid)
+            data[base] = encoded; // R = elevation
+            data[base + 3] = 255; // A = opaque (unused but keeps format valid)
         }
     }
     data
@@ -374,18 +395,22 @@ fn build_heightmap(
 fn upload_heightmap(queue: &wgpu::Queue, tex: &wgpu::Texture, data: &[u8]) {
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
-            texture:   tex,
+            texture: tex,
             mip_level: 0,
-            origin:    wgpu::Origin3d::ZERO,
-            aspect:    wgpu::TextureAspect::All,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
         },
         data,
         wgpu::TexelCopyBufferLayout {
-            offset:         0,
-            bytes_per_row:  Some(HMAP_SIZE * 4),
+            offset: 0,
+            bytes_per_row: Some(HMAP_SIZE * 4),
             rows_per_image: Some(HMAP_SIZE),
         },
-        wgpu::Extent3d { width: HMAP_SIZE, height: HMAP_SIZE, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: HMAP_SIZE,
+            height: HMAP_SIZE,
+            depth_or_array_layers: 1,
+        },
     );
 }
 
@@ -394,39 +419,39 @@ fn upload_heightmap(queue: &wgpu::Queue, tex: &wgpu::Texture, data: &[u8]) {
 /// Parameters for one frame's terrain draw.  Construct via [`LocalTerrainCallback::new`]
 /// and submit with [`into_paint_callback`].
 pub struct LocalTerrainCallback {
-    center:         GeoPoint,
+    center: GeoPoint,
     half_extent_deg: f32,
-    selected_root:  Option<PathBuf>,
-    uniforms:       LocalTerrainUniforms,
+    selected_root: Option<PathBuf>,
+    uniforms: LocalTerrainUniforms,
 }
 
 /// Layout parameters mirroring `LocalLayout` from `local_terrain_scene`.
 pub struct LocalTerrainLayout {
-    pub focus_center:    egui::Pos2,
+    pub focus_center: egui::Pos2,
     pub horizontal_scale: f32,
-    pub height:          f32,
+    pub height: f32,
 }
 
 impl LocalTerrainCallback {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        center:          GeoPoint,
+        center: GeoPoint,
         half_extent_deg: f32,
-        layout:          &LocalTerrainLayout,
-        view_yaw:        f32,
-        view_pitch:      f32,
-        layer_spread:    f32,
-        alpha:           f32,
-        selected_root:   Option<&Path>,
-        backdrop_col:    egui::Color32,
-        low_col:         egui::Color32,
-        high_col:        egui::Color32,
-        peak_col:        egui::Color32,
+        layout: &LocalTerrainLayout,
+        view_yaw: f32,
+        view_pitch: f32,
+        layer_spread: f32,
+        alpha: f32,
+        selected_root: Option<&Path>,
+        backdrop_col: egui::Color32,
+        low_col: egui::Color32,
+        high_col: egui::Color32,
+        peak_col: egui::Color32,
     ) -> Self {
         let km_per_deg_lat = 111.32_f32;
         let km_per_deg_lon = km_per_deg_lat * center.lat.to_radians().cos().abs().max(0.2);
-        let extent_x_km    = (half_extent_deg * km_per_deg_lon).max(1.0);
-        let extent_y_km    = (half_extent_deg * km_per_deg_lat).max(1.0);
+        let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
+        let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
         let reference_span_km = (extent_x_km + extent_y_km) * 0.5;
 
         Self {
@@ -434,34 +459,34 @@ impl LocalTerrainCallback {
             half_extent_deg,
             selected_root: selected_root.map(PathBuf::from),
             uniforms: LocalTerrainUniforms {
-                focus_lat:         center.lat,
-                focus_lon:         center.lon,
+                focus_lat: center.lat,
+                focus_lon: center.lon,
                 half_extent_deg,
                 km_per_deg_lon,
                 extent_x_km,
                 extent_y_km,
                 reference_span_km,
                 _pad0: 0.0,
-                focus_center_x:    layout.focus_center.x,
-                focus_center_y:    layout.focus_center.y,
-                horizontal_scale:  layout.horizontal_scale,
-                layout_height:     layout.height,
-                yaw_cos:           view_yaw.cos(),
-                yaw_sin:           view_yaw.sin(),
-                pitch_cos:         view_pitch.cos(),
-                pitch_sin:         view_pitch.sin(),
+                focus_center_x: layout.focus_center.x,
+                focus_center_y: layout.focus_center.y,
+                horizontal_scale: layout.horizontal_scale,
+                layout_height: layout.height,
+                yaw_cos: view_yaw.cos(),
+                yaw_sin: view_yaw.sin(),
+                pitch_cos: view_pitch.cos(),
+                pitch_sin: view_pitch.sin(),
                 layer_spread,
                 alpha,
-                screen_width:      0.0, // filled in prepare()
-                screen_height:     0.0,
-                elev_min_m:        ELEV_MIN_M,
-                elev_range_m:      ELEV_RANGE_M,
+                screen_width: 0.0, // filled in prepare()
+                screen_height: 0.0,
+                elev_min_m: ELEV_MIN_M,
+                elev_range_m: ELEV_RANGE_M,
                 _pad1: 0.0,
                 _pad2: 0.0,
                 backdrop_col: color_to_linear(backdrop_col),
-                low_col:      color_to_linear(low_col),
-                high_col:     color_to_linear(high_col),
-                peak_col:     color_to_linear(peak_col),
+                low_col: color_to_linear(low_col),
+                high_col: color_to_linear(high_col),
+                peak_col: color_to_linear(peak_col),
             },
         }
     }
@@ -486,12 +511,16 @@ impl egui_wgpu::CallbackTrait for LocalTerrainCallback {
 
         // Patch screen dimensions (not known at callback construction time).
         let mut uniforms = self.uniforms;
-        uniforms.screen_width  = screen_descriptor.size_in_pixels[0] as f32;
+        uniforms.screen_width = screen_descriptor.size_in_pixels[0] as f32;
         uniforms.screen_height = screen_descriptor.size_in_pixels[1] as f32;
         queue.write_buffer(&res.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
 
         // ── Non-blocking heightmap update ────────────────────────────────────
-        let key = HeightmapKey::new(self.center, self.half_extent_deg, self.selected_root.as_deref());
+        let key = HeightmapKey::new(
+            self.center,
+            self.half_extent_deg,
+            self.selected_root.as_deref(),
+        );
 
         // 1. If a background build finished, upload the result now.
         if let Ok(mut slot) = pending_hmap_slot().lock() {
@@ -503,18 +532,19 @@ impl egui_wgpu::CallbackTrait for LocalTerrainCallback {
 
         // 2. If the uploaded key still doesn't match (viewport moved) and no
         //    build is in flight, kick off a new background build.  Never block.
-        if res.cached_key.as_ref() != Some(&key)
-            && !BUILDING.load(Ordering::Relaxed)
-        {
+        if res.cached_key.as_ref() != Some(&key) && !BUILDING.load(Ordering::Relaxed) {
             BUILDING.store(true, Ordering::Relaxed);
-            let center       = self.center;
-            let half_extent  = self.half_extent_deg;
-            let root         = self.selected_root.clone();
-            let key_clone    = key.clone();
+            let center = self.center;
+            let half_extent = self.half_extent_deg;
+            let root = self.selected_root.clone();
+            let key_clone = key.clone();
             std::thread::spawn(move || {
                 let data = build_heightmap(center, half_extent, root.as_deref());
                 if let Ok(mut slot) = pending_hmap_slot().lock() {
-                    *slot = Some(PendingHeightmap { key: key_clone, data });
+                    *slot = Some(PendingHeightmap {
+                        key: key_clone,
+                        data,
+                    });
                 }
                 BUILDING.store(false, Ordering::Relaxed);
                 crate::app::request_repaint();
@@ -530,7 +560,9 @@ impl egui_wgpu::CallbackTrait for LocalTerrainCallback {
         render_pass: &mut wgpu::RenderPass<'static>,
         resources: &egui_wgpu::CallbackResources,
     ) {
-        let Some(res) = resources.get::<LocalTerrainPassResources>() else { return };
+        let Some(res) = resources.get::<LocalTerrainPassResources>() else {
+            return;
+        };
         render_pass.set_pipeline(&res.pipeline);
         render_pass.set_bind_group(0, &res.bind_group, &[]);
         render_pass.set_index_buffer(res.index_buf.slice(..), wgpu::IndexFormat::Uint16);

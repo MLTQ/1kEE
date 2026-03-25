@@ -1,3 +1,8 @@
+use super::db::{
+    cleanup_temp_tile_artifacts, import_coastline_into_cache, import_tile_into_cache,
+    journal_path_for, shm_path_for, temp_tile_paths, wal_path_for,
+};
+use super::{BUILD_TIMEOUT, FocusContourSpec, GeoBounds, TEMP_DIR_NAME, TileKey};
 use crate::settings_store;
 use std::collections::HashSet;
 use std::fs;
@@ -6,11 +11,6 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use super::{GeoBounds, FocusContourSpec, TileKey, BUILD_TIMEOUT, TEMP_DIR_NAME};
-use super::db::{
-    cleanup_temp_tile_artifacts, import_coastline_into_cache, import_tile_into_cache,
-    journal_path_for, shm_path_for, temp_tile_paths, wal_path_for,
-};
 
 pub fn find_prebuilt_vrt(srtm_root: &Path) -> Option<PathBuf> {
     let parent = srtm_root.parent()?;
@@ -496,11 +496,16 @@ fn run_gdal_coastline_0m(input_path: &Path, output_path: &Path) -> std::io::Resu
     let mut command = Command::new(gdal_tool_path("gdal_contour"));
     command.args([
         "-q",
-        "-f", "GPKG",
-        "-a", "elevation_m",
-        "-fl", "0",
-        "-snodata", "-32768",
-        "-nln", "contour",
+        "-f",
+        "GPKG",
+        "-a",
+        "elevation_m",
+        "-fl",
+        "0",
+        "-snodata",
+        "-32768",
+        "-nln",
+        "contour",
     ]);
     command.arg(input_path);
     command.arg(output_path);

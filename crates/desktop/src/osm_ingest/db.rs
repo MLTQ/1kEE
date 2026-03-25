@@ -1,8 +1,8 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 
-use super::{GeoBounds, OsmFeatureKind, OsmJob, OsmJobSnapshot};
 use super::util::unix_timestamp;
+use super::{GeoBounds, OsmFeatureKind, OsmJob, OsmJobSnapshot};
 
 pub(super) fn runtime_db_path(selected_root: Option<&Path>) -> Option<PathBuf> {
     let derived_root = crate::terrain_assets::find_derived_root(selected_root)?;
@@ -137,10 +137,10 @@ pub(super) fn fetch_next_job(connection: &Connection) -> rusqlite::Result<Option
     let job = statement
         .query_row([], |row| {
             let feature_kind = match row.get::<_, String>(1)?.as_str() {
-                "roads"     => OsmFeatureKind::Roads,
+                "roads" => OsmFeatureKind::Roads,
                 "buildings" => OsmFeatureKind::Buildings,
-                "water"     => OsmFeatureKind::Water,
-                _           => OsmFeatureKind::Roads,
+                "water" => OsmFeatureKind::Water,
+                _ => OsmFeatureKind::Roads,
             };
             Ok(OsmJob {
                 id: row.get(0)?,
@@ -272,7 +272,9 @@ pub(super) fn register_planet_source(connection: &Connection, path: &Path) -> ru
     Ok(())
 }
 
-pub(super) fn read_runtime_counts(path: &Path) -> rusqlite::Result<(bool, usize, usize, usize, usize)> {
+pub(super) fn read_runtime_counts(
+    path: &Path,
+) -> rusqlite::Result<(bool, usize, usize, usize, usize)> {
     let connection = open_runtime_db(path)?;
     ensure_runtime_schema(&connection)?;
 

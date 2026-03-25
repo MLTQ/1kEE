@@ -150,9 +150,11 @@ pub fn load_roads_for_bounds(
     tile_zoom: u8,
     layer_kind: RoadLayerKind,
 ) -> Vec<RoadPolyline> {
-    if let Some(roads) =
-        roads_vector_cache::load_roads_for_bounds_from_vector_cache(selected_root, bounds, layer_kind)
-    {
+    if let Some(roads) = roads_vector_cache::load_roads_for_bounds_from_vector_cache(
+        selected_root,
+        bounds,
+        layer_kind,
+    ) {
         return roads;
     }
     let Some(db_path) = db::runtime_db_path(selected_root) else {

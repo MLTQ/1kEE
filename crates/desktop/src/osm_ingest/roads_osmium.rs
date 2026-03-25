@@ -2,6 +2,7 @@ use crate::settings_store;
 use std::fs;
 use std::path::Path;
 
+use super::OsmFeatureKind;
 use super::OsmJob;
 use super::db::update_job_note;
 use super::job_dispatch::{
@@ -9,7 +10,6 @@ use super::job_dispatch::{
     focus_cells_bounds, focus_cells_for_bounds, road_data_gen, run_osmium_extract,
     set_cell_progress,
 };
-use super::OsmFeatureKind;
 use super::roads_vector_cache::{
     ensure_cell_geojson_from_extract, vector_cache_dir, vector_cell_path,
 };

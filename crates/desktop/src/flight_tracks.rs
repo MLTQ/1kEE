@@ -26,7 +26,6 @@
 /// ```
 /// Returns `{ "time": unix_ts, "states": [[…], …] }`.
 /// Each state vector is a fixed-position array; see `parse_state`.
-
 use crate::model::{FlightTrack, GeoPoint};
 
 use std::collections::HashMap;
@@ -63,7 +62,11 @@ fn wait_for_rate_gate() {
         let wait = last
             .map(|t| {
                 let elapsed = now.duration_since(t);
-                if elapsed >= RATE_GAP { Duration::ZERO } else { RATE_GAP - elapsed }
+                if elapsed >= RATE_GAP {
+                    Duration::ZERO
+                } else {
+                    RATE_GAP - elapsed
+                }
             })
             .unwrap_or(Duration::ZERO);
         // Reserve: mark the "virtual now" at now+wait so concurrent waiters
@@ -125,15 +128,20 @@ pub fn poll(center: GeoPoint, ctx: egui::Context) -> Vec<FlightTrack> {
             if g.backoff_until.map(|t| t > Instant::now()).unwrap_or(false) {
                 return false;
             }
-            let interval_expired = g.last_poll
+            let interval_expired = g
+                .last_poll
                 .map(|t| t.elapsed() >= POLL_INTERVAL)
                 .unwrap_or(true);
-            let drifted = g.last_center.map(|prev| {
-                let dlat = (center.lat - prev.lat).abs();
-                let dlon = (center.lon - prev.lon).abs()
-                    .min(360.0 - (center.lon - prev.lon).abs());
-                dlat > RECENTER_THRESHOLD_DEG || dlon > RECENTER_THRESHOLD_DEG
-            }).unwrap_or(false);
+            let drifted = g
+                .last_center
+                .map(|prev| {
+                    let dlat = (center.lat - prev.lat).abs();
+                    let dlon = (center.lon - prev.lon)
+                        .abs()
+                        .min(360.0 - (center.lon - prev.lon).abs());
+                    dlat > RECENTER_THRESHOLD_DEG || dlon > RECENTER_THRESHOLD_DEG
+                })
+                .unwrap_or(false);
             interval_expired || drifted
         })
         .unwrap_or(false);
@@ -205,7 +213,10 @@ pub fn invalidate() {
 // ── HTTP fetch ────────────────────────────────────────────────────────────────
 
 enum FlightFetchResult {
-    Ok { flights: Vec<FlightTrack>, status: String },
+    Ok {
+        flights: Vec<FlightTrack>,
+        status: String,
+    },
     RateLimited,
     Error(String),
 }
@@ -309,7 +320,8 @@ fn parse_state(state: &serde_json::Value) -> Option<FlightTrack> {
         return None;
     }
 
-    let callsign = arr.get(1)
+    let callsign = arr
+        .get(1)
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty());
@@ -317,21 +329,19 @@ fn parse_state(state: &serde_json::Value) -> Option<FlightTrack> {
     let baro_altitude_m = arr.get(7).and_then(|v| v.as_f64()).map(|v| v as f32);
     let on_ground = arr.get(8).and_then(|v| v.as_bool()).unwrap_or(false);
 
-    let speed_knots = arr.get(9)
+    let speed_knots = arr
+        .get(9)
         .and_then(|v| v.as_f64())
         .map(|v| (v * 1.943_84) as f32);
 
-    let heading_deg = arr.get(10)
-        .and_then(|v| v.as_f64())
-        .map(|v| v as f32);
+    let heading_deg = arr.get(10).and_then(|v| v.as_f64()).map(|v| v as f32);
 
-    let vertical_rate_fpm = arr.get(11)
+    let vertical_rate_fpm = arr
+        .get(11)
         .and_then(|v| v.as_f64())
         .map(|v| (v * 196.85) as f32);
 
-    let origin_country = arr.get(2)
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_owned());
+    let origin_country = arr.get(2).and_then(|v| v.as_str()).map(|s| s.to_owned());
 
     Some(FlightTrack {
         icao24,
@@ -355,14 +365,14 @@ fn parse_state(state: &serde_json::Value) -> Option<FlightTrack> {
 /// Static aircraft metadata from the OpenSky extended database.
 #[derive(Clone, Debug)]
 pub struct AircraftMeta {
-    pub registration:      Option<String>,
-    pub manufacturer:      Option<String>,
-    pub model:             Option<String>,
-    pub typecode:          Option<String>,
-    pub owner:             Option<String>,
-    pub operator:          Option<String>,
+    pub registration: Option<String>,
+    pub manufacturer: Option<String>,
+    pub model: Option<String>,
+    pub typecode: Option<String>,
+    pub owner: Option<String>,
+    pub operator: Option<String>,
     pub operator_callsign: Option<String>,
-    pub operator_icao:     Option<String>,
+    pub operator_icao: Option<String>,
 }
 
 enum MetaEntry {
@@ -394,8 +404,12 @@ pub fn request_metadata(icao24: &str, ctx: egui::Context) {
             // On 429: remove the Loading entry so the user can retry by
             // clicking again rather than being stuck on a spinner forever.
             match entry {
-                MetaEntry::Loading => { c.remove(&icao24); }
-                other              => { c.insert(icao24, other); }
+                MetaEntry::Loading => {
+                    c.remove(&icao24);
+                }
+                other => {
+                    c.insert(icao24, other);
+                }
             }
         }
         ctx.request_repaint();
@@ -422,9 +436,7 @@ pub fn is_meta_loading(icao24: &str) -> bool {
 }
 
 fn fetch_aircraft_meta(icao24: &str) -> MetaEntry {
-    let url = format!(
-        "https://opensky-network.org/api/metadata/aircraft/icao/{icao24}"
-    );
+    let url = format!("https://opensky-network.org/api/metadata/aircraft/icao/{icao24}");
 
     wait_for_rate_gate();
 
@@ -459,16 +471,19 @@ fn fetch_aircraft_meta(icao24: &str) -> MetaEntry {
         Err(_) => return MetaEntry::NotFound,
     };
     let s = |key: &str| -> Option<String> {
-        json[key].as_str().filter(|v| !v.is_empty()).map(|v| v.to_owned())
+        json[key]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .map(|v| v.to_owned())
     };
     MetaEntry::Loaded(AircraftMeta {
-        registration:      s("registration"),
-        manufacturer:      s("manufacturername"),
-        model:             s("model"),
-        typecode:          s("typecode"),
-        owner:             s("owner"),
-        operator:          s("operator"),
+        registration: s("registration"),
+        manufacturer: s("manufacturername"),
+        model: s("model"),
+        typecode: s("typecode"),
+        owner: s("owner"),
+        operator: s("operator"),
         operator_callsign: s("operatorcallsign"),
-        operator_icao:     s("operatoricao"),
+        operator_icao: s("operatoricao"),
     })
 }

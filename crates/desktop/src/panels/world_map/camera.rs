@@ -79,7 +79,11 @@ pub fn apply_interaction(
 
     // ── Scroll zoom (no momentum — instant feels best for zoom) ──────────────
     let scroll_y = ctx.input(|i| {
-        if response.hovered() { i.raw_scroll_delta.y } else { 0.0 }
+        if response.hovered() {
+            i.raw_scroll_delta.y
+        } else {
+            0.0
+        }
     });
     if scroll_y.abs() > f32::EPSILON {
         if view.local_mode {
@@ -93,13 +97,15 @@ pub fn apply_interaction(
 
     // ── Keyboard arrow navigation ─────────────────────────────────────────────
     if response.hovered() {
-        let (left, right, up, down, rotate_mod) = ctx.input(|i| (
-            i.key_down(egui::Key::ArrowLeft),
-            i.key_down(egui::Key::ArrowRight),
-            i.key_down(egui::Key::ArrowUp),
-            i.key_down(egui::Key::ArrowDown),
-            i.modifiers.ctrl || i.modifiers.shift,
-        ));
+        let (left, right, up, down, rotate_mod) = ctx.input(|i| {
+            (
+                i.key_down(egui::Key::ArrowLeft),
+                i.key_down(egui::Key::ArrowRight),
+                i.key_down(egui::Key::ArrowUp),
+                i.key_down(egui::Key::ArrowDown),
+                i.modifiers.ctrl || i.modifiers.shift,
+            )
+        });
 
         if left || right || up || down {
             // Accumulate hold time and compute an acceleration ramp.
@@ -111,8 +117,20 @@ pub fn apply_interaction(
             let ramp = (view.key_hold_secs / KEY_RAMP_SECS).sqrt();
 
             input_active = true;
-            let h = if left { -1.0f32 } else if right { 1.0 } else { 0.0 };
-            let v = if up { -1.0f32 } else if down { 1.0 } else { 0.0 };
+            let h = if left {
+                -1.0f32
+            } else if right {
+                1.0
+            } else {
+                0.0
+            };
+            let v = if up {
+                -1.0f32
+            } else if down {
+                1.0
+            } else {
+                0.0
+            };
 
             if view.local_mode {
                 if rotate_mod {
@@ -169,28 +187,25 @@ pub fn apply_interaction(
 
         // Slow yaw orbit — circles around the scene.
         let yaw_sum = (t * 0.035).sin() * 0.75
-                    + (t * 0.063 * PHI).sin() * 0.45
-                    + (t * 0.098 * SQRT2).sin() * 0.30;
+            + (t * 0.063 * PHI).sin() * 0.45
+            + (t * 0.098 * SQRT2).sin() * 0.30;
         let yaw_target = s * 0.10 * yaw_sum / 1.50;
 
         // Subtle pitch oscillation — tilts the camera gently.
-        let pitch_sum = (t * 0.027 + 1.3).sin() * 0.55
-                      + (t * 0.050 * PHI + 2.5).sin() * 0.35;
+        let pitch_sum = (t * 0.027 + 1.3).sin() * 0.55 + (t * 0.050 * PHI + 2.5).sin() * 0.35;
         let pitch_target = s * 0.025 * pitch_sum / 0.90;
 
         // Very slow pan drift — wanders across the terrain.
-        let pan_lat_sum = (t * 0.020 + 1.7).sin() * 0.60
-                        + (t * 0.038 * SQRT2 + 0.8).sin() * 0.40;
-        let pan_lon_sum = (t * 0.018 + 2.5).sin() * 0.60
-                        + (t * 0.035 * PHI + 1.4).sin() * 0.40;
+        let pan_lat_sum = (t * 0.020 + 1.7).sin() * 0.60 + (t * 0.038 * SQRT2 + 0.8).sin() * 0.40;
+        let pan_lon_sum = (t * 0.018 + 2.5).sin() * 0.60 + (t * 0.035 * PHI + 1.4).sin() * 0.40;
         let half_ext = local_terrain_scene::visual_half_extent_for_zoom(view.local_zoom);
         // ~0.5 view-widths per minute at full speed — visibly traverses the terrain.
         let pan_scale = s * 0.015 * half_ext;
 
-        view.vel_local_yaw   = lerp(view.vel_local_yaw,   yaw_target,            0.03);
-        view.vel_local_pitch = lerp(view.vel_local_pitch, pitch_target,           0.03);
-        view.vel_local_lat   = lerp(view.vel_local_lat,   pan_lat_sum * pan_scale, 0.015);
-        view.vel_local_lon   = lerp(view.vel_local_lon,   pan_lon_sum * pan_scale, 0.015);
+        view.vel_local_yaw = lerp(view.vel_local_yaw, yaw_target, 0.03);
+        view.vel_local_pitch = lerp(view.vel_local_pitch, pitch_target, 0.03);
+        view.vel_local_lat = lerp(view.vel_local_lat, pan_lat_sum * pan_scale, 0.015);
+        view.vel_local_lon = lerp(view.vel_local_lon, pan_lon_sum * pan_scale, 0.015);
         input_active = true;
     }
 
@@ -198,26 +213,25 @@ pub fn apply_interaction(
         let t = ctx.input(|i| i.time) as f32;
 
         // Incommensurate frequency multipliers.
-        const PHI:   f32 = 1.618_034; // golden ratio
+        const PHI: f32 = 1.618_034; // golden ratio
         const SQRT2: f32 = 1.414_213;
 
         let s = view.meander_speed;
 
         // Yaw (horizontal drift): sum bounded by ±1.65, scaled to ±0.22 rad/s.
         let yaw_sum = (t * 0.080).sin() * 0.80
-                    + (t * 0.130 * PHI).sin() * 0.50
-                    + (t * 0.210 * SQRT2).sin() * 0.35;
+            + (t * 0.130 * PHI).sin() * 0.50
+            + (t * 0.210 * SQRT2).sin() * 0.35;
         let yaw_target = s * 0.22 * yaw_sum / 1.65;
 
         // Pitch (vertical tilt): sum bounded by ±1.25, scaled to ±0.09 rad/s.
         // Phase offsets ensure pitch and yaw drift independently.
-        let pitch_sum = (t * 0.060 + 1.1).sin() * 0.70
-                      + (t * 0.110 * PHI + 2.8).sin() * 0.55;
+        let pitch_sum = (t * 0.060 + 1.1).sin() * 0.70 + (t * 0.110 * PHI + 2.8).sin() * 0.55;
         let pitch_target = s * 0.09 * pitch_sum / 1.25;
 
         // Smooth blend — fast enough to track the slowly-evolving target,
         // slow enough that any momentum from a drag release fades naturally.
-        view.vel_yaw   = lerp(view.vel_yaw,   yaw_target,   0.05);
+        view.vel_yaw = lerp(view.vel_yaw, yaw_target, 0.05);
         view.vel_pitch = lerp(view.vel_pitch, pitch_target, 0.05);
         input_active = true;
     }
@@ -235,26 +249,36 @@ pub fn apply_interaction(
     }
 
     // Dead-zone: kill negligible velocities so we stop requesting repaints.
-    if view.vel_yaw.abs() < DEAD_VEL { view.vel_yaw = 0.0; }
-    if view.vel_pitch.abs() < DEAD_VEL { view.vel_pitch = 0.0; }
-    if view.vel_local_yaw.abs() < DEAD_VEL { view.vel_local_yaw = 0.0; }
-    if view.vel_local_pitch.abs() < DEAD_VEL { view.vel_local_pitch = 0.0; }
-    if view.vel_local_lat.abs() < DEAD_PAN { view.vel_local_lat = 0.0; }
-    if view.vel_local_lon.abs() < DEAD_PAN { view.vel_local_lon = 0.0; }
+    if view.vel_yaw.abs() < DEAD_VEL {
+        view.vel_yaw = 0.0;
+    }
+    if view.vel_pitch.abs() < DEAD_VEL {
+        view.vel_pitch = 0.0;
+    }
+    if view.vel_local_yaw.abs() < DEAD_VEL {
+        view.vel_local_yaw = 0.0;
+    }
+    if view.vel_local_pitch.abs() < DEAD_VEL {
+        view.vel_local_pitch = 0.0;
+    }
+    if view.vel_local_lat.abs() < DEAD_PAN {
+        view.vel_local_lat = 0.0;
+    }
+    if view.vel_local_lon.abs() < DEAD_PAN {
+        view.vel_local_lon = 0.0;
+    }
 
     // ── Apply velocity to position ───────────────────────────────────────────
     if view.local_mode {
         view.local_yaw += view.vel_local_yaw * dt;
-        view.local_pitch =
-            (view.local_pitch + view.vel_local_pitch * dt).clamp(0.02, 1.55);
+        view.local_pitch = (view.local_pitch + view.vel_local_pitch * dt).clamp(0.02, 1.55);
         view.local_center.lat =
             (view.local_center.lat + view.vel_local_lat * dt).clamp(-85.0, 85.0);
-        view.local_center.lon =
-            normalize_lon(view.local_center.lon + view.vel_local_lon * dt);
+        view.local_center.lon = normalize_lon(view.local_center.lon + view.vel_local_lon * dt);
     } else {
         view.yaw += view.vel_yaw * dt;
-        view.pitch = (view.pitch + view.vel_pitch * dt)
-            .clamp(-GLOBE_PITCH_LIMIT_RAD, GLOBE_PITCH_LIMIT_RAD);
+        view.pitch =
+            (view.pitch + view.vel_pitch * dt).clamp(-GLOBE_PITCH_LIMIT_RAD, GLOBE_PITCH_LIMIT_RAD);
     }
 
     // Request repaint while coasting so the view updates every frame.
@@ -286,8 +310,7 @@ fn local_pan_delta_to_latlon(
 ) -> (f32, f32) {
     let half_extent_deg = local_terrain_scene::visual_half_extent_for_zoom(view.local_zoom);
     let km_per_deg_lat = 111.32f32;
-    let km_per_deg_lon =
-        km_per_deg_lat * view.local_center.lat.to_radians().cos().abs().max(0.2);
+    let km_per_deg_lon = km_per_deg_lat * view.local_center.lat.to_radians().cos().abs().max(0.2);
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
     let horizontal_scale = rect.width() * 0.31;
@@ -315,8 +338,12 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 
 fn normalize_lon(lon: f32) -> f32 {
     let mut wrapped = lon;
-    while wrapped > 180.0 { wrapped -= 360.0; }
-    while wrapped < -180.0 { wrapped += 360.0; }
+    while wrapped > 180.0 {
+        wrapped -= 360.0;
+    }
+    while wrapped < -180.0 {
+        wrapped += 360.0;
+    }
     wrapped
 }
 

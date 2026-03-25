@@ -124,7 +124,11 @@ fn load_tile_via_image(path: &Path) -> Option<SrtmTile> {
     // Samples from the image crate come back as u16; reinterpret as i16 so
     // that negative elevations and the SRTM no-data sentinel (-32768) work.
     let samples: Vec<i16> = image.into_raw().into_iter().map(|u| u as i16).collect();
-    Some(SrtmTile { width, height, samples })
+    Some(SrtmTile {
+        width,
+        height,
+        samples,
+    })
 }
 
 /// Convert `src` to a headerless raw Int16 little-endian binary via
@@ -145,8 +149,8 @@ fn load_tile_via_gdal(src: &Path) -> Option<SrtmTile> {
     // is more reliably available.  The output stem is the raw_path without
     // extension so gdal_translate appends its own extensions.
     let stem = raw_path.with_extension("");
-    let hdr_path  = stem.with_extension("hdr");
-    let bil_path  = stem.with_extension("bil");
+    let hdr_path = stem.with_extension("hdr");
+    let bil_path = stem.with_extension("bil");
 
     let gdal_translate = crate::settings_store::resolve_gdal_tool("gdal_translate");
     let status = std::process::Command::new(&gdal_translate)
@@ -167,9 +171,15 @@ fn load_tile_via_gdal(src: &Path) -> Option<SrtmTile> {
     let (mut width, mut height, mut big_endian) = (0u32, 0u32, false);
     for line in hdr_text.lines() {
         let line = line.trim();
-        if let Some(val) = line.strip_prefix("NCOLS").or_else(|| line.strip_prefix("ncols")) {
+        if let Some(val) = line
+            .strip_prefix("NCOLS")
+            .or_else(|| line.strip_prefix("ncols"))
+        {
             width = val.trim().parse().unwrap_or(0);
-        } else if let Some(val) = line.strip_prefix("NROWS").or_else(|| line.strip_prefix("nrows")) {
+        } else if let Some(val) = line
+            .strip_prefix("NROWS")
+            .or_else(|| line.strip_prefix("nrows"))
+        {
             height = val.trim().parse().unwrap_or(0);
         } else if line.starts_with("BYTEORDER") || line.starts_with("byteorder") {
             let val = line.split_whitespace().nth(1).unwrap_or("I");
@@ -193,7 +203,11 @@ fn load_tile_via_gdal(src: &Path) -> Option<SrtmTile> {
         .take((width * height) as usize)
         .map(|b| {
             let arr = [b[0], b[1]];
-            if big_endian { i16::from_be_bytes(arr) } else { i16::from_le_bytes(arr) }
+            if big_endian {
+                i16::from_be_bytes(arr)
+            } else {
+                i16::from_le_bytes(arr)
+            }
         })
         .collect();
 
@@ -209,24 +223,36 @@ fn load_tile_via_gdal(src: &Path) -> Option<SrtmTile> {
     let _ = std::fs::remove_file(&hdr_path);
     let _ = std::fs::remove_file(&bil_path);
 
-    Some(SrtmTile { width, height, samples })
+    Some(SrtmTile {
+        width,
+        height,
+        samples,
+    })
 }
 
 /// Load a tile from the compact `.srtm_raw` cache format:
 /// 4-byte LE u32 width, 4-byte LE u32 height, then width*height LE i16 samples.
 fn load_raw_int16(path: &Path) -> Option<SrtmTile> {
     let bytes = std::fs::read(path).ok()?;
-    if bytes.len() < 8 { return None; }
-    let width  = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    if bytes.len() < 8 {
+        return None;
+    }
+    let width = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     let height = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
     let expected = 8 + (width * height * 2) as usize;
-    if bytes.len() < expected { return None; }
+    if bytes.len() < expected {
+        return None;
+    }
     let samples: Vec<i16> = bytes[8..]
         .chunks_exact(2)
         .take((width * height) as usize)
         .map(|b| i16::from_le_bytes([b[0], b[1]]))
         .collect();
-    Some(SrtmTile { width, height, samples })
+    Some(SrtmTile {
+        width,
+        height,
+        samples,
+    })
 }
 
 fn tile_path(root: &Path, point: GeoPoint) -> PathBuf {

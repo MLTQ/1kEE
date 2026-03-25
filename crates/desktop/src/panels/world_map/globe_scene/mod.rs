@@ -178,7 +178,13 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     // `model.tracks` is refreshed each frame by `render_world_map` before
     // this function is called.  We just draw whatever is cached.
     if model.show_ships && !model.globe_view.local_mode {
-        markers::draw_ships(painter, &layout, &model.globe_view, &model.tracks, model.selected_track_mmsi);
+        markers::draw_ships(
+            painter,
+            &layout,
+            &model.globe_view,
+            &model.tracks,
+            model.selected_track_mmsi,
+        );
     }
 
     // ── ADS-B flight markers ───────────────────────────────────────────────
@@ -193,12 +199,18 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     }
 
     // ── ArcGIS feature markers ─────────────────────────────────────────────
-    let arcgis_feature_markers = if !model.globe_view.local_mode && !model.arcgis_features.is_empty() {
-        draw_arcgis_features(painter, &layout, &model.globe_view, &model.arcgis_features,
-            model.selected_arcgis_feature.as_ref())
-    } else {
-        Vec::new()
-    };
+    let arcgis_feature_markers =
+        if !model.globe_view.local_mode && !model.arcgis_features.is_empty() {
+            draw_arcgis_features(
+                painter,
+                &layout,
+                &model.globe_view,
+                &model.arcgis_features,
+                model.selected_arcgis_feature.as_ref(),
+            )
+        } else {
+            Vec::new()
+        };
 
     let ship_markers: Vec<(u64, egui::Pos2)> = if model.show_ships && !model.globe_view.local_mode {
         model
@@ -224,7 +236,9 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 
     let flight_markers: Vec<(String, egui::Pos2)> =
         if model.show_flights && !model.globe_view.local_mode {
-            model.flights.iter()
+            model
+                .flights
+                .iter()
                 .filter_map(|f| {
                     projection::project_geo(&layout, &model.globe_view, f.location, 0.0)
                         .filter(|p| p.front_facing)
@@ -356,13 +370,13 @@ pub fn screen_to_latlon(
 
     // Inverse pitch rotation
     let pitch = view.pitch;
-    let y2 =  py * pitch.cos() + pz * pitch.sin();
+    let y2 = py * pitch.cos() + pz * pitch.sin();
     let z2 = -py * pitch.sin() + pz * pitch.cos();
 
     // Inverse yaw rotation
     let yaw = view.yaw;
-    let x3 =  px * yaw.cos() - z2 * yaw.sin();
-    let z3 =  px * yaw.sin() + z2 * yaw.cos();
+    let x3 = px * yaw.cos() - z2 * yaw.sin();
+    let z3 = px * yaw.sin() + z2 * yaw.cos();
 
     let lat_rad = y2.clamp(-1.0, 1.0).asin();
     let lon_rad = z3.atan2(x3);

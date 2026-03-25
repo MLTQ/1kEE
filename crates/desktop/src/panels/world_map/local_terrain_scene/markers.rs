@@ -3,9 +3,9 @@ use std::path::Path;
 use crate::model::{EventRecord, GeoPoint, GlobeViewState, NearbyCamera};
 use crate::theme;
 
-use super::{LocalLayout, ProjectedLocalPoint, visual_half_extent_for_zoom};
-use super::projection::project_local;
 use super::super::srtm_stream;
+use super::projection::project_local;
+use super::{LocalLayout, ProjectedLocalPoint, visual_half_extent_for_zoom};
 
 /// Height in screen-space pixels of an event laser beam.
 const EVENT_BEAM_HEIGHT_PX: f32 = 110.0;
@@ -44,19 +44,29 @@ pub(super) fn draw_markers(
     // a higher elevation and measuring the displacement.  Normalising then
     // scaling gives a beam of consistent pixel length regardless of zoom.
     let event_sky = project_local(
-        layout, view, viewport_center, event.location,
-        event_elev + 1000.0, extent_x_km, extent_y_km,
+        layout,
+        view,
+        viewport_center,
+        event.location,
+        event_elev + 1000.0,
+        extent_x_km,
+        extent_y_km,
     );
     if let Some(event_marker) = event_marker {
-        let tip = event_sky.map(|sky| {
-            let dx = sky.pos.x - event_marker.pos.x;
-            let dy = sky.pos.y - event_marker.pos.y;
-            let len = (dx * dx + dy * dy).sqrt().max(0.1);
-            egui::pos2(
-                event_marker.pos.x + dx / len * EVENT_BEAM_HEIGHT_PX,
-                event_marker.pos.y + dy / len * EVENT_BEAM_HEIGHT_PX,
-            )
-        }).unwrap_or(egui::pos2(event_marker.pos.x, event_marker.pos.y - EVENT_BEAM_HEIGHT_PX));
+        let tip = event_sky
+            .map(|sky| {
+                let dx = sky.pos.x - event_marker.pos.x;
+                let dy = sky.pos.y - event_marker.pos.y;
+                let len = (dx * dx + dy * dy).sqrt().max(0.1);
+                egui::pos2(
+                    event_marker.pos.x + dx / len * EVENT_BEAM_HEIGHT_PX,
+                    event_marker.pos.y + dy / len * EVENT_BEAM_HEIGHT_PX,
+                )
+            })
+            .unwrap_or(egui::pos2(
+                event_marker.pos.x,
+                event_marker.pos.y - EVENT_BEAM_HEIGHT_PX,
+            ));
 
         draw_event_marker(
             painter,
@@ -139,9 +149,18 @@ pub(super) fn draw_event_marker(
         let a = (1.0 - tm).powi(2);
         let p0 = egui::pos2(ground.pos.x + dx * t0, ground.pos.y + dy * t0);
         let p1 = egui::pos2(ground.pos.x + dx * t1, ground.pos.y + dy * t1);
-        painter.line_segment([p0, p1], egui::Stroke::new((22.0 * a).max(0.5), col.gamma_multiply(0.04 * a)));
-        painter.line_segment([p0, p1], egui::Stroke::new((11.0 * a).max(0.5), col.gamma_multiply(0.08 * a)));
-        painter.line_segment([p0, p1], egui::Stroke::new(( 4.5 * a).max(0.5), col.gamma_multiply(0.16 * a)));
+        painter.line_segment(
+            [p0, p1],
+            egui::Stroke::new((22.0 * a).max(0.5), col.gamma_multiply(0.04 * a)),
+        );
+        painter.line_segment(
+            [p0, p1],
+            egui::Stroke::new((11.0 * a).max(0.5), col.gamma_multiply(0.08 * a)),
+        );
+        painter.line_segment(
+            [p0, p1],
+            egui::Stroke::new((4.5 * a).max(0.5), col.gamma_multiply(0.16 * a)),
+        );
     }
 
     // ── Tapering core — cubic fade, width narrows to a point ─────────────────
@@ -151,35 +170,59 @@ pub(super) fn draw_event_marker(
         let t1 = (i + 1) as f32 / SEGS as f32;
         let tm = (t0 + t1) * 0.5;
         let falloff = 1.0 - tm;
-        let alpha   = falloff.powi(3);
-        let w_glow  = (4.0 * falloff.powf(0.7)).max(0.4);
-        let w_core  = (1.7 * falloff.powf(0.7)).max(0.3);
+        let alpha = falloff.powi(3);
+        let w_glow = (4.0 * falloff.powf(0.7)).max(0.4);
+        let w_core = (1.7 * falloff.powf(0.7)).max(0.3);
         let p0 = egui::pos2(ground.pos.x + dx * t0, ground.pos.y + dy * t0);
         let p1 = egui::pos2(ground.pos.x + dx * t1, ground.pos.y + dy * t1);
-        painter.line_segment([p0, p1], egui::Stroke::new(w_glow, col.gamma_multiply(alpha * 0.30)));
-        painter.line_segment([p0, p1], egui::Stroke::new(w_core, col.gamma_multiply(alpha * 0.96)));
+        painter.line_segment(
+            [p0, p1],
+            egui::Stroke::new(w_glow, col.gamma_multiply(alpha * 0.30)),
+        );
+        painter.line_segment(
+            [p0, p1],
+            egui::Stroke::new(w_core, col.gamma_multiply(alpha * 0.96)),
+        );
     }
 
     // ── Ground strike ─────────────────────────────────────────────────────────
     if is_selected {
         let pulse = 9.0 + ((time as f32 * 2.6).sin() + 1.0) * 3.2;
         painter.circle_stroke(
-            ground.pos, pulse,
+            ground.pos,
+            pulse,
             egui::Stroke::new(1.3, theme::marker_glow_warm()),
         );
     }
-    painter.circle_stroke(ground.pos, 5.5, egui::Stroke::new(3.5, col.gamma_multiply(0.10)));
-    painter.circle_stroke(ground.pos, 4.8, egui::Stroke::new(1.1, col.gamma_multiply(0.60)));
+    painter.circle_stroke(
+        ground.pos,
+        5.5,
+        egui::Stroke::new(3.5, col.gamma_multiply(0.10)),
+    );
+    painter.circle_stroke(
+        ground.pos,
+        4.8,
+        egui::Stroke::new(1.1, col.gamma_multiply(0.60)),
+    );
     painter.circle_filled(ground.pos, 2.2, col);
 }
 
-pub(super) fn draw_camera_marker(painter: &egui::Painter, marker: ProjectedLocalPoint, is_selected: bool) {
+pub(super) fn draw_camera_marker(
+    painter: &egui::Painter,
+    marker: ProjectedLocalPoint,
+    is_selected: bool,
+) {
     let radius = 3.4 + marker.depth;
-    let color = if is_selected { theme::marker_camera_ring() } else { theme::camera_color() };
+    let color = if is_selected {
+        theme::marker_camera_ring()
+    } else {
+        theme::camera_color()
+    };
 
     // Soft halo so cameras read against the terrain
     painter.circle_stroke(
-        marker.pos, radius + 5.0,
+        marker.pos,
+        radius + 5.0,
         egui::Stroke::new(5.0, color.gamma_multiply(0.08)),
     );
     painter.circle_filled(marker.pos, radius, color);

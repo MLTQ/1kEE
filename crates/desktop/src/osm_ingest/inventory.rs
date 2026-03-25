@@ -3,9 +3,9 @@ use osmpbf::{BlobDecode, BlobReader};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{OsmInventory, PLANET_PBF_NAME};
 use super::db::{read_runtime_counts, runtime_db_path};
 use super::util::{human_bytes, yes_no};
+use super::{OsmInventory, PLANET_PBF_NAME};
 
 impl OsmInventory {
     pub fn detect_from(selected_root: Option<&Path>) -> Self {
@@ -17,11 +17,12 @@ impl OsmInventory {
             .unwrap_or_default();
         let runtime_db_path = runtime_db_path(selected_root);
 
-        let (runtime_db_ready, queued_jobs, road_tiles, building_tiles, water_tiles) = runtime_db_path
-            .as_ref()
-            .filter(|path| path.exists())
-            .and_then(|path| read_runtime_counts(path).ok())
-            .unwrap_or((false, 0, 0, 0, 0));
+        let (runtime_db_ready, queued_jobs, road_tiles, building_tiles, water_tiles) =
+            runtime_db_path
+                .as_ref()
+                .filter(|path| path.exists())
+                .and_then(|path| read_runtime_counts(path).ok())
+                .unwrap_or((false, 0, 0, 0, 0));
 
         let primary_runtime_source = if road_tiles > 0 || building_tiles > 0 || water_tiles > 0 {
             "Planet OSM -> shared SQLite tile store"

@@ -15,7 +15,15 @@ pub(super) fn project_local(
     extent_x_km: f32,
     extent_y_km: f32,
 ) -> Option<ProjectedLocalPoint> {
-    projection::project_local(layout, view, focus, point, elevation_m, extent_x_km, extent_y_km)
+    projection::project_local(
+        layout,
+        view,
+        focus,
+        point,
+        elevation_m,
+        extent_x_km,
+        extent_y_km,
+    )
 }
 
 use crate::model::{AppModel, GeoPoint, GlobeViewState};
@@ -159,9 +167,9 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     if model.show_terrain_surface {
         let half_extent_deg = visual_half_extent_for_zoom(model.globe_view.local_zoom);
         let terrain_layout = local_terrain_pass::LocalTerrainLayout {
-            focus_center:    layout.focus_center,
+            focus_center: layout.focus_center,
             horizontal_scale: layout.horizontal_scale,
-            height:          layout.height,
+            height: layout.height,
         };
         let callback = local_terrain_pass::LocalTerrainCallback::new(
             viewport_center,
@@ -172,10 +180,10 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             model.globe_view.local_layer_spread,
             0.95,
             model.selected_root.as_deref(),
-            theme::scene_backdrop(),  // sea / deep
-            theme::topo_color(),      // low land
-            theme::contour_color(),   // mid / high land
-            theme::hot_color(),       // peaks
+            theme::scene_backdrop(), // sea / deep
+            theme::topo_color(),     // low land
+            theme::contour_color(),  // mid / high land
+            theme::hot_color(),      // peaks
         );
         painter.add(callback.into_paint_callback(rect));
     }
@@ -195,8 +203,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     // within the visible area, not just the selected one.
     let half_extent_deg = visual_half_extent_for_zoom(model.globe_view.local_zoom);
     let km_per_deg_lat = 111.32f32;
-    let km_per_deg_lon =
-        km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
+    let km_per_deg_lon = km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
 
@@ -219,16 +226,27 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                     if dlat > half_extent_deg * 2.5 || dlon > half_extent_deg * 2.5 {
                         return None;
                     }
-                    let elev = markers::marker_elevation_m(model.selected_root.as_deref(), event.location);
+                    let elev =
+                        markers::marker_elevation_m(model.selected_root.as_deref(), event.location);
                     let ground = projection::project_local(
-                        &layout, &model.globe_view, viewport_center,
-                        event.location, elev, extent_x_km, extent_y_km,
+                        &layout,
+                        &model.globe_view,
+                        viewport_center,
+                        event.location,
+                        elev,
+                        extent_x_km,
+                        extent_y_km,
                     )?;
                     // Tip: project the same point 1 km higher, then cap the
                     // screen-space length so beams don't vary wildly with tilt.
                     let tip = projection::project_local(
-                        &layout, &model.globe_view, viewport_center,
-                        event.location, elev + 1000.0, extent_x_km, extent_y_km,
+                        &layout,
+                        &model.globe_view,
+                        viewport_center,
+                        event.location,
+                        elev + 1000.0,
+                        extent_x_km,
+                        extent_y_km,
                     )
                     .map(|sky| {
                         let dx = sky.pos.x - ground.pos.x;
@@ -244,7 +262,10 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                         ground.pos.y - EVENT_BEAM_HEIGHT_PX,
                     ));
                     markers::draw_event_marker(
-                        painter, ground, tip, event,
+                        painter,
+                        ground,
+                        tip,
+                        event,
                         model.selected_event_id.as_deref() == Some(event.id.as_str()),
                         time,
                     );
@@ -258,14 +279,18 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         .iter()
         .filter_map(|camera| {
             projection::project_local(
-                &layout, &model.globe_view, viewport_center,
+                &layout,
+                &model.globe_view,
+                viewport_center,
                 camera.location,
                 markers::marker_elevation_m(model.selected_root.as_deref(), camera.location),
-                extent_x_km, extent_y_km,
+                extent_x_km,
+                extent_y_km,
             )
             .map(|projected| {
                 markers::draw_camera_marker(
-                    painter, projected,
+                    painter,
+                    projected,
                     model.selected_camera_id.as_deref() == Some(camera.id.as_str()),
                 );
                 (camera.id.clone(), projected.pos)
@@ -680,16 +705,14 @@ fn draw_geojson_layers_local(
 
     // Coarse viewport cull bounds (generous margin for lines crossing the border)
     let half_deg_lat = extent_y_km / 111.32 * 1.5;
-    let half_deg_lon =
-        (extent_x_km / (111.32 * focus.lat.to_radians().cos().abs().max(0.2))) * 1.5;
+    let half_deg_lon = (extent_x_km / (111.32 * focus.lat.to_radians().cos().abs().max(0.2))) * 1.5;
     let min_lat = focus.lat - half_deg_lat;
     let max_lat = focus.lat + half_deg_lat;
     let min_lon = focus.lon - half_deg_lon;
     let max_lon = focus.lon + half_deg_lon;
 
-    let in_view_pt = |p: &GeoPoint| {
-        p.lat >= min_lat && p.lat <= max_lat && p.lon >= min_lon && p.lon <= max_lon
-    };
+    let in_view_pt =
+        |p: &GeoPoint| p.lat >= min_lat && p.lat <= max_lat && p.lon >= min_lon && p.lon <= max_lon;
 
     for layer in layers {
         if !layer.visible {
@@ -704,47 +727,95 @@ fn draw_geojson_layers_local(
             match &feature.geometry {
                 GeoJsonGeometry::Point(pt) => {
                     if in_view_pt(pt) {
-                        if let Some(pp) = projection::project_local(layout, view, focus, *pt, 0.0, extent_x_km, extent_y_km) {
+                        if let Some(pp) = projection::project_local(
+                            layout,
+                            view,
+                            focus,
+                            *pt,
+                            0.0,
+                            extent_x_km,
+                            extent_y_km,
+                        ) {
                             painter.circle_filled(pp.pos, 4.0, color);
-                            painter.circle_stroke(pp.pos, 6.5, egui::Stroke::new(1.0, color.gamma_multiply(0.4)));
+                            painter.circle_stroke(
+                                pp.pos,
+                                6.5,
+                                egui::Stroke::new(1.0, color.gamma_multiply(0.4)),
+                            );
                         }
                     }
                 }
                 GeoJsonGeometry::LineString(pts) => {
-                    project_and_draw_line(painter, layout, view, focus, pts, extent_x_km, extent_y_km, stroke);
+                    project_and_draw_line(
+                        painter,
+                        layout,
+                        view,
+                        focus,
+                        pts,
+                        extent_x_km,
+                        extent_y_km,
+                        stroke,
+                    );
                 }
                 GeoJsonGeometry::MultiLineString(lines) => {
                     for line in lines {
-                        project_and_draw_line(painter, layout, view, focus, line, extent_x_km, extent_y_km, stroke);
+                        project_and_draw_line(
+                            painter,
+                            layout,
+                            view,
+                            focus,
+                            line,
+                            extent_x_km,
+                            extent_y_km,
+                            stroke,
+                        );
                     }
                 }
                 GeoJsonGeometry::Polygon(rings) => {
                     for ring in rings {
-                        project_and_draw_line(painter, layout, view, focus, ring, extent_x_km, extent_y_km, stroke);
+                        project_and_draw_line(
+                            painter,
+                            layout,
+                            view,
+                            focus,
+                            ring,
+                            extent_x_km,
+                            extent_y_km,
+                            stroke,
+                        );
                     }
                 }
                 GeoJsonGeometry::MultiPolygon(polys) => {
                     for poly in polys {
                         for ring in poly {
-                            project_and_draw_line(painter, layout, view, focus, ring, extent_x_km, extent_y_km, stroke);
+                            project_and_draw_line(
+                                painter,
+                                layout,
+                                view,
+                                focus,
+                                ring,
+                                extent_x_km,
+                                extent_y_km,
+                                stroke,
+                            );
                         }
                     }
                 }
             }
 
             // ── Draw label ────────────────────────────────────────────────
-            let Some(label) = &feature.label else { continue };
+            let Some(label) = &feature.label else {
+                continue;
+            };
             let anchor = match &feature.geometry {
                 GeoJsonGeometry::Point(pt) => Some(*pt),
-                GeoJsonGeometry::LineString(pts) if !pts.is_empty() => {
-                    Some(pts[pts.len() / 2])
-                }
-                GeoJsonGeometry::MultiLineString(lines) if !lines.is_empty() && !lines[0].is_empty() => {
+                GeoJsonGeometry::LineString(pts) if !pts.is_empty() => Some(pts[pts.len() / 2]),
+                GeoJsonGeometry::MultiLineString(lines)
+                    if !lines.is_empty() && !lines[0].is_empty() =>
+                {
                     Some(lines[0][lines[0].len() / 2])
                 }
-                GeoJsonGeometry::Polygon(rings) if !rings.is_empty() => {
-                    ring_centroid(&rings[0])
-                }
+                GeoJsonGeometry::Polygon(rings) if !rings.is_empty() => ring_centroid(&rings[0]),
                 GeoJsonGeometry::MultiPolygon(polys)
                     if !polys.is_empty() && !polys[0].is_empty() =>
                 {
@@ -754,7 +825,15 @@ fn draw_geojson_layers_local(
             };
             if let Some(pt) = anchor {
                 if in_view_pt(&pt) {
-                    if let Some(pp) = projection::project_local(layout, view, focus, pt, 0.0, extent_x_km, extent_y_km) {
+                    if let Some(pp) = projection::project_local(
+                        layout,
+                        view,
+                        focus,
+                        pt,
+                        0.0,
+                        extent_x_km,
+                        extent_y_km,
+                    ) {
                         painter.text(
                             egui::pos2(pp.pos.x, pp.pos.y - 9.0),
                             egui::Align2::CENTER_BOTTOM,
@@ -782,7 +861,9 @@ fn project_and_draw_line(
 ) {
     let projected: Vec<egui::Pos2> = pts
         .iter()
-        .filter_map(|p| projection::project_local(layout, view, focus, *p, 0.0, extent_x_km, extent_y_km))
+        .filter_map(|p| {
+            projection::project_local(layout, view, focus, *p, 0.0, extent_x_km, extent_y_km)
+        })
         .map(|pp| pp.pos)
         .collect();
     if projected.len() >= 2 {

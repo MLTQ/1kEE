@@ -207,15 +207,12 @@ pub(super) fn road_class_matches(road_class: &str, layer_kind: super::RoadLayerK
 
 pub(super) fn canonical_water_class(key: &str, value: &str) -> Option<(&'static str, bool)> {
     match (key, value) {
-        ("waterway", "river")               => Some(("river",     false)),
-        ("waterway", "stream")
-        | ("waterway", "creek")             => Some(("stream",    false)),
-        ("waterway", "canal")               => Some(("canal",     false)),
-        ("waterway", "drain")
-        | ("waterway", "ditch")             => Some(("drain",     false)),
-        ("natural",  "water")               => Some(("lake",      true)),
-        ("landuse",  "reservoir")
-        | ("landuse",  "basin")             => Some(("reservoir", true)),
-        _                                   => None,
+        ("waterway", "river") => Some(("river", false)),
+        ("waterway", "stream") | ("waterway", "creek") => Some(("stream", false)),
+        ("waterway", "canal") => Some(("canal", false)),
+        ("waterway", "drain") | ("waterway", "ditch") => Some(("drain", false)),
+        ("natural", "water") => Some(("lake", true)),
+        ("landuse", "reservoir") | ("landuse", "basin") => Some(("reservoir", true)),
+        _ => None,
     }
 }

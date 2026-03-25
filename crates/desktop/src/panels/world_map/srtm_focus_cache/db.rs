@@ -1,9 +1,9 @@
+use super::{CACHE_DB_NAME, TileKey};
 use crate::terrain_assets;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use super::{TileKey, CACHE_DB_NAME};
 
 pub fn open_cache_db(path: &Path) -> rusqlite::Result<Connection> {
     if let Some(parent) = path.parent() {
@@ -189,7 +189,13 @@ pub fn import_coastline_into_cache(
             transaction.execute(
                 "INSERT INTO coastline_tiles (zoom_bucket, lat_bucket, lon_bucket, fid, geom)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket, fid, geometry],
+                params![
+                    tile.zoom_bucket,
+                    tile.lat_bucket,
+                    tile.lon_bucket,
+                    fid,
+                    geometry
+                ],
             )?;
             line_count += 1;
         }
@@ -198,7 +204,12 @@ pub fn import_coastline_into_cache(
     transaction.execute(
         "INSERT INTO coastline_tile_manifest (zoom_bucket, lat_bucket, lon_bucket, line_count)
          VALUES (?1, ?2, ?3, ?4)",
-        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket, line_count as i64],
+        params![
+            tile.zoom_bucket,
+            tile.lat_bucket,
+            tile.lon_bucket,
+            line_count as i64
+        ],
     )?;
     transaction.commit()?;
     Ok(())

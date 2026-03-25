@@ -20,7 +20,6 @@
 /// Incoming `ShipStaticData` messages carry name, callsign, IMO, destination,
 /// ETA, ship type, and draught.  Both reference the same MMSI so they are
 /// merged into a single `MovingTrack` record per vessel.
-
 use crate::model::{GeoPoint, MovingTrack};
 
 use std::collections::HashMap;
@@ -136,16 +135,22 @@ pub fn poll(api_key: &str, center: GeoPoint, ctx: egui::Context) -> Vec<MovingTr
                 return false;
             }
             // Re-poll on interval expiry.
-            let interval_expired = g.last_poll
+            let interval_expired = g
+                .last_poll
                 .map(|t| t.elapsed() >= POLL_INTERVAL)
                 .unwrap_or(true);
             // Re-poll when the globe center has moved significantly outside the
             // previous bounding box so vessels stay relevant to the current view.
-            let drifted = g.last_center.map(|prev| {
-                let dlat = (center.lat - prev.lat).abs();
-                let dlon = (center.lon - prev.lon).abs().min(360.0 - (center.lon - prev.lon).abs());
-                dlat > RECENTER_THRESHOLD_DEG || dlon > RECENTER_THRESHOLD_DEG
-            }).unwrap_or(false);
+            let drifted = g
+                .last_center
+                .map(|prev| {
+                    let dlat = (center.lat - prev.lat).abs();
+                    let dlon = (center.lon - prev.lon)
+                        .abs()
+                        .min(360.0 - (center.lon - prev.lon).abs());
+                    dlat > RECENTER_THRESHOLD_DEG || dlon > RECENTER_THRESHOLD_DEG
+                })
+                .unwrap_or(false);
             interval_expired || drifted
         })
         .unwrap_or(false);
@@ -309,7 +314,10 @@ fn ingest_message(val: &serde_json::Value, acc: &mut HashMap<u64, VesselAccum>) 
         return;
     }
 
-    let entry = acc.entry(mmsi).or_insert_with(|| VesselAccum { mmsi, ..Default::default() });
+    let entry = acc.entry(mmsi).or_insert_with(|| VesselAccum {
+        mmsi,
+        ..Default::default()
+    });
 
     // Ship name lives in MetaData on every message type.
     if entry.name.is_empty() {

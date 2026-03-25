@@ -337,7 +337,8 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                                     );
                                     ui.painter().circle_filled(rect.center(), 4.0, dot_color);
                                     ui.checkbox(&mut layer.visible, &layer.name);
-                                    if ui.small_button("×").on_hover_text("Remove layer").clicked() {
+                                    if ui.small_button("×").on_hover_text("Remove layer").clicked()
+                                    {
                                         remove_idx = Some(idx);
                                     }
                                 });

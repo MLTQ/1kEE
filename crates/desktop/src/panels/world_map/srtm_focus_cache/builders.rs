@@ -1,13 +1,13 @@
+use super::db::tile_exists;
+use super::gdal::{build_focus_contours, shutdown_requested};
+use super::zoom::spec_for_zoom;
+use super::{FocusContourAsset, FocusContourSpec, GeoBounds, TileKey};
 use crate::model::GeoPoint;
 use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
-use super::{FocusContourAsset, FocusContourSpec, GeoBounds, TileKey};
-use super::db::tile_exists;
-use super::gdal::{build_focus_contours, shutdown_requested};
-use super::zoom::spec_for_zoom;
 
 fn max_background_builds() -> usize {
     let cpus = std::thread::available_parallelism()

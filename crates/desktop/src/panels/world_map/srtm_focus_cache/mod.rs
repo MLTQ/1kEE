@@ -7,14 +7,14 @@ use std::process::Command;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-pub mod zoom;
+pub mod builders;
 pub mod db;
 pub mod gdal;
-pub mod builders;
+pub mod zoom;
 
 pub use zoom::{
-    feature_budget_for_zoom, half_extent_for_zoom, zoom_bucket_for_zoom,
-    contour_interval_for_zoom, bucket_radius_for_target_radius_miles,
+    bucket_radius_for_target_radius_miles, contour_interval_for_zoom, feature_budget_for_zoom,
+    half_extent_for_zoom, zoom_bucket_for_zoom,
 };
 
 const BUILD_TIMEOUT: Duration = Duration::from_secs(90);

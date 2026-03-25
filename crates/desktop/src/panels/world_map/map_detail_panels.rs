@@ -3,7 +3,9 @@ use crate::model::{AppModel, FlightCategory};
 use crate::theme;
 
 pub(super) fn draw_ship_detail_panel(ctx: &egui::Context, model: &mut AppModel) {
-    let Some(mmsi) = model.selected_track_mmsi else { return };
+    let Some(mmsi) = model.selected_track_mmsi else {
+        return;
+    };
 
     // Clone the data we need so we don't hold a borrow on model.
     let track = model.tracks.iter().find(|t| t.mmsi == mmsi).cloned();
@@ -53,10 +55,7 @@ pub(super) fn draw_ship_detail_panel(ctx: &egui::Context, model: &mut AppModel) 
                     }
                     row(
                         "Position",
-                        &format!(
-                            "{:.4}°N  {:.4}°E",
-                            track.location.lat, track.location.lon
-                        ),
+                        &format!("{:.4}°N  {:.4}°E", track.location.lat, track.location.lon),
                     );
                     if let Some(spd) = track.speed_knots {
                         row("Speed", &format!("{spd:.1} kn"));
@@ -82,7 +81,9 @@ pub(super) fn draw_ship_detail_panel(ctx: &egui::Context, model: &mut AppModel) 
 }
 
 pub(super) fn draw_flight_detail_panel(ctx: &egui::Context, model: &mut AppModel) {
-    let Some(ref icao24) = model.selected_flight_icao24.clone() else { return };
+    let Some(ref icao24) = model.selected_flight_icao24.clone() else {
+        return;
+    };
 
     // Deselect if the flight has left the active list.
     let flight = model.flights.iter().find(|f| f.icao24 == *icao24).cloned();
@@ -92,18 +93,18 @@ pub(super) fn draw_flight_detail_panel(ctx: &egui::Context, model: &mut AppModel
     };
 
     let accent = match flight.category() {
-        FlightCategory::Airline  => theme::flight_airline_color(),
-        FlightCategory::Cargo    => theme::flight_cargo_color(),
+        FlightCategory::Airline => theme::flight_airline_color(),
+        FlightCategory::Cargo => theme::flight_cargo_color(),
         FlightCategory::Military => theme::flight_military_color(),
-        FlightCategory::GA       => theme::flight_ga_color(),
-        FlightCategory::Unknown  => theme::flight_unknown_color(),
+        FlightCategory::GA => theme::flight_ga_color(),
+        FlightCategory::Unknown => theme::flight_unknown_color(),
     };
     let cat_label = match flight.category() {
-        FlightCategory::Airline  => "Scheduled Airline",
-        FlightCategory::Cargo    => "Cargo / Freight",
+        FlightCategory::Airline => "Scheduled Airline",
+        FlightCategory::Cargo => "Cargo / Freight",
         FlightCategory::Military => "Military / Government",
-        FlightCategory::GA       => "General Aviation",
-        FlightCategory::Unknown  => "Unknown",
+        FlightCategory::GA => "General Aviation",
+        FlightCategory::Unknown => "Unknown",
     };
 
     let mut open = true;

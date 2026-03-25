@@ -1,9 +1,11 @@
-use crate::model::{ArcGisFeature, EventRecord, FlightCategory, FlightTrack, GeoPoint, GlobeViewState, MovingTrack};
-use crate::theme;
 use crate::arcgis_source;
+use crate::model::{
+    ArcGisFeature, EventRecord, FlightCategory, FlightTrack, GeoPoint, GlobeViewState, MovingTrack,
+};
+use crate::theme;
 
-use super::{GlobeLayout, ProjectedPoint};
 use super::projection::project_geo;
+use super::{GlobeLayout, ProjectedPoint};
 
 /// Draw all live AIS vessels as small ship markers on the globe.
 pub(super) fn draw_ships(
@@ -26,7 +28,11 @@ pub(super) fn draw_ships(
         }
 
         let is_selected = selected_mmsi == Some(track.mmsi);
-        let col = if is_selected { selected_color } else { ship_color };
+        let col = if is_selected {
+            selected_color
+        } else {
+            ship_color
+        };
         let pos = proj.pos;
 
         // Glow halo
@@ -63,7 +69,8 @@ pub(super) fn draw_ships(
                     color: col,
                 });
             }
-            mesh.indices.extend_from_slice(&[base_i, base_i + 1, base_i + 2]);
+            mesh.indices
+                .extend_from_slice(&[base_i, base_i + 1, base_i + 2]);
             painter.add(egui::Shape::mesh(mesh));
         } else {
             // No heading: draw a simple filled dot
@@ -100,18 +107,18 @@ pub(super) fn draw_flights(
 
         // ── Category → base colour (theme-aware) ───────────────────────────
         let cat_col: egui::Color32 = match flight.category() {
-            FlightCategory::Airline  => theme::flight_airline_color(),
-            FlightCategory::Cargo    => theme::flight_cargo_color(),
+            FlightCategory::Airline => theme::flight_airline_color(),
+            FlightCategory::Cargo => theme::flight_cargo_color(),
             FlightCategory::Military => theme::flight_military_color(),
-            FlightCategory::GA       => theme::flight_ga_color(),
-            FlightCategory::Unknown  => theme::flight_unknown_color(),
+            FlightCategory::GA => theme::flight_ga_color(),
+            FlightCategory::Unknown => theme::flight_unknown_color(),
         };
 
         // ── Vertical-rate brightness modifier ──────────────────────────────
         let col = match flight.vertical_rate_fpm {
-            Some(r) if r >  100.0 => cat_col.gamma_multiply(1.20),
+            Some(r) if r > 100.0 => cat_col.gamma_multiply(1.20),
             Some(r) if r < -100.0 => cat_col.gamma_multiply(0.80),
-            _                     => cat_col,
+            _ => cat_col,
         };
         let pos = proj.pos;
 
@@ -125,8 +132,8 @@ pub(super) fn draw_flights(
             let back: f32 = 3.0;
             let wing: f32 = 2.5;
 
-            let tip   = egui::pos2(pos.x + angle.cos() * fwd,  pos.y + angle.sin() * fwd);
-            let left  = egui::pos2(
+            let tip = egui::pos2(pos.x + angle.cos() * fwd, pos.y + angle.sin() * fwd);
+            let left = egui::pos2(
                 pos.x - angle.cos() * back + (angle + std::f32::consts::FRAC_PI_2).cos() * wing,
                 pos.y - angle.sin() * back + (angle + std::f32::consts::FRAC_PI_2).sin() * wing,
             );
@@ -144,7 +151,8 @@ pub(super) fn draw_flights(
                     color: col,
                 });
             }
-            mesh.indices.extend_from_slice(&[base_i, base_i + 1, base_i + 2]);
+            mesh.indices
+                .extend_from_slice(&[base_i, base_i + 1, base_i + 2]);
             painter.add(egui::Shape::mesh(mesh));
         } else {
             painter.circle_filled(pos, 2.5, col);
@@ -187,9 +195,18 @@ pub(super) fn draw_event_marker(
         let a = (1.0 - tm).powi(2);
         let p0 = egui::pos2(base.pos.x + dx * t0, base.pos.y + dy * t0);
         let p1 = egui::pos2(base.pos.x + dx * t1, base.pos.y + dy * t1);
-        painter.line_segment([p0, p1], egui::Stroke::new((22.0 * a).max(0.5), col.gamma_multiply(0.04 * a)));
-        painter.line_segment([p0, p1], egui::Stroke::new((11.0 * a).max(0.5), col.gamma_multiply(0.08 * a)));
-        painter.line_segment([p0, p1], egui::Stroke::new(( 4.5 * a).max(0.5), col.gamma_multiply(0.16 * a)));
+        painter.line_segment(
+            [p0, p1],
+            egui::Stroke::new((22.0 * a).max(0.5), col.gamma_multiply(0.04 * a)),
+        );
+        painter.line_segment(
+            [p0, p1],
+            egui::Stroke::new((11.0 * a).max(0.5), col.gamma_multiply(0.08 * a)),
+        );
+        painter.line_segment(
+            [p0, p1],
+            egui::Stroke::new((4.5 * a).max(0.5), col.gamma_multiply(0.16 * a)),
+        );
     }
 
     // ── Tapering core — bright and wide at the base, tapers to a sharp point ─
@@ -202,34 +219,58 @@ pub(super) fn draw_event_marker(
         let t1 = (i + 1) as f32 / SEGS as f32;
         let tm = (t0 + t1) * 0.5;
         let falloff = 1.0 - tm;
-        let alpha   = falloff.powi(3);                       // cubic: steep near tip
-        let w_glow  = (4.0  * falloff.powf(0.7)).max(0.4);  // wide glow, tapers fast
-        let w_core  = (1.7  * falloff.powf(0.7)).max(0.3);  // crisp inner core
+        let alpha = falloff.powi(3); // cubic: steep near tip
+        let w_glow = (4.0 * falloff.powf(0.7)).max(0.4); // wide glow, tapers fast
+        let w_core = (1.7 * falloff.powf(0.7)).max(0.3); // crisp inner core
         let p0 = egui::pos2(base.pos.x + dx * t0, base.pos.y + dy * t0);
         let p1 = egui::pos2(base.pos.x + dx * t1, base.pos.y + dy * t1);
-        painter.line_segment([p0, p1], egui::Stroke::new(w_glow, col.gamma_multiply(alpha * 0.30)));
-        painter.line_segment([p0, p1], egui::Stroke::new(w_core, col.gamma_multiply(alpha * 0.96)));
+        painter.line_segment(
+            [p0, p1],
+            egui::Stroke::new(w_glow, col.gamma_multiply(alpha * 0.30)),
+        );
+        painter.line_segment(
+            [p0, p1],
+            egui::Stroke::new(w_core, col.gamma_multiply(alpha * 0.96)),
+        );
     }
 
     // ── Ground strike ────────────────────────────────────────────────────────
     if is_selected {
         let pulse = 9.0 + ((time as f32 * 2.6).sin() + 1.0) * 3.5;
         painter.circle_stroke(
-            base.pos, pulse,
+            base.pos,
+            pulse,
             egui::Stroke::new(1.3, theme::marker_glow_warm()),
         );
     }
-    painter.circle_stroke(base.pos, 6.5, egui::Stroke::new(9.0,  col.gamma_multiply(0.06)));
-    painter.circle_stroke(base.pos, 4.8, egui::Stroke::new(1.1,  col.gamma_multiply(0.60)));
+    painter.circle_stroke(
+        base.pos,
+        6.5,
+        egui::Stroke::new(9.0, col.gamma_multiply(0.06)),
+    );
+    painter.circle_stroke(
+        base.pos,
+        4.8,
+        egui::Stroke::new(1.1, col.gamma_multiply(0.60)),
+    );
     painter.circle_filled(base.pos, 2.5, col);
 }
 
-pub(super) fn draw_camera_marker(painter: &egui::Painter, marker: ProjectedPoint, is_selected: bool) {
+pub(super) fn draw_camera_marker(
+    painter: &egui::Painter,
+    marker: ProjectedPoint,
+    is_selected: bool,
+) {
     let radius = 3.0 + marker.depth;
-    let color = if is_selected { theme::marker_camera_ring() } else { theme::camera_color() };
+    let color = if is_selected {
+        theme::marker_camera_ring()
+    } else {
+        theme::camera_color()
+    };
 
     painter.circle_stroke(
-        marker.pos, radius + 5.5,
+        marker.pos,
+        radius + 5.5,
         egui::Stroke::new(5.5, color.gamma_multiply(0.07)),
     );
     painter.circle_filled(marker.pos, radius, color);

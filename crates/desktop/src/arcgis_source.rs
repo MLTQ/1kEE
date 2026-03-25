@@ -15,14 +15,14 @@ const POLL_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Fixed color palette — cycles per (source_index, layer_index).
 const PALETTE: &[(u8, u8, u8)] = &[
-    (255, 120,  50), // orange-red
-    ( 60, 200, 195), // teal
-    (210,  50,  50), // crimson
-    (230, 175,  40), // amber
-    (170,  90, 220), // purple
+    (255, 120, 50),  // orange-red
+    (60, 200, 195),  // teal
+    (210, 50, 50),   // crimson
+    (230, 175, 40),  // amber
+    (170, 90, 220),  // purple
     (100, 175, 235), // steel blue
-    (200, 220,  60), // yellow-green
-    (255, 165,  40), // warm orange
+    (200, 220, 60),  // yellow-green
+    (255, 165, 40),  // warm orange
 ];
 
 pub fn palette_color(idx: usize) -> egui::Color32 {
@@ -85,14 +85,17 @@ pub fn add_source(url: String, color_offset: usize, ctx: egui::Context) {
         if c.contains_key(&canonical) {
             return; // already registered
         }
-        c.insert(canonical.clone(), SourceCache {
-            layers: None,
-            display_name: short_name(&canonical),
-            discovering: true,
-            discover_error: None,
-            color_offset,
-            layer_entries: HashMap::new(),
-        });
+        c.insert(
+            canonical.clone(),
+            SourceCache {
+                layers: None,
+                display_name: short_name(&canonical),
+                discovering: true,
+                discover_error: None,
+                color_offset,
+                layer_entries: HashMap::new(),
+            },
+        );
     }
     let url2 = canonical.clone();
     let ctx2 = ctx.clone();
@@ -129,7 +132,11 @@ fn discover_layers(url: &str) -> (Vec<ArcGisLayerDef>, String, Option<String>) {
         Err(e) => return (vec![], short_name(url), Some(format!("connect: {e}"))),
     };
     if !resp.status().is_success() {
-        return (vec![], short_name(url), Some(format!("HTTP {}", resp.status().as_u16())));
+        return (
+            vec![],
+            short_name(url),
+            Some(format!("HTTP {}", resp.status().as_u16())),
+        );
     }
     let text = match resp.text() {
         Ok(t) => t,
@@ -158,19 +165,38 @@ fn discover_layers(url: &str) -> (Vec<ArcGisLayerDef>, String, Option<String>) {
     let layers: Vec<ArcGisLayerDef> = if layers_json.is_empty() {
         // Single-layer service: treat as layer 0
         let layer_name = json["name"].as_str().unwrap_or("Layer 0").to_owned();
-        let geom = json["geometryType"].as_str().unwrap_or("esriGeometryPoint").to_owned();
-        vec![ArcGisLayerDef { id: 0, name: layer_name, geometry_type: geom, color: egui::Color32::GRAY }]
+        let geom = json["geometryType"]
+            .as_str()
+            .unwrap_or("esriGeometryPoint")
+            .to_owned();
+        vec![ArcGisLayerDef {
+            id: 0,
+            name: layer_name,
+            geometry_type: geom,
+            color: egui::Color32::GRAY,
+        }]
     } else {
-        layers_json.iter().filter_map(|l| {
-            let id = l["id"].as_u64()? as u32;
-            let name = l["name"].as_str().unwrap_or("Layer").to_owned();
-            let geom = l["geometryType"].as_str().unwrap_or("esriGeometryPoint").to_owned();
-            // Skip tables
-            if l["type"].as_str() == Some("Table") {
-                return None;
-            }
-            Some(ArcGisLayerDef { id, name, geometry_type: geom, color: egui::Color32::GRAY })
-        }).collect()
+        layers_json
+            .iter()
+            .filter_map(|l| {
+                let id = l["id"].as_u64()? as u32;
+                let name = l["name"].as_str().unwrap_or("Layer").to_owned();
+                let geom = l["geometryType"]
+                    .as_str()
+                    .unwrap_or("esriGeometryPoint")
+                    .to_owned();
+                // Skip tables
+                if l["type"].as_str() == Some("Table") {
+                    return None;
+                }
+                Some(ArcGisLayerDef {
+                    id,
+                    name,
+                    geometry_type: geom,
+                    color: egui::Color32::GRAY,
+                })
+            })
+            .collect()
     };
 
     (layers, name, None)
@@ -197,7 +223,11 @@ pub fn poll(
                 let offset = src.color_offset;
                 if let Some(layers) = src.layers.as_mut() {
                     // Apply colors only if they haven't been set yet
-                    if layers.first().map(|l| l.color == egui::Color32::GRAY).unwrap_or(false) {
+                    if layers
+                        .first()
+                        .map(|l| l.color == egui::Color32::GRAY)
+                        .unwrap_or(false)
+                    {
                         apply_layer_colors(layers, offset);
                     }
                 }
@@ -207,7 +237,9 @@ pub fn poll(
         for layer_id in enabled {
             let should_fetch = {
                 let Ok(c) = cache().lock() else { continue };
-                let Some(src) = c.get(url.as_str()) else { continue };
+                let Some(src) = c.get(url.as_str()) else {
+                    continue;
+                };
                 if src.discovering || src.layers.is_none() {
                     continue; // not ready yet
                 }
@@ -215,8 +247,13 @@ pub fn poll(
                 match entry {
                     None => true,
                     Some(e) => {
-                        if e.loading { false }
-                        else { e.last_poll.map(|t| t.elapsed() >= POLL_INTERVAL).unwrap_or(true) }
+                        if e.loading {
+                            false
+                        } else {
+                            e.last_poll
+                                .map(|t| t.elapsed() >= POLL_INTERVAL)
+                                .unwrap_or(true)
+                        }
                     }
                 }
             };
@@ -224,12 +261,15 @@ pub fn poll(
             if should_fetch {
                 if let Ok(mut c) = cache().lock() {
                     if let Some(src) = c.get_mut(url.as_str()) {
-                        let entry = src.layer_entries.entry(*layer_id).or_insert_with(|| LayerEntry {
-                            features: Vec::new(),
-                            last_poll: None,
-                            loading: false,
-                            status: "idle".into(),
-                        });
+                        let entry =
+                            src.layer_entries
+                                .entry(*layer_id)
+                                .or_insert_with(|| LayerEntry {
+                                    features: Vec::new(),
+                                    last_poll: None,
+                                    loading: false,
+                                    status: "idle".into(),
+                                });
                         entry.loading = true;
                         entry.status = "loading\u{2026}".into();
                     }
@@ -241,12 +281,13 @@ pub fn poll(
                     let (feats, status) = fetch_layer(&url2, lid);
                     if let Ok(mut c) = cache().lock() {
                         if let Some(src) = c.get_mut(&url2) {
-                            let entry = src.layer_entries.entry(lid).or_insert_with(|| LayerEntry {
-                                features: Vec::new(),
-                                last_poll: None,
-                                loading: false,
-                                status: "idle".into(),
-                            });
+                            let entry =
+                                src.layer_entries.entry(lid).or_insert_with(|| LayerEntry {
+                                    features: Vec::new(),
+                                    last_poll: None,
+                                    loading: false,
+                                    status: "idle".into(),
+                                });
                             entry.features = feats;
                             entry.loading = false;
                             entry.last_poll = Some(Instant::now());
@@ -260,16 +301,26 @@ pub fn poll(
     }
 
     // Collect all cached features for enabled layers
-    let Ok(c) = cache().lock() else { return Vec::new() };
-    source_refs.iter().flat_map(|(url, enabled)| {
-        let src = c.get(url.as_str())?;
-        let features: Vec<ArcGisFeature> = enabled.iter().flat_map(|lid| {
-            src.layer_entries.get(lid)
-                .map(|e| e.features.clone())
-                .unwrap_or_default()
-        }).collect();
-        Some(features)
-    }).flatten().collect()
+    let Ok(c) = cache().lock() else {
+        return Vec::new();
+    };
+    source_refs
+        .iter()
+        .flat_map(|(url, enabled)| {
+            let src = c.get(url.as_str())?;
+            let features: Vec<ArcGisFeature> = enabled
+                .iter()
+                .flat_map(|lid| {
+                    src.layer_entries
+                        .get(lid)
+                        .map(|e| e.features.clone())
+                        .unwrap_or_default()
+                })
+                .collect();
+            Some(features)
+        })
+        .flatten()
+        .collect()
 }
 
 fn fetch_layer(url: &str, layer_id: u32) -> (Vec<ArcGisFeature>, String) {
@@ -292,21 +343,29 @@ fn fetch_layer(url: &str, layer_id: u32) -> (Vec<ArcGisFeature>, String) {
         Err(e) => return (vec![], format!("parse: {e}")),
     };
     if json.get("error").is_some() {
-        let msg = json["error"]["message"].as_str().unwrap_or("API error").to_owned();
+        let msg = json["error"]["message"]
+            .as_str()
+            .unwrap_or("API error")
+            .to_owned();
         return (vec![], format!("error: {msg}"));
     }
     let features_json = match json["features"].as_array() {
         Some(f) => f,
         None => return (vec![], "0 features".into()),
     };
-    let features: Vec<ArcGisFeature> = features_json.iter()
+    let features: Vec<ArcGisFeature> = features_json
+        .iter()
         .filter_map(|f| parse_feature(f, url, layer_id))
         .collect();
     let status = format!("{} features", features.len());
     (features, status)
 }
 
-fn parse_feature(feat: &serde_json::Value, source_url: &str, layer_id: u32) -> Option<ArcGisFeature> {
+fn parse_feature(
+    feat: &serde_json::Value,
+    source_url: &str,
+    layer_id: u32,
+) -> Option<ArcGisFeature> {
     let geom = feat.get("geometry")?;
     let lon = geom["x"].as_f64()? as f32;
     let lat = geom["y"].as_f64()? as f32;
@@ -315,16 +374,24 @@ fn parse_feature(feat: &serde_json::Value, source_url: &str, layer_id: u32) -> O
     }
     let attr = feat.get("attributes")?;
     let object_id = attr["OBJECTID"].as_i64().unwrap_or(0);
-    let date_ms = attr["Date"].as_i64().or_else(|| attr["date"].as_i64())
+    let date_ms = attr["Date"]
+        .as_i64()
+        .or_else(|| attr["date"].as_i64())
         .or_else(|| attr["DATE_"].as_i64());
 
-    let attributes: Vec<(String, String)> = attr.as_object()?.iter()
-        .filter(|(k, _)| k.as_str() != "OBJECTID" && k.as_str() != "Shape__Area" && k.as_str() != "Shape__Length")
+    let attributes: Vec<(String, String)> = attr
+        .as_object()?
+        .iter()
+        .filter(|(k, _)| {
+            k.as_str() != "OBJECTID" && k.as_str() != "Shape__Area" && k.as_str() != "Shape__Length"
+        })
         .filter_map(|(k, v)| {
             let s = match v {
                 serde_json::Value::String(s) => {
                     let trimmed = s.trim();
-                    if trimmed.is_empty() || trimmed == " " { return None; }
+                    if trimmed.is_empty() || trimmed == " " {
+                        return None;
+                    }
                     trimmed.to_owned()
                 }
                 serde_json::Value::Number(n) => n.to_string(),
@@ -369,7 +436,9 @@ pub fn source_snapshot(url: &str) -> Option<SourceSnapshot> {
         discover_error: src.discover_error.clone(),
         layers: src.layers.clone(),
         color_offset: src.color_offset,
-        layer_status: src.layer_entries.iter()
+        layer_status: src
+            .layer_entries
+            .iter()
             .map(|(id, e)| (*id, e.status.clone()))
             .collect(),
     })
@@ -385,7 +454,10 @@ pub fn feature_color(feat: &ArcGisFeature) -> egui::Color32 {
                     return layer.color;
                 }
                 // Color not applied yet — use palette directly
-                let li = layers.iter().position(|l| l.id == feat.layer_id).unwrap_or(0);
+                let li = layers
+                    .iter()
+                    .position(|l| l.id == feat.layer_id)
+                    .unwrap_or(0);
                 return palette_color(offset + li);
             }
         }
@@ -414,15 +486,32 @@ fn days_to_ymd(mut days: u32) -> (u32, u32, u32) {
     let mut year = 1970u32;
     loop {
         let diy = if is_leap(year) { 366 } else { 365 };
-        if days < diy { break; }
+        if days < diy {
+            break;
+        }
         days -= diy;
         year += 1;
     }
     let leap = is_leap(year);
-    let month_lengths: [u32; 12] = [31, if leap { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let month_lengths: [u32; 12] = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
     let mut month = 1u32;
     for &ml in &month_lengths {
-        if days < ml { break; }
+        if days < ml {
+            break;
+        }
         days -= ml;
         month += 1;
     }

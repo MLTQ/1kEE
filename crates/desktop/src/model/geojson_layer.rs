@@ -9,7 +9,7 @@ pub enum GeoJsonGeometry {
     Point(GeoPoint),
     LineString(Vec<GeoPoint>),
     MultiLineString(Vec<Vec<GeoPoint>>),
-    Polygon(Vec<Vec<GeoPoint>>),       // rings: outer + optional holes
+    Polygon(Vec<Vec<GeoPoint>>), // rings: outer + optional holes
     MultiPolygon(Vec<Vec<Vec<GeoPoint>>>),
 }
 
@@ -52,18 +52,18 @@ impl GeoJsonLayer {
 // ── Colour palette ────────────────────────────────────────────────────────────
 
 fn palette_color(seed: &str) -> [u8; 4] {
-    let h: u32 = seed
-        .bytes()
-        .fold(5381u32, |acc, b| acc.wrapping_mul(33).wrapping_add(b as u32));
+    let h: u32 = seed.bytes().fold(5381u32, |acc, b| {
+        acc.wrapping_mul(33).wrapping_add(b as u32)
+    });
     const PALETTE: &[[u8; 4]] = &[
-        [255, 120,  40, 220],  // orange
-        [ 80, 210, 120, 220],  // green
-        [ 90, 170, 255, 220],  // blue
-        [255,  80, 180, 220],  // pink
-        [255, 220,  50, 220],  // yellow
-        [160,  90, 255, 220],  // purple
-        [ 50, 210, 210, 220],  // cyan
-        [255,  70,  80, 220],  // red
+        [255, 120, 40, 220], // orange
+        [80, 210, 120, 220], // green
+        [90, 170, 255, 220], // blue
+        [255, 80, 180, 220], // pink
+        [255, 220, 50, 220], // yellow
+        [160, 90, 255, 220], // purple
+        [50, 210, 210, 220], // cyan
+        [255, 70, 80, 220],  // red
     ];
     PALETTE[(h as usize) % PALETTE.len()]
 }
@@ -90,7 +90,10 @@ fn collect_features(val: &Value) -> Result<Vec<GeoJsonFeature>, String> {
             let label = extract_label(&val["properties"]);
             // GeometryCollection inside a Feature → expand into multiple features
             if geom.get("type").and_then(Value::as_str) == Some("GeometryCollection") {
-                let geoms = geom["geometries"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+                let geoms = geom["geometries"]
+                    .as_array()
+                    .map(|a| a.as_slice())
+                    .unwrap_or(&[]);
                 return Ok(geoms
                     .iter()
                     .filter_map(|g| parse_geometry(g).ok())

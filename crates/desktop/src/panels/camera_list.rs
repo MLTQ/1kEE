@@ -22,11 +22,19 @@ pub fn render_camera_list(ctx: &egui::Context, model: &mut AppModel) {
             ui.horizontal(|ui| {
                 for (t, label) in [
                     (SidebarTab::Cameras, "Cameras"),
-                    (SidebarTab::Items,   "Items"),
+                    (SidebarTab::Items, "Items"),
                 ] {
                     let active = tab == t;
-                    let fill  = if active { theme::chrome_active_fill() } else { egui::Color32::TRANSPARENT };
-                    let color = if active { theme::chrome_active_text() } else { theme::text_muted() };
+                    let fill = if active {
+                        theme::chrome_active_fill()
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    };
+                    let color = if active {
+                        theme::chrome_active_text()
+                    } else {
+                        theme::text_muted()
+                    };
                     if ui
                         .add(
                             egui::Button::new(egui::RichText::new(label).color(color))
@@ -43,7 +51,7 @@ pub fn render_camera_list(ctx: &egui::Context, model: &mut AppModel) {
 
             match tab {
                 SidebarTab::Cameras => tab_cameras(ui, model),
-                SidebarTab::Items   => tab_items(ui, model),
+                SidebarTab::Items => tab_items(ui, model),
             }
 
             ui.data_mut(|d| d.insert_temp(tab_id, tab));
@@ -79,8 +87,7 @@ fn tab_cameras(ui: &mut egui::Ui, model: &mut AppModel) {
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         for camera in nearby {
-            let is_selected =
-                model.selected_camera_id.as_deref() == Some(camera.id.as_str());
+            let is_selected = model.selected_camera_id.as_deref() == Some(camera.id.as_str());
 
             egui::Frame::group(ui.style())
                 .fill(if is_selected {
@@ -92,12 +99,9 @@ fn tab_cameras(ui: &mut egui::Ui, model: &mut AppModel) {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.strong(camera.label.as_str());
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                ui.colored_label(camera.status.color(), camera.status.label());
-                            },
-                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.colored_label(camera.status.color(), camera.status.label());
+                        });
                     });
                     ui.label(format!(
                         "{} | {} | {:.1} km",
@@ -145,7 +149,11 @@ fn tab_items(ui: &mut egui::Ui, model: &mut AppModel) {
             && !url_buf.trim().is_empty()
         {
             let canonical = arcgis_source::normalize_url(&url_buf);
-            if !model.arcgis_sources.iter().any(|s| arcgis_source::normalize_url(&s.url) == canonical) {
+            if !model
+                .arcgis_sources
+                .iter()
+                .any(|s| arcgis_source::normalize_url(&s.url) == canonical)
+            {
                 let color_offset = model.arcgis_sources.len() * 2;
                 arcgis_source::add_source(canonical.clone(), color_offset, ui.ctx().clone());
                 model.arcgis_sources.push(crate::model::ArcGisSourceRef {
@@ -172,7 +180,10 @@ fn tab_items(ui: &mut egui::Ui, model: &mut AppModel) {
                     if s.discovering {
                         ui.label("Discovering\u{2026}");
                     } else if let Some(ref e) = s.discover_error {
-                        ui.colored_label(egui::Color32::from_rgb(200, 80, 80), format!("Error: {e}"));
+                        ui.colored_label(
+                            egui::Color32::from_rgb(200, 80, 80),
+                            format!("Error: {e}"),
+                        );
                     } else {
                         let layer_count = s.layers.as_ref().map(|l| l.len()).unwrap_or(0);
                         ui.strong(format!(
@@ -201,7 +212,8 @@ fn tab_items(ui: &mut egui::Ui, model: &mut AppModel) {
                         ui.horizontal(|ui| {
                             ui.add_space(12.0);
                             // Color swatch
-                            let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                            let (rect, _) =
+                                ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                             ui.painter().circle_filled(rect.center(), 4.0, layer.color);
 
                             if ui.checkbox(&mut enabled, &layer.name).changed() {
@@ -212,12 +224,16 @@ fn tab_items(ui: &mut egui::Ui, model: &mut AppModel) {
                                 }
                             }
 
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let status = s.layer_status.get(&layer.id).cloned().unwrap_or_default();
-                                if !status.is_empty() {
-                                    ui.colored_label(theme::text_muted(), status);
-                                }
-                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    let status =
+                                        s.layer_status.get(&layer.id).cloned().unwrap_or_default();
+                                    if !status.is_empty() {
+                                        ui.colored_label(theme::text_muted(), status);
+                                    }
+                                },
+                            );
                         });
                     }
                 }
@@ -236,6 +252,10 @@ fn tab_items(ui: &mut egui::Ui, model: &mut AppModel) {
     // Footer count
     let total = model.arcgis_features.len();
     if total > 0 {
-        ui.label(egui::RichText::new(format!("{total} features loaded")).small().color(theme::text_muted()));
+        ui.label(
+            egui::RichText::new(format!("{total} features loaded"))
+                .small()
+                .color(theme::text_muted()),
+        );
     }
 }

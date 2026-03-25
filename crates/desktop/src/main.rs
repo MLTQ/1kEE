@@ -1,13 +1,13 @@
 mod app;
+mod arcgis_source;
 mod camera_registry;
 mod camera_scrape_catalog;
 mod camera_source_catalog;
 mod city_catalog;
 mod factal_stream;
-mod model;
 mod flight_tracks;
+mod model;
 mod moving_tracks;
-mod arcgis_source;
 mod osm_ingest;
 mod panels;
 mod settings_store;

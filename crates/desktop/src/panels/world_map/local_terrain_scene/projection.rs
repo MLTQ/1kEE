@@ -1,8 +1,8 @@
 use crate::model::{GeoPoint, GlobeViewState};
 use crate::osm_ingest::GeoBounds as OsmGeoBounds;
 
-use super::{LocalLayout, ProjectedLocalPoint, BASE_VERTICAL_EXAGGERATION};
 use super::super::srtm_focus_cache;
+use super::{BASE_VERTICAL_EXAGGERATION, LocalLayout, ProjectedLocalPoint};
 
 pub(super) fn visual_half_extent_for_zoom_inner(view_zoom: f32) -> f32 {
     super::visual_half_extent_for_zoom(view_zoom)

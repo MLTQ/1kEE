@@ -39,10 +39,8 @@ impl DashboardApp {
 
         // Initialise GPU pass resources for the globe and local terrain views.
         if let Some(wgpu_state) = cc.wgpu_render_state.as_ref() {
-            let globe_res = globe_pass::GlobePassResources::new(
-                &wgpu_state.device,
-                wgpu_state.target_format,
-            );
+            let globe_res =
+                globe_pass::GlobePassResources::new(&wgpu_state.device, wgpu_state.target_format);
             let terrain_res = local_terrain_pass::LocalTerrainPassResources::new(
                 &wgpu_state.device,
                 wgpu_state.target_format,
@@ -53,7 +51,10 @@ impl DashboardApp {
         }
 
         let model = AppModel::seed_demo();
-        Self { last_theme: model.map_theme, model }
+        Self {
+            last_theme: model.map_theme,
+            model,
+        }
     }
 }
 

@@ -24,7 +24,8 @@ pub struct ArcGisFeature {
 
 impl ArcGisFeature {
     pub fn get_attr(&self, key: &str) -> Option<&str> {
-        self.attributes.iter()
+        self.attributes
+            .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(key))
             .map(|(_, v)| v.as_str())
     }
@@ -33,10 +34,16 @@ impl ArcGisFeature {
     }
     /// True if any standard casualty field is > 0.
     pub fn has_casualties(&self) -> bool {
-        ["CivilianKilled","FriendlyKilled","EnemyKilled",
-         "CivilianWounded","FriendlyWounded","EnemyWounded"]
-            .iter()
-            .any(|k| self.get_attr_i32(k).unwrap_or(0) > 0)
+        [
+            "CivilianKilled",
+            "FriendlyKilled",
+            "EnemyKilled",
+            "CivilianWounded",
+            "FriendlyWounded",
+            "EnemyWounded",
+        ]
+        .iter()
+        .any(|k| self.get_attr_i32(k).unwrap_or(0) > 0)
     }
 }
 

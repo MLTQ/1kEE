@@ -14,11 +14,15 @@ use super::globe_scene::{GlobeLayout, project_geo};
 /// meridian) use `hot_color()`; major 30° lines use brighter `wireframe_color()`;
 /// minor subdivisions use plain `wireframe_color()`.
 pub(super) fn draw_graticule(painter: &egui::Painter, layout: &GlobeLayout, view: &GlobeViewState) {
-    let step: f32 = if layout.radius >= 300.0 { 10.0 }
-                    else if layout.radius >= 120.0 { 15.0 }
-                    else { 30.0 };
+    let step: f32 = if layout.radius >= 300.0 {
+        10.0
+    } else if layout.radius >= 120.0 {
+        15.0
+    } else {
+        30.0
+    };
 
-    let hot   = theme::hot_color();
+    let hot = theme::hot_color();
     let major = theme::wireframe_color().gamma_multiply(1.8);
     let minor = theme::wireframe_color();
 
@@ -31,7 +35,7 @@ pub(super) fn draw_graticule(painter: &egui::Painter, layout: &GlobeLayout, view
     let mut l = -90.0_f32 + step;
     while l < 90.0 - step * 0.1 {
         let is_sp = SPECIAL_LATS.iter().any(|&s| (s - l).abs() < 0.5);
-        let is_m  = (l / 30.0).fract().abs().min(1.0 - (l / 30.0).fract().abs()) < 0.02;
+        let is_m = (l / 30.0).fract().abs().min(1.0 - (l / 30.0).fract().abs()) < 0.02;
         lats.push((l, is_sp, is_m));
         l += step;
     }
@@ -41,12 +45,19 @@ pub(super) fn draw_graticule(painter: &egui::Painter, layout: &GlobeLayout, view
         }
     }
     for (lat, is_sp, is_m) in lats {
-        let (col, w) = if is_sp        { (hot.gamma_multiply(0.72),   1.15) }
-                       else if is_m    { (major.gamma_multiply(0.55),  0.95) }
-                       else            { (minor.gamma_multiply(0.28),  0.80) };
+        let (col, w) = if is_sp {
+            (hot.gamma_multiply(0.72), 1.15)
+        } else if is_m {
+            (major.gamma_multiply(0.55), 0.95)
+        } else {
+            (minor.gamma_multiply(0.28), 0.80)
+        };
         // One point every 5° of longitude for smooth circles near the equator.
         let pts: Vec<GeoPoint> = (-36..=36)
-            .map(|i| GeoPoint { lat, lon: i as f32 * 5.0 })
+            .map(|i| GeoPoint {
+                lat,
+                lon: i as f32 * 5.0,
+            })
             .collect();
         draw_graticule_path(painter, layout, view, &pts, col, w);
     }
@@ -55,13 +66,24 @@ pub(super) fn draw_graticule(painter: &egui::Painter, layout: &GlobeLayout, view
     let mut lon = -180.0_f32 + step;
     while lon <= 180.0 - step * 0.1 {
         let is_pm = lon.abs() < 0.5;
-        let is_m  = (lon / 30.0).fract().abs().min(1.0 - (lon / 30.0).fract().abs()) < 0.02;
-        let (col, w) = if is_pm       { (hot.gamma_multiply(0.72),   1.15) }
-                       else if is_m   { (major.gamma_multiply(0.55),  0.95) }
-                       else           { (minor.gamma_multiply(0.28),  0.80) };
+        let is_m = (lon / 30.0)
+            .fract()
+            .abs()
+            .min(1.0 - (lon / 30.0).fract().abs())
+            < 0.02;
+        let (col, w) = if is_pm {
+            (hot.gamma_multiply(0.72), 1.15)
+        } else if is_m {
+            (major.gamma_multiply(0.55), 0.95)
+        } else {
+            (minor.gamma_multiply(0.28), 0.80)
+        };
         // One point every 3° of latitude for smooth meridian curves.
         let pts: Vec<GeoPoint> = (-30..=30)
-            .map(|i| GeoPoint { lat: i as f32 * 3.0, lon })
+            .map(|i| GeoPoint {
+                lat: i as f32 * 3.0,
+                lon,
+            })
             .collect();
         draw_graticule_path(painter, layout, view, &pts, col, w);
         lon += step;
@@ -79,11 +101,11 @@ fn draw_graticule_path(
     color: egui::Color32,
     width: f32,
 ) {
-    const ALT: f32 = 0.022;         // sits on sphere surface, same as coastlines
-    const BACK_ALPHA: f32 = 0.14;   // faint back-hemisphere ghost reinforces 3D feel
+    const ALT: f32 = 0.022; // sits on sphere surface, same as coastlines
+    const BACK_ALPHA: f32 = 0.14; // faint back-hemisphere ghost reinforces 3D feel
 
     let mut front_seg: Vec<egui::Pos2> = Vec::new();
-    let mut back_seg:  Vec<egui::Pos2> = Vec::new();
+    let mut back_seg: Vec<egui::Pos2> = Vec::new();
 
     for &point in path {
         match project_geo(layout, view, point, ALT) {

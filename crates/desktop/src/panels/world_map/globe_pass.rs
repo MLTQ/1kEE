@@ -73,7 +73,11 @@ pub fn color_to_linear(c: egui::Color32) -> [f32; 4] {
 
 fn srgb_byte_to_linear(v: u8) -> f32 {
     let s = v as f32 / 255.0;
-    if s <= 0.04045 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+    if s <= 0.04045 {
+        s / 12.92
+    } else {
+        ((s + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 // ── Persistent GPU resources ──────────────────────────────────────────────────
@@ -158,7 +162,11 @@ impl GlobePassResources {
             cache: None,
         });
 
-        Self { pipeline, uniform_buf, bind_group }
+        Self {
+            pipeline,
+            uniform_buf,
+            bind_group,
+        }
     }
 }
 

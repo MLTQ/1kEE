@@ -1,6 +1,6 @@
+use super::globe_scene;
 use crate::model::{AppModel, FlightCategory};
 use crate::theme;
-use super::globe_scene;
 
 pub(super) fn draw_event_hover_tooltip(
     ctx: &egui::Context,
@@ -50,7 +50,9 @@ pub(super) fn draw_ship_hover_tooltip(
     let Some(pointer) = hover_pos else { return };
 
     // Don't show hover tooltip if a ship is already selected (detail panel visible).
-    if model.selected_track_mmsi.is_some() { return; }
+    if model.selected_track_mmsi.is_some() {
+        return;
+    }
 
     let Some(&(mmsi, marker_pos)) = scene
         .ship_markers
@@ -70,7 +72,10 @@ pub(super) fn draw_ship_hover_tooltip(
         .show(ctx, |ui| {
             egui::Frame::new()
                 .fill(theme::panel_fill(238))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 210, 180).gamma_multiply(0.5)))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    egui::Color32::from_rgb(40, 210, 180).gamma_multiply(0.5),
+                ))
                 .corner_radius(8.0)
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
@@ -94,7 +99,9 @@ pub(super) fn draw_flight_hover_tooltip(
     hover_pos: Option<egui::Pos2>,
 ) {
     // Suppress hover tooltip while a flight detail panel is open.
-    if model.selected_flight_icao24.is_some() { return; }
+    if model.selected_flight_icao24.is_some() {
+        return;
+    }
 
     let Some(pointer) = hover_pos else { return };
     let Some((icao24, marker_pos)) = scene
@@ -109,18 +116,18 @@ pub(super) fn draw_flight_hover_tooltip(
     };
 
     let col = match flight.category() {
-        FlightCategory::Airline  => theme::flight_airline_color(),
-        FlightCategory::Cargo    => theme::flight_cargo_color(),
+        FlightCategory::Airline => theme::flight_airline_color(),
+        FlightCategory::Cargo => theme::flight_cargo_color(),
         FlightCategory::Military => theme::flight_military_color(),
-        FlightCategory::GA       => theme::flight_ga_color(),
-        FlightCategory::Unknown  => theme::flight_unknown_color(),
+        FlightCategory::GA => theme::flight_ga_color(),
+        FlightCategory::Unknown => theme::flight_unknown_color(),
     };
     let cat_label = match flight.category() {
-        FlightCategory::Airline  => "Airline",
-        FlightCategory::Cargo    => "Cargo",
+        FlightCategory::Airline => "Airline",
+        FlightCategory::Cargo => "Cargo",
         FlightCategory::Military => "Military",
-        FlightCategory::GA       => "General Aviation",
-        FlightCategory::Unknown  => "",
+        FlightCategory::GA => "General Aviation",
+        FlightCategory::Unknown => "",
     };
 
     egui::Area::new("flight_hover_tooltip".into())
@@ -146,8 +153,7 @@ pub(super) fn draw_flight_hover_tooltip(
                     if let Some(spd) = flight.speed_knots {
                         ui.small(format!("{:.0} kn", spd));
                     }
-                    ui.small(egui::RichText::new("click for details")
-                        .color(theme::text_muted()));
+                    ui.small(egui::RichText::new("click for details").color(theme::text_muted()));
                 });
         });
 }

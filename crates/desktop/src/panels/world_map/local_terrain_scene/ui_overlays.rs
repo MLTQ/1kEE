@@ -1,9 +1,14 @@
 use crate::theme;
 
-use super::visual_half_extent_for_zoom;
 use super::super::srtm_focus_cache;
+use super::visual_half_extent_for_zoom;
 
-pub(super) fn draw_legend(painter: &egui::Painter, rect: egui::Rect, title: &str, render_zoom: f32) {
+pub(super) fn draw_legend(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    title: &str,
+    render_zoom: f32,
+) {
     let interval_m = srtm_focus_cache::contour_interval_for_zoom(render_zoom);
     let half_extent_km = visual_half_extent_for_zoom(render_zoom) * 111.32;
     painter.text(
@@ -74,11 +79,19 @@ pub(super) fn draw_progress_overlay(
     // ── Osmium cell-extraction card ────────────────────────────────────────
     if osmium_active {
         let (done, total) = osmium_progress.unwrap();
-        let progress = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+        let progress = if total > 0 {
+            done as f32 / total as f32
+        } else {
+            0.0
+        };
         // Truncate job note to fit in card width (≈26 chars at monospace 11)
         let label = if let Some(note) = job_note {
             let trimmed = note.trim_end_matches('…').trim_end_matches("...");
-            if trimmed.len() > 28 { format!("{}…", &trimmed[..28]) } else { trimmed.to_owned() }
+            if trimmed.len() > 28 {
+                format!("{}…", &trimmed[..28])
+            } else {
+                trimmed.to_owned()
+            }
         } else {
             format!("OSMIUM {done}/{total} cells")
         };
