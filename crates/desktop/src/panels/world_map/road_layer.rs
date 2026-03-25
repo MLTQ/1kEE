@@ -10,8 +10,8 @@ use super::local_terrain_scene::{
 use super::srtm_stream;
 
 const MAX_SOURCE_POINTS_PER_ROAD: usize = 192;
-const MAX_MAJOR_RENDER_POINTS_TOTAL: usize = 40_000;
-const MAX_MINOR_RENDER_POINTS_TOTAL: usize = 80_000;
+const MAX_MAJOR_RENDER_POINTS_TOTAL: usize = 400_000;
+const MAX_MINOR_RENDER_POINTS_TOTAL: usize = 800_000;
 
 // How much extra area to pre-fetch beyond the visible viewport in each
 // direction, expressed as a fraction of the current view half-extent.

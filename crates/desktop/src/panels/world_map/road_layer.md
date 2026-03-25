@@ -28,6 +28,7 @@ Loads OSM road geometry from the runtime store, enriches it with terrain elevati
 
 ## Notes
 - The local road overlay now enforces both a per-road source simplification cap and separate per-layer point budgets. This intentionally trades some road detail for stability when the focused import covers a very dense region.
+- The current per-layer budgets are intentionally generous (`400k` major, `800k` minor render points) so remaining fragmentation is more likely to indicate cache/LOD gaps than simple overlay starvation.
 - The road cache always loads both major and minor classes together for the covered viewport. Layer toggles only decide what gets drawn, which keeps checkbox changes from blowing away the loaded road geometry.
 - Major roads are rendered before minor roads and use their own reserved point budget so enabling minor roads cannot starve the major-road layer.
 - Camera-dependent screen-space thinning was removed because it caused roads to pop in and out as the operator rotated the local scene.
