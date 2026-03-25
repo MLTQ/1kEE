@@ -155,6 +155,22 @@ impl ReplayState {
         self.next_idx = 0;
     }
 
+    /// Jump the playhead to `fraction` ∈ [0, 1] of the total replay duration.
+    /// Clears active flares; events before the new position are skipped.
+    pub fn seek(&mut self, fraction: f32) {
+        let target = (fraction as f64 * self.wall_duration).clamp(0.0, self.wall_duration);
+        let was_paused = self.is_paused();
+        self.elapsed_before_pause = target;
+        self.play_start = if was_paused { None } else { Some(Instant::now()) };
+        self.active_flares.clear();
+        // Advance next_idx past all events that would have already fired.
+        let sim_now = self.sim_from as f64
+            + fraction as f64 * (self.sim_to - self.sim_from) as f64;
+        self.next_idx = self
+            .events
+            .partition_point(|(unix, _)| (*unix as f64) <= sim_now);
+    }
+
     /// Advance the playhead: spawn newly-reached events as flares, expire old ones.
     /// Returns `true` if the UI needs a repaint (flares are changing).
     pub fn tick(&mut self) -> bool {

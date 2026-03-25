@@ -142,6 +142,32 @@ pub fn load_events_in_range(from_unix: i64, to_unix: i64) -> Vec<(i64, EventReco
     .unwrap_or_default()
 }
 
+/// Unix timestamp of the oldest stored event, or `None` if the store is empty.
+pub fn oldest_event_unix() -> Option<i64> {
+    with_conn(|conn| {
+        conn.query_row(
+            "SELECT MIN(occurred_unix) FROM stored_events",
+            [],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+    })
+    .ok()
+    .flatten()
+}
+
+/// Unix timestamp of the newest stored event, or `None` if the store is empty.
+pub fn newest_event_unix() -> Option<i64> {
+    with_conn(|conn| {
+        conn.query_row(
+            "SELECT MAX(occurred_unix) FROM stored_events",
+            [],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+    })
+    .ok()
+    .flatten()
+}
+
 /// Total number of stored events (for deciding whether to backfill).
 pub fn event_count() -> usize {
     with_conn(|conn| {

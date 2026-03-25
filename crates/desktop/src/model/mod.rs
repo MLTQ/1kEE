@@ -88,8 +88,14 @@ pub struct AppModel {
     pub camera_registry_status: String,
     // ── Replay mode ──────────────────────────────────────────────────────────
     pub replay_mode: bool,
-    /// How many days of history to replay (1–365).
-    pub replay_days: u32,
+    /// Start of the replay window (unix seconds).
+    pub replay_from_unix: i64,
+    /// End of the replay window (unix seconds, ≤ now).
+    pub replay_to_unix: i64,
+    /// Edit buffer for the "from" date text input (kept in sync with replay_from_unix).
+    pub replay_from_str: String,
+    /// Edit buffer for the "to" date text input (kept in sync with replay_to_unix).
+    pub replay_to_str: String,
     /// Wall-clock duration of the full replay in seconds (60–300).
     pub replay_duration_secs: u32,
     pub replay_state: Option<ReplayState>,
@@ -319,7 +325,12 @@ impl AppModel {
                 lines
             },
             replay_mode: false,
-            replay_days: 30,
+            replay_from_unix: crate::event_store::now_unix() - 30 * 86_400,
+            replay_to_unix: crate::event_store::now_unix(),
+            replay_from_str: crate::event_store::unix_to_date_str(
+                crate::event_store::now_unix() - 30 * 86_400,
+            ),
+            replay_to_str: crate::event_store::unix_to_date_str(crate::event_store::now_unix()),
             replay_duration_secs: 120,
             replay_state: None,
             replay_history_status: String::new(),
@@ -697,28 +708,39 @@ impl AppModel {
         }
         // Enter replay
         self.replay_mode = true;
-        // Trigger history fetch if store is empty and a key is configured.
-        if crate::event_store::event_count() == 0 && self.has_factal_api_key() {
-            crate::factal_stream::trigger_history_fetch(
-                self.factal_api_key.clone(),
-                365,
-            );
-            self.replay_history_status = "Fetching history…".into();
-            self.push_log("Replay: fetching 1 year of Factal event history…".into());
+        // Fetch history only when we actually have a coverage gap.
+        // We consider coverage adequate when:
+        //   (a) oldest stored event ≤ replay_from_unix  (data goes back far enough)
+        //   (b) newest stored event ≥ now − 1 day       (data is fresh)
+        if self.has_factal_api_key() && !crate::factal_stream::is_history_fetching() {
+            let now = crate::event_store::now_unix();
+            let oldest = crate::event_store::oldest_event_unix().unwrap_or(i64::MAX);
+            let newest = crate::event_store::newest_event_unix().unwrap_or(0);
+            if oldest > self.replay_from_unix || newest < now - 86_400 {
+                crate::factal_stream::trigger_history_fetch(self.factal_api_key.clone(), 365);
+                self.replay_history_status = "Fetching history…".into();
+                self.push_log("Replay: fetching 1 year of Factal event history…".into());
+            }
         }
         self.rebuild_replay_state();
     }
 
     /// Reload the replay state from the event store with current settings.
     pub fn rebuild_replay_state(&mut self) {
-        let to_unix = crate::event_store::now_unix();
-        let from_unix = to_unix - (self.replay_days as i64) * 86_400;
-        let events = crate::event_store::load_events_in_range(from_unix, to_unix);
+        let events = crate::event_store::load_events_in_range(
+            self.replay_from_unix,
+            self.replay_to_unix,
+        );
         let wall_duration = self.replay_duration_secs as f64;
         if events.is_empty() {
             self.replay_state = None;
         } else {
-            self.replay_state = Some(ReplayState::new(events, from_unix, to_unix, wall_duration));
+            self.replay_state = Some(ReplayState::new(
+                events,
+                self.replay_from_unix,
+                self.replay_to_unix,
+                wall_duration,
+            ));
         }
     }
 
