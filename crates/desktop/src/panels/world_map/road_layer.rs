@@ -10,8 +10,8 @@ use super::local_terrain_scene::{
 use super::srtm_stream;
 
 const MAX_SOURCE_POINTS_PER_ROAD: usize = 192;
-const MAX_RENDER_POINTS_TOTAL: usize = 120_000;
-const MIN_SCREEN_POINT_DISTANCE: f32 = 1.5;
+const MAX_MAJOR_RENDER_POINTS_TOTAL: usize = 40_000;
+const MAX_MINOR_RENDER_POINTS_TOTAL: usize = 80_000;
 
 // How much extra area to pre-fetch beyond the visible viewport in each
 // direction, expressed as a fraction of the current view half-extent.
@@ -176,7 +176,7 @@ pub(super) fn draw_roads(
                 )
                 .into_iter()
                 .map(|poly| ElevatedRoad::from_polyline(&poly, root_ref))
-                .collect();
+                .collect::<Vec<_>>();
                 let minor_elevated = osm_ingest::load_roads_for_bounds(
                     root_ref,
                     load_bounds,
@@ -185,7 +185,12 @@ pub(super) fn draw_roads(
                 )
                 .into_iter()
                 .map(|poly| ElevatedRoad::from_polyline(&poly, root_ref))
-                .collect();
+                .collect::<Vec<_>>();
+
+                let mut major_elevated = major_elevated;
+                let mut minor_elevated = minor_elevated;
+                sort_roads_for_budget(&mut major_elevated);
+                sort_roads_for_budget(&mut minor_elevated);
 
                 if let Ok(mut store) = road_cache().lock() {
                     store.cache = Some(RoadCache {
@@ -213,22 +218,9 @@ pub(super) fn draw_roads(
     let Some(cache) = &mut store.cache else {
         return;
     };
-    let mut remaining_points = MAX_RENDER_POINTS_TOTAL;
 
-    if show_minor_roads {
-        draw_road_layer(
-            painter,
-            layout,
-            view,
-            viewport_center,
-            extent_x_km,
-            extent_y_km,
-            &cache.minor_elevated,
-            egui::Stroke::new(0.8, theme::road_minor_color()),
-            &mut remaining_points,
-        );
-    }
     if show_major_roads {
+        let mut remaining_points = MAX_MAJOR_RENDER_POINTS_TOTAL;
         draw_road_layer(
             painter,
             layout,
@@ -238,6 +230,20 @@ pub(super) fn draw_roads(
             extent_y_km,
             &cache.major_elevated,
             egui::Stroke::new(1.35, theme::road_major_color()),
+            &mut remaining_points,
+        );
+    }
+    if show_minor_roads {
+        let mut remaining_points = MAX_MINOR_RENDER_POINTS_TOTAL;
+        draw_road_layer(
+            painter,
+            layout,
+            view,
+            viewport_center,
+            extent_x_km,
+            extent_y_km,
+            &cache.minor_elevated,
+            egui::Stroke::new(0.8, theme::road_minor_color()),
             &mut remaining_points,
         );
     }
@@ -260,7 +266,6 @@ fn draw_road_layer(
         }
 
         let mut points = Vec::with_capacity(road.points.len().min(*remaining_points));
-        let mut last_kept: Option<egui::Pos2> = None;
         for &(pt, elev) in &road.points {
             if *remaining_points == 0 {
                 break;
@@ -278,16 +283,8 @@ fn draw_road_layer(
                 continue;
             };
 
-            let should_keep = points.is_empty()
-                || last_kept
-                    .map(|prev| prev.distance(pos) >= MIN_SCREEN_POINT_DISTANCE)
-                    .unwrap_or(true);
-
-            if should_keep {
-                points.push(pos);
-                last_kept = Some(pos);
-                *remaining_points = remaining_points.saturating_sub(1);
-            }
+            points.push(pos);
+            *remaining_points = remaining_points.saturating_sub(1);
         }
 
         if points.len() >= 2 {
@@ -317,4 +314,25 @@ fn simplify_source_points(points: &[GeoPoint], max_points: usize) -> Vec<GeoPoin
     }
 
     simplified
+}
+
+fn sort_roads_for_budget(roads: &mut [ElevatedRoad]) {
+    roads.sort_by(|a, b| {
+        b.points
+            .len()
+            .cmp(&a.points.len())
+            .then_with(|| compare_road_start(a, b))
+    });
+}
+
+fn compare_road_start(a: &ElevatedRoad, b: &ElevatedRoad) -> std::cmp::Ordering {
+    let a0 = a
+        .points
+        .first()
+        .map(|(pt, _)| (pt.lat.to_bits(), pt.lon.to_bits()));
+    let b0 = b
+        .points
+        .first()
+        .map(|(pt, _)| (pt.lat.to_bits(), pt.lon.to_bits()));
+    a0.cmp(&b0)
 }
