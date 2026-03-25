@@ -6,11 +6,12 @@ use std::sync::{Mutex, OnceLock};
 
 use super::cell_loader::{LoadedPolyline, load_features_from_cells};
 use super::local_terrain_scene::{
-    LocalLayout, local_geo_bounds, project_local, road_tile_zoom, visual_half_extent_for_zoom,
+    LocalLayout, local_geo_bounds, project_local, visual_half_extent_for_zoom,
 };
 use super::srtm_stream;
 
 const ELEVATION_OFFSET_M: f32 = 2.0;
+const GEO_MARGIN_FACTOR: f32 = 0.75;
 
 // ── Waterway layer ─────────────────────────────────────────────────────────────
 
@@ -36,13 +37,12 @@ impl ElevatedWaterway {
 }
 
 struct WaterwayCache {
-    tile_zoom: u8,
-    tile_x_min: u32,
-    tile_x_max: u32,
-    tile_y_min: u32,
-    tile_y_max: u32,
     data_gen: u64,
     last_root: std::path::PathBuf,
+    covered_min_lat: f32,
+    covered_max_lat: f32,
+    covered_min_lon: f32,
+    covered_max_lon: f32,
     features: Vec<ElevatedWaterway>,
 }
 
@@ -70,6 +70,8 @@ pub(super) fn draw_waterways(
     render_zoom: f32,
     show_waterways: bool,
 ) {
+    let _ = render_zoom; // zoom no longer drives cache invalidation
+
     if !show_waterways {
         if let Ok(mut g) = waterway_cache().lock() {
             g.cache = None;
@@ -82,18 +84,11 @@ pub(super) fn draw_waterways(
     };
 
     let bounds = local_geo_bounds(viewport_center, view.local_zoom);
-    let tile_zoom = road_tile_zoom(render_zoom);
     let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
     let km_per_deg_lat = 111.32f32;
     let km_per_deg_lon = km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
-
-    let (x0, y0) = osm_ingest::lat_lon_to_tile(bounds.max_lat, bounds.min_lon, tile_zoom);
-    let (x1, y1) = osm_ingest::lat_lon_to_tile(bounds.min_lat, bounds.max_lon, tile_zoom);
-    let (txmin, txmax) = (x0.min(x1), x0.max(x1));
-    let (tymin, tymax) = (y0.min(y1), y0.max(y1));
-    const MARGIN: u32 = 1;
     let current_gen = osm_ingest::road_data_generation();
 
     {
@@ -102,24 +97,32 @@ pub(super) fn draw_waterways(
             Err(_) => return,
         };
         let stale = store.cache.as_ref().map_or(true, |c| {
-            c.tile_zoom != tile_zoom
-                || c.data_gen != current_gen
+            c.data_gen != current_gen
                 || c.last_root != *root
-                || c.tile_x_min > txmin
-                || c.tile_x_max < txmax
-                || c.tile_y_min > tymin
-                || c.tile_y_max < tymax
+                || bounds.min_lat < c.covered_min_lat
+                || bounds.max_lat > c.covered_max_lat
+                || bounds.min_lon < c.covered_min_lon
+                || bounds.max_lon > c.covered_max_lon
         });
 
         if stale && !store.building {
-            let (lxmin, lxmax) = (txmin.saturating_sub(MARGIN), txmax + MARGIN);
-            let (lymin, lymax) = (tymin.saturating_sub(MARGIN), tymax + MARGIN);
+            let lat_margin = (bounds.max_lat - bounds.min_lat) * GEO_MARGIN_FACTOR;
+            let lon_margin = (bounds.max_lon - bounds.min_lon) * GEO_MARGIN_FACTOR;
+            let load_bounds = osm_ingest::GeoBounds {
+                min_lat: (bounds.min_lat - lat_margin).max(-85.0),
+                max_lat: (bounds.max_lat + lat_margin).min(85.0),
+                min_lon: (bounds.min_lon - lon_margin).max(-180.0),
+                max_lon: (bounds.max_lon + lon_margin).min(180.0),
+            };
+            let (covered_min_lat, covered_max_lat) = (load_bounds.min_lat, load_bounds.max_lat);
+            let (covered_min_lon, covered_max_lon) = (load_bounds.min_lon, load_bounds.max_lon);
+
             store.building = true;
             drop(store);
 
             let root_buf = root.to_path_buf();
             std::thread::spawn(move || {
-                let polylines = load_features_from_cells(&root_buf, "waterway", bounds);
+                let polylines = load_features_from_cells(&root_buf, "waterway", load_bounds);
                 let features = polylines
                     .iter()
                     .map(|p| ElevatedWaterway::from_polyline(p, Some(&root_buf)))
@@ -127,13 +130,12 @@ pub(super) fn draw_waterways(
 
                 if let Ok(mut store) = waterway_cache().lock() {
                     store.cache = Some(WaterwayCache {
-                        tile_zoom,
-                        tile_x_min: lxmin,
-                        tile_x_max: lxmax,
-                        tile_y_min: lymin,
-                        tile_y_max: lymax,
                         data_gen: current_gen,
                         last_root: root_buf.clone(),
+                        covered_min_lat,
+                        covered_max_lat,
+                        covered_min_lon,
+                        covered_max_lon,
                         features,
                     });
                     store.building = false;

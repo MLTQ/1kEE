@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use super::local_terrain_scene::{
-    LocalLayout, local_geo_bounds, project_local, road_tile_zoom, visual_half_extent_for_zoom,
+    LocalLayout, local_geo_bounds, project_local, visual_half_extent_for_zoom,
 };
 use super::srtm_stream;
 
@@ -13,10 +13,18 @@ const MAX_SOURCE_POINTS_PER_ROAD: usize = 192;
 const MAX_RENDER_POINTS_TOTAL: usize = 120_000;
 const MIN_SCREEN_POINT_DISTANCE: f32 = 1.5;
 
-// ── Road tile cache ────────────────────────────────────────────────────────
-// Road geometry is fetched from SQLite and cached until the tile coverage
-// actually changes.  Opening a DB connection + running a query on every
-// frame was the source of the 2-5 FPS regression.
+// How much extra area to pre-fetch beyond the visible viewport in each
+// direction, expressed as a fraction of the current view half-extent.
+// 0.75 means "load 75 % extra on every side", giving a comfortable pan
+// buffer without flooding memory on large zoom-out views.
+const GEO_MARGIN_FACTOR: f32 = 0.75;
+
+// ── Road geo-bounds cache ───────────────────────────────────────────────────
+// Roads are loaded once for a geo bounding box that is slightly larger than
+// the visible viewport.  The cache stays valid as long as the viewport is
+// fully contained within that box — zoom changes that shrink the view never
+// invalidate it, and zoom-out/pan only invalidates when the viewport actually
+// escapes the loaded coverage area.
 
 /// A road polyline with elevation pre-sampled for every vertex.
 /// Elevation is computed once at cache-load time so `draw_road_layer`
@@ -29,12 +37,10 @@ impl ElevatedRoad {
     /// Build an elevated road with a terrain sample for every vertex.
     fn from_polyline(poly: &osm_ingest::RoadPolyline, selected_root: Option<&Path>) -> Self {
         let simplified = simplify_source_points(&poly.points, MAX_SOURCE_POINTS_PER_ROAD);
-        let pts = &simplified;
-        if pts.is_empty() {
+        if simplified.is_empty() {
             return Self { points: Vec::new() };
         }
-
-        let points = pts
+        let points = simplified
             .iter()
             .copied()
             .map(|pt| {
@@ -47,7 +53,7 @@ impl ElevatedRoad {
     }
 }
 
-/// Clear the road tile cache so the next draw reloads from SQLite.
+/// Clear the road cache so the next draw reloads from disk.
 /// Call this whenever the road layer checkboxes change.
 pub fn invalidate_road_cache() {
     if let Ok(mut g) = road_cache().lock() {
@@ -63,26 +69,25 @@ pub fn road_cache_building() -> bool {
 }
 
 struct RoadCache {
-    tile_zoom: u8,
-    tile_x_min: u32,
-    tile_x_max: u32,
-    tile_y_min: u32,
-    tile_y_max: u32,
     road_gen: u64,
     had_major: bool,
     had_minor: bool,
-    /// The selected_root that was active when this cache was built.
-    /// A root change (user switches events) immediately invalidates the cache.
+    /// The selected_root active when this cache was built.
+    /// A root change (different event) immediately invalidates the cache.
     last_root: Option<std::path::PathBuf>,
-    /// Elevation-enriched roads, built off the render thread so enabling
-    /// layers or panning into uncached tiles does not hitch the UI.
+    /// Geo coverage this cache was built for (viewport + margin).
+    /// Cache is valid as long as the current viewport is fully inside this box.
+    /// This is zoom-level independent — zooming in never evicts the cache.
+    covered_min_lat: f32,
+    covered_max_lat: f32,
+    covered_min_lon: f32,
+    covered_max_lon: f32,
     major_elevated: Vec<ElevatedRoad>,
     minor_elevated: Vec<ElevatedRoad>,
 }
 
 struct RoadCacheStore {
     cache: Option<RoadCache>,
-    /// True while a background thread is building new geometry.
     building: bool,
 }
 
@@ -106,6 +111,8 @@ pub(super) fn draw_roads(
     show_major_roads: bool,
     show_minor_roads: bool,
 ) {
+    let _ = render_zoom; // tile_zoom no longer drives cache invalidation
+
     if !show_major_roads && !show_minor_roads {
         if let Ok(mut g) = road_cache().lock() {
             g.cache = None;
@@ -114,18 +121,11 @@ pub(super) fn draw_roads(
     }
 
     let bounds = local_geo_bounds(viewport_center, view.local_zoom);
-    let tile_zoom = road_tile_zoom(render_zoom);
     let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
     let km_per_deg_lat = 111.32f32;
     let km_per_deg_lon = km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
-
-    let (x0, y0) = osm_ingest::lat_lon_to_tile(bounds.max_lat, bounds.min_lon, tile_zoom);
-    let (x1, y1) = osm_ingest::lat_lon_to_tile(bounds.min_lat, bounds.max_lon, tile_zoom);
-    let (txmin, txmax) = (x0.min(x1), x0.max(x1));
-    let (tymin, tymax) = (y0.min(y1), y0.max(y1));
-    const MARGIN: u32 = 1;
     let current_gen = osm_ingest::road_data_generation();
 
     // ── Stale check + background build launch ─────────────────────────────
@@ -134,32 +134,47 @@ pub(super) fn draw_roads(
             Ok(g) => g,
             Err(_) => return,
         };
+
+        // Stale when: data generation changed, toggles changed, root changed,
+        // or — crucially — the viewport has panned/zoomed OUT of the loaded
+        // geo coverage.  Zooming IN never triggers a rebuild.
         let stale = store.cache.as_ref().map_or(true, |c| {
-            c.tile_zoom != tile_zoom
-                || c.road_gen != current_gen
+            c.road_gen != current_gen
                 || c.had_major != show_major_roads
                 || c.had_minor != show_minor_roads
                 || c.last_root.as_deref() != selected_root
-                || c.tile_x_min > txmin
-                || c.tile_x_max < txmax
-                || c.tile_y_min > tymin
-                || c.tile_y_max < tymax
+                || bounds.min_lat < c.covered_min_lat
+                || bounds.max_lat > c.covered_max_lat
+                || bounds.min_lon < c.covered_min_lon
+                || bounds.max_lon > c.covered_max_lon
         });
 
         if stale && !store.building {
-            let (lxmin, lxmax) = (txmin.saturating_sub(MARGIN), txmax + MARGIN);
-            let (lymin, lymax) = (tymin.saturating_sub(MARGIN), tymax + MARGIN);
+            // Build a load bbox that extends GEO_MARGIN_FACTOR beyond the
+            // current viewport in each direction.
+            let lat_margin = (bounds.max_lat - bounds.min_lat) * GEO_MARGIN_FACTOR;
+            let lon_margin = (bounds.max_lon - bounds.min_lon) * GEO_MARGIN_FACTOR;
+            let load_bounds = osm_ingest::GeoBounds {
+                min_lat: (bounds.min_lat - lat_margin).max(-85.0),
+                max_lat: (bounds.max_lat + lat_margin).min(85.0),
+                min_lon: (bounds.min_lon - lon_margin).max(-180.0),
+                max_lon: (bounds.max_lon + lon_margin).min(180.0),
+            };
+            let (covered_min_lat, covered_max_lat) = (load_bounds.min_lat, load_bounds.max_lat);
+            let (covered_min_lon, covered_max_lon) = (load_bounds.min_lon, load_bounds.max_lon);
+
             store.building = true;
             drop(store); // release lock before spawning
 
             let root_buf = selected_root.map(|p| p.to_path_buf());
             std::thread::spawn(move || {
                 let root_ref = root_buf.as_deref();
+                // tile_zoom=10 is a hint only; the GeoJSON cell path ignores it
                 let major_elevated = if show_major_roads {
                     osm_ingest::load_roads_for_bounds(
                         root_ref,
-                        bounds,
-                        tile_zoom,
+                        load_bounds,
+                        10,
                         RoadLayerKind::Major,
                     )
                     .into_iter()
@@ -171,8 +186,8 @@ pub(super) fn draw_roads(
                 let minor_elevated = if show_minor_roads {
                     osm_ingest::load_roads_for_bounds(
                         root_ref,
-                        bounds,
-                        tile_zoom,
+                        load_bounds,
+                        10,
                         RoadLayerKind::Minor,
                     )
                     .into_iter()
@@ -184,15 +199,14 @@ pub(super) fn draw_roads(
 
                 if let Ok(mut store) = road_cache().lock() {
                     store.cache = Some(RoadCache {
-                        tile_zoom,
-                        tile_x_min: lxmin,
-                        tile_x_max: lxmax,
-                        tile_y_min: lymin,
-                        tile_y_max: lymax,
                         road_gen: current_gen,
                         had_major: show_major_roads,
                         had_minor: show_minor_roads,
                         last_root: root_buf.clone(),
+                        covered_min_lat,
+                        covered_max_lat,
+                        covered_min_lon,
+                        covered_max_lon,
                         major_elevated,
                         minor_elevated,
                     });
