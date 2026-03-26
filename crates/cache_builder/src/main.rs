@@ -5,6 +5,7 @@ mod geojson;
 mod job;
 mod node_store;
 mod roads;
+mod srtm;
 mod util;
 
 fn main() {

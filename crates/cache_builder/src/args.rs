@@ -10,6 +10,7 @@ pub enum Command {
 pub struct BboxCommand {
     pub planet_path: PathBuf,
     pub cache_dir: PathBuf,  // parent dir; subdirs created per feature
+    pub srtm_root: Option<PathBuf>, // when set, elevations are baked into .1kc files
     pub min_lat: f32,
     pub max_lat: f32,
     pub min_lon: f32,
@@ -47,6 +48,7 @@ where
 {
     let mut planet_path = None;
     let mut cache_dir = None;
+    let mut srtm_root = None;
     let mut min_lat = None;
     let mut max_lat = None;
     let mut min_lon = None;
@@ -66,6 +68,7 @@ where
         match flag.as_str() {
             "--planet" => planet_path = Some(PathBuf::from(value)),
             "--cache-dir" => cache_dir = Some(PathBuf::from(value)),
+            "--srtm-root" => srtm_root = Some(PathBuf::from(value)),
             "--min-lat" => min_lat = Some(parse_f32("--min-lat", &value)?),
             "--max-lat" => max_lat = Some(parse_f32("--max-lat", &value)?),
             "--min-lon" => min_lon = Some(parse_f32("--min-lon", &value)?),
@@ -91,6 +94,7 @@ where
     let command = BboxCommand {
         planet_path: planet_path.ok_or_else(|| format!("Missing --planet.\n\n{}", usage()))?,
         cache_dir: cache_dir.ok_or_else(|| format!("Missing --cache-dir.\n\n{}", usage()))?,
+        srtm_root,
         min_lat: min_lat.ok_or_else(|| format!("Missing --min-lat.\n\n{}", usage()))?,
         max_lat: max_lat.ok_or_else(|| format!("Missing --max-lat.\n\n{}", usage()))?,
         min_lon: min_lon.ok_or_else(|| format!("Missing --min-lon.\n\n{}", usage()))?,

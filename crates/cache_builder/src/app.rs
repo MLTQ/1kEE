@@ -84,6 +84,7 @@ pub struct BuilderApp {
 struct BuilderForm {
     planet_path: String,
     cache_dir: String,
+    srtm_root: String,
     min_lat: String,
     max_lat: String,
     min_lon: String,
@@ -132,6 +133,7 @@ impl BuilderApp {
             form: BuilderForm {
                 planet_path: "/Volumes/Hilbert/Data/planet-latest.osm.pbf".to_owned(),
                 cache_dir: default_cache_dir.display().to_string(),
+                srtm_root: String::new(),
                 min_lat: "37.60".to_owned(),
                 max_lat: "37.90".to_owned(),
                 min_lon: "-122.60".to_owned(),
@@ -186,9 +188,18 @@ impl BuilderApp {
                 .map_err(|_| format!("Invalid {} value '{}'", label, value))
         };
 
+        let srtm_root = {
+            let trimmed = self.form.srtm_root.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(trimmed))
+            }
+        };
         let command = BboxCommand {
             planet_path: PathBuf::from(self.form.planet_path.trim()),
             cache_dir: PathBuf::from(self.form.cache_dir.trim()),
+            srtm_root,
             min_lat: parse_num("min latitude", &self.form.min_lat)?,
             max_lat: parse_num("max latitude", &self.form.max_lat)?,
             min_lon: parse_num("min longitude", &self.form.min_lon)?,
@@ -262,7 +273,8 @@ impl BuilderApp {
         if let Ok(entries) = fs::read_dir(&cache_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().and_then(|ext| ext.to_str()) != Some("geojson") {
+                let ext = path.extension().and_then(|e| e.to_str());
+                if !matches!(ext, Some("1kc") | Some("geojson")) {
                     continue;
                 }
                 let metadata = entry.metadata().ok();
@@ -343,9 +355,38 @@ impl eframe::App for BuilderApp {
                 ui.separator();
 
                 ui.label("Planet PBF");
-                ui.text_edit_singleline(&mut self.form.planet_path);
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.form.planet_path);
+                    if ui.small_button("…").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("PBF", &["pbf"])
+                            .pick_file()
+                        {
+                            self.form.planet_path = path.display().to_string();
+                        }
+                    }
+                });
                 ui.label("Cache Dir");
-                ui.text_edit_singleline(&mut self.form.cache_dir);
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.form.cache_dir);
+                    if ui.small_button("…").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            self.form.cache_dir = path.display().to_string();
+                        }
+                    }
+                });
+                ui.label("SRTM Root (optional — bakes elevation into .1kc files)");
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.form.srtm_root);
+                    if ui.small_button("…").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            self.form.srtm_root = path.display().to_string();
+                        }
+                    }
+                    if !self.form.srtm_root.is_empty() && ui.small_button("✕").clicked() {
+                        self.form.srtm_root.clear();
+                    }
+                });
 
                 ui.separator();
                 ui.label("Bounding Box");

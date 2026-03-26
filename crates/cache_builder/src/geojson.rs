@@ -1,3 +1,4 @@
+use crate::srtm::SrtmSampler;
 use crate::util::{GeoBounds, GeoPoint, RoadPolyline, WayFeature, bounds_intersect, focus_cell_bounds};
 use cell_format::{
     CellFeature, CellPoint, TAG_ADMN, TAG_BLDG, TAG_ROAD, TAG_TREE, TAG_WATR,
@@ -32,6 +33,7 @@ pub fn feature_cell_path(cache_dir: &Path, prefix: &str, cell_lat: i32, cell_lon
 pub fn merge_write_cells(
     cache_dir: &Path,
     roads_by_cell: &HashMap<(i32, i32), Vec<RoadPolyline>>,
+    srtm: Option<&mut SrtmSampler>,
 ) -> Result<usize, String> {
     let road_cells_dir = cache_dir.join("road_cells");
     ensure_cache_dir(&road_cells_dir)?;
@@ -53,11 +55,18 @@ pub fn merge_write_cells(
         }
 
         let cell_bounds = focus_cell_bounds(cell_lat, cell_lon);
-        let features: Vec<CellFeature> = merged
-            .into_values()
-            .filter(|road| bounds_intersect(crate::util::polyline_bounds(&road.points), cell_bounds))
-            .map(road_to_cell_feature)
-            .collect();
+        let mut features: Vec<CellFeature> = Vec::new();
+        for road in merged.into_values() {
+            if !bounds_intersect(crate::util::polyline_bounds(&road.points), cell_bounds) {
+                continue;
+            }
+            let elevations = if let Some(s) = srtm.as_mut() {
+                Some(road.points.iter().map(|p| s.sample(p.lat, p.lon)).collect::<Vec<_>>())
+            } else {
+                None
+            };
+            features.push(road_to_cell_feature(road, elevations));
+        }
 
         let bytes = write_cell(cell_lat as i16, cell_lon as i16, &[(&TAG_ROAD, &features)]);
         fs::write(&path, bytes).map_err(|e| e.to_string())?;
@@ -73,6 +82,7 @@ pub fn merge_write_feature_cells(
     cache_dir: &Path,
     prefix: &str,
     features_by_cell: &HashMap<(i32, i32), Vec<WayFeature>>,
+    srtm: Option<&mut SrtmSampler>,
 ) -> Result<usize, String> {
     let cells_dir = cache_dir.join(format!("{prefix}_cells"));
     fs::create_dir_all(&cells_dir).map_err(|e| e.to_string())?;
@@ -96,11 +106,18 @@ pub fn merge_write_feature_cells(
         }
 
         let cell_bounds = focus_cell_bounds(cell_lat, cell_lon);
-        let cell_features: Vec<CellFeature> = merged
-            .into_values()
-            .filter(|f| bounds_intersect(crate::util::polyline_bounds(&f.points), cell_bounds))
-            .map(|f| way_feature_to_cell_feature(&f, prefix))
-            .collect();
+        let mut cell_features: Vec<CellFeature> = Vec::new();
+        for f in merged.into_values() {
+            if !bounds_intersect(crate::util::polyline_bounds(&f.points), cell_bounds) {
+                continue;
+            }
+            let elevations = if let Some(s) = srtm.as_mut() {
+                Some(f.points.iter().map(|p| s.sample(p.lat, p.lon)).collect::<Vec<_>>())
+            } else {
+                None
+            };
+            cell_features.push(way_feature_to_cell_feature_with_elev(&f, prefix, elevations));
+        }
 
         let bytes = write_cell(cell_lat as i16, cell_lon as i16, &[(tag, &cell_features)]);
         fs::write(&path, bytes).map_err(|e| e.to_string())?;
@@ -230,18 +247,22 @@ fn load_features_from_binary(path: &Path, tag: [u8; 4]) -> Option<Vec<WayFeature
 
 // ── Conversion helpers ────────────────────────────────────────────────────────
 
-fn road_to_cell_feature(road: RoadPolyline) -> CellFeature {
+fn road_to_cell_feature(road: RoadPolyline, elevations: Option<Vec<f32>>) -> CellFeature {
     CellFeature {
         way_id: road.way_id,
         class: encode_road_class(&road.road_class),
         is_polygon: false,
         name: road.name,
         points: road.points.into_iter().map(|p| CellPoint { lon: p.lon, lat: p.lat }).collect(),
-        elevations: None,
+        elevations,
     }
 }
 
-fn way_feature_to_cell_feature(f: &WayFeature, prefix: &str) -> CellFeature {
+fn way_feature_to_cell_feature_with_elev(
+    f: &WayFeature,
+    prefix: &str,
+    elevations: Option<Vec<f32>>,
+) -> CellFeature {
     let class = match prefix {
         "waterway" => encode_watr_class(&f.feature_class),
         _ => 0, // building=0, forest=0, etc.
@@ -252,8 +273,12 @@ fn way_feature_to_cell_feature(f: &WayFeature, prefix: &str) -> CellFeature {
         is_polygon: f.is_polygon,
         name: f.name.clone(),
         points: f.points.iter().map(|p| CellPoint { lon: p.lon, lat: p.lat }).collect(),
-        elevations: None,
+        elevations,
     }
+}
+
+fn way_feature_to_cell_feature(f: &WayFeature, prefix: &str) -> CellFeature {
+    way_feature_to_cell_feature_with_elev(f, prefix, None)
 }
 
 fn prefix_to_tag(prefix: &str) -> [u8; 4] {
