@@ -1,4 +1,4 @@
-use crate::args::BboxCommand;
+use crate::args::{BboxCommand, ContoursBboxCommand};
 use crate::job::{BuildEvent, BuildJob, JobHandle, spawn_job};
 use eframe::egui;
 use eframe::egui::Color32;
@@ -90,6 +90,9 @@ struct BuilderForm {
     min_lon: String,
     max_lon: String,
     margin_deg: String,
+    // Contour-specific fields
+    contour_db: String,   // path to srtm_focus_cache.sqlite
+    gdal_bin_dir: String, // empty = use $PATH
 }
 
 #[derive(Clone)]
@@ -134,6 +137,14 @@ impl BuilderApp {
                 planet_path: "/Volumes/Hilbert/Data/planet-latest.osm.pbf".to_owned(),
                 cache_dir: default_cache_dir.display().to_string(),
                 srtm_root: String::new(),
+                contour_db: std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join("Derived")
+                    .join("terrain")
+                    .join("srtm_focus_cache.sqlite")
+                    .display()
+                    .to_string(),
+                gdal_bin_dir: String::new(),
                 min_lat: "37.60".to_owned(),
                 max_lat: "37.90".to_owned(),
                 min_lon: "-122.60".to_owned(),
@@ -179,6 +190,55 @@ impl BuilderApp {
             self.form.min_lat, self.form.max_lat, self.form.min_lon, self.form.max_lon
         ));
         self.active_job = Some(spawn_job(BuildJob::Bbox(command)));
+    }
+
+    fn start_contour_build(&mut self) {
+        if self.active_job.is_some() {
+            return;
+        }
+        let command = match self.contours_command() {
+            Ok(cmd) => cmd,
+            Err(e) => { self.push_log(e); return; }
+        };
+        self.status = "Building Contours".to_owned();
+        self.progress = 0.0;
+        self.progress_detail = "Starting contour export…".to_owned();
+        self.push_log(format!(
+            "Starting contour build for bbox [{}, {}] x [{}, {}]",
+            self.form.min_lat, self.form.max_lat, self.form.min_lon, self.form.max_lon,
+        ));
+        self.active_job = Some(spawn_job(BuildJob::ContoursBbox(command)));
+    }
+
+    fn contours_command(&self) -> Result<ContoursBboxCommand, String> {
+        let parse_num = |label: &str, value: &str| {
+            value.parse::<f32>().map_err(|_| format!("Invalid {} value '{}'", label, value))
+        };
+        let srtm_root = {
+            let t = self.form.srtm_root.trim();
+            if t.is_empty() {
+                return Err("SRTM Root is required for contour building.".to_owned());
+            }
+            PathBuf::from(t)
+        };
+        let cache_db = {
+            let t = self.form.contour_db.trim();
+            if t.is_empty() {
+                return Err("Contour DB path is required.".to_owned());
+            }
+            PathBuf::from(t)
+        };
+        Ok(ContoursBboxCommand {
+            srtm_root,
+            cache_db_path: cache_db,
+            tmp_dir: None,
+            min_lat: parse_num("min latitude", &self.form.min_lat)?,
+            max_lat: parse_num("max latitude", &self.form.max_lat)?,
+            min_lon: parse_num("min longitude", &self.form.min_lon)?,
+            max_lon: parse_num("max longitude", &self.form.max_lon)?,
+            zoom_buckets: (0..=6).collect(),
+            gdal_bin_dir: PathBuf::from(self.form.gdal_bin_dir.trim()),
+        })
     }
 
     fn build_command(&self) -> Result<BboxCommand, String> {
@@ -527,6 +587,35 @@ impl eframe::App for BuilderApp {
                 ui.checkbox(&mut self.assets.trees, "Trees / Forest");
                 ui.checkbox(&mut self.assets.admin, "Admin Boundaries");
 
+                // ── Terrain / Contours ────────────────────────────────────────
+                ui.separator();
+                ui.heading("Terrain / Contours");
+                ui.label("Contour DB (srtm_focus_cache.sqlite)");
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.form.contour_db);
+                    if ui.small_button("…").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("SQLite", &["sqlite", "db"])
+                            .set_file_name("srtm_focus_cache.sqlite")
+                            .save_file()
+                        {
+                            self.form.contour_db = path.display().to_string();
+                        }
+                    }
+                });
+                ui.label("GDAL bin dir (empty = use $PATH)");
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.form.gdal_bin_dir);
+                    if ui.small_button("…").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            self.form.gdal_bin_dir = path.display().to_string();
+                        }
+                    }
+                    if !self.form.gdal_bin_dir.is_empty() && ui.small_button("✕").clicked() {
+                        self.form.gdal_bin_dir.clear();
+                    }
+                });
+
                 ui.separator();
                 ui.add(
                     egui::ProgressBar::new(self.progress)
@@ -538,10 +627,16 @@ impl eframe::App for BuilderApp {
                 ui.horizontal(|ui| {
                     let building = self.active_job.is_some();
                     if ui
-                        .add_enabled(!building, egui::Button::new("Build Cache"))
+                        .add_enabled(!building, egui::Button::new("Build OSM Cache"))
                         .clicked()
                     {
                         self.start_build();
+                    }
+                    if ui
+                        .add_enabled(!building, egui::Button::new("Build Contours"))
+                        .clicked()
+                    {
+                        self.start_contour_build();
                     }
                     if ui.button("Refresh Inspector").clicked() {
                         self.refresh_inspector();

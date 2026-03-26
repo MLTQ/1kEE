@@ -1,9 +1,23 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
 pub enum Command {
     Gui,
     RoadsBbox(BboxCommand),
+    ContoursBbox(ContoursBboxCommand),
+}
+
+#[derive(Debug, Clone)]
+pub struct ContoursBboxCommand {
+    pub srtm_root: PathBuf,
+    pub cache_db_path: PathBuf,  // path to srtm_focus_cache.sqlite
+    pub tmp_dir: Option<PathBuf>, // default: cache_db parent / srtm_focus_tmp
+    pub min_lat: f32,
+    pub max_lat: f32,
+    pub min_lon: f32,
+    pub max_lon: f32,
+    pub zoom_buckets: Vec<i32>,  // default: all 0–6
+    pub gdal_bin_dir: PathBuf,   // "" = use $PATH
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +51,7 @@ where
     match command.as_str() {
         "gui" => Ok(Command::Gui),
         "roads-bbox" => parse_roads_bbox(args).map(Command::RoadsBbox),
+        "contours-bbox" => parse_contours_bbox(args).map(Command::ContoursBbox),
         "--help" | "-h" | "help" => Err(usage()),
         other => Err(format!("Unknown command '{other}'.\n\n{}", usage())),
     }
@@ -114,6 +129,69 @@ where
     Ok(command)
 }
 
+fn parse_contours_bbox<I>(args: I) -> Result<ContoursBboxCommand, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut srtm_root = None;
+    let mut cache_db_path = None;
+    let mut tmp_dir = None;
+    let mut min_lat = None;
+    let mut max_lat = None;
+    let mut min_lon = None;
+    let mut max_lon = None;
+    let mut zoom_buckets: Option<Vec<i32>> = None;
+    let mut gdal_bin_dir = PathBuf::from("");
+
+    let mut iter = args.into_iter();
+    while let Some(flag) = iter.next() {
+        let value = iter
+            .next()
+            .ok_or_else(|| format!("Missing value for '{flag}'.\n\n{}", usage()))?;
+        match flag.as_str() {
+            "--srtm-root"    => srtm_root = Some(PathBuf::from(value)),
+            "--cache-db"     => cache_db_path = Some(PathBuf::from(value)),
+            "--tmp-dir"      => tmp_dir = Some(PathBuf::from(value)),
+            "--min-lat"      => min_lat = Some(parse_f32("--min-lat", &value)?),
+            "--max-lat"      => max_lat = Some(parse_f32("--max-lat", &value)?),
+            "--min-lon"      => min_lon = Some(parse_f32("--min-lon", &value)?),
+            "--max-lon"      => max_lon = Some(parse_f32("--max-lon", &value)?),
+            "--gdal-bin"     => gdal_bin_dir = PathBuf::from(value),
+            "--zoom-buckets" => {
+                let buckets: Result<Vec<i32>, _> = value
+                    .split(',')
+                    .map(|s| s.trim().parse::<i32>())
+                    .collect();
+                zoom_buckets = Some(
+                    buckets.map_err(|_| format!("Invalid --zoom-buckets '{value}'"))?,
+                );
+            }
+            other => return Err(format!("Unknown flag '{other}'.\n\n{}", usage())),
+        }
+    }
+
+    let cache_db = cache_db_path
+        .ok_or_else(|| format!("Missing --cache-db.\n\n{}", usage()))?;
+    let derived_tmp = tmp_dir.unwrap_or_else(|| {
+        cache_db
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("srtm_focus_tmp")
+    });
+
+    Ok(ContoursBboxCommand {
+        srtm_root: srtm_root.ok_or_else(|| format!("Missing --srtm-root.\n\n{}", usage()))?,
+        cache_db_path: cache_db,
+        tmp_dir: Some(derived_tmp),
+        min_lat: min_lat.ok_or_else(|| format!("Missing --min-lat.\n\n{}", usage()))?,
+        max_lat: max_lat.ok_or_else(|| format!("Missing --max-lat.\n\n{}", usage()))?,
+        min_lon: min_lon.ok_or_else(|| format!("Missing --min-lon.\n\n{}", usage()))?,
+        max_lon: max_lon.ok_or_else(|| format!("Missing --max-lon.\n\n{}", usage()))?,
+        zoom_buckets: zoom_buckets.unwrap_or_else(|| (0..=6).collect()),
+        gdal_bin_dir,
+    })
+}
+
 fn parse_f32(flag: &str, value: &str) -> Result<f32, String> {
     value
         .parse::<f32>()
@@ -121,5 +199,17 @@ fn parse_f32(flag: &str, value: &str) -> Result<f32, String> {
 }
 
 fn usage() -> String {
-    "Usage:\n  one-thousand-electric-eye-cache-builder\n  one-thousand-electric-eye-cache-builder gui\n  one-thousand-electric-eye-cache-builder roads-bbox --planet <planet.osm.pbf> --cache-dir <Derived/osm> --min-lat <f32> --max-lat <f32> --min-lon <f32> --max-lon <f32> [--margin-deg <f32>] [--features roads,waterways,buildings,trees,admin]".to_owned()
+    "Usage:
+  one-thousand-electric-eye-cache-builder
+  one-thousand-electric-eye-cache-builder gui
+  one-thousand-electric-eye-cache-builder roads-bbox \\
+      --planet <planet.osm.pbf> --cache-dir <Derived/osm> \\
+      --min-lat <f32> --max-lat <f32> --min-lon <f32> --max-lon <f32> \\
+      [--margin-deg <f32>] [--features roads,waterways,buildings,trees,admin] \\
+      [--srtm-root <dir>]
+  one-thousand-electric-eye-cache-builder contours-bbox \\
+      --srtm-root <dir> --cache-db <Derived/terrain/srtm_focus_cache.sqlite> \\
+      --min-lat <f32> --max-lat <f32> --min-lon <f32> --max-lon <f32> \\
+      [--zoom-buckets 0,1,2,3,4,5,6] [--gdal-bin <dir>] [--tmp-dir <dir>]"
+        .to_owned()
 }
