@@ -303,6 +303,9 @@ impl BuilderApp {
                     self.progress = update.fraction.clamp(0.0, 1.0);
                     self.progress_detail = update.message.clone();
                 }
+                BuildEvent::Log(line) => {
+                    self.push_log(line);
+                }
                 BuildEvent::Finished(result) => {
                     match result {
                         Ok(summary) => {

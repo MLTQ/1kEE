@@ -16,6 +16,7 @@ pub struct JobHandle {
 #[derive(Debug)]
 pub enum BuildEvent {
     Progress(RoadBuildProgress),
+    Log(String),
     Finished(Result<String, String>),
 }
 
@@ -44,6 +45,9 @@ pub fn spawn_job(job: BuildJob) -> JobHandle {
                     .join("srtm_focus_tmp")
             });
             let mut reporter = |p: ContourBuildProgress| {
+                if p.is_error {
+                    let _ = tx.send(BuildEvent::Log(p.message.clone()));
+                }
                 let _ = tx.send(BuildEvent::Progress(RoadBuildProgress {
                     stage:   p.stage,
                     fraction: p.fraction,

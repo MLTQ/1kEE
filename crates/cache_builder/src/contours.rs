@@ -251,13 +251,13 @@ fn srtm_tile_paths(srtm_root: &Path, bounds: GeoBounds) -> Vec<PathBuf> {
 }
 
 fn run_gdalwarp(
-    gdal_bin: &Path,
+    gdalwarp: &Path,
     tiles: &[PathBuf],
     out_tif: &Path,
     bounds: GeoBounds,
     spec: FocusContourSpec,
 ) -> std::io::Result<()> {
-    let mut cmd = Command::new(gdal_bin.join("gdalwarp"));
+    let mut cmd = Command::new(gdalwarp);
     cmd.args([
         "-q", "-overwrite", "-r", "bilinear",
         "-dstnodata", "-32768",
@@ -274,12 +274,12 @@ fn run_gdalwarp(
 }
 
 fn run_gdal_contour(
-    gdal_bin: &Path,
+    gdal_contour: &Path,
     in_tif: &Path,
     out_gpkg: &Path,
     interval_m: i32,
 ) -> std::io::Result<()> {
-    let mut cmd = Command::new(gdal_bin.join("gdal_contour"));
+    let mut cmd = Command::new(gdal_contour);
     cmd.args(["-q", "-f", "GPKG", "-a", "elevation_m",
               "-i", &interval_m.to_string(),
               "-snodata", "-32768",
@@ -289,8 +289,8 @@ fn run_gdal_contour(
     run_gdal(cmd, "gdal_contour")
 }
 
-fn run_gdal_coastline(gdal_bin: &Path, in_tif: &Path, out_gpkg: &Path) -> std::io::Result<()> {
-    let mut cmd = Command::new(gdal_bin.join("gdal_contour"));
+fn run_gdal_coastline(gdal_contour: &Path, in_tif: &Path, out_gpkg: &Path) -> std::io::Result<()> {
+    let mut cmd = Command::new(gdal_contour);
     cmd.args(["-q", "-f", "GPKG", "-a", "elevation_m",
               "-fl", "0", "-snodata", "-32768", "-nln", "contour"]);
     cmd.arg(in_tif);
@@ -305,9 +305,40 @@ fn cleanup(paths: &[&Path]) {
 // ── Public entry point ────────────────────────────────────────────────────────
 
 pub struct ContourBuildProgress {
-    pub stage:   String,
+    pub stage:    String,
     pub fraction: f32,
-    pub message: String,
+    pub message:  String,
+    pub is_error: bool,
+}
+
+impl ContourBuildProgress {
+    fn info(stage: impl Into<String>, fraction: f32, message: impl Into<String>) -> Self {
+        Self { stage: stage.into(), fraction, message: message.into(), is_error: false }
+    }
+    fn error(stage: impl Into<String>, fraction: f32, message: impl Into<String>) -> Self {
+        Self { stage: stage.into(), fraction, message: message.into(), is_error: true }
+    }
+}
+
+/// Resolve the full path to a GDAL tool, checking the explicit bin dir first
+/// then common Homebrew locations, then falling back to bare name (PATH).
+fn resolve_gdal_tool(gdal_bin_dir: &Path, tool: &str) -> PathBuf {
+    // 1. Explicit bin dir from the user
+    if gdal_bin_dir != Path::new("") {
+        let candidate = gdal_bin_dir.join(tool);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    // 2. Homebrew (Apple Silicon then Intel)
+    for prefix in &["/opt/homebrew/bin", "/usr/local/bin"] {
+        let candidate = PathBuf::from(prefix).join(tool);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    // 3. Bare name — relies on PATH (works in CLI context)
+    PathBuf::from(tool)
 }
 
 /// Pre-build contour tiles for every zoom bucket in `zoom_buckets` that covers
@@ -315,7 +346,7 @@ pub struct ContourBuildProgress {
 /// reads as `Derived/terrain/srtm_focus_cache.sqlite`).
 ///
 /// `gdal_bin_dir` is the directory containing `gdalwarp` / `gdal_contour`.
-/// Pass `Path::new("")` to use the system PATH.
+/// Pass `Path::new("")` to search Homebrew locations then `$PATH`.
 pub fn build_contour_tiles(
     srtm_root: &Path,
     cache_db_path: &Path,
@@ -325,6 +356,57 @@ pub fn build_contour_tiles(
     gdal_bin_dir: &Path,
     progress: &mut dyn FnMut(ContourBuildProgress),
 ) -> Result<String, String> {
+    // ── Validate SRTM root ────────────────────────────────────────────────────
+    if !srtm_root.exists() {
+        return Err(format!("SRTM root does not exist: {}", srtm_root.display()));
+    }
+    let srtm_tile_count = fs::read_dir(srtm_root)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("tif"))
+                .count()
+        })
+        .unwrap_or(0);
+    if srtm_tile_count == 0 {
+        return Err(format!(
+            "No .tif files found directly in SRTM root: {}. \
+             Make sure the directory contains files like N37W122.tif.",
+            srtm_root.display()
+        ));
+    }
+    progress(ContourBuildProgress::info(
+        "Startup",
+        0.0,
+        format!("SRTM root OK — {srtm_tile_count} tiles found"),
+    ));
+
+    // ── Validate GDAL ─────────────────────────────────────────────────────────
+    let gdalwarp = resolve_gdal_tool(gdal_bin_dir, "gdalwarp");
+    let gdal_contour = resolve_gdal_tool(gdal_bin_dir, "gdal_contour");
+    for (tool_path, name) in [(&gdalwarp, "gdalwarp"), (&gdal_contour, "gdal_contour")] {
+        match std::process::Command::new(tool_path).arg("--version").output() {
+            Ok(out) if out.status.success() => {
+                let version = String::from_utf8_lossy(&out.stdout);
+                progress(ContourBuildProgress::info(
+                    "Startup",
+                    0.0,
+                    format!("{name}: {}", version.trim()),
+                ));
+            }
+            Ok(_) => {
+                return Err(format!("{name} at '{}' returned an error on --version", tool_path.display()));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Could not launch {name} at '{}': {e}. \
+                     Set GDAL bin dir to the folder containing gdalwarp.",
+                    tool_path.display()
+                ));
+            }
+        }
+    }
+
     fs::create_dir_all(tmp_dir).map_err(|e| e.to_string())?;
 
     // Ensure schema exists before we start
@@ -360,14 +442,13 @@ pub fn build_contour_tiles(
             for lon_bucket in lon_range.clone() {
                 let tile = TileKey { zoom_bucket: spec.zoom_bucket, lat_bucket, lon_bucket };
 
-                progress(ContourBuildProgress {
-                    stage:   format!("Zoom bucket {}", spec.zoom_bucket),
-                    fraction: done as f32 / total_tiles.max(1) as f32,
-                    message: format!(
-                        "z{} tile ({lat_bucket},{lon_bucket}) — {done}/{total_tiles}",
-                        spec.zoom_bucket
-                    ),
-                });
+                let frac = done as f32 / total_tiles.max(1) as f32;
+                let stage = format!("Zoom bucket {}", spec.zoom_bucket);
+                progress(ContourBuildProgress::info(
+                    &stage,
+                    frac,
+                    format!("z{} tile ({lat_bucket},{lon_bucket}) — {done}/{total_tiles}", spec.zoom_bucket),
+                ));
 
                 if tile_exists(&conn, tile) {
                     skipped += 1;
@@ -386,52 +467,50 @@ pub fn build_contour_tiles(
 
                 let srtm_tiles = srtm_tile_paths(srtm_root, tile_bounds);
                 if srtm_tiles.is_empty() {
-                    done += 1;
-                    continue; // no SRTM coverage — skip silently
-                }
-
-                let stem = format!("z{}_lat{}_lon{}", tile.zoom_bucket, lat_bucket, lon_bucket);
-                let tmp_tif  = tmp_dir.join(format!("{stem}.tmp.tif"));
-                let tmp_gpkg = tmp_dir.join(format!("{stem}.tmp.gpkg"));
-                let tmp_coast_gpkg = tmp_dir.join(format!("{stem}.coast.tmp.gpkg"));
-
-                cleanup(&[&tmp_tif, &tmp_gpkg, &tmp_coast_gpkg]);
-
-                if let Err(e) = run_gdalwarp(gdal_bin_dir, &srtm_tiles, &tmp_tif, tile_bounds, *spec) {
-                    cleanup(&[&tmp_tif]);
-                    progress(ContourBuildProgress {
-                        stage: format!("Zoom bucket {}", spec.zoom_bucket),
-                        fraction: done as f32 / total_tiles.max(1) as f32,
-                        message: format!("gdalwarp failed for z{} ({lat_bucket},{lon_bucket}): {e}", spec.zoom_bucket),
-                    });
+                    // No SRTM data for this tile — ocean or outside coverage
                     done += 1;
                     continue;
                 }
 
-                if let Err(e) = run_gdal_contour(gdal_bin_dir, &tmp_tif, &tmp_gpkg, spec.interval_m) {
+                let stem = format!("z{}_lat{}_lon{}", tile.zoom_bucket, lat_bucket, lon_bucket);
+                let tmp_tif        = tmp_dir.join(format!("{stem}.tmp.tif"));
+                let tmp_gpkg       = tmp_dir.join(format!("{stem}.tmp.gpkg"));
+                let tmp_coast_gpkg = tmp_dir.join(format!("{stem}.coast.tmp.gpkg"));
+
+                cleanup(&[&tmp_tif, &tmp_gpkg, &tmp_coast_gpkg]);
+
+                if let Err(e) = run_gdalwarp(&gdalwarp, &srtm_tiles, &tmp_tif, tile_bounds, *spec) {
+                    cleanup(&[&tmp_tif]);
+                    progress(ContourBuildProgress::error(
+                        &stage, frac,
+                        format!("gdalwarp failed for z{} ({lat_bucket},{lon_bucket}): {e}", spec.zoom_bucket),
+                    ));
+                    done += 1;
+                    continue;
+                }
+
+                if let Err(e) = run_gdal_contour(&gdal_contour, &tmp_tif, &tmp_gpkg, spec.interval_m) {
                     cleanup(&[&tmp_tif, &tmp_gpkg]);
-                    progress(ContourBuildProgress {
-                        stage: format!("Zoom bucket {}", spec.zoom_bucket),
-                        fraction: done as f32 / total_tiles.max(1) as f32,
-                        message: format!("gdal_contour failed for z{} ({lat_bucket},{lon_bucket}): {e}", spec.zoom_bucket),
-                    });
+                    progress(ContourBuildProgress::error(
+                        &stage, frac,
+                        format!("gdal_contour failed for z{} ({lat_bucket},{lon_bucket}): {e}", spec.zoom_bucket),
+                    ));
                     done += 1;
                     continue;
                 }
 
                 if let Err(e) = import_tile(cache_db_path, tile, &tmp_gpkg) {
                     cleanup(&[&tmp_tif, &tmp_gpkg]);
-                    progress(ContourBuildProgress {
-                        stage: format!("Zoom bucket {}", spec.zoom_bucket),
-                        fraction: done as f32 / total_tiles.max(1) as f32,
-                        message: format!("DB import failed for z{} ({lat_bucket},{lon_bucket}): {e}", spec.zoom_bucket),
-                    });
+                    progress(ContourBuildProgress::error(
+                        &stage, frac,
+                        format!("DB import failed for z{} ({lat_bucket},{lon_bucket}): {e}", spec.zoom_bucket),
+                    ));
                     done += 1;
                     continue;
                 }
 
                 // Piggyback coastline 0m extraction (matches desktop behaviour)
-                if run_gdal_coastline(gdal_bin_dir, &tmp_tif, &tmp_coast_gpkg).is_ok() {
+                if run_gdal_coastline(&gdal_contour, &tmp_tif, &tmp_coast_gpkg).is_ok() {
                     let _ = import_coastline(cache_db_path, tile, &tmp_coast_gpkg);
                 }
 
