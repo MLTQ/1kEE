@@ -1,5 +1,5 @@
 use crate::srtm::SrtmSampler;
-use crate::util::{GeoBounds, GeoPoint, RoadPolyline, WayFeature, bounds_intersect, focus_cell_bounds};
+use crate::util::{GeoPoint, RoadPolyline, WayFeature, bounds_intersect, focus_cell_bounds};
 use cell_format::{
     CellFeature, CellPoint, TAG_ADMN, TAG_BLDG, TAG_ROAD, TAG_TREE, TAG_WATR,
     cell_filename, admin_filename,
@@ -33,7 +33,7 @@ pub fn feature_cell_path(cache_dir: &Path, prefix: &str, cell_lat: i32, cell_lon
 pub fn merge_write_cells(
     cache_dir: &Path,
     roads_by_cell: &HashMap<(i32, i32), Vec<RoadPolyline>>,
-    srtm: Option<&mut SrtmSampler>,
+    mut srtm: Option<&mut SrtmSampler>,
 ) -> Result<usize, String> {
     let road_cells_dir = cache_dir.join("road_cells");
     ensure_cache_dir(&road_cells_dir)?;
@@ -68,7 +68,7 @@ pub fn merge_write_cells(
             features.push(road_to_cell_feature(road, elevations));
         }
 
-        let bytes = write_cell(cell_lat as i16, cell_lon as i16, &[(&TAG_ROAD, &features)]);
+        let bytes = write_cell(cell_lat as i16, cell_lon as i16, &[(TAG_ROAD, &features)]);
         fs::write(&path, bytes).map_err(|e| e.to_string())?;
         written_cells += 1;
     }
@@ -82,7 +82,7 @@ pub fn merge_write_feature_cells(
     cache_dir: &Path,
     prefix: &str,
     features_by_cell: &HashMap<(i32, i32), Vec<WayFeature>>,
-    srtm: Option<&mut SrtmSampler>,
+    mut srtm: Option<&mut SrtmSampler>,
 ) -> Result<usize, String> {
     let cells_dir = cache_dir.join(format!("{prefix}_cells"));
     fs::create_dir_all(&cells_dir).map_err(|e| e.to_string())?;
@@ -168,7 +168,7 @@ pub fn write_admin_level_file(
 
     let count = cell_features.len();
     // Admin files are global, not per-cell, so cell coordinates are (0, 0).
-    let bytes = write_cell(0, 0, &[(&TAG_ADMN, &cell_features)]);
+    let bytes = write_cell(0, 0, &[(TAG_ADMN, &cell_features)]);
     fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(count)
 }

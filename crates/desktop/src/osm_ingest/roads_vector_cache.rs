@@ -4,7 +4,7 @@ use cell_format::{
     read::read_single_chunk,
     write::write_cell,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use super::util::{
     bounds_intersect, canonical_road_class, expand_bounds, parse_geojson_linestring,
     parse_geojson_multilinestring, polyline_bounds, road_class_matches,
 };
-use super::{FOCUS_NODE_MARGIN_DEGREES, GeoBounds, OsmFeatureKind, RoadLayerKind, RoadPolyline};
+use super::{FOCUS_NODE_MARGIN_DEGREES, GeoBounds, RoadLayerKind, RoadPolyline};
 use osmpbf::{Element, ElementReader};
 
 pub(super) fn vector_cache_dir(db_path: &Path) -> Result<PathBuf, String> {
@@ -123,7 +123,7 @@ pub(super) fn ensure_cell_geojson_from_extract(
     // Path is …/road_cells/road_cell_{lat}_{lon}.1kc; we use (0,0) as a safe
     // fallback since the cell coords in the header are informational only.
     let (cell_lat, cell_lon) = cell_coords_from_path(output_path);
-    let bytes = write_cell(cell_lat, cell_lon, &[(&TAG_ROAD, &cell_features)]);
+    let bytes = write_cell(cell_lat, cell_lon, &[(TAG_ROAD, &cell_features)]);
     fs::write(output_path, bytes).map_err(|error| error.to_string())?;
 
     Ok(feature_count)
@@ -314,7 +314,7 @@ pub(super) fn write_roads_to_vector_cells(
             })
             .collect();
 
-        let bytes = write_cell(cell_lat as i16, cell_lon as i16, &[(&TAG_ROAD, &cell_features)]);
+        let bytes = write_cell(cell_lat as i16, cell_lon as i16, &[(TAG_ROAD, &cell_features)]);
         fs::write(&path, bytes).map_err(|e| e.to_string())?;
         written_cells += 1;
     }

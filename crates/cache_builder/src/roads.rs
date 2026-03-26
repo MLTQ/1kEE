@@ -284,7 +284,7 @@ fn collect_all_features_by_cell(
     command:         &BboxCommand,
     bounds:          GeoBounds,
     candidate_nodes: &mut NodeStore,
-    srtm:            Option<&mut SrtmSampler>,
+    mut srtm:        Option<&mut SrtmSampler>,
     progress:        &mut dyn FnMut(RoadBuildProgress),
 ) -> Result<FeatureBuildStats, String> {
     // Resume from the last way-scan checkpoint if available.
