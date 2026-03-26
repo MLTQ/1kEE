@@ -9,7 +9,7 @@ pub enum Command {
 #[derive(Debug, Clone)]
 pub struct BboxCommand {
     pub planet_path: PathBuf,
-    pub cache_dir: PathBuf,  // parent dir; subdirs created per feature
+    pub cache_dir: PathBuf, // parent dir; subdirs created per feature
     pub min_lat: f32,
     pub max_lat: f32,
     pub min_lon: f32,

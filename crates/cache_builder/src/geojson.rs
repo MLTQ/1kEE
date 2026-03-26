@@ -1,4 +1,6 @@
-use crate::util::{GeoBounds, GeoPoint, RoadPolyline, WayFeature, bounds_intersect, focus_cell_bounds};
+use crate::util::{
+    GeoBounds, GeoPoint, RoadPolyline, WayFeature, bounds_intersect, focus_cell_bounds,
+};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs;
@@ -9,18 +11,17 @@ pub fn ensure_cache_dir(path: &Path) -> Result<(), String> {
 }
 
 pub fn vector_cell_path(cache_dir: &Path, cell_lat: i32, cell_lon: i32) -> PathBuf {
-    cache_dir
-        .join("road_cells")
-        .join(format!(
-            "road_cell_{:+04}_{:+05}.geojson",
-            cell_lat, cell_lon
-        ))
+    cache_dir.join("road_cells").join(format!(
+        "road_cell_{:+04}_{:+05}.geojson",
+        cell_lat, cell_lon
+    ))
 }
 
 pub fn feature_cell_path(cache_dir: &Path, prefix: &str, cell_lat: i32, cell_lon: i32) -> PathBuf {
-    cache_dir
-        .join(format!("{prefix}_cells"))
-        .join(format!("{prefix}_cell_{:+04}_{:+05}.geojson", cell_lat, cell_lon))
+    cache_dir.join(format!("{prefix}_cells")).join(format!(
+        "{prefix}_cell_{:+04}_{:+05}.geojson",
+        cell_lat, cell_lon
+    ))
 }
 
 pub fn merge_write_cells(

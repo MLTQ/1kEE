@@ -34,10 +34,7 @@ pub fn load_features_from_cells(
 
     for lat in min_lat_c..=max_lat_c {
         for lon in min_lon_c..=max_lon_c {
-            let path = cell_dir.join(format!(
-                "{prefix}_cell_{:+04}_{:+05}.geojson",
-                lat, lon
-            ));
+            let path = cell_dir.join(format!("{prefix}_cell_{:+04}_{:+05}.geojson", lat, lon));
             if !path.exists() {
                 continue;
             }

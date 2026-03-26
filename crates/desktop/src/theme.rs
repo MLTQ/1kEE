@@ -536,9 +536,9 @@ pub fn road_minor_color() -> egui::Color32 {
 /// Colors are theme-neutral — fixed RGBA values chosen to read on any dark palette.
 pub fn admin_color(level: u8) -> egui::Color32 {
     match level {
-        2 => egui::Color32::from_rgba_unmultiplied(220, 200, 60, 200),  // country — bright yellow
-        4 => egui::Color32::from_rgba_unmultiplied(180, 140, 60, 160),  // state — amber
-        6 => egui::Color32::from_rgba_unmultiplied(140, 110, 60, 120),  // county — muted
+        2 => egui::Color32::from_rgba_unmultiplied(220, 200, 60, 200), // country — bright yellow
+        4 => egui::Color32::from_rgba_unmultiplied(180, 140, 60, 160), // state — amber
+        6 => egui::Color32::from_rgba_unmultiplied(140, 110, 60, 120), // county — muted
         _ => egui::Color32::from_rgba_unmultiplied(100, 80, 60, 80),   // municipality — very subtle
     }
 }

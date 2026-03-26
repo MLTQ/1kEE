@@ -14,8 +14,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-const NE_URL: &str =
-    "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_admin_0_countries.geojson";
+const NE_URL: &str = "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_admin_0_countries.geojson";
 
 fn main() {
     // Only rerun this script when build.rs itself changes.
@@ -34,7 +33,14 @@ fn main() {
 
     // Try curl first (available on macOS and most Linux distros by default).
     let ok = Command::new("curl")
-        .args(["-fsSL", "--max-time", "30", "-o", dest.to_str().unwrap(), NE_URL])
+        .args([
+            "-fsSL",
+            "--max-time",
+            "30",
+            "-o",
+            dest.to_str().unwrap(),
+            NE_URL,
+        ])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);

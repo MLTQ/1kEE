@@ -26,7 +26,7 @@ pub struct WayFeature {
     pub feature_class: String,
     pub name: Option<String>,
     pub points: Vec<GeoPoint>,
-    pub is_polygon: bool,  // true = close ring for Polygon geometry
+    pub is_polygon: bool, // true = close ring for Polygon geometry
 }
 
 pub fn canonical_road_class(value: &str) -> Option<&'static str> {
@@ -50,7 +50,11 @@ pub fn canonical_waterway_class(value: &str) -> Option<&'static str> {
 }
 
 pub fn canonical_building_class(value: &str) -> Option<&'static str> {
-    if value.is_empty() || value == "no" { None } else { Some("building") }
+    if value.is_empty() || value == "no" {
+        None
+    } else {
+        Some("building")
+    }
 }
 
 pub fn canonical_tree_class(key: &str, value: &str) -> Option<&'static str> {

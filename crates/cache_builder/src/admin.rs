@@ -1,7 +1,7 @@
 use crate::args::BboxCommand;
 use crate::geojson::write_admin_level_file;
 use crate::node_store::NodeStore;
-use crate::roads::{open_planet_at, RoadBuildProgress};
+use crate::roads::{RoadBuildProgress, open_planet_at};
 use crate::util::{GeoBounds, GeoPoint};
 use osmpbf::{BlobDecode, RelMemberType};
 use std::collections::{HashMap, HashSet};
@@ -26,7 +26,7 @@ pub fn load_or_build_admin_boundaries(
     } else {
         let count = node_store.count_admin_relations()?;
         progress(RoadBuildProgress {
-            stage:   "Scanning Relations".to_owned(),
+            stage: "Scanning Relations".to_owned(),
             fraction: 0.84,
             message: format!("Relation scan already complete ({count} relations cached)"),
         });
@@ -37,7 +37,7 @@ pub fn load_or_build_admin_boundaries(
         collect_admin_way_nodes(&command.planet_path, node_store, progress)?;
     } else {
         progress(RoadBuildProgress {
-            stage:   "Scanning Admin Ways".to_owned(),
+            stage: "Scanning Admin Ways".to_owned(),
             fraction: 0.90,
             message: "Admin way scan already complete".to_owned(),
         });
@@ -57,7 +57,7 @@ fn collect_admin_relations(
     let resume_offset = node_store.get_scan_offset("relation_scan")?;
     if let Some(off) = resume_offset {
         progress(RoadBuildProgress {
-            stage:   "Scanning Relations".to_owned(),
+            stage: "Scanning Relations".to_owned(),
             fraction: 0.83,
             message: format!("Resuming relation scan from file offset {off}"),
         });
@@ -71,12 +71,16 @@ fn collect_admin_relations(
     let mut total_relations = 0usize;
 
     for blob_result in reader {
-        let blob    = blob_result.map_err(|e| e.to_string())?;
+        let blob = blob_result.map_err(|e| e.to_string())?;
         let decoded = blob.decode().map_err(|e| e.to_string())?;
-        let BlobDecode::OsmData(block) = decoded else { continue };
+        let BlobDecode::OsmData(block) = decoded else {
+            continue;
+        };
 
         for element in block.elements() {
-            let osmpbf::Element::Relation(rel) = element else { continue };
+            let osmpbf::Element::Relation(rel) = element else {
+                continue;
+            };
 
             // Check tags: boundary=administrative AND admin_level in {2,4,6,8}
             let mut is_boundary = false;
@@ -92,7 +96,7 @@ fn collect_admin_relations(
                             "4" => Some(4),
                             "6" => Some(6),
                             "8" => Some(8),
-                            _   => None,
+                            _ => None,
                         };
                     }
                     "name" if name.is_none() => name = Some(value.to_owned()),
@@ -100,21 +104,29 @@ fn collect_admin_relations(
                 }
             }
 
-            if !is_boundary { continue; }
+            if !is_boundary {
+                continue;
+            }
             let Some(level) = admin_level else { continue };
 
             // Collect outer/empty-role member ways.
             let way_ids: Vec<i64> = rel
                 .members()
                 .filter_map(|m| {
-                    if m.member_type != RelMemberType::Way { return None; }
+                    if m.member_type != RelMemberType::Way {
+                        return None;
+                    }
                     let role = m.role().unwrap_or("");
-                    if role == "inner" { return None; }
+                    if role == "inner" {
+                        return None;
+                    }
                     Some(m.member_id)
                 })
                 .collect();
 
-            if way_ids.is_empty() { continue; }
+            if way_ids.is_empty() {
+                continue;
+            }
 
             batch.push((rel.id(), name, level, way_ids));
             total_relations += 1;
@@ -126,7 +138,7 @@ fn collect_admin_relations(
                 node_store.save_scan_offset("relation_scan", checkpoint)?;
 
                 progress(RoadBuildProgress {
-                    stage:   "Scanning Relations".to_owned(),
+                    stage: "Scanning Relations".to_owned(),
                     fraction: 0.84,
                     message: format!("Collected {total_relations} admin relations so far"),
                 });
@@ -140,7 +152,7 @@ fn collect_admin_relations(
     }
 
     progress(RoadBuildProgress {
-        stage:   "Scanning Relations".to_owned(),
+        stage: "Scanning Relations".to_owned(),
         fraction: 0.86,
         message: format!("Relation scan complete: {total_relations} admin relations found"),
     });
@@ -167,7 +179,7 @@ fn collect_admin_way_nodes(
     let resume_offset = node_store.get_scan_offset("admin_way_scan")?;
     if let Some(off) = resume_offset {
         progress(RoadBuildProgress {
-            stage:   "Scanning Admin Ways".to_owned(),
+            stage: "Scanning Admin Ways".to_owned(),
             fraction: 0.87,
             message: format!("Resuming admin way scan from file offset {off}"),
         });
@@ -180,13 +192,19 @@ fn collect_admin_way_nodes(
     let mut ways_found = 0usize;
 
     for blob_result in reader {
-        let blob    = blob_result.map_err(|e| e.to_string())?;
+        let blob = blob_result.map_err(|e| e.to_string())?;
         let decoded = blob.decode().map_err(|e| e.to_string())?;
-        let BlobDecode::OsmData(block) = decoded else { continue };
+        let BlobDecode::OsmData(block) = decoded else {
+            continue;
+        };
 
         for element in block.elements() {
-            let osmpbf::Element::Way(way) = element else { continue };
-            if !admin_way_ids.contains(&way.id()) { continue; }
+            let osmpbf::Element::Way(way) = element else {
+                continue;
+            };
+            if !admin_way_ids.contains(&way.id()) {
+                continue;
+            }
 
             let node_ids: Vec<i64> = way.refs().collect();
             batch.push((way.id(), node_ids));
@@ -199,7 +217,7 @@ fn collect_admin_way_nodes(
                 node_store.save_scan_offset("admin_way_scan", checkpoint)?;
 
                 progress(RoadBuildProgress {
-                    stage:   "Scanning Admin Ways".to_owned(),
+                    stage: "Scanning Admin Ways".to_owned(),
                     fraction: 0.89,
                     message: format!("Collected node refs for {ways_found} admin ways"),
                 });
@@ -213,7 +231,7 @@ fn collect_admin_way_nodes(
     }
 
     progress(RoadBuildProgress {
-        stage:   "Scanning Admin Ways".to_owned(),
+        stage: "Scanning Admin Ways".to_owned(),
         fraction: 0.90,
         message: format!("Admin way scan complete: {ways_found} ways processed"),
     });
@@ -251,7 +269,7 @@ fn stitch_and_write(
     }
 
     progress(RoadBuildProgress {
-        stage:   "Writing Admin Boundaries".to_owned(),
+        stage: "Writing Admin Boundaries".to_owned(),
         fraction: 0.95,
         message: format!(
             "Wrote {total_written} admin boundary rings across {} levels",
@@ -274,9 +292,7 @@ pub fn stitch_ways(ways: &HashMap<i64, Vec<GeoPoint>>) -> Vec<Vec<GeoPoint>> {
     }
 
     // Helper: approximate integer key for an endpoint.
-    let key = |pt: GeoPoint| -> (i64, i64) {
-        ((pt.lat * 1e5) as i64, (pt.lon * 1e5) as i64)
-    };
+    let key = |pt: GeoPoint| -> (i64, i64) { ((pt.lat * 1e5) as i64, (pt.lon * 1e5) as i64) };
 
     // Build an index: endpoint_key → way_id (or multiple).
     // We store (way_id, is_end) pairs so we can look up by either end.
@@ -284,9 +300,11 @@ pub fn stitch_ways(ways: &HashMap<i64, Vec<GeoPoint>>) -> Vec<Vec<GeoPoint>> {
     // reversed=false → key is the start; reversed=true → key is the end.
     let mut endpoint_index: HashMap<(i64, i64), Vec<i64>> = HashMap::new();
     for (&way_id, pts) in ways {
-        if pts.len() < 2 { continue; }
+        if pts.len() < 2 {
+            continue;
+        }
         let start_key = key(*pts.first().unwrap());
-        let end_key   = key(*pts.last().unwrap());
+        let end_key = key(*pts.last().unwrap());
         endpoint_index.entry(start_key).or_default().push(way_id);
         endpoint_index.entry(end_key).or_default().push(way_id);
     }
@@ -295,9 +313,13 @@ pub fn stitch_ways(ways: &HashMap<i64, Vec<GeoPoint>>) -> Vec<Vec<GeoPoint>> {
     let mut chains: Vec<Vec<GeoPoint>> = Vec::new();
 
     for &start_way_id in ways.keys() {
-        if used.contains(&start_way_id) { continue; }
+        if used.contains(&start_way_id) {
+            continue;
+        }
         let start_pts = &ways[&start_way_id];
-        if start_pts.len() < 2 { continue; }
+        if start_pts.len() < 2 {
+            continue;
+        }
 
         used.insert(start_way_id);
         let mut chain: Vec<GeoPoint> = start_pts.clone();
@@ -311,11 +333,14 @@ pub fn stitch_ways(ways: &HashMap<i64, Vec<GeoPoint>>) -> Vec<Vec<GeoPoint>> {
             let Some(next_id) = next else { break };
 
             let next_pts = &ways[&next_id];
-            if next_pts.len() < 2 { used.insert(next_id); continue; }
+            if next_pts.len() < 2 {
+                used.insert(next_id);
+                continue;
+            }
 
             used.insert(next_id);
             let next_start_key = key(*next_pts.first().unwrap());
-            let next_end_key   = key(*next_pts.last().unwrap());
+            let next_end_key = key(*next_pts.last().unwrap());
 
             if next_start_key == tail_key {
                 // Append forward (skip duplicate junction point).
