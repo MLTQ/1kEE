@@ -4,10 +4,14 @@
 /// box, skips tiles already present in `srtm_focus_cache.sqlite`, and runs
 /// the same gdalwarp + gdal_contour pipeline the desktop uses on-demand.
 /// The desktop will find the pre-built tiles and skip its own generation.
+use rayon::prelude::*;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 // ── Types (mirrors desktop srtm_focus_cache internals) ───────────────────────
@@ -408,8 +412,6 @@ pub fn build_contour_tiles(
     }
 
     fs::create_dir_all(tmp_dir).map_err(|e| e.to_string())?;
-
-    // Ensure schema exists before we start
     open_cache_db(cache_db_path).map_err(|e| e.to_string())?;
 
     let specs = all_specs();
@@ -419,111 +421,149 @@ pub fn build_contour_tiles(
         .copied()
         .collect();
 
-    // Count total tiles up front for progress reporting
-    let total_tiles: usize = selected.iter().map(|spec| {
-        let bucket_step = spec.half_extent_deg * 0.45;
-        let lat_buckets = tiles_in_range(bounds.min_lat, bounds.max_lat, bucket_step);
-        let lon_buckets = tiles_in_range(bounds.min_lon, bounds.max_lon, bucket_step);
-        lat_buckets * lon_buckets
-    }).sum();
+    // ── Phase 1: collect work (single-threaded, needs SQLite connection) ──────
+    progress(ContourBuildProgress::info("Planning", 0.0, "Scanning tiles…"));
 
-    let mut done = 0usize;
-    let mut built = 0usize;
-    let mut skipped = 0usize;
+    struct TileWork {
+        tile: TileKey,
+        tile_bounds: GeoBounds,
+        spec: FocusContourSpec,
+        srtm_tiles: Vec<PathBuf>,
+    }
 
     let conn = open_cache_db(cache_db_path).map_err(|e| e.to_string())?;
+    let mut work: Vec<TileWork> = Vec::new();
+    let mut skipped = 0usize;
 
     for spec in &selected {
         let bucket_step = spec.half_extent_deg * 0.45;
-        let lat_range = bucket_range(bounds.min_lat, bounds.max_lat, bucket_step);
-        let lon_range = bucket_range(bounds.min_lon, bounds.max_lon, bucket_step);
-
-        for lat_bucket in lat_range.clone() {
-            for lon_bucket in lon_range.clone() {
+        for lat_bucket in bucket_range(bounds.min_lat, bounds.max_lat, bucket_step) {
+            for lon_bucket in bucket_range(bounds.min_lon, bounds.max_lon, bucket_step) {
                 let tile = TileKey { zoom_bucket: spec.zoom_bucket, lat_bucket, lon_bucket };
-
-                let frac = done as f32 / total_tiles.max(1) as f32;
-                let stage = format!("Zoom bucket {}", spec.zoom_bucket);
-                progress(ContourBuildProgress::info(
-                    &stage,
-                    frac,
-                    format!("z{} tile ({lat_bucket},{lon_bucket}) — {done}/{total_tiles}", spec.zoom_bucket),
-                ));
-
                 if tile_exists(&conn, tile) {
                     skipped += 1;
-                    done += 1;
                     continue;
                 }
-
-                let bucket_center_lat = (lat_bucket as f32 * bucket_step).clamp(-89.999, 89.999);
-                let bucket_center_lon = lon_bucket as f32 * bucket_step;
+                let center_lat = (lat_bucket as f32 * bucket_step).clamp(-89.999, 89.999);
+                let center_lon = lon_bucket as f32 * bucket_step;
                 let tile_bounds = GeoBounds {
-                    min_lat: (bucket_center_lat - spec.half_extent_deg).clamp(-89.999, 89.999),
-                    max_lat: (bucket_center_lat + spec.half_extent_deg).clamp(-89.999, 89.999),
-                    min_lon: bucket_center_lon - spec.half_extent_deg,
-                    max_lon: bucket_center_lon + spec.half_extent_deg,
+                    min_lat: (center_lat - spec.half_extent_deg).clamp(-89.999, 89.999),
+                    max_lat: (center_lat + spec.half_extent_deg).clamp(-89.999, 89.999),
+                    min_lon: center_lon - spec.half_extent_deg,
+                    max_lon: center_lon + spec.half_extent_deg,
                 };
-
                 let srtm_tiles = srtm_tile_paths(srtm_root, tile_bounds);
-                if srtm_tiles.is_empty() {
-                    // No SRTM data for this tile — ocean or outside coverage
-                    done += 1;
-                    continue;
+                if !srtm_tiles.is_empty() {
+                    work.push(TileWork { tile, tile_bounds, spec: *spec, srtm_tiles });
                 }
+            }
+        }
+    }
+    drop(conn);
 
-                let stem = format!("z{}_lat{}_lon{}", tile.zoom_bucket, lat_bucket, lon_bucket);
+    let total = work.len() + skipped;
+    let to_build = work.len();
+    progress(ContourBuildProgress::info(
+        "Planning",
+        0.0,
+        format!("{to_build} tiles to build, {skipped} already cached, {total} total"),
+    ));
+
+    if work.is_empty() {
+        return Ok(format!("Contours complete: 0 built, {skipped} already cached, {total} total"));
+    }
+
+    // ── Phase 2: parallel build ───────────────────────────────────────────────
+    let num_threads = (std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        / 2)
+        .max(2)
+        .min(8);
+    progress(ContourBuildProgress::info(
+        "Building",
+        0.0,
+        format!("Starting {num_threads} parallel workers"),
+    ));
+
+    enum Outcome { Built, Error(String) }
+    let (tx, rx) = mpsc::channel::<Outcome>();
+    let done_count = Arc::new(AtomicUsize::new(0));
+
+    // Capture by-value for the spawned thread
+    let gdalwarp = gdalwarp.clone();
+    let gdal_contour = gdal_contour.clone();
+    let cache_db_path = cache_db_path.to_path_buf();
+    let tmp_dir = tmp_dir.to_path_buf();
+    let done_arc = done_count.clone();
+
+    std::thread::spawn(move || {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .expect("rayon pool");
+        pool.install(|| {
+            work.into_par_iter().for_each_with(tx, |tx, w| {
+                let TileWork { tile, tile_bounds, spec, srtm_tiles } = w;
+                let stem = format!(
+                    "z{}_lat{}_lon{}",
+                    tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket
+                );
                 let tmp_tif        = tmp_dir.join(format!("{stem}.tmp.tif"));
                 let tmp_gpkg       = tmp_dir.join(format!("{stem}.tmp.gpkg"));
                 let tmp_coast_gpkg = tmp_dir.join(format!("{stem}.coast.tmp.gpkg"));
-
                 cleanup(&[&tmp_tif, &tmp_gpkg, &tmp_coast_gpkg]);
 
-                if let Err(e) = run_gdalwarp(&gdalwarp, &srtm_tiles, &tmp_tif, tile_bounds, *spec) {
-                    cleanup(&[&tmp_tif]);
-                    progress(ContourBuildProgress::error(
-                        &stage, frac,
-                        format!("gdalwarp failed for z{} ({lat_bucket},{lon_bucket}): {e}", spec.zoom_bucket),
-                    ));
-                    done += 1;
-                    continue;
-                }
-
-                if let Err(e) = run_gdal_contour(&gdal_contour, &tmp_tif, &tmp_gpkg, spec.interval_m) {
-                    cleanup(&[&tmp_tif, &tmp_gpkg]);
-                    progress(ContourBuildProgress::error(
-                        &stage, frac,
-                        format!("gdal_contour failed for z{} ({lat_bucket},{lon_bucket}): {e}", spec.zoom_bucket),
-                    ));
-                    done += 1;
-                    continue;
-                }
-
-                if let Err(e) = import_tile(cache_db_path, tile, &tmp_gpkg) {
-                    cleanup(&[&tmp_tif, &tmp_gpkg]);
-                    progress(ContourBuildProgress::error(
-                        &stage, frac,
-                        format!("DB import failed for z{} ({lat_bucket},{lon_bucket}): {e}", spec.zoom_bucket),
-                    ));
-                    done += 1;
-                    continue;
-                }
-
-                // Piggyback coastline 0m extraction (matches desktop behaviour)
-                if run_gdal_coastline(&gdal_contour, &tmp_tif, &tmp_coast_gpkg).is_ok() {
-                    let _ = import_coastline(cache_db_path, tile, &tmp_coast_gpkg);
-                }
+                let outcome = (|| {
+                    run_gdalwarp(&gdalwarp, &srtm_tiles, &tmp_tif, tile_bounds, spec)
+                        .map_err(|e| format!("gdalwarp: {e}"))?;
+                    run_gdal_contour(&gdal_contour, &tmp_tif, &tmp_gpkg, spec.interval_m)
+                        .map_err(|e| format!("gdal_contour: {e}"))?;
+                    import_tile(&cache_db_path, tile, &tmp_gpkg)
+                        .map_err(|e| format!("db import: {e}"))?;
+                    if run_gdal_coastline(&gdal_contour, &tmp_tif, &tmp_coast_gpkg).is_ok() {
+                        let _ = import_coastline(&cache_db_path, tile, &tmp_coast_gpkg);
+                    }
+                    Ok::<_, String>(())
+                })();
 
                 cleanup(&[&tmp_tif, &tmp_gpkg, &tmp_coast_gpkg]);
+                done_arc.fetch_add(1, Ordering::Relaxed);
+                let _ = tx.send(match outcome {
+                    Ok(()) => Outcome::Built,
+                    Err(e) => Outcome::Error(format!(
+                        "z{} ({},{}) — {e}",
+                        tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket
+                    )),
+                });
+            });
+        });
+    });
+
+    // ── Phase 3: drain results, report progress ───────────────────────────────
+    let mut built = 0usize;
+    let mut errors = 0usize;
+    for outcome in rx {
+        let done = done_count.load(Ordering::Relaxed);
+        let frac = done as f32 / to_build.max(1) as f32;
+        match outcome {
+            Outcome::Built => {
                 built += 1;
-                done += 1;
+                progress(ContourBuildProgress::info(
+                    "Building",
+                    frac,
+                    format!("{done}/{to_build} tiles built"),
+                ));
+            }
+            Outcome::Error(msg) => {
+                errors += 1;
+                progress(ContourBuildProgress::error("Building", frac, msg));
             }
         }
     }
 
     Ok(format!(
-        "Contours complete: {built} tiles built, {skipped} already cached, {} total",
-        done
+        "Contours complete: {built} built, {skipped} cached, {errors} errors, {total} total"
     ))
 }
 
@@ -535,8 +575,3 @@ fn bucket_range(coord_min: f32, coord_max: f32, step: f32) -> std::ops::RangeInc
     lo..=hi
 }
 
-fn tiles_in_range(coord_min: f32, coord_max: f32, step: f32) -> usize {
-    let lo = (coord_min / step).floor() as i32;
-    let hi = (coord_max / step).ceil() as i32;
-    (hi - lo + 1).max(0) as usize
-}
