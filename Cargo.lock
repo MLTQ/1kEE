@@ -2263,6 +2263,7 @@ dependencies = [
  "egui",
  "image",
  "osmpbf",
+ "rayon",
  "rfd",
  "rusqlite",
  "serde",
