@@ -402,7 +402,7 @@ pub fn build_contour_tiles(
                     progress(ContourBuildProgress {
                         stage: format!("Zoom bucket {}", spec.zoom_bucket),
                         fraction: done as f32 / total_tiles.max(1) as f32,
-                        message: format!("gdalwarp failed for z{} ({lat_bucket},{lon_bucket}): {e}"),
+                        message: format!("gdalwarp failed for z{} ({lat_bucket},{lon_bucket}): {e}", spec.zoom_bucket),
                     });
                     done += 1;
                     continue;
@@ -413,7 +413,7 @@ pub fn build_contour_tiles(
                     progress(ContourBuildProgress {
                         stage: format!("Zoom bucket {}", spec.zoom_bucket),
                         fraction: done as f32 / total_tiles.max(1) as f32,
-                        message: format!("gdal_contour failed for z{} ({lat_bucket},{lon_bucket}): {e}"),
+                        message: format!("gdal_contour failed for z{} ({lat_bucket},{lon_bucket}): {e}", spec.zoom_bucket),
                     });
                     done += 1;
                     continue;
@@ -424,7 +424,7 @@ pub fn build_contour_tiles(
                     progress(ContourBuildProgress {
                         stage: format!("Zoom bucket {}", spec.zoom_bucket),
                         fraction: done as f32 / total_tiles.max(1) as f32,
-                        message: format!("DB import failed for z{} ({lat_bucket},{lon_bucket}): {e}"),
+                        message: format!("DB import failed for z{} ({lat_bucket},{lon_bucket}): {e}", spec.zoom_bucket),
                     });
                     done += 1;
                     continue;
