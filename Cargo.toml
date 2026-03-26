@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/cache_builder", "crates/desktop"]
+members = ["crates/cache_builder", "crates/cell_format", "crates/desktop"]
 resolver = "2"
 
 [workspace.package]

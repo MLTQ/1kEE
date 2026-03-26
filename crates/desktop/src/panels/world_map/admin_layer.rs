@@ -1,8 +1,10 @@
-// Loads administrative boundary GeoJSON files from the cache.
+// Loads administrative boundary files from the cache.
 // One file per admin level (2=country, 4=state, 6=county, 8=municipality).
 // Files are loaded lazily on first draw call, cached for the session.
+// Reads binary .1kc format, falling back to legacy .geojson.
 
 use crate::model::GeoPoint;
+use cell_format::{TAG_ADMN, admin_filename, read::read_single_chunk};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -57,8 +59,8 @@ pub fn get_or_load_admin_boundaries(cache_root: &Path, levels: &[u8]) -> Vec<Loa
 
 // ── Loading ────────────────────────────────────────────────────────────────────
 
-/// Read `{cache_root}/admin_cells/admin_level_{level}.geojson` for each
-/// requested level and return all parsed LineString features.
+/// Read admin boundary files for each requested level, trying binary `.1kc`
+/// first then falling back to legacy `.geojson`.
 pub fn load_admin_boundaries(cache_root: &Path, levels: &[u8]) -> Vec<LoadedAdminBoundary> {
     let admin_dir = cache_root.join("admin_cells");
     if !admin_dir.exists() {
@@ -68,11 +70,37 @@ pub fn load_admin_boundaries(cache_root: &Path, levels: &[u8]) -> Vec<LoadedAdmi
     let mut results = Vec::new();
 
     for &level in levels {
-        let path = admin_dir.join(format!("admin_level_{level}.geojson"));
-        if !path.exists() {
+        // Binary path.
+        let binary_path = admin_dir.join(admin_filename(level));
+        if binary_path.exists() {
+            if let Ok(data) = fs::read(&binary_path) {
+                if let Some(features) = read_single_chunk(&data, TAG_ADMN) {
+                    for f in features {
+                        if f.points.len() < 2 {
+                            continue;
+                        }
+                        results.push(LoadedAdminBoundary {
+                            relation_id: f.way_id,
+                            admin_level: f.class,
+                            name: f.name,
+                            points: f
+                                .points
+                                .into_iter()
+                                .map(|p| GeoPoint { lat: p.lat, lon: p.lon })
+                                .collect(),
+                        });
+                    }
+                    continue; // binary level loaded
+                }
+            }
+        }
+
+        // Legacy GeoJSON fallback.
+        let geojson_path = admin_dir.join(format!("admin_level_{level}.geojson"));
+        if !geojson_path.exists() {
             continue;
         }
-        let Ok(body) = fs::read_to_string(&path) else {
+        let Ok(body) = fs::read_to_string(&geojson_path) else {
             continue;
         };
         let Ok(payload) = serde_json::from_str::<Value>(&body) else {

@@ -1,4 +1,9 @@
 use crate::model::GeoPoint;
+use cell_format::{
+    CellFeature, CellPoint, TAG_ROAD, cell_filename, decode_road_class, encode_road_class,
+    read::read_single_chunk,
+    write::write_cell,
+};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -22,10 +27,7 @@ pub(super) fn vector_cache_dir(db_path: &Path) -> Result<PathBuf, String> {
 }
 
 pub(super) fn vector_cell_path(cache_dir: &Path, cell_lat: i32, cell_lon: i32) -> PathBuf {
-    cache_dir.join(format!(
-        "road_cell_{:+04}_{:+05}.geojson",
-        cell_lat, cell_lon
-    ))
+    cache_dir.join(cell_filename("road", cell_lat, cell_lon))
 }
 
 pub(super) fn ensure_cell_geojson_from_extract(
@@ -47,7 +49,7 @@ pub(super) fn ensure_cell_geojson_from_extract(
 
     let mut candidate_nodes: HashMap<i64, GeoPoint> = HashMap::new();
     let mut seen_way_ids = HashSet::new();
-    let mut features = Vec::new();
+    let mut cell_features: Vec<CellFeature> = Vec::new();
 
     reader
         .for_each(|element| match element {
@@ -99,34 +101,31 @@ pub(super) fn ensure_cell_geojson_from_extract(
                     return;
                 }
 
-                let coordinates: Vec<Value> = points
-                    .iter()
-                    .map(|point| json!([point.lon as f64, point.lat as f64]))
-                    .collect();
-                features.push(json!({
-                    "type": "Feature",
-                    "properties": {
-                        "way_id": way.id(),
-                        "class": road_class,
-                        "name": road_name,
-                    },
-                    "geometry": {
-                        "type": "LineString",
-                        "coordinates": coordinates,
-                    }
-                }));
+                cell_features.push(CellFeature {
+                    way_id: way.id(),
+                    class: encode_road_class(road_class),
+                    is_polygon: false,
+                    name: road_name,
+                    points: points
+                        .into_iter()
+                        .map(|p| CellPoint { lon: p.lon, lat: p.lat })
+                        .collect(),
+                    elevations: None,
+                });
             }
             Element::Relation(_) => {}
         })
         .map_err(|error| error.to_string())?;
 
-    let feature_count = features.len();
-    let body = serde_json::to_string(&json!({
-        "type": "FeatureCollection",
-        "features": features,
-    }))
-    .map_err(|error| error.to_string())?;
-    fs::write(output_path, body).map_err(|error| error.to_string())?;
+    let feature_count = cell_features.len();
+
+    // Derive cell coordinates from the output path stem.
+    // Path is …/road_cells/road_cell_{lat}_{lon}.1kc; we use (0,0) as a safe
+    // fallback since the cell coords in the header are informational only.
+    let (cell_lat, cell_lon) = cell_coords_from_path(output_path);
+    let bytes = write_cell(cell_lat, cell_lon, &[(&TAG_ROAD, &cell_features)]);
+    fs::write(output_path, bytes).map_err(|error| error.to_string())?;
+
     Ok(feature_count)
 }
 
@@ -145,6 +144,7 @@ pub fn load_roads_for_bounds_from_vector_cache(
     if cells.is_empty() {
         return None;
     }
+
     let mut any_file = false;
     let mut missing_cell = false;
     let mut seen_way_ids = HashSet::new();
@@ -152,12 +152,52 @@ pub fn load_roads_for_bounds_from_vector_cache(
 
     for (cell_lat, cell_lon) in cells {
         let path = vector_cell_path(&cache_dir, cell_lat, cell_lon);
-        if !path.exists() {
+
+        // Try binary format first.
+        if path.exists() {
+            any_file = true;
+            if let Ok(data) = fs::read(&path) {
+                if let Some(features) = read_single_chunk(&data, TAG_ROAD) {
+                    for f in features {
+                        let road_class = decode_road_class(f.class).to_owned();
+                        if !road_class_matches(&road_class, layer_kind)
+                            || !seen_way_ids.insert(f.way_id)
+                        {
+                            continue;
+                        }
+                        if f.points.len() < 2 {
+                            continue;
+                        }
+                        let points: Vec<GeoPoint> = f
+                            .points
+                            .into_iter()
+                            .map(|p| GeoPoint { lat: p.lat, lon: p.lon })
+                            .collect();
+                        if !bounds_intersect(polyline_bounds(&points), bounds) {
+                            continue;
+                        }
+                        roads.push(RoadPolyline {
+                            way_id: f.way_id,
+                            road_class,
+                            name: f.name,
+                            points,
+                        });
+                    }
+                    continue; // binary cell handled
+                }
+            }
+        }
+
+        // Legacy GeoJSON fallback.
+        let geojson_path = cache_dir.join(format!(
+            "road_cell_{cell_lat:+04}_{cell_lon:+05}.geojson"
+        ));
+        if !geojson_path.exists() {
             missing_cell = true;
             continue;
         }
         any_file = true;
-        let Ok(body) = fs::read_to_string(&path) else {
+        let Ok(body) = fs::read_to_string(&geojson_path) else {
             continue;
         };
         let Ok(payload) = serde_json::from_str::<Value>(&body) else {
@@ -169,10 +209,7 @@ pub fn load_roads_for_bounds_from_vector_cache(
 
         for feature in features {
             let props = feature.get("properties").unwrap_or(&Value::Null);
-            let way_id = props
-                .get("way_id")
-                .and_then(Value::as_i64)
-                .unwrap_or_default();
+            let way_id = props.get("way_id").and_then(Value::as_i64).unwrap_or_default();
             let road_class = props
                 .get("class")
                 .and_then(Value::as_str)
@@ -197,8 +234,7 @@ pub fn load_roads_for_bounds_from_vector_cache(
             if points.len() < 2 {
                 continue;
             }
-            let road_bounds = polyline_bounds(&points);
-            if !bounds_intersect(road_bounds, bounds) {
+            if !bounds_intersect(polyline_bounds(&points), bounds) {
                 continue;
             }
 
@@ -239,11 +275,14 @@ pub(super) fn write_roads_to_vector_cells(
             max_lon: (cell_lon + 1) as f32,
         };
         let path = vector_cell_path(&cache_dir, cell_lat, cell_lon);
-        let mut merged: HashMap<i64, RoadPolyline> = load_all_roads_from_vector_cell(&path)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|road| (road.way_id, road))
-            .collect();
+
+        // Load existing roads for merge (binary-first with GeoJSON fallback).
+        let mut merged: HashMap<i64, RoadPolyline> =
+            load_all_roads_from_vector_cell(&path, cell_lat, cell_lon, &cache_dir)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|road| (road.way_id, road))
+                .collect();
 
         let mut changed = false;
         for road in roads {
@@ -259,38 +298,31 @@ pub(super) fn write_roads_to_vector_cells(
             continue;
         }
 
-        let mut features = Vec::with_capacity(merged.len());
-        for road in merged.values() {
-            let coordinates: Vec<Value> = road
-                .points
-                .iter()
-                .map(|point| json!([point.lon as f64, point.lat as f64]))
-                .collect();
-            features.push(json!({
-                "type": "Feature",
-                "properties": {
-                    "way_id": road.way_id,
-                    "class": road.road_class,
-                    "name": road.name,
-                },
-                "geometry": {
-                    "type": "LineString",
-                    "coordinates": coordinates,
-                }
-            }));
-        }
+        let cell_features: Vec<CellFeature> = merged
+            .into_values()
+            .map(|road| CellFeature {
+                way_id: road.way_id,
+                class: encode_road_class(&road.road_class),
+                is_polygon: false,
+                name: road.name,
+                points: road
+                    .points
+                    .into_iter()
+                    .map(|p| CellPoint { lon: p.lon, lat: p.lat })
+                    .collect(),
+                elevations: None,
+            })
+            .collect();
 
-        let body = serde_json::to_string(&json!({
-            "type": "FeatureCollection",
-            "features": features,
-        }))
-        .map_err(|error| error.to_string())?;
-        fs::write(&path, body).map_err(|error| error.to_string())?;
+        let bytes = write_cell(cell_lat as i16, cell_lon as i16, &[(&TAG_ROAD, &cell_features)]);
+        fs::write(&path, bytes).map_err(|e| e.to_string())?;
         written_cells += 1;
     }
 
     Ok(written_cells)
 }
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
 
 fn focus_cells_for_bounds(bounds: GeoBounds) -> Vec<(i32, i32)> {
     let min_lat_c = bounds.min_lat.floor() as i32;
@@ -302,7 +334,44 @@ fn focus_cells_for_bounds(bounds: GeoBounds) -> Vec<(i32, i32)> {
         .collect()
 }
 
-fn load_all_roads_from_vector_cell(path: &Path) -> Option<Vec<RoadPolyline>> {
+/// Load roads from a binary cell file, falling back to the legacy GeoJSON.
+fn load_all_roads_from_vector_cell(
+    binary_path: &Path,
+    cell_lat: i32,
+    cell_lon: i32,
+    cache_dir: &Path,
+) -> Option<Vec<RoadPolyline>> {
+    if binary_path.exists() {
+        if let Ok(data) = fs::read(binary_path) {
+            if let Some(features) = read_single_chunk(&data, TAG_ROAD) {
+                return Some(
+                    features
+                        .into_iter()
+                        .filter(|f| f.points.len() >= 2)
+                        .map(|f| RoadPolyline {
+                            way_id: f.way_id,
+                            road_class: decode_road_class(f.class).to_owned(),
+                            name: f.name,
+                            points: f
+                                .points
+                                .into_iter()
+                                .map(|p| GeoPoint { lat: p.lat, lon: p.lon })
+                                .collect(),
+                        })
+                        .collect(),
+                );
+            }
+        }
+    }
+
+    // Legacy GeoJSON fallback.
+    let geojson_path = cache_dir.join(format!(
+        "road_cell_{cell_lat:+04}_{cell_lon:+05}.geojson"
+    ));
+    load_roads_from_geojson(&geojson_path)
+}
+
+fn load_roads_from_geojson(path: &Path) -> Option<Vec<RoadPolyline>> {
     let body = fs::read_to_string(path).ok()?;
     let payload = serde_json::from_str::<Value>(&body).ok()?;
     let features = payload.get("features").and_then(Value::as_array)?;
@@ -310,10 +379,7 @@ fn load_all_roads_from_vector_cell(path: &Path) -> Option<Vec<RoadPolyline>> {
 
     for feature in features {
         let props = feature.get("properties").unwrap_or(&Value::Null);
-        let way_id = props
-            .get("way_id")
-            .and_then(Value::as_i64)
-            .unwrap_or_default();
+        let way_id = props.get("way_id").and_then(Value::as_i64).unwrap_or_default();
         let road_class = props
             .get("class")
             .and_then(Value::as_str)
@@ -343,4 +409,21 @@ fn load_all_roads_from_vector_cell(path: &Path) -> Option<Vec<RoadPolyline>> {
     }
 
     Some(roads)
+}
+
+/// Extract cell lat/lon from a `.1kc` filename as a best-effort fallback.
+/// Returns (0, 0) on parse failure — the header coords are informational only.
+fn cell_coords_from_path(path: &Path) -> (i16, i16) {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    // Expected stem: "road_cell_{:+04}_{:+05}"
+    let parts: Vec<&str> = stem.split('_').collect();
+    if parts.len() >= 4 {
+        let lat = parts[parts.len() - 2].parse::<i16>().unwrap_or(0);
+        let lon = parts[parts.len() - 1].parse::<i16>().unwrap_or(0);
+        return (lat, lon);
+    }
+    (0, 0)
 }
