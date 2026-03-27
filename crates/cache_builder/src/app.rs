@@ -600,16 +600,17 @@ impl eframe::App for BuilderApp {
                 // ── Terrain / Contours ────────────────────────────────────────
                 ui.separator();
                 ui.heading("Terrain / Contours");
-                ui.label("Contour DB (srtm_focus_cache.sqlite)");
+                ui.label("Contour DB folder (contains srtm_focus_cache.sqlite)");
                 ui.horizontal(|ui| {
                     ui.text_edit_singleline(&mut self.form.contour_db);
                     if ui.small_button("…").clicked() {
-                        if let Some(path) = rfd::FileDialog::new()
-                            .add_filter("SQLite", &["sqlite", "db"])
-                            .set_file_name("srtm_focus_cache.sqlite")
-                            .save_file()
-                        {
-                            self.form.contour_db = path.display().to_string();
+                        // Pick a folder — avoids the macOS "Replace?" dialog that
+                        // save_file() triggers when the DB already exists.
+                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                            self.form.contour_db = folder
+                                .join("srtm_focus_cache.sqlite")
+                                .display()
+                                .to_string();
                         }
                     }
                 });
