@@ -7,6 +7,14 @@ pub enum Command {
     ContoursBbox(ContoursBboxCommand),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ContourEngine {
+    /// GDAL subprocess pipeline (gdalwarp + gdal_contour).
+    Gdal,
+    /// Pure-Rust marching squares — no GDAL required.
+    Native,
+}
+
 #[derive(Debug, Clone)]
 pub struct ContoursBboxCommand {
     pub srtm_root: PathBuf,
@@ -18,6 +26,7 @@ pub struct ContoursBboxCommand {
     pub max_lon: f32,
     pub zoom_buckets: Vec<i32>,  // default: all 0–6
     pub gdal_bin_dir: PathBuf,   // "" = use $PATH
+    pub engine: ContourEngine,
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +151,7 @@ where
     let mut max_lon = None;
     let mut zoom_buckets: Option<Vec<i32>> = None;
     let mut gdal_bin_dir = PathBuf::from("");
+    let mut engine = ContourEngine::Gdal;
 
     let mut iter = args.into_iter();
     while let Some(flag) = iter.next() {
@@ -157,6 +167,13 @@ where
             "--min-lon"      => min_lon = Some(parse_f32("--min-lon", &value)?),
             "--max-lon"      => max_lon = Some(parse_f32("--max-lon", &value)?),
             "--gdal-bin"     => gdal_bin_dir = PathBuf::from(value),
+            "--engine"       => {
+                engine = match value.as_str() {
+                    "gdal"   => ContourEngine::Gdal,
+                    "native" => ContourEngine::Native,
+                    other => return Err(format!("Unknown --engine '{other}'. Use 'gdal' or 'native'.")),
+                };
+            }
             "--zoom-buckets" => {
                 let buckets: Result<Vec<i32>, _> = value
                     .split(',')
@@ -189,6 +206,7 @@ where
         max_lon: max_lon.ok_or_else(|| format!("Missing --max-lon.\n\n{}", usage()))?,
         zoom_buckets: zoom_buckets.unwrap_or_else(|| (0..=6).collect()),
         gdal_bin_dir,
+        engine,
     })
 }
 

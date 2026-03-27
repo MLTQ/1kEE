@@ -4,6 +4,7 @@ mod args;
 mod contours;
 mod geojson;
 mod job;
+mod marching_squares;
 mod node_store;
 mod roads;
 mod srtm;
@@ -27,24 +28,36 @@ fn run() -> Result<(), String> {
                 min_lon: command.min_lon,
                 max_lon: command.max_lon,
             };
-            let tmp_dir = command.tmp_dir.clone().unwrap_or_else(|| {
-                command
-                    .cache_db_path
-                    .parent()
-                    .unwrap_or(std::path::Path::new("."))
-                    .join("srtm_focus_tmp")
-            });
-            contours::build_contour_tiles(
-                &command.srtm_root,
-                &command.cache_db_path,
-                &tmp_dir,
-                bounds,
-                &command.zoom_buckets,
-                &command.gdal_bin_dir,
-                &mut |p: contours::ContourBuildProgress| {
-                    println!("[{:.0}%] {}: {}", p.fraction * 100.0, p.stage, p.message);
-                },
-            )
+            let reporter = &mut |p: contours::ContourBuildProgress| {
+                println!("[{:.0}%] {}: {}", p.fraction * 100.0, p.stage, p.message);
+            };
+            match command.engine {
+                args::ContourEngine::Native => contours::build_contour_tiles_native(
+                    &command.srtm_root,
+                    &command.cache_db_path,
+                    bounds,
+                    &command.zoom_buckets,
+                    reporter,
+                ),
+                args::ContourEngine::Gdal => {
+                    let tmp_dir = command.tmp_dir.clone().unwrap_or_else(|| {
+                        command
+                            .cache_db_path
+                            .parent()
+                            .unwrap_or(std::path::Path::new("."))
+                            .join("srtm_focus_tmp")
+                    });
+                    contours::build_contour_tiles(
+                        &command.srtm_root,
+                        &command.cache_db_path,
+                        &tmp_dir,
+                        bounds,
+                        &command.zoom_buckets,
+                        &command.gdal_bin_dir,
+                        reporter,
+                    )
+                }
+            }
             .map(|summary| println!("{summary}"))
             .map_err(|e| e)
         }

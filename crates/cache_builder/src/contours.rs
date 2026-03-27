@@ -567,6 +567,227 @@ pub fn build_contour_tiles(
     ))
 }
 
+// ── Native (marching-squares) builder ────────────────────────────────────────
+
+/// Encode a slice of (lon, lat) f32 pairs as a GeoPackage geometry blob
+/// containing a WKB LineString (EPSG:4326, little-endian, no envelope).
+pub fn encode_gpkg_linestring(points: &[(f32, f32)]) -> Vec<u8> {
+    let n = points.len() as u32;
+    // 8-byte GPKG header + 1+4+4 WKB header + n*16 point bytes
+    let mut buf = Vec::with_capacity(8 + 9 + n as usize * 16);
+    // GPKG header
+    buf.extend_from_slice(b"GP");
+    buf.push(0x00); // version
+    buf.push(0x00); // flags: LE WKB, no envelope
+    buf.extend_from_slice(&4326u32.to_le_bytes()); // SRS ID
+    // WKB LineString
+    buf.push(0x01); // little-endian
+    buf.extend_from_slice(&2u32.to_le_bytes()); // type = LineString
+    buf.extend_from_slice(&n.to_le_bytes());
+    for &(lon, lat) in points {
+        buf.extend_from_slice(&(lon as f64).to_le_bytes());
+        buf.extend_from_slice(&(lat as f64).to_le_bytes());
+    }
+    buf
+}
+
+fn import_tile_native(
+    cache_db_path: &Path,
+    tile: TileKey,
+    contours: &[crate::marching_squares::ContourLine],
+) -> rusqlite::Result<()> {
+    let mut cache = open_cache_db(cache_db_path)?;
+    let tx = cache.transaction()?;
+    tx.execute(
+        "DELETE FROM contour_tiles WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
+        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
+    )?;
+    tx.execute(
+        "DELETE FROM contour_tile_manifest WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
+        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
+    )?;
+    let mut count = 0usize;
+    for (fid, line) in contours.iter().enumerate() {
+        let blob = encode_gpkg_linestring(&line.points);
+        tx.execute(
+            "INSERT INTO contour_tiles (zoom_bucket,lat_bucket,lon_bucket,fid,elevation_m,geom)
+             VALUES (?1,?2,?3,?4,?5,?6)",
+            params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket,
+                    fid as i64, line.elevation_m, blob],
+        )?;
+        count += 1;
+    }
+    tx.execute(
+        "INSERT INTO contour_tile_manifest (zoom_bucket,lat_bucket,lon_bucket,contour_count,built_at)
+         VALUES (?1,?2,?3,?4,unixepoch())",
+        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket, count as i64],
+    )?;
+    tx.commit()
+}
+
+fn import_coastline_native(
+    cache_db_path: &Path,
+    tile: TileKey,
+    coastlines: &[Vec<(f32, f32)>],
+) -> rusqlite::Result<()> {
+    let mut cache = open_cache_db(cache_db_path)?;
+    let tx = cache.transaction()?;
+    tx.execute(
+        "DELETE FROM coastline_tiles WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
+        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
+    )?;
+    tx.execute(
+        "DELETE FROM coastline_tile_manifest WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
+        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
+    )?;
+    let mut count = 0usize;
+    for (fid, pts) in coastlines.iter().enumerate() {
+        let blob = encode_gpkg_linestring(pts);
+        tx.execute(
+            "INSERT INTO coastline_tiles (zoom_bucket,lat_bucket,lon_bucket,fid,geom)
+             VALUES (?1,?2,?3,?4,?5)",
+            params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket, fid as i64, blob],
+        )?;
+        count += 1;
+    }
+    tx.execute(
+        "INSERT INTO coastline_tile_manifest (zoom_bucket,lat_bucket,lon_bucket,line_count)
+         VALUES (?1,?2,?3,?4)",
+        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket, count as i64],
+    )?;
+    tx.commit()
+}
+
+/// Pre-build contour tiles using pure-Rust marching squares — no GDAL required.
+///
+/// Same parameters and output schema as `build_contour_tiles`, but reads SRTM
+/// tiles in-process with bilinear interpolation and extracts iso-lines via
+/// marching squares.  `gdal_bin_dir` is ignored (kept for API consistency).
+pub fn build_contour_tiles_native(
+    srtm_root: &Path,
+    cache_db_path: &Path,
+    bounds: GeoBounds,
+    zoom_buckets: &[i32],
+    progress: &mut dyn FnMut(ContourBuildProgress),
+) -> Result<String, String> {
+    use crate::marching_squares::{NativeSrtmSampler, build_tile_contours};
+
+    // ── Validate SRTM root ────────────────────────────────────────────────────
+    if !srtm_root.exists() {
+        return Err(format!("SRTM root does not exist: {}", srtm_root.display()));
+    }
+    let srtm_tile_count = fs::read_dir(srtm_root)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("tif"))
+                .count()
+        })
+        .unwrap_or(0);
+    if srtm_tile_count == 0 {
+        return Err(format!(
+            "No .tif files found in SRTM root: {}",
+            srtm_root.display()
+        ));
+    }
+    progress(ContourBuildProgress::info(
+        "Startup",
+        0.0,
+        format!("Native engine — {srtm_tile_count} SRTM tiles found"),
+    ));
+
+    open_cache_db(cache_db_path).map_err(|e| e.to_string())?;
+
+    let specs = all_specs();
+    let selected: Vec<FocusContourSpec> = specs
+        .iter()
+        .filter(|s| zoom_buckets.contains(&s.zoom_bucket))
+        .copied()
+        .collect();
+
+    // ── Planning phase ────────────────────────────────────────────────────────
+    progress(ContourBuildProgress::info("Planning", 0.0, "Scanning tiles…"));
+
+    let conn = open_cache_db(cache_db_path).map_err(|e| e.to_string())?;
+    let mut work: Vec<(TileKey, GeoBounds, FocusContourSpec)> = Vec::new();
+    let mut skipped = 0usize;
+
+    for spec in &selected {
+        let bucket_step = spec.half_extent_deg * 0.45;
+        for lat_bucket in bucket_range(bounds.min_lat, bounds.max_lat, bucket_step) {
+            for lon_bucket in bucket_range(bounds.min_lon, bounds.max_lon, bucket_step) {
+                let tile = TileKey { zoom_bucket: spec.zoom_bucket, lat_bucket, lon_bucket };
+                if tile_exists(&conn, tile) {
+                    skipped += 1;
+                    continue;
+                }
+                let center_lat = (lat_bucket as f32 * bucket_step).clamp(-89.999, 89.999);
+                let center_lon = lon_bucket as f32 * bucket_step;
+                let tile_bounds = GeoBounds {
+                    min_lat: (center_lat - spec.half_extent_deg).clamp(-89.999, 89.999),
+                    max_lat: (center_lat + spec.half_extent_deg).clamp(-89.999, 89.999),
+                    min_lon: center_lon - spec.half_extent_deg,
+                    max_lon: center_lon + spec.half_extent_deg,
+                };
+                // Only plan tiles that have at least one SRTM tile in range.
+                if !srtm_tile_paths(srtm_root, tile_bounds).is_empty() {
+                    work.push((tile, tile_bounds, *spec));
+                }
+            }
+        }
+    }
+    drop(conn);
+
+    let total = work.len() + skipped;
+    let to_build = work.len();
+    progress(ContourBuildProgress::info(
+        "Planning",
+        0.0,
+        format!("{to_build} tiles to build, {skipped} already cached, {total} total"),
+    ));
+
+    if work.is_empty() {
+        return Ok(format!("Contours complete: 0 built, {skipped} already cached, {total} total"));
+    }
+
+    // ── Build phase (sequential — fast in-process) ────────────────────────────
+    let mut sampler = NativeSrtmSampler::new(srtm_root.to_path_buf());
+    let mut built = 0usize;
+    let mut errors = 0usize;
+
+    for (i, (tile, tile_bounds, spec)) in work.into_iter().enumerate() {
+        let frac = i as f32 / to_build as f32;
+        progress(ContourBuildProgress::info(
+            "Building",
+            frac,
+            format!("{i}/{to_build} tiles built"),
+        ));
+
+        let (contours, coastlines) = build_tile_contours(&mut sampler, spec, tile_bounds);
+
+        let res = import_tile_native(cache_db_path, tile, &contours)
+            .and_then(|_| import_coastline_native(cache_db_path, tile, &coastlines));
+
+        match res {
+            Ok(()) => built += 1,
+            Err(e) => {
+                errors += 1;
+                progress(ContourBuildProgress::error(
+                    "Building",
+                    frac,
+                    format!("z{} ({},{}) — {e}", tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket),
+                ));
+            }
+        }
+    }
+
+    progress(ContourBuildProgress::info("Building", 1.0, format!("{built}/{to_build} tiles built")));
+
+    Ok(format!(
+        "Contours complete: {built} built, {skipped} cached, {errors} errors, {total} total"
+    ))
+}
+
 // ── Tile range helpers ────────────────────────────────────────────────────────
 
 fn bucket_range(coord_min: f32, coord_max: f32, step: f32) -> std::ops::RangeInclusive<i32> {

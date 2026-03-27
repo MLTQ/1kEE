@@ -37,13 +37,6 @@ pub fn spawn_job(job: BuildJob) -> JobHandle {
                 min_lon: command.min_lon,
                 max_lon: command.max_lon,
             };
-            let tmp_dir = command.tmp_dir.unwrap_or_else(|| {
-                command
-                    .cache_db_path
-                    .parent()
-                    .unwrap_or(std::path::Path::new("."))
-                    .join("srtm_focus_tmp")
-            });
             let mut reporter = |p: ContourBuildProgress| {
                 if p.is_error {
                     let _ = tx.send(BuildEvent::Log(p.message.clone()));
@@ -54,15 +47,35 @@ pub fn spawn_job(job: BuildJob) -> JobHandle {
                     message: p.message,
                 }));
             };
-            let result = build_contour_tiles(
-                &command.srtm_root,
-                &command.cache_db_path,
-                &tmp_dir,
-                bounds,
-                &command.zoom_buckets,
-                &command.gdal_bin_dir,
-                &mut reporter,
-            );
+            let result = match command.engine {
+                crate::args::ContourEngine::Native => {
+                    crate::contours::build_contour_tiles_native(
+                        &command.srtm_root,
+                        &command.cache_db_path,
+                        bounds,
+                        &command.zoom_buckets,
+                        &mut reporter,
+                    )
+                }
+                crate::args::ContourEngine::Gdal => {
+                    let tmp_dir = command.tmp_dir.unwrap_or_else(|| {
+                        command
+                            .cache_db_path
+                            .parent()
+                            .unwrap_or(std::path::Path::new("."))
+                            .join("srtm_focus_tmp")
+                    });
+                    build_contour_tiles(
+                        &command.srtm_root,
+                        &command.cache_db_path,
+                        &tmp_dir,
+                        bounds,
+                        &command.zoom_buckets,
+                        &command.gdal_bin_dir,
+                        &mut reporter,
+                    )
+                }
+            };
             let _ = tx.send(BuildEvent::Finished(result));
         }
     });

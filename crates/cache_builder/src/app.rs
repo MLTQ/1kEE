@@ -93,6 +93,7 @@ struct BuilderForm {
     // Contour-specific fields
     contour_db: String,   // path to srtm_focus_cache.sqlite
     gdal_bin_dir: String, // empty = use $PATH
+    use_native_engine: bool,
 }
 
 #[derive(Clone)]
@@ -145,6 +146,7 @@ impl BuilderApp {
                     .display()
                     .to_string(),
                 gdal_bin_dir: String::new(),
+                use_native_engine: true,
                 min_lat: "37.60".to_owned(),
                 max_lat: "37.90".to_owned(),
                 min_lon: "-122.60".to_owned(),
@@ -238,6 +240,11 @@ impl BuilderApp {
             max_lon: parse_num("max longitude", &self.form.max_lon)?,
             zoom_buckets: (0..=6).collect(),
             gdal_bin_dir: PathBuf::from(self.form.gdal_bin_dir.trim()),
+            engine: if self.form.use_native_engine {
+                crate::args::ContourEngine::Native
+            } else {
+                crate::args::ContourEngine::Gdal
+            },
         })
     }
 
@@ -606,18 +613,25 @@ impl eframe::App for BuilderApp {
                         }
                     }
                 });
-                ui.label("GDAL bin dir (empty = use $PATH)");
                 ui.horizontal(|ui| {
-                    ui.text_edit_singleline(&mut self.form.gdal_bin_dir);
-                    if ui.small_button("…").clicked() {
-                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                            self.form.gdal_bin_dir = path.display().to_string();
-                        }
-                    }
-                    if !self.form.gdal_bin_dir.is_empty() && ui.small_button("✕").clicked() {
-                        self.form.gdal_bin_dir.clear();
-                    }
+                    ui.label("Engine:");
+                    ui.radio_value(&mut self.form.use_native_engine, true, "Native (fast, no GDAL)");
+                    ui.radio_value(&mut self.form.use_native_engine, false, "GDAL");
                 });
+                if !self.form.use_native_engine {
+                    ui.label("GDAL bin dir (empty = use $PATH)");
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut self.form.gdal_bin_dir);
+                        if ui.small_button("…").clicked() {
+                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                self.form.gdal_bin_dir = path.display().to_string();
+                            }
+                        }
+                        if !self.form.gdal_bin_dir.is_empty() && ui.small_button("✕").clicked() {
+                            self.form.gdal_bin_dir.clear();
+                        }
+                    });
+                }
 
                 ui.separator();
                 ui.add(
