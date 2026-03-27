@@ -2,6 +2,7 @@ use crate::camera_registry;
 use crate::factal_stream;
 use crate::model::AppModel;
 use crate::moving_tracks;
+use crate::panels::world_map::srtm_focus_cache::db as focus_cache_db;
 use crate::settings_store;
 use crate::theme;
 
@@ -332,6 +333,29 @@ fn tab_paths(ui: &mut egui::Ui, model: &mut AppModel) {
         true,
         true,
     );
+    // ── Contour cache diagnostic ──────────────────────────────────────────────
+    // Show exactly where the app will look for srtm_focus_cache.sqlite so
+    // path mismatches are immediately visible.
+    {
+        let db_path = focus_cache_db::focus_cache_db_path(model.selected_root.as_deref());
+        let (label, color) = match &db_path {
+            Some(p) if p.exists() => (
+                format!("Contour cache: {} ✓", p.display()),
+                egui::Color32::from_rgb(80, 200, 100),
+            ),
+            Some(p) => (
+                format!("Contour cache (NOT FOUND): {}", p.display()),
+                egui::Color32::from_rgb(220, 100, 60),
+            ),
+            None => (
+                "Contour cache: could not resolve path (set Derived Root)".to_owned(),
+                egui::Color32::from_rgb(220, 100, 60),
+            ),
+        };
+        ui.colored_label(color, label);
+    }
+    ui.add_space(4.0);
+
     path_row(ui, "SRTM Root", &mut model.settings_srtm_root, true, true);
     path_row(
         ui,
