@@ -759,55 +759,69 @@ pub fn build_contour_tiles_native(
         return Ok(format!("Contours complete: 0 built, {skipped} already cached, {total} total"));
     }
 
-    // ── Build phase (parallel — one NativeSrtmSampler per rayon worker) ───────
-    let num_threads = (std::thread::available_parallelism()
+    // ── Build phase ───────────────────────────────────────────────────────────
+    // Architecture: N rayon compute workers → mpsc channel → 1 writer thread
+    //
+    // Rayon workers only do CPU work (marching squares + SRTM I/O).  A single
+    // dedicated writer thread drains results and writes to SQLite with zero
+    // lock contention.  This lets all cores run at full speed.
+    let num_threads = std::thread::available_parallelism()
         .map(|n| n.get())
-        .unwrap_or(4)
-        / 2)
-        .max(2)
-        .min(8);
+        .unwrap_or(4);
     progress(ContourBuildProgress::info(
         "Building",
         0.0,
-        format!("Starting {num_threads} parallel workers"),
+        format!("Starting {num_threads} compute workers + 1 writer"),
     ));
 
+    // compute workers → writer thread
+    type ComputeResult = (TileKey, GeoBounds, Vec<crate::marching_squares::ContourLine>, Vec<Vec<(f32, f32)>>);
+    let (compute_tx, compute_rx) = mpsc::channel::<ComputeResult>();
+
+    // writer thread → main thread (outcome events)
     enum Outcome { Built(f32, f32, f32, f32), Error(String) }
-    let (tx, rx) = mpsc::channel::<Outcome>();
+    let (outcome_tx, rx) = mpsc::channel::<Outcome>();
     let done_count = Arc::new(AtomicUsize::new(0));
 
-    let cache_db_owned = cache_db_path.to_path_buf();
     let srtm_root_owned = srtm_root.to_path_buf();
-    let done_arc = done_count.clone();
 
+    // ── Compute thread: fans work out to rayon, sends raw results ────────────
     std::thread::spawn(move || {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(num_threads)
             .build()
             .expect("rayon pool");
         pool.install(|| {
-            work.into_par_iter().for_each_with(tx, |tx, (tile, tile_bounds, spec)| {
-                // Each worker owns its own sampler — avoids cross-thread borrowing
-                // of &mut self. SRTM files are read-only so concurrent loads are
-                // safe; the OS page cache ensures the files only hit disk once.
+            work.into_par_iter().for_each_with(compute_tx, |tx, (tile, tile_bounds, spec)| {
                 let mut sampler = NativeSrtmSampler::new(srtm_root_owned.clone());
                 let (contours, coastlines) =
                     build_tile_contours(&mut sampler, spec, tile_bounds);
-                let outcome = import_tile_native(&cache_db_owned, tile, &contours)
-                    .and_then(|_| import_coastline_native(&cache_db_owned, tile, &coastlines));
-                done_arc.fetch_add(1, Ordering::Relaxed);
-                let _ = tx.send(match outcome {
-                    Ok(()) => Outcome::Built(
-                        tile_bounds.min_lat, tile_bounds.max_lat,
-                        tile_bounds.min_lon, tile_bounds.max_lon,
-                    ),
-                    Err(e) => Outcome::Error(format!(
-                        "z{} ({},{}) — {e}",
-                        tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket
-                    )),
-                });
+                let _ = tx.send((tile, tile_bounds, contours, coastlines));
             });
         });
+        // compute_tx drops here, closing the channel → writer thread exits
+    });
+
+    // ── Writer thread: single SQLite writer, no contention ───────────────────
+    let cache_db_owned = cache_db_path.to_path_buf();
+    let done_arc = done_count.clone();
+    std::thread::spawn(move || {
+        for (tile, tile_bounds, contours, coastlines) in compute_rx {
+            let outcome = import_tile_native(&cache_db_owned, tile, &contours)
+                .and_then(|_| import_coastline_native(&cache_db_owned, tile, &coastlines));
+            done_arc.fetch_add(1, Ordering::Relaxed);
+            let _ = outcome_tx.send(match outcome {
+                Ok(()) => Outcome::Built(
+                    tile_bounds.min_lat, tile_bounds.max_lat,
+                    tile_bounds.min_lon, tile_bounds.max_lon,
+                ),
+                Err(e) => Outcome::Error(format!(
+                    "z{} ({},{}) — {e}",
+                    tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket
+                )),
+            });
+        }
+        // outcome_tx drops here → main thread's rx loop exits
     });
 
     // ── Drain results, report progress ────────────────────────────────────────
