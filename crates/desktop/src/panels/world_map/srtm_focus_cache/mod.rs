@@ -68,9 +68,9 @@ pub fn ensure_focus_contour_region(
     zoom: f32,
     radius: i32,
 ) -> Vec<FocusContourAsset> {
-    let Some(srtm_root) = terrain_assets::find_srtm_root(selected_root) else {
-        return Vec::new();
-    };
+    // SRTM root is only needed to spawn on-demand GDAL builds for uncached tiles.
+    // Pre-built tiles in the SQLite cache are returned even without SRTM access.
+    let srtm_root = terrain_assets::find_srtm_root(selected_root);
     let Some(cache_root) = db::focus_cache_root(selected_root) else {
         return Vec::new();
     };
@@ -91,7 +91,7 @@ pub fn ensure_focus_contour_region(
     for lat_bucket in (center_lat_bucket - radius)..=(center_lat_bucket + radius) {
         for lon_bucket in (center_lon_bucket - radius)..=(center_lon_bucket + radius) {
             if let Some(asset) = builders::ensure_bucket_asset(
-                &srtm_root,
+                srtm_root.as_deref(),
                 &cache_root,
                 &cache_db_path,
                 &connection,
@@ -149,7 +149,7 @@ pub fn focus_contour_region_status(
     zoom: f32,
     radius: i32,
 ) -> Option<FocusContourRegionStatus> {
-    let _ = terrain_assets::find_srtm_root(selected_root)?;
+    // Don't require SRTM root — status should reflect cache hits too.
     let cache_db_path = db::focus_cache_db_path(selected_root)?;
     let connection = db::open_cache_db(&cache_db_path).ok()?;
     let spec = zoom::spec_for_zoom(zoom);
