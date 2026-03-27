@@ -752,6 +752,26 @@ pub fn build_contour_tiles_native(
     }
     drop(conn);
 
+    // Interleave zoom levels so all levels progress simultaneously — avoids the
+    // visual artifact where low-zoom (large) tiles complete first and flood the
+    // map with solid blocks before high-zoom tiles even start.
+    // Round-robin: take tile[0] from z0, tile[0] from z1, …, tile[1] from z0, …
+    {
+        let mut by_zoom: std::collections::BTreeMap<i32, Vec<_>> = std::collections::BTreeMap::new();
+        for item in work.drain(..) {
+            by_zoom.entry(item.0.zoom_bucket).or_default().push(item);
+        }
+        let buckets: Vec<Vec<_>> = by_zoom.into_values().collect();
+        let max_len = buckets.iter().map(|v| v.len()).max().unwrap_or(0);
+        for i in 0..max_len {
+            for bucket in &buckets {
+                if i < bucket.len() {
+                    work.push(bucket[i]);
+                }
+            }
+        }
+    }
+
     let total = work.len() + skipped;
     let to_build = work.len();
     // Log path + skip count prominently so mismatched cache paths are obvious
