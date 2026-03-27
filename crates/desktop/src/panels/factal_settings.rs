@@ -334,15 +334,35 @@ fn tab_paths(ui: &mut egui::Ui, model: &mut AppModel) {
         true,
     );
     // ── Contour cache diagnostic ──────────────────────────────────────────────
-    // Show exactly where the app will look for srtm_focus_cache.sqlite so
-    // path mismatches are immediately visible.
+    // Show exactly where the app will look for srtm_focus_cache.sqlite and
+    // how many tiles it contains — a green path with 0 tiles means path
+    // mismatch (the real cache is elsewhere; this is an empty shell).
     {
         let db_path = focus_cache_db::focus_cache_db_path(model.selected_root.as_deref());
         let (label, color) = match &db_path {
-            Some(p) if p.exists() => (
-                format!("Contour cache: {} ✓", p.display()),
-                egui::Color32::from_rgb(80, 200, 100),
-            ),
+            Some(p) if p.exists() => {
+                let tile_count = rusqlite::Connection::open_with_flags(
+                    p,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .ok()
+                .and_then(|conn| {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM contour_tile_manifest",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .ok()
+                })
+                .unwrap_or(0);
+                let indicator = if tile_count > 0 { "✓" } else { "⚠ 0 tiles — wrong file?" };
+                let color = if tile_count > 0 {
+                    egui::Color32::from_rgb(80, 200, 100)
+                } else {
+                    egui::Color32::from_rgb(220, 160, 40)
+                };
+                (format!("Contour cache ({tile_count} tiles): {} {indicator}", p.display()), color)
+            }
             Some(p) => (
                 format!("Contour cache (NOT FOUND): {}", p.display()),
                 egui::Color32::from_rgb(220, 100, 60),
