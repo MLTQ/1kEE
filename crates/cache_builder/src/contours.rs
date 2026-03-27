@@ -704,6 +704,11 @@ pub fn build_contour_tiles_native(
         0.0,
         format!("Native engine — {srtm_tile_count} SRTM tiles found"),
     ));
+    progress(ContourBuildProgress::info(
+        "Startup",
+        0.0,
+        format!("Cache DB: {}", cache_db_path.display()),
+    ));
 
     open_cache_db(cache_db_path).map_err(|e| e.to_string())?;
 
@@ -749,14 +754,18 @@ pub fn build_contour_tiles_native(
 
     let total = work.len() + skipped;
     let to_build = work.len();
+    // Log path + skip count prominently so mismatched cache paths are obvious
     progress(ContourBuildProgress::info(
         "Planning",
         0.0,
-        format!("{to_build} tiles to build, {skipped} already cached, {total} total"),
+        format!(
+            "Plan: {to_build} to build, {skipped} skipped (already cached), {total} in bbox — DB: {}",
+            cache_db_path.display()
+        ),
     ));
 
     if work.is_empty() {
-        return Ok(format!("Contours complete: 0 built, {skipped} already cached, {total} total"));
+        return Ok(format!("All {total} tiles already cached — nothing to build"));
     }
 
     // ── Build phase ───────────────────────────────────────────────────────────
