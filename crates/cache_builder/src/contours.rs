@@ -750,38 +750,82 @@ pub fn build_contour_tiles_native(
         return Ok(format!("Contours complete: 0 built, {skipped} already cached, {total} total"));
     }
 
-    // ── Build phase (sequential — fast in-process) ────────────────────────────
-    let mut sampler = NativeSrtmSampler::new(srtm_root.to_path_buf());
+    // ── Build phase (parallel — one NativeSrtmSampler per rayon worker) ───────
+    let num_threads = (std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        / 2)
+        .max(2)
+        .min(8);
+    progress(ContourBuildProgress::info(
+        "Building",
+        0.0,
+        format!("Starting {num_threads} parallel workers"),
+    ));
+
+    enum Outcome { Built, Error(String) }
+    let (tx, rx) = mpsc::channel::<Outcome>();
+    let done_count = Arc::new(AtomicUsize::new(0));
+
+    let cache_db_owned = cache_db_path.to_path_buf();
+    let srtm_root_owned = srtm_root.to_path_buf();
+    let done_arc = done_count.clone();
+
+    std::thread::spawn(move || {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .expect("rayon pool");
+        pool.install(|| {
+            work.into_par_iter().for_each_with(tx, |tx, (tile, tile_bounds, spec)| {
+                // Each worker owns its own sampler — avoids cross-thread borrowing
+                // of &mut self. SRTM files are read-only so concurrent loads are
+                // safe; the OS page cache ensures the files only hit disk once.
+                let mut sampler = NativeSrtmSampler::new(srtm_root_owned.clone());
+                let (contours, coastlines) =
+                    build_tile_contours(&mut sampler, spec, tile_bounds);
+                let outcome = import_tile_native(&cache_db_owned, tile, &contours)
+                    .and_then(|_| import_coastline_native(&cache_db_owned, tile, &coastlines));
+                done_arc.fetch_add(1, Ordering::Relaxed);
+                let _ = tx.send(match outcome {
+                    Ok(()) => Outcome::Built,
+                    Err(e) => Outcome::Error(format!(
+                        "z{} ({},{}) — {e}",
+                        tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket
+                    )),
+                });
+            });
+        });
+    });
+
+    // ── Drain results, report progress ────────────────────────────────────────
     let mut built = 0usize;
     let mut errors = 0usize;
-
-    for (i, (tile, tile_bounds, spec)) in work.into_iter().enumerate() {
-        let frac = i as f32 / to_build as f32;
-        progress(ContourBuildProgress::info(
-            "Building",
-            frac,
-            format!("{i}/{to_build} tiles built"),
-        ));
-
-        let (contours, coastlines) = build_tile_contours(&mut sampler, spec, tile_bounds);
-
-        let res = import_tile_native(cache_db_path, tile, &contours)
-            .and_then(|_| import_coastline_native(cache_db_path, tile, &coastlines));
-
-        match res {
-            Ok(()) => built += 1,
-            Err(e) => {
-                errors += 1;
-                progress(ContourBuildProgress::error(
+    for outcome in rx {
+        let done = done_count.load(Ordering::Relaxed);
+        let frac = done as f32 / to_build.max(1) as f32;
+        match outcome {
+            Outcome::Built => {
+                built += 1;
+                progress(ContourBuildProgress::info(
                     "Building",
                     frac,
-                    format!("z{} ({},{}) — {e}", tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket),
+                    format!("{done}/{to_build} tiles built"),
                 ));
+            }
+            Outcome::Error(msg) => {
+                errors += 1;
+                progress(ContourBuildProgress::error("Building", frac, msg));
             }
         }
     }
 
-    progress(ContourBuildProgress::info("Building", 1.0, format!("{built}/{to_build} tiles built")));
+    // Checkpoint the WAL so all committed tiles are in the main .sqlite file
+    // (not just the WAL file).  This ensures the file size reflects actual data
+    // and the DB is portable without the .sqlite-wal side-car.
+    if let Ok(conn) = Connection::open(cache_db_path) {
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
+    }
 
     Ok(format!(
         "Contours complete: {built} built, {skipped} cached, {errors} errors, {total} total"
