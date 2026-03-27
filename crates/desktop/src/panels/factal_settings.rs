@@ -337,42 +337,91 @@ fn tab_paths(ui: &mut egui::Ui, model: &mut AppModel) {
     // Show exactly where the app will look for srtm_focus_cache.sqlite and
     // how many tiles it contains — a green path with 0 tiles means path
     // mismatch (the real cache is elsewhere; this is an empty shell).
+    // Also shows SUM(contour_count) to detect "tiles in manifest but 0
+    // actual contour rows" (marching squares produced no output).
     {
         let db_path = focus_cache_db::focus_cache_db_path(model.selected_root.as_deref());
-        let (label, color) = match &db_path {
+        match &db_path {
             Some(p) if p.exists() => {
-                let tile_count = rusqlite::Connection::open_with_flags(
+                struct CacheStats {
+                    tile_count: i64,
+                    total_contours: i64,
+                    zoom_summary: String,
+                }
+                let stats = rusqlite::Connection::open_with_flags(
                     p,
                     rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
                 )
                 .ok()
                 .and_then(|conn| {
-                    conn.query_row(
+                    let tile_count: i64 = conn.query_row(
                         "SELECT COUNT(*) FROM contour_tile_manifest",
                         [],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .ok()
-                })
-                .unwrap_or(0);
-                let indicator = if tile_count > 0 { "✓" } else { "⚠ 0 tiles — wrong file?" };
-                let color = if tile_count > 0 {
-                    egui::Color32::from_rgb(80, 200, 100)
+                        |row| row.get(0),
+                    ).unwrap_or(0);
+                    let total_contours: i64 = conn.query_row(
+                        "SELECT COALESCE(SUM(contour_count), 0) FROM contour_tile_manifest",
+                        [],
+                        |row| row.get(0),
+                    ).unwrap_or(0);
+                    // Per-zoom-bucket summary: "z0:123 z6:456"
+                    let mut stmt = conn.prepare(
+                        "SELECT zoom_bucket, COUNT(*), COALESCE(SUM(contour_count),0) \
+                         FROM contour_tile_manifest GROUP BY zoom_bucket ORDER BY zoom_bucket"
+                    ).ok()?;
+                    let rows: Vec<(i32, i64, i64)> = stmt.query_map([], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    }).ok()?.flatten().collect();
+                    let zoom_summary = rows.iter()
+                        .map(|(z, tiles, contours)| format!("z{z}:{tiles}t/{contours}c"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    Some(CacheStats { tile_count, total_contours, zoom_summary })
+                });
+
+                if let Some(s) = stats {
+                    let has_tiles = s.tile_count > 0;
+                    let has_contours = s.total_contours > 0;
+                    let (indicator, color) = if !has_tiles {
+                        ("⚠ 0 tiles — wrong file?", egui::Color32::from_rgb(220, 160, 40))
+                    } else if !has_contours {
+                        ("⚠ 0 contour lines — marching squares may have failed!", egui::Color32::from_rgb(220, 100, 60))
+                    } else {
+                        ("✓", egui::Color32::from_rgb(80, 200, 100))
+                    };
+                    ui.colored_label(
+                        color,
+                        format!(
+                            "Contour cache ({} tiles, {} lines) {}: {}",
+                            s.tile_count, s.total_contours, indicator, p.display()
+                        ),
+                    );
+                    if !s.zoom_summary.is_empty() {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(150, 180, 200),
+                            format!("  Per zoom: {}", s.zoom_summary),
+                        );
+                    }
                 } else {
-                    egui::Color32::from_rgb(220, 160, 40)
-                };
-                (format!("Contour cache ({tile_count} tiles): {} {indicator}", p.display()), color)
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 160, 40),
+                        format!("Contour cache (could not read): {}", p.display()),
+                    );
+                }
             }
-            Some(p) => (
-                format!("Contour cache (NOT FOUND): {}", p.display()),
-                egui::Color32::from_rgb(220, 100, 60),
-            ),
-            None => (
-                "Contour cache: could not resolve path (set Derived Root)".to_owned(),
-                egui::Color32::from_rgb(220, 100, 60),
-            ),
-        };
-        ui.colored_label(color, label);
+            Some(p) => {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 100, 60),
+                    format!("Contour cache (NOT FOUND): {}", p.display()),
+                );
+            }
+            None => {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 100, 60),
+                    "Contour cache: could not resolve path (set Derived Root)",
+                );
+            }
+        }
     }
     ui.add_space(4.0);
 

@@ -4,7 +4,6 @@
 /// memory.  Bilinearly interpolates between the four nearest grid samples.
 /// Returns `0.0` for no-data cells (SRTM sentinel −32768) and for tiles
 /// that cannot be opened (e.g. ocean areas with no tile file).
-use image::ImageReader;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -72,23 +71,43 @@ impl SrtmSampler {
 // ── Tile loading ──────────────────────────────────────────────────────────────
 
 fn load_tile(path: &Path) -> Option<SrtmTile> {
-    let image = ImageReader::open(path).ok()?.decode().ok()?.to_luma16();
-    let (width, height) = image.dimensions();
-    // SRTM tiles are stored as signed i16; the image crate decodes them as u16.
-    // Reinterpret the bits so that negative elevations and the −32768 no-data
-    // sentinel work correctly, then convert to f32 for fast arithmetic.
-    let samples: Vec<f32> = image
-        .into_raw()
-        .into_iter()
-        .map(|u| {
-            let signed = u as i16;
-            if signed == i16::MIN {
-                0.0 // SRTM no-data sentinel
-            } else {
-                signed as f32
-            }
-        })
-        .collect();
+    use tiff::decoder::{Decoder, DecodingResult};
+    use std::fs::File;
+
+    let file = File::open(path).ok()?;
+    let mut decoder = Decoder::new(file).ok()?;
+    let (width, height) = decoder.dimensions().ok()?;
+    let result = decoder.read_image().ok()?;
+
+    // Convert all supported SRTM pixel formats to f32 elevation values.
+    // Nodata sentinel (-32768 for Int/UInt, NaN/-32768.0 for float) → 0.0.
+    let samples: Vec<f32> = match result {
+        DecodingResult::I16(data) => data
+            .into_iter()
+            .map(|s| if s == i16::MIN { 0.0 } else { s as f32 })
+            .collect(),
+        DecodingResult::U16(data) => data
+            .into_iter()
+            .map(|u| {
+                let s = u as i16;
+                if s == i16::MIN { 0.0 } else { s as f32 }
+            })
+            .collect(),
+        DecodingResult::F32(data) => data
+            .into_iter()
+            .map(|f| if f.is_nan() || f <= -32767.0 { 0.0 } else { f })
+            .collect(),
+        DecodingResult::F64(data) => data
+            .into_iter()
+            .map(|f| if f.is_nan() || f <= -32767.0 { 0.0 } else { f as f32 })
+            .collect(),
+        _ => return None,
+    };
+
+    if samples.len() != (width * height) as usize {
+        return None;
+    }
+
     Some(SrtmTile { width, height, samples })
 }
 

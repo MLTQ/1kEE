@@ -5,7 +5,6 @@
 /// Produces the same output schema as the GDAL pipeline so the desktop
 /// reads both transparently.
 use crate::contours::{FocusContourSpec, GeoBounds};
-use image::ImageReader;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
@@ -19,17 +18,79 @@ struct SrtmTile {
 }
 
 impl SrtmTile {
+    /// Load an SRTM GeoTIFF tile.  Handles both signed Int16 (the most common
+    /// SRTM distribution format) and Float32 (some re-processed products).
+    ///
+    /// Using the `tiff` crate directly rather than going through `image` avoids
+    /// a silent failure mode where `image` rejects Int16 TIFFs tagged with
+    /// SampleFormat=2 (SAMPLEFORMAT_INT) and `decode()` returns an error.
     fn load(path: &Path) -> Option<Self> {
-        let img = ImageReader::open(path).ok()?.decode().ok()?.to_luma16();
-        let (width, height) = img.dimensions();
-        let samples = img
-            .into_raw()
-            .into_iter()
-            .map(|u| {
-                let s = u as i16;
-                if s == i16::MIN { f32::NAN } else { s as f32 }
-            })
-            .collect();
+        use tiff::decoder::{Decoder, DecodingResult};
+        use std::fs::File;
+
+        let file = File::open(path)
+            .map_err(|e| eprintln!("[1kEE] SRTM open error {}: {e}", path.display()))
+            .ok()?;
+        let mut decoder = Decoder::new(file)
+            .map_err(|e| eprintln!("[1kEE] SRTM TIFF init error {}: {e}", path.display()))
+            .ok()?;
+
+        let (width, height) = decoder.dimensions()
+            .map_err(|e| eprintln!("[1kEE] SRTM dimensions error {}: {e}", path.display()))
+            .ok()?;
+
+        let result = decoder.read_image()
+            .map_err(|e| eprintln!("[1kEE] SRTM read error {}: {e}", path.display()))
+            .ok()?;
+
+        let samples: Vec<f32> = match result {
+            // Signed Int16 — the canonical SRTM format (SampleFormat=2).
+            // -32768 is the SRTM nodata sentinel; map to NaN.
+            DecodingResult::I16(data) => data
+                .into_iter()
+                .map(|s| if s == i16::MIN { f32::NAN } else { s as f32 })
+                .collect(),
+            // Unsigned 16-bit — sometimes written by tools that ignore SampleFormat.
+            // Reinterpret bits as i16 so negative elevations decode correctly.
+            DecodingResult::U16(data) => data
+                .into_iter()
+                .map(|u| {
+                    let s = u as i16;
+                    if s == i16::MIN { f32::NAN } else { s as f32 }
+                })
+                .collect(),
+            // Float32 — used by some re-projected SRTM products.
+            // Common nodata values: NaN, -32768.0, -9999.0.
+            DecodingResult::F32(data) => data
+                .into_iter()
+                .map(|f| {
+                    if f.is_nan() || f <= -32767.0 { f32::NAN } else { f }
+                })
+                .collect(),
+            // Float64 — rare but possible after reprojection.
+            DecodingResult::F64(data) => data
+                .into_iter()
+                .map(|f| {
+                    if f.is_nan() || f <= -32767.0 { f32::NAN } else { f as f32 }
+                })
+                .collect(),
+            _other => {
+                eprintln!(
+                    "[1kEE] SRTM unsupported pixel format in {} (not I16/U16/F32/F64)",
+                    path.display()
+                );
+                return None;
+            }
+        };
+
+        if samples.len() != (width * height) as usize {
+            eprintln!(
+                "[1kEE] SRTM sample count mismatch {}: got {} expected {}",
+                path.display(), samples.len(), width * height
+            );
+            return None;
+        }
+
         Some(Self { width, height, samples })
     }
 
