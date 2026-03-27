@@ -313,14 +313,19 @@ pub struct ContourBuildProgress {
     pub fraction: f32,
     pub message:  String,
     pub is_error: bool,
+    /// Set when a tile was just completed; carries (min_lat, max_lat, min_lon, max_lon).
+    pub tile_bounds: Option<(f32, f32, f32, f32)>,
 }
 
 impl ContourBuildProgress {
     fn info(stage: impl Into<String>, fraction: f32, message: impl Into<String>) -> Self {
-        Self { stage: stage.into(), fraction, message: message.into(), is_error: false }
+        Self { stage: stage.into(), fraction, message: message.into(), is_error: false, tile_bounds: None }
     }
     fn error(stage: impl Into<String>, fraction: f32, message: impl Into<String>) -> Self {
-        Self { stage: stage.into(), fraction, message: message.into(), is_error: true }
+        Self { stage: stage.into(), fraction, message: message.into(), is_error: true, tile_bounds: None }
+    }
+    fn built(stage: impl Into<String>, fraction: f32, message: impl Into<String>, bounds: (f32, f32, f32, f32)) -> Self {
+        Self { stage: stage.into(), fraction, message: message.into(), is_error: false, tile_bounds: Some(bounds) }
     }
 }
 
@@ -486,7 +491,7 @@ pub fn build_contour_tiles(
         format!("Starting {num_threads} parallel workers"),
     ));
 
-    enum Outcome { Built, Error(String) }
+    enum Outcome { Built(f32, f32, f32, f32), Error(String) }
     let (tx, rx) = mpsc::channel::<Outcome>();
     let done_count = Arc::new(AtomicUsize::new(0));
 
@@ -530,7 +535,10 @@ pub fn build_contour_tiles(
                 cleanup(&[&tmp_tif, &tmp_gpkg, &tmp_coast_gpkg]);
                 done_arc.fetch_add(1, Ordering::Relaxed);
                 let _ = tx.send(match outcome {
-                    Ok(()) => Outcome::Built,
+                    Ok(()) => Outcome::Built(
+                        tile_bounds.min_lat, tile_bounds.max_lat,
+                        tile_bounds.min_lon, tile_bounds.max_lon,
+                    ),
                     Err(e) => Outcome::Error(format!(
                         "z{} ({},{}) — {e}",
                         tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket
@@ -547,12 +555,13 @@ pub fn build_contour_tiles(
         let done = done_count.load(Ordering::Relaxed);
         let frac = done as f32 / to_build.max(1) as f32;
         match outcome {
-            Outcome::Built => {
+            Outcome::Built(min_lat, max_lat, min_lon, max_lon) => {
                 built += 1;
-                progress(ContourBuildProgress::info(
+                progress(ContourBuildProgress::built(
                     "Building",
                     frac,
                     format!("{done}/{to_build} tiles built"),
+                    (min_lat, max_lat, min_lon, max_lon),
                 ));
             }
             Outcome::Error(msg) => {
@@ -763,7 +772,7 @@ pub fn build_contour_tiles_native(
         format!("Starting {num_threads} parallel workers"),
     ));
 
-    enum Outcome { Built, Error(String) }
+    enum Outcome { Built(f32, f32, f32, f32), Error(String) }
     let (tx, rx) = mpsc::channel::<Outcome>();
     let done_count = Arc::new(AtomicUsize::new(0));
 
@@ -788,7 +797,10 @@ pub fn build_contour_tiles_native(
                     .and_then(|_| import_coastline_native(&cache_db_owned, tile, &coastlines));
                 done_arc.fetch_add(1, Ordering::Relaxed);
                 let _ = tx.send(match outcome {
-                    Ok(()) => Outcome::Built,
+                    Ok(()) => Outcome::Built(
+                        tile_bounds.min_lat, tile_bounds.max_lat,
+                        tile_bounds.min_lon, tile_bounds.max_lon,
+                    ),
                     Err(e) => Outcome::Error(format!(
                         "z{} ({},{}) — {e}",
                         tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket
@@ -805,12 +817,13 @@ pub fn build_contour_tiles_native(
         let done = done_count.load(Ordering::Relaxed);
         let frac = done as f32 / to_build.max(1) as f32;
         match outcome {
-            Outcome::Built => {
+            Outcome::Built(min_lat, max_lat, min_lon, max_lon) => {
                 built += 1;
-                progress(ContourBuildProgress::info(
+                progress(ContourBuildProgress::built(
                     "Building",
                     frac,
                     format!("{done}/{to_build} tiles built"),
+                    (min_lat, max_lat, min_lon, max_lon),
                 ));
             }
             Outcome::Error(msg) => {

@@ -18,6 +18,8 @@ pub enum BuildEvent {
     Progress(RoadBuildProgress),
     Log(String),
     Finished(Result<String, String>),
+    /// A contour tile finished building; carries (min_lat, max_lat, min_lon, max_lon).
+    TileCompleted(f32, f32, f32, f32),
 }
 
 pub fn spawn_job(job: BuildJob) -> JobHandle {
@@ -40,6 +42,9 @@ pub fn spawn_job(job: BuildJob) -> JobHandle {
             let mut reporter = |p: ContourBuildProgress| {
                 if p.is_error {
                     let _ = tx.send(BuildEvent::Log(p.message.clone()));
+                }
+                if let Some((min_lat, max_lat, min_lon, max_lon)) = p.tile_bounds {
+                    let _ = tx.send(BuildEvent::TileCompleted(min_lat, max_lat, min_lon, max_lon));
                 }
                 let _ = tx.send(BuildEvent::Progress(RoadBuildProgress {
                     stage:   p.stage,

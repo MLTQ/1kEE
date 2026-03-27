@@ -2,6 +2,7 @@ use crate::args::{BboxCommand, ContoursBboxCommand};
 use crate::job::{BuildEvent, BuildJob, JobHandle, spawn_job};
 use eframe::egui;
 use eframe::egui::Color32;
+use rusqlite::OpenFlags;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -78,6 +79,10 @@ pub struct BuilderApp {
     inspector: CacheInspector,
     active_job: Option<JobHandle>,
     drag_start: Option<egui::Pos2>,
+    /// Tiles already in the cache (from Scan Cache): (zoom_bucket, min_lat, max_lat, min_lon, max_lon)
+    cached_tiles: Vec<(i32, f32, f32, f32, f32)>,
+    /// Tiles completed in the current build run: (min_lat, max_lat, min_lon, max_lon)
+    live_tiles: Vec<(f32, f32, f32, f32)>,
 }
 
 #[derive(Clone)]
@@ -167,6 +172,8 @@ impl BuilderApp {
             inspector: CacheInspector::default(),
             active_job: None,
             drag_start: None,
+            cached_tiles: Vec::new(),
+            live_tiles: Vec::new(),
         };
         app.refresh_inspector();
         app
@@ -194,6 +201,48 @@ impl BuilderApp {
         self.active_job = Some(spawn_job(BuildJob::Bbox(command)));
     }
 
+    fn scan_cache_tiles(&mut self) {
+        let db_path = PathBuf::from(self.form.contour_db.trim());
+        if !db_path.exists() {
+            self.push_log(format!("Contour DB not found: {}", db_path.display()));
+            return;
+        }
+        let Ok(conn) = rusqlite::Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+            self.push_log("Failed to open contour DB for scanning.".to_owned());
+            return;
+        };
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT zoom_bucket, lat_bucket, lon_bucket FROM contour_tile_manifest"
+        ) else {
+            self.push_log("Failed to query contour_tile_manifest.".to_owned());
+            return;
+        };
+        let specs = crate::contours::all_specs();
+        let mut tiles = Vec::new();
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, i32>(0)?, row.get::<_, i32>(1)?, row.get::<_, i32>(2)?))
+        }) {
+            for row in rows.flatten() {
+                let (zoom_bucket, lat_bucket, lon_bucket) = row;
+                if let Some(spec) = specs.iter().find(|s| s.zoom_bucket == zoom_bucket) {
+                    let step = spec.half_extent_deg * 0.45;
+                    let center_lat = lat_bucket as f32 * step;
+                    let center_lon = lon_bucket as f32 * step;
+                    tiles.push((
+                        zoom_bucket,
+                        center_lat - spec.half_extent_deg,
+                        center_lat + spec.half_extent_deg,
+                        center_lon - spec.half_extent_deg,
+                        center_lon + spec.half_extent_deg,
+                    ));
+                }
+            }
+        }
+        let count = tiles.len();
+        self.cached_tiles = tiles;
+        self.push_log(format!("Cache scan: {count} tiles found."));
+    }
+
     fn start_contour_build(&mut self) {
         if self.active_job.is_some() {
             return;
@@ -205,6 +254,7 @@ impl BuilderApp {
         self.status = "Building Contours".to_owned();
         self.progress = 0.0;
         self.progress_detail = "Starting contour export…".to_owned();
+        self.live_tiles.clear();
         self.push_log(format!(
             "Starting contour build for bbox [{}, {}] x [{}, {}]",
             self.form.min_lat, self.form.max_lat, self.form.min_lon, self.form.max_lon,
@@ -312,6 +362,9 @@ impl BuilderApp {
                 }
                 BuildEvent::Log(line) => {
                     self.push_log(line);
+                }
+                BuildEvent::TileCompleted(min_lat, max_lat, min_lon, max_lon) => {
+                    self.live_tiles.push((min_lat, max_lat, min_lon, max_lon));
                 }
                 BuildEvent::Finished(result) => {
                     match result {
@@ -479,16 +532,63 @@ impl eframe::App for BuilderApp {
 
                 // ── World bbox map ────────────────────────────────────────────
                 ui.separator();
-                ui.label("Bounding Box Map");
+                ui.horizontal(|ui| {
+                    ui.label("Bounding Box Map");
+                    if ui.small_button("Scan Cache").clicked() {
+                        self.scan_cache_tiles();
+                    }
+                    if !self.cached_tiles.is_empty() {
+                        ui.label(
+                            egui::RichText::new(format!("({} cached)", self.cached_tiles.len()))
+                                .color(Color32::from_rgb(0, 180, 160))
+                                .small(),
+                        );
+                    }
+                    if !self.live_tiles.is_empty() {
+                        ui.label(
+                            egui::RichText::new(format!("({} built)", self.live_tiles.len()))
+                                .color(Color32::from_rgb(80, 255, 120))
+                                .small(),
+                        );
+                    }
+                });
 
+                let map_width = (ui.available_width()).max(560.0);
+                let map_height = map_width * (280.0 / 560.0);
                 let (response, painter) = ui.allocate_painter(
-                    egui::Vec2::new(280.0, 140.0),
+                    egui::Vec2::new(map_width, map_height),
                     egui::Sense::click_and_drag(),
                 );
                 let rect = response.rect;
 
                 // Background
                 painter.rect_filled(rect, 0.0, Color32::from_rgb(8, 12, 28));
+
+                // Cached tiles (dim teal — existing cache coverage)
+                for &(zoom_bucket, min_lat, max_lat, min_lon, max_lon) in &self.cached_tiles {
+                    // Brighter for higher zoom buckets (more detail)
+                    let alpha = (25 + zoom_bucket as u8 * 12).min(120);
+                    let color = Color32::from_rgba_unmultiplied(0, 180, 160, alpha);
+                    let x0 = lon_to_x(rect, min_lon);
+                    let x1 = lon_to_x(rect, max_lon);
+                    let y0 = lat_to_y(rect, max_lat);
+                    let y1 = lat_to_y(rect, min_lat);
+                    let tile_rect = egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1))
+                        .expand(0.5);
+                    painter.rect_filled(tile_rect, 0.0, color);
+                }
+
+                // Live tiles (bright green — built in this session)
+                for &(min_lat, max_lat, min_lon, max_lon) in &self.live_tiles {
+                    let color = Color32::from_rgba_unmultiplied(80, 255, 120, 210);
+                    let x0 = lon_to_x(rect, min_lon);
+                    let x1 = lon_to_x(rect, max_lon);
+                    let y0 = lat_to_y(rect, max_lat);
+                    let y1 = lat_to_y(rect, min_lat);
+                    let tile_rect = egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1))
+                        .expand(0.5);
+                    painter.rect_filled(tile_rect, 0.0, color);
+                }
 
                 // Graticule lines
                 let graticule_color  = Color32::from_rgb(20, 40, 80);
