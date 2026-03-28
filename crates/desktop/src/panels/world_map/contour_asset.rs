@@ -300,8 +300,11 @@ pub fn load_srtm_for_globe(
     // globe grows.  radius=2 gives a 5×5 grid covering ~8.4° across.
     const GLOBE_TILE_ZOOM: f32 = 1.5;
 
+    // Globe view is cache-only: never trigger on-demand GDAL builds.
+    // Globe tiles are large (zoom_bucket=1, 4.4° each) and GDAL is slow;
+    // tiles outside the pre-built cache area are simply skipped.
     let assets =
-        srtm_focus_cache::ensure_focus_contour_region(selected_root, center, GLOBE_TILE_ZOOM, 2);
+        srtm_focus_cache::ensure_focus_contour_region_cached(selected_root, center, GLOBE_TILE_ZOOM, 2);
 
     let cache: &'static Mutex<GlobeRegionCache> =
         GLOBE_CONTOUR_CACHE.get_or_init(|| Mutex::new(GlobeRegionCache::default()));
