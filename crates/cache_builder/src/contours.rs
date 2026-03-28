@@ -600,13 +600,18 @@ pub fn encode_gpkg_linestring(points: &[(f32, f32)]) -> Vec<u8> {
     buf
 }
 
-fn import_tile_native(
-    cache_db_path: &Path,
+/// Write one tile's contours and coastlines in a single transaction.
+/// Takes a persistent `&mut Connection` — the caller holds it open across all tiles,
+/// avoiding the per-tile open/pragma/DDL overhead of opening a new connection each time.
+fn write_tile_native(
+    conn: &mut Connection,
     tile: TileKey,
     contours: &[crate::marching_squares::ContourLine],
+    coastlines: &[Vec<(f32, f32)>],
 ) -> rusqlite::Result<()> {
-    let mut cache = open_cache_db(cache_db_path)?;
-    let tx = cache.transaction()?;
+    let tx = conn.transaction()?;
+
+    // ── Contours ──────────────────────────────────────────────────────────────
     tx.execute(
         "DELETE FROM contour_tiles WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
         params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
@@ -615,7 +620,7 @@ fn import_tile_native(
         "DELETE FROM contour_tile_manifest WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
         params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
     )?;
-    let mut count = 0usize;
+    let mut contour_count = 0usize;
     for (fid, line) in contours.iter().enumerate() {
         let blob = encode_gpkg_linestring(&line.points);
         tx.execute(
@@ -624,23 +629,15 @@ fn import_tile_native(
             params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket,
                     fid as i64, line.elevation_m, blob],
         )?;
-        count += 1;
+        contour_count += 1;
     }
     tx.execute(
         "INSERT INTO contour_tile_manifest (zoom_bucket,lat_bucket,lon_bucket,contour_count,built_at)
          VALUES (?1,?2,?3,?4,unixepoch())",
-        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket, count as i64],
+        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket, contour_count as i64],
     )?;
-    tx.commit()
-}
 
-fn import_coastline_native(
-    cache_db_path: &Path,
-    tile: TileKey,
-    coastlines: &[Vec<(f32, f32)>],
-) -> rusqlite::Result<()> {
-    let mut cache = open_cache_db(cache_db_path)?;
-    let tx = cache.transaction()?;
+    // ── Coastlines ────────────────────────────────────────────────────────────
     tx.execute(
         "DELETE FROM coastline_tiles WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
         params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
@@ -649,7 +646,7 @@ fn import_coastline_native(
         "DELETE FROM coastline_tile_manifest WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
         params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
     )?;
-    let mut count = 0usize;
+    let mut coastline_count = 0usize;
     for (fid, pts) in coastlines.iter().enumerate() {
         let blob = encode_gpkg_linestring(pts);
         tx.execute(
@@ -657,13 +654,14 @@ fn import_coastline_native(
              VALUES (?1,?2,?3,?4,?5)",
             params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket, fid as i64, blob],
         )?;
-        count += 1;
+        coastline_count += 1;
     }
     tx.execute(
         "INSERT INTO coastline_tile_manifest (zoom_bucket,lat_bucket,lon_bucket,line_count)
          VALUES (?1,?2,?3,?4)",
-        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket, count as i64],
+        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket, coastline_count as i64],
     )?;
+
     tx.commit()
 }
 
@@ -832,12 +830,20 @@ pub fn build_contour_tiles_native(
     });
 
     // ── Writer thread: single SQLite writer, no contention ───────────────────
+    // One persistent connection for all tiles — avoids the per-tile
+    // open+pragma+DDL overhead (~2 ms each × 155k tiles = 5+ minutes wasted).
     let cache_db_owned = cache_db_path.to_path_buf();
     let done_arc = done_count.clone();
     std::thread::spawn(move || {
+        let mut conn = match open_cache_db(&cache_db_owned) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[1kEE] writer thread: failed to open cache DB: {e}");
+                return;
+            }
+        };
         for (tile, tile_bounds, contours, coastlines) in compute_rx {
-            let outcome = import_tile_native(&cache_db_owned, tile, &contours)
-                .and_then(|_| import_coastline_native(&cache_db_owned, tile, &coastlines));
+            let outcome = write_tile_native(&mut conn, tile, &contours, &coastlines);
             done_arc.fetch_add(1, Ordering::Relaxed);
             let _ = outcome_tx.send(match outcome {
                 Ok(()) => Outcome::Built(
