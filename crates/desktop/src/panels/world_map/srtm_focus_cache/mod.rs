@@ -68,34 +68,9 @@ pub fn ensure_focus_contour_region(
     zoom: f32,
     radius: i32,
 ) -> Vec<FocusContourAsset> {
-    ensure_focus_contour_region_inner(selected_root, focus, zoom, radius, true)
-}
-
-/// Cache-only variant: never spawns on-demand GDAL builds for uncached tiles.
-/// Used by the globe view, where tiles are large and on-demand builds are slow.
-pub fn ensure_focus_contour_region_cached(
-    selected_root: Option<&Path>,
-    focus: GeoPoint,
-    zoom: f32,
-    radius: i32,
-) -> Vec<FocusContourAsset> {
-    ensure_focus_contour_region_inner(selected_root, focus, zoom, radius, false)
-}
-
-fn ensure_focus_contour_region_inner(
-    selected_root: Option<&Path>,
-    focus: GeoPoint,
-    zoom: f32,
-    radius: i32,
-    build_missing: bool,
-) -> Vec<FocusContourAsset> {
     // SRTM root is only needed to spawn on-demand GDAL builds for uncached tiles.
     // Pre-built tiles in the SQLite cache are returned even without SRTM access.
-    let srtm_root = if build_missing {
-        terrain_assets::find_srtm_root(selected_root)
-    } else {
-        None
-    };
+    let srtm_root = terrain_assets::find_srtm_root(selected_root);
     let Some(cache_root) = db::focus_cache_root(selected_root) else {
         return Vec::new();
     };
