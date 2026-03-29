@@ -36,7 +36,6 @@ use super::contour_asset;
 use super::globe_scene::GlobeScene;
 use super::srtm_focus_cache;
 use super::srtm_stream;
-use super::terrain_raster;
 
 #[allow(dead_code)]
 pub const LOCAL_TRANSITION_START_ZOOM: f32 = 4.0;
@@ -137,7 +136,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             &layout,
             &model.globe_view,
             viewport_center,
-            model.selected_root.as_deref(),
+            contours_slice,
         );
     }
 
@@ -679,11 +678,16 @@ static ELEV_FILL: std::sync::OnceLock<std::sync::Mutex<Option<ElevFillEntry>>> =
     std::sync::OnceLock::new();
 
 struct ElevFillEntry {
-    key: (i32, i32, i32, i32, i32, i32, u8),
+    key: (i32, i32, i32, i32, i32, i32, i32, u8),
     mesh: egui::Mesh,
 }
 
-fn elev_fill_key(focus: GeoPoint, view: &GlobeViewState) -> (i32, i32, i32, i32, i32, i32, u8) {
+fn elev_fill_key(
+    focus: GeoPoint,
+    view: &GlobeViewState,
+    layout: &LocalLayout,
+    contour_count: usize,
+) -> (i32, i32, i32, i32, i32, i32, i32, u8) {
     (
         (focus.lat * 100.0) as i32,
         (focus.lon * 100.0) as i32,
@@ -691,6 +695,9 @@ fn elev_fill_key(focus: GeoPoint, view: &GlobeViewState) -> (i32, i32, i32, i32,
         (view.local_yaw * 100.0) as i32,
         (view.local_pitch * 100.0) as i32,
         (view.local_layer_spread * 100.0) as i32,
+        // Contour count changes as background threads finish loading tiles.
+        // Layout scale changes on window resize.  Both must invalidate the mesh.
+        contour_count as i32 ^ (layout.horizontal_scale * 0.5) as i32,
         theme::hot_color().r(), // proxy for theme identity
     )
 }
@@ -729,7 +736,7 @@ fn build_elev_fill_mesh(
     layout: &LocalLayout,
     view: &GlobeViewState,
     focus: GeoPoint,
-    selected_root: Option<&Path>,
+    contours: &[contour_asset::ContourPath],
 ) -> egui::Mesh {
     const N: usize = 60; // 61×61 = 3,721 vertices, 7,200 triangles
 
@@ -740,6 +747,51 @@ fn build_elev_fill_mesh(
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
     let cell_size_m = (2.0 * half_extent_deg * 111_320.0 / N as f32).max(1.0);
 
+    // Build elevation surface from the contour data already loaded.
+    // Strategy: take up to MAX_SAMPLES representative (lat, lon, elevation_m) points
+    // from the contour polylines, then use inverse-distance-weighted (IDW) interpolation
+    // to estimate elevation at each fill-mesh vertex.
+    //
+    // This avoids any dependency on SRTM or GEBCO files at render time — if the
+    // contour lines loaded correctly, the fill elevations will be correct too.
+    const MAX_SAMPLES: usize = 400;
+    let stride = (contours.len() / MAX_SAMPLES).max(1);
+    let samples: Vec<(f32, f32, f32)> = contours
+        .iter()
+        .step_by(stride)
+        .filter_map(|c| {
+            if c.points.is_empty() {
+                return None;
+            }
+            // Use the midpoint of each contour arc (more representative than centroid
+            // for long arcs that curve around topographic features).
+            let mid = &c.points[c.points.len() / 2];
+            Some((mid.lat, mid.lon, c.elevation_m))
+        })
+        .collect();
+
+    // IDW elevation estimate for a (lat, lon) given the sample set.
+    // Power = 2 (inverse square distance).  Sea level (0.0) if no samples.
+    let idw_elevation = |lat: f32, lon: f32| -> f32 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        let mut wsum = 0.0f32;
+        let mut esum = 0.0f32;
+        for &(slat, slon, elev) in &samples {
+            let dlat = lat - slat;
+            let dlon = lon - slon;
+            let dist2 = dlat * dlat + dlon * dlon;
+            if dist2 < 1e-10 {
+                return elev; // exactly on a sample point
+            }
+            let w = 1.0 / dist2;
+            wsum += w;
+            esum += w * elev;
+        }
+        esum / wsum
+    };
+
     // Sample elevations into a flat grid so we can compute normals
     let side = N + 1;
     let mut elevs = vec![0.0f32; side * side];
@@ -747,9 +799,7 @@ fn build_elev_fill_mesh(
         for col in 0..side {
             let lat = (focus.lat - half_extent_deg) + (row as f32 / N as f32) * 2.0 * half_extent_deg;
             let lon = (focus.lon - half_extent_deg) + (col as f32 / N as f32) * 2.0 * half_extent_deg;
-            elevs[row * side + col] =
-                terrain_raster::sample_elevation_m(selected_root, GeoPoint { lat, lon })
-                    .unwrap_or(0.0);
+            elevs[row * side + col] = idw_elevation(lat, lon);
         }
     }
 
@@ -822,14 +872,14 @@ fn draw_elevation_fill(
     layout: &LocalLayout,
     view: &GlobeViewState,
     focus: GeoPoint,
-    selected_root: Option<&Path>,
+    contours: &[contour_asset::ContourPath],
 ) {
-    let key = elev_fill_key(focus, view);
+    let key = elev_fill_key(focus, view, layout, contours.len());
     let cache = ELEV_FILL.get_or_init(|| std::sync::Mutex::new(None));
     let mut guard = cache.lock().unwrap();
 
     if guard.as_ref().map(|e| e.key != key).unwrap_or(true) {
-        let mesh = build_elev_fill_mesh(layout, view, focus, selected_root);
+        let mesh = build_elev_fill_mesh(layout, view, focus, contours);
         *guard = Some(ElevFillEntry { key, mesh });
     }
 
