@@ -129,7 +129,20 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 
     let contours_slice = contours.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
 
-    // ── Elevation fill (drawn first so contours/roads appear on top) ──────────
+    // ── Background contour pass (drawn before fill so opaque fill covers them) ─
+    if model.fill_elevation && !contours_slice.is_empty() && model.show_contours {
+        draw_contour_stack(
+            painter,
+            &layout,
+            &model.globe_view,
+            viewport_center,
+            render_zoom,
+            contours_slice,
+            1.0,
+        );
+    }
+
+    // ── Elevation fill (opaque — occludes the background contour pass above) ──
     if model.fill_elevation && !contours_slice.is_empty() {
         draw_elevation_fill(
             painter,
@@ -140,6 +153,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         );
     }
 
+    // ── Surface contour pass (drawn after fill so lines on top are visible) ───
     if !contours_slice.is_empty() && model.show_contours {
         draw_contour_stack(
             painter,
