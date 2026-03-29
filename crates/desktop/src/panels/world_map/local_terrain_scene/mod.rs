@@ -807,6 +807,7 @@ fn build_elev_fill_mesh(
     }
 
     let mut mesh = egui::Mesh::default();
+    let mut vertex_depths: Vec<f32> = Vec::with_capacity(side * side);
     mesh.vertices.reserve(side * side);
     mesh.indices.reserve(N * N * 6);
 
@@ -852,27 +853,42 @@ fn build_elev_fill_mesh(
 
             let lat = (focus.lat - half_extent_deg) + (row as f32 / N as f32) * 2.0 * half_extent_deg;
             let lon = (focus.lon - half_extent_deg) + (col as f32 / N as f32) * 2.0 * half_extent_deg;
-            let pos = projection::project_local(
+            let projected = projection::project_local(
                 layout, view, focus, GeoPoint { lat, lon }, elev, extent_x_km, extent_y_km,
-            )
-            .map(|p| p.pos)
-            .unwrap_or_else(|| {
-                egui::pos2(
-                    layout.focus_center.x + (col as f32 / N as f32 - 0.5) * layout.horizontal_scale * 2.0,
-                    layout.focus_center.y - (row as f32 / N as f32 - 0.5) * layout.height,
-                )
-            });
+            );
+            let (pos, depth) = projected
+                .map(|p| (p.pos, p.depth))
+                .unwrap_or_else(|| (
+                    egui::pos2(
+                        layout.focus_center.x + (col as f32 / N as f32 - 0.5) * layout.horizontal_scale * 2.0,
+                        layout.focus_center.y - (row as f32 / N as f32 - 0.5) * layout.height,
+                    ),
+                    0.5,
+                ));
 
+            vertex_depths.push(depth);
             mesh.vertices.push(egui::epaint::Vertex { pos, uv: egui::pos2(0.0, 0.0), color });
         }
     }
 
+    // Sort triangles back-to-front (painter's algorithm) so nearer terrain
+    // correctly occludes terrain behind it without a z-buffer.
+    let mut tris: Vec<[u32; 3]> = Vec::with_capacity(N * N * 2);
     for row in 0..N {
         for col in 0..N {
             let v = |r: usize, c: usize| (r * side + c) as u32;
-            mesh.indices.extend_from_slice(&[v(row, col), v(row + 1, col), v(row, col + 1)]);
-            mesh.indices.extend_from_slice(&[v(row + 1, col), v(row + 1, col + 1), v(row, col + 1)]);
+            tris.push([v(row, col), v(row + 1, col), v(row, col + 1)]);
+            tris.push([v(row + 1, col), v(row + 1, col + 1), v(row, col + 1)]);
         }
+    }
+    tris.sort_unstable_by(|a, b| {
+        let da = (vertex_depths[a[0] as usize] + vertex_depths[a[1] as usize] + vertex_depths[a[2] as usize]) / 3.0;
+        let db = (vertex_depths[b[0] as usize] + vertex_depths[b[1] as usize] + vertex_depths[b[2] as usize]) / 3.0;
+        // Descending: far triangles (high depth) first so near ones paint over them
+        db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for tri in &tris {
+        mesh.indices.extend_from_slice(tri);
     }
 
     mesh
