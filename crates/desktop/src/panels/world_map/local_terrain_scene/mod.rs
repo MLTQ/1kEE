@@ -34,9 +34,9 @@ use std::path::Path;
 
 use super::contour_asset;
 use super::globe_scene::GlobeScene;
-use super::local_terrain_pass;
 use super::srtm_focus_cache;
 use super::srtm_stream;
+use super::terrain_raster;
 
 #[allow(dead_code)]
 pub const LOCAL_TRANSITION_START_ZOOM: f32 = 4.0;
@@ -129,6 +129,18 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     }
 
     let contours_slice = contours.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+
+    // ── Elevation fill (drawn first so contours/roads appear on top) ──────────
+    if model.fill_elevation && !contours_slice.is_empty() {
+        draw_elevation_fill(
+            painter,
+            &layout,
+            &model.globe_view,
+            viewport_center,
+            model.selected_root.as_deref(),
+        );
+    }
+
     if !contours_slice.is_empty() && model.show_contours {
         draw_contour_stack(
             painter,
@@ -234,34 +246,6 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 }
             }
         }
-    }
-
-    // ── GPU terrain surface ────────────────────────────────────────────────
-    // Rendered on top of contours/roads so the shaded mesh occludes the line
-    // work within the terrain quad — outside the quad the contours remain fully
-    // visible, giving a high-contrast look everywhere else.
-    if model.show_terrain_surface {
-        let half_extent_deg = visual_half_extent_for_zoom(model.globe_view.local_zoom);
-        let terrain_layout = local_terrain_pass::LocalTerrainLayout {
-            focus_center: layout.focus_center,
-            horizontal_scale: layout.horizontal_scale,
-            height: layout.height,
-        };
-        let callback = local_terrain_pass::LocalTerrainCallback::new(
-            viewport_center,
-            half_extent_deg,
-            &terrain_layout,
-            model.globe_view.local_yaw,
-            model.globe_view.local_pitch,
-            model.globe_view.local_layer_spread,
-            0.95,
-            model.selected_root.as_deref(),
-            theme::scene_backdrop(), // sea / deep
-            theme::topo_color(),     // low land
-            theme::contour_color(),  // mid / high land
-            theme::hot_color(),      // peaks
-        );
-        painter.add(callback.into_paint_callback(rect));
     }
 
     // Beam, markers, legend and progress bar always render regardless of load state.
@@ -687,6 +671,171 @@ fn draw_local_beam(
     painter.circle_filled(ground, 1.8, cherry);
 
     elevation_m
+}
+
+// ── Elevation fill (hypsometric tint + hillshade) ─────────────────────────────
+
+static ELEV_FILL: std::sync::OnceLock<std::sync::Mutex<Option<ElevFillEntry>>> =
+    std::sync::OnceLock::new();
+
+struct ElevFillEntry {
+    key: (i32, i32, i32, i32, i32, i32, u8),
+    mesh: egui::Mesh,
+}
+
+fn elev_fill_key(focus: GeoPoint, view: &GlobeViewState) -> (i32, i32, i32, i32, i32, i32, u8) {
+    (
+        (focus.lat * 100.0) as i32,
+        (focus.lon * 100.0) as i32,
+        (view.local_zoom * 10.0) as i32,
+        (view.local_yaw * 100.0) as i32,
+        (view.local_pitch * 100.0) as i32,
+        (view.local_layer_spread * 100.0) as i32,
+        theme::hot_color().r(), // proxy for theme identity
+    )
+}
+
+fn elev_lerp(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
+    let t = t.clamp(0.0, 1.0);
+    egui::Color32::from_rgb(
+        (a.r() as f32 + (b.r() as f32 - a.r() as f32) * t) as u8,
+        (a.g() as f32 + (b.g() as f32 - a.g() as f32) * t) as u8,
+        (a.b() as f32 + (b.b() as f32 - a.b() as f32) * t) as u8,
+    )
+}
+
+fn elevation_fill_color(elev_m: f32) -> egui::Color32 {
+    let ocean  = theme::canvas_background(); // very dark: deepest water
+    let low    = theme::topo_color();        // dark theme hue: lowland
+    let high   = theme::hot_color();         // bright accent: peaks
+    // Intermediate "mid" = halfway between low and high, slightly brightened
+    let mid = elev_lerp(low, high, 0.45);
+
+    if elev_m < -500.0 {
+        elev_lerp(ocean.gamma_multiply(0.6), ocean, ((-elev_m - 500.0) / 3000.0).min(1.0))
+    } else if elev_m < 0.0 {
+        elev_lerp(ocean, low.gamma_multiply(0.7), 1.0 - (-elev_m / 500.0))
+    } else if elev_m < 600.0 {
+        elev_lerp(low, mid, elev_m / 600.0)
+    } else if elev_m < 2500.0 {
+        elev_lerp(mid, high, (elev_m - 600.0) / 1900.0)
+    } else {
+        // High peaks — blend toward a lighter version for snow-cap feel
+        elev_lerp(high, high.gamma_multiply(1.6).linear_multiply(0.95), ((elev_m - 2500.0) / 2000.0).min(1.0))
+    }
+}
+
+fn build_elev_fill_mesh(
+    layout: &LocalLayout,
+    view: &GlobeViewState,
+    focus: GeoPoint,
+    selected_root: Option<&Path>,
+) -> egui::Mesh {
+    const N: usize = 60; // 61×61 = 3,721 vertices, 7,200 triangles
+
+    let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
+    let km_per_deg_lat = 111.32f32;
+    let km_per_deg_lon = km_per_deg_lat * focus.lat.to_radians().cos().abs().max(0.2);
+    let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
+    let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
+    let cell_size_m = (2.0 * half_extent_deg * 111_320.0 / N as f32).max(1.0);
+
+    // Sample elevations into a flat grid so we can compute normals
+    let side = N + 1;
+    let mut elevs = vec![0.0f32; side * side];
+    for row in 0..side {
+        for col in 0..side {
+            let lat = (focus.lat - half_extent_deg) + (row as f32 / N as f32) * 2.0 * half_extent_deg;
+            let lon = (focus.lon - half_extent_deg) + (col as f32 / N as f32) * 2.0 * half_extent_deg;
+            elevs[row * side + col] =
+                terrain_raster::sample_elevation_m(selected_root, GeoPoint { lat, lon })
+                    .unwrap_or(0.0);
+        }
+    }
+
+    let mut mesh = egui::Mesh::default();
+    mesh.vertices.reserve(side * side);
+    mesh.indices.reserve(N * N * 6);
+
+    for row in 0..side {
+        for col in 0..side {
+            let elev = elevs[row * side + col];
+
+            // Central-difference normals for hillshade (world-space, Z-up)
+            let dzdx = if col > 0 && col < N {
+                (elevs[row * side + col + 1] - elevs[row * side + col - 1]) / (2.0 * cell_size_m)
+            } else if col == 0 {
+                (elevs[row * side + 1] - elev) / cell_size_m
+            } else {
+                (elev - elevs[row * side + col - 1]) / cell_size_m
+            };
+            let dzdy = if row > 0 && row < N {
+                (elevs[(row - 1) * side + col] - elevs[(row + 1) * side + col]) / (2.0 * cell_size_m)
+            } else if row == 0 {
+                (elev - elevs[side + col]) / cell_size_m
+            } else {
+                (elevs[(row - 1) * side + col] - elev) / cell_size_m
+            };
+            let len = (dzdx * dzdx + dzdy * dzdy + 1.0).sqrt();
+            let nx = -dzdx / len;
+            let ny = dzdy / len;
+            let nz = 1.0 / len;
+
+            // Sun from upper-right
+            let (lx, ly, lz) = (0.5f32, 0.8, 1.2);
+            let llen = (lx * lx + ly * ly + lz * lz).sqrt();
+            let shade = 0.32 + 0.68 * (nx * lx / llen + ny * ly / llen + nz * lz / llen).max(0.0);
+
+            let base = elevation_fill_color(elev);
+            let color = base.gamma_multiply(shade);
+
+            let lat = (focus.lat - half_extent_deg) + (row as f32 / N as f32) * 2.0 * half_extent_deg;
+            let lon = (focus.lon - half_extent_deg) + (col as f32 / N as f32) * 2.0 * half_extent_deg;
+            let pos = projection::project_local(
+                layout, view, focus, GeoPoint { lat, lon }, elev, extent_x_km, extent_y_km,
+            )
+            .map(|p| p.pos)
+            .unwrap_or_else(|| {
+                egui::pos2(
+                    layout.focus_center.x + (col as f32 / N as f32 - 0.5) * layout.horizontal_scale * 2.0,
+                    layout.focus_center.y - (row as f32 / N as f32 - 0.5) * layout.height,
+                )
+            });
+
+            mesh.vertices.push(egui::epaint::Vertex { pos, uv: egui::pos2(0.0, 0.0), color });
+        }
+    }
+
+    for row in 0..N {
+        for col in 0..N {
+            let v = |r: usize, c: usize| (r * side + c) as u32;
+            mesh.indices.extend_from_slice(&[v(row, col), v(row + 1, col), v(row, col + 1)]);
+            mesh.indices.extend_from_slice(&[v(row + 1, col), v(row + 1, col + 1), v(row, col + 1)]);
+        }
+    }
+
+    mesh
+}
+
+fn draw_elevation_fill(
+    painter: &egui::Painter,
+    layout: &LocalLayout,
+    view: &GlobeViewState,
+    focus: GeoPoint,
+    selected_root: Option<&Path>,
+) {
+    let key = elev_fill_key(focus, view);
+    let cache = ELEV_FILL.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = cache.lock().unwrap();
+
+    if guard.as_ref().map(|e| e.key != key).unwrap_or(true) {
+        let mesh = build_elev_fill_mesh(layout, view, focus, selected_root);
+        *guard = Some(ElevFillEntry { key, mesh });
+    }
+
+    if let Some(entry) = guard.as_ref() {
+        painter.add(egui::Shape::mesh(entry.mesh.clone()));
+    }
 }
 
 fn draw_contour_stack(

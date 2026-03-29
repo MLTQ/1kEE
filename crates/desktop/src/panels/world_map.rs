@@ -9,7 +9,6 @@ pub(crate) mod globe_pass;
 mod globe_scene;
 mod graticule;
 mod layer_import;
-pub(crate) mod local_terrain_pass;
 mod local_terrain_scene;
 mod map_detail_panels;
 mod map_tooltips;
@@ -262,7 +261,7 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                     ui.checkbox(&mut model.show_reticle, "Reticle");
                 }
                 if model.globe_view.local_mode {
-                    ui.checkbox(&mut model.show_terrain_surface, "Terrain");
+                    ui.checkbox(&mut model.fill_elevation, "Terrain fill");
                 }
                 let major_changed = ui
                     .checkbox(&mut model.show_major_roads, "Major roads")
@@ -573,7 +572,7 @@ fn draw_local_footer(ui: &mut egui::Ui, model: &mut AppModel, beam_elevation_m: 
                     ui.label(format!("Terrain zoom {:.1}x", model.globe_view.local_zoom));
                 }
 
-                if model.show_terrain_surface && local_terrain_scene::is_active(model) {
+                if model.fill_elevation && local_terrain_scene::is_active(model) {
                     let half_deg = local_terrain_scene::visual_half_extent_for_zoom(
                         model.globe_view.local_zoom,
                     );
