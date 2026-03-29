@@ -712,23 +712,26 @@ fn elev_lerp(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
 }
 
 fn elevation_fill_color(elev_m: f32) -> egui::Color32 {
-    let ocean  = theme::canvas_background(); // very dark: deepest water
-    let low    = theme::topo_color();        // dark theme hue: lowland
-    let high   = theme::hot_color();         // bright accent: peaks
-    // Intermediate "mid" = halfway between low and high, slightly brightened
-    let mid = elev_lerp(low, high, 0.45);
+    // Use theme colors that are clearly distinguishable from the dark canvas background.
+    // canvas_background() ≈ rgb(18,44,56) — very dark.
+    // topo_color()        ≈ rgb(39,88,105) — only slightly lighter → looks invisible.
+    // contour_color()     ≈ rgb(96,164,181) — noticeably lighter → clearly visible.
+    // hot_color()         ≈ rgb(245,125,78) — warm/bright → peaks.
+    let ocean = theme::canvas_background(); // deep water
+    let shore = theme::topo_color();        // shallow / coastline
+    let land  = theme::contour_color();     // main land surface — must contrast with bg
+    let peak  = theme::hot_color();         // mountain peaks
 
     if elev_m < -500.0 {
-        elev_lerp(ocean.gamma_multiply(0.6), ocean, ((-elev_m - 500.0) / 3000.0).min(1.0))
+        elev_lerp(shore, ocean, ((-elev_m - 500.0) / 3000.0).min(1.0))
     } else if elev_m < 0.0 {
-        elev_lerp(ocean, low.gamma_multiply(0.7), 1.0 - (-elev_m / 500.0))
+        elev_lerp(land, shore, (-elev_m / 500.0))
     } else if elev_m < 600.0 {
-        elev_lerp(low, mid, elev_m / 600.0)
+        elev_lerp(land, elev_lerp(land, peak, 0.4), elev_m / 600.0)
     } else if elev_m < 2500.0 {
-        elev_lerp(mid, high, (elev_m - 600.0) / 1900.0)
+        elev_lerp(elev_lerp(land, peak, 0.4), peak, (elev_m - 600.0) / 1900.0)
     } else {
-        // High peaks — blend toward a lighter version for snow-cap feel
-        elev_lerp(high, high.gamma_multiply(1.6).linear_multiply(0.95), ((elev_m - 2500.0) / 2000.0).min(1.0))
+        peak
     }
 }
 
@@ -834,7 +837,9 @@ fn build_elev_fill_mesh(
             // Sun from upper-right
             let (lx, ly, lz) = (0.5f32, 0.8, 1.2);
             let llen = (lx * lx + ly * ly + lz * lz).sqrt();
-            let shade = 0.32 + 0.68 * (nx * lx / llen + ny * ly / llen + nz * lz / llen).max(0.0);
+            // Ambient=0.6 so shadows never darken below 60% — keeps land color
+            // clearly visible against the near-black canvas background.
+            let shade = 0.60 + 0.40 * (nx * lx / llen + ny * ly / llen + nz * lz / llen).max(0.0);
 
             let base = elevation_fill_color(elev);
             // Apply hillshade to RGB only — gamma_multiply would also reduce alpha,
