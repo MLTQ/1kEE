@@ -837,7 +837,13 @@ fn build_elev_fill_mesh(
             let shade = 0.32 + 0.68 * (nx * lx / llen + ny * ly / llen + nz * lz / llen).max(0.0);
 
             let base = elevation_fill_color(elev);
-            let color = base.gamma_multiply(shade);
+            // Apply hillshade to RGB only — gamma_multiply would also reduce alpha,
+            // making the mesh semi-transparent.  Keep alpha=255 (fully opaque).
+            let color = egui::Color32::from_rgb(
+                (base.r() as f32 * shade).min(255.0) as u8,
+                (base.g() as f32 * shade).min(255.0) as u8,
+                (base.b() as f32 * shade).min(255.0) as u8,
+            );
 
             let lat = (focus.lat - half_extent_deg) + (row as f32 / N as f32) * 2.0 * half_extent_deg;
             let lon = (focus.lon - half_extent_deg) + (col as f32 / N as f32) * 2.0 * half_extent_deg;
