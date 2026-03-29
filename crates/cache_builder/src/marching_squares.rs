@@ -28,6 +28,9 @@ impl SrtmTile {
         use tiff::decoder::{Decoder, DecodingResult};
         use std::fs::File;
 
+        // Missing file = ocean/nodata area — expected, return None silently.
+        if !path.exists() { return None; }
+
         let file = File::open(path)
             .map_err(|e| eprintln!("[1kEE] SRTM open error {}: {e}", path.display()))
             .ok()?;
