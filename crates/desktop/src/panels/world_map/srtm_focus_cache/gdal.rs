@@ -661,7 +661,10 @@ pub fn build_lunar_contour_tile(
         "-of", "GTiff",
     ]);
     translate.arg(jp2_path).arg(&tmp_tif_path);
-    run_command(translate, "gdal_translate (lunar tile)").ok()?;
+    // JP2 reads from SLDEM2015 are slow — the file is ~22 GB and a single
+    // region extraction can take several minutes even on fast storage.
+    // Use a generous 10-minute timeout instead of the 90-second default.
+    run_command_with_timeout(translate, "gdal_translate (lunar tile)", Duration::from_secs(600)).ok()?;
 
     if shutdown_requested().load(Ordering::Relaxed) {
         cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);

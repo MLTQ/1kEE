@@ -283,7 +283,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         );
         if lunar_total > 0 && lunar_ready < lunar_total {
             draw_lunar_build_overlay(
-                painter, rect, lunar_ready, lunar_building, lunar_total, time,
+                painter, rect, &layout, lunar_ready, lunar_building, lunar_total, time,
             );
         }
     }
@@ -570,6 +570,7 @@ fn draw_graticule(painter: &egui::Painter, layout: &GlobeLayout, view: &GlobeVie
 fn draw_lunar_build_overlay(
     painter: &egui::Painter,
     rect: egui::Rect,
+    layout: &GlobeLayout,
     ready: usize,
     building: usize,
     total: usize,
@@ -617,15 +618,13 @@ fn draw_lunar_build_overlay(
     // ── Pulsing ring around the globe ─────────────────────────────────────
     // A slow expanding ring tells you at a glance that background work is
     // happening even when the card is out of peripheral vision.
+    // Use the actual layout radius so the ring hugs the sphere edge at any
+    // zoom level (high zoom makes layout.radius >> rect * 0.38).
     let pulse = (time as f32 * 0.9).sin() * 0.5 + 0.5;
     let ring_alpha = (0.06 + pulse * 0.10) * (1.0 - progress * 0.6);
-    // We don't have direct access to the layout here, but rect.center() is
-    // close enough for a full-globe ring.  Use a generous radius so it hugs
-    // the sphere edge regardless of zoom.
-    let globe_r = (rect.width().min(rect.height()) * 0.38).max(60.0);
-    let ring_r = globe_r + 6.0 + pulse * 8.0;
+    let ring_r = layout.radius + 6.0 + pulse * 8.0;
     painter.circle_stroke(
-        rect.center(),
+        layout.center,
         ring_r,
         egui::Stroke::new(
             2.5 + pulse * 1.5,
