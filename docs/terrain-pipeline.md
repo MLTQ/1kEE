@@ -85,7 +85,28 @@ gdal_contour \
   Derived/terrain/gebco_2025_contours_500m.gpkg
 ```
 
-### 4. Produce a Natural Earth fallback raster
+### 4. Produce the depth-fill BIL grid for the globe texture layer
+
+Used by `gebco_depth_fill.rs` to render ocean depth as a coloured texture on
+the globe.  The 1440×720 size matches 0.25°/pixel — fast to load, sufficient
+for a full-globe visualisation.
+
+```bash
+gdal_translate \
+  -outsize 1440 720 \
+  -ot Int16 \
+  -of EHdr \
+  Derived/terrain/gebco_2025_preview_4096.tif \
+  Derived/terrain/gebco_depth_1440x720.bil
+```
+
+This produces both `gebco_depth_1440x720.bil` and its companion
+`gebco_depth_1440x720.hdr` (written automatically by GDAL's EHdr driver).
+The app expects little-endian Int16 values; `BYTEORDER I` in the .hdr confirms
+this.  Positive values and the NODATA sentinel (−32767) are rendered
+transparent so land shows the globe background.
+
+### 6. Produce a Natural Earth fallback raster
 
 ```bash
 gdal_translate \
@@ -95,7 +116,7 @@ gdal_translate \
   Derived/terrain/natural_earth_relief_4096.tif
 ```
 
-### 5. Produce runtime-friendly PNG assets for in-app sampling
+### 7. Produce runtime-friendly PNG assets for in-app sampling
 
 ```bash
 gdal_translate \

@@ -68,9 +68,9 @@ pub fn ensure_focus_contour_region(
     zoom: f32,
     radius: i32,
 ) -> Vec<FocusContourAsset> {
-    let Some(srtm_root) = terrain_assets::find_srtm_root(selected_root) else {
-        return Vec::new();
-    };
+    // SRTM root is only needed to spawn on-demand GDAL builds for uncached tiles.
+    // Pre-built tiles in the SQLite cache are returned even without SRTM access.
+    let srtm_root = terrain_assets::find_srtm_root(selected_root);
     let Some(cache_root) = db::focus_cache_root(selected_root) else {
         return Vec::new();
     };
@@ -91,7 +91,7 @@ pub fn ensure_focus_contour_region(
     for lat_bucket in (center_lat_bucket - radius)..=(center_lat_bucket + radius) {
         for lon_bucket in (center_lon_bucket - radius)..=(center_lon_bucket + radius) {
             if let Some(asset) = builders::ensure_bucket_asset(
-                &srtm_root,
+                srtm_root.as_deref(),
                 &cache_root,
                 &cache_db_path,
                 &connection,
@@ -149,7 +149,7 @@ pub fn focus_contour_region_status(
     zoom: f32,
     radius: i32,
 ) -> Option<FocusContourRegionStatus> {
-    let _ = terrain_assets::find_srtm_root(selected_root)?;
+    // Don't require SRTM root — status should reflect cache hits too.
     let cache_db_path = db::focus_cache_db_path(selected_root)?;
     let connection = db::open_cache_db(&cache_db_path).ok()?;
     let spec = zoom::spec_for_zoom(zoom);
@@ -266,6 +266,67 @@ pub fn ensure_global_coastline_cache(selected_root: Option<&Path>) -> Option<Pat
     });
 
     None
+}
+
+/// Ensure the two GEBCO-derived runtime assets exist in the cache/terrain directory:
+///   - `gebco_depth_1440x720.bil`      (globe depth-fill texture)
+///   - `gebco_2025_contours_200m.gpkg` (bathymetry isobaths)
+///
+/// Returns `(Option<depth_bil_path>, Option<contours_gpkg_path>)`.
+/// Any file that already exists is returned immediately; missing ones are
+/// built in a background thread and `None` is returned until complete.
+/// Callers should call every frame — the function is cheap when already built.
+pub fn ensure_gebco_derived(
+    selected_root: Option<&Path>,
+) -> (Option<PathBuf>, Option<PathBuf>) {
+    let Some(data_root) = terrain_assets::find_data_root(selected_root) else {
+        return (None, None);
+    };
+    let Some(cache_root) = db::focus_cache_root(selected_root) else {
+        return (None, None);
+    };
+
+    let depth_bil = cache_root.join("gebco_depth_1440x720.bil");
+    let contours_gpkg = cache_root.join("gebco_2025_contours_200m.gpkg");
+
+    let bil_ready = depth_bil.exists();
+    let gpkg_ready = contours_gpkg.exists();
+
+    if bil_ready && gpkg_ready {
+        return (Some(depth_bil), Some(contours_gpkg));
+    }
+
+    if gdal::gebco_derived_building().load(Ordering::Relaxed) {
+        return (
+            bil_ready.then_some(depth_bil),
+            gpkg_ready.then_some(contours_gpkg),
+        );
+    }
+
+    let tiles = gdal::find_gebco_topography_tiles(&data_root);
+    if tiles.is_empty() {
+        return (
+            bil_ready.then_some(depth_bil),
+            gpkg_ready.then_some(contours_gpkg),
+        );
+    }
+
+    gdal::gebco_derived_building().store(true, Ordering::SeqCst);
+    let cache_root_clone = cache_root.clone();
+    std::thread::spawn(move || {
+        let _ = gdal::build_gebco_derived(&tiles, &cache_root_clone);
+        gdal::gebco_derived_building().store(false, Ordering::SeqCst);
+        crate::app::request_repaint();
+    });
+
+    (
+        bil_ready.then_some(depth_bil),
+        gpkg_ready.then_some(contours_gpkg),
+    )
+}
+
+pub fn is_gebco_derived_building() -> bool {
+    gdal::gebco_derived_building().load(Ordering::Relaxed)
 }
 
 pub fn terminate_active_gdal_jobs() {

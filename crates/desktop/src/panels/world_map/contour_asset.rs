@@ -158,6 +158,11 @@ pub fn load_srtm_region_for_view(
     let missing: Vec<(CacheKey, srtm_focus_cache::FocusContourAsset)> = {
         let mut guard = cache.lock().ok()?;
         if guard.scene_key.as_ref() != Some(&scene_key) {
+            eprintln!(
+                "[1kEE] scene change → {} assets for zoom_bucket={} (entries cleared)",
+                assets.len(),
+                assets.first().map(|a| a.zoom_bucket).unwrap_or(-1)
+            );
             guard.scene_key = Some(scene_key);
             guard.entries.clear();
             guard.in_flight.clear();
@@ -195,16 +200,36 @@ pub fn load_srtm_region_for_view(
     for (key, asset) in missing {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = query_local_contours(
+            let query_result = query_local_contours(
                 &key.path,
                 key.zoom_bucket,
                 key.lat_bucket,
                 key.lon_bucket,
                 asset.simplify_step,
                 per_asset_budget,
-            )
-            .ok()
-            .filter(|c| !c.is_empty());
+            );
+            // Debug: log result so it's visible in Console.app / Terminal stderr.
+            match &query_result {
+                Ok(contours) if contours.is_empty() => {
+                    eprintln!(
+                        "[1kEE] contour tile z{} ({},{}) → 0 lines (empty tile or nodata)",
+                        key.zoom_bucket, key.lat_bucket, key.lon_bucket
+                    );
+                }
+                Ok(contours) => {
+                    eprintln!(
+                        "[1kEE] contour tile z{} ({},{}) → {} lines OK",
+                        key.zoom_bucket, key.lat_bucket, key.lon_bucket, contours.len()
+                    );
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[1kEE] contour tile z{} ({},{}) → ERROR: {e}",
+                        key.zoom_bucket, key.lat_bucket, key.lon_bucket
+                    );
+                }
+            }
+            let result = query_result.ok().filter(|c| !c.is_empty());
 
             if let Ok(mut g) = cache.lock() {
                 if let Some(contours) = result {
@@ -477,6 +502,9 @@ pub fn load_global_bathymetry(
     zoom: f32,
     ctx: egui::Context,
 ) -> Option<Arc<Vec<ContourPath>>> {
+    // Trigger background generation of derived GEBCO assets when missing.
+    // This is a no-op once both files exist and is cheap to call every frame.
+    srtm_focus_cache::ensure_gebco_derived(selected_root);
     let path = contour_path(selected_root, zoom)?;
     // Single LOD — no zoom-based switching so the cache never reloads on zoom
     // changes (which was causing contours to appear/disappear while panning).

@@ -81,9 +81,11 @@ pub fn clear() {
 // ── private ───────────────────────────────────────────────────────────────────
 
 fn bil_path(selected_root: Option<&Path>) -> Option<std::path::PathBuf> {
-    let derived = terrain_assets::find_derived_root(selected_root)?;
-    let p = derived.join("terrain/gebco_depth_1440x720.bil");
-    p.exists().then_some(p)
+    // Trigger background generation of the depth BIL (and companion contours)
+    // when missing.  Returns the ready path or None while building.
+    let (depth_bil, _contours) =
+        crate::panels::world_map::srtm_focus_cache::ensure_gebco_derived(selected_root);
+    depth_bil
 }
 
 fn ensure_grid_loaded(selected_root: Option<&Path>) -> Option<()> {

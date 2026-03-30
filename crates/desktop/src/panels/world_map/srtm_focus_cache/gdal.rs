@@ -288,6 +288,149 @@ pub fn global_coastline_building() -> &'static AtomicBool {
     BUILDING.get_or_init(|| AtomicBool::new(false))
 }
 
+pub fn gebco_derived_building() -> &'static AtomicBool {
+    static BUILDING: OnceLock<AtomicBool> = OnceLock::new();
+    BUILDING.get_or_init(|| AtomicBool::new(false))
+}
+
+/// Build the GEBCO-derived runtime assets into `cache_root` (= derived/terrain/).
+///
+/// Three outputs are produced in order:
+///   1. `gebco_2025_preview_4096.tif`  — 4096×2048 Int16 GeoTIFF (skipped if present)
+///   2. `gebco_depth_1440x720.bil`     — 1440×720 Int16 EHdr grid for the depth-fill texture
+///   3. `gebco_2025_contours_200m.gpkg`— 200 m isobath GeoPackage for bathymetry layer
+///
+/// Each output is skipped if it already exists, so a partial run (or a
+/// manually-generated file) is always respected.
+pub fn build_gebco_derived(tiles: &[PathBuf], cache_root: &Path) -> Option<()> {
+    if shutdown_requested().load(Ordering::Relaxed) {
+        return None;
+    }
+    let tmp_dir = cache_root.join(super::TEMP_DIR_NAME);
+    fs::create_dir_all(&tmp_dir).ok()?;
+
+    // ── Step 1: 4096×2048 preview TIF (input for steps 2 and 3) ─────────────
+    let preview_tif = cache_root.join("gebco_2025_preview_4096.tif");
+    if !preview_tif.exists() {
+        let tmp_vrt = tmp_dir.join("gebco_derived.tmp.vrt");
+        let mut buildvrt = Command::new(gdal_tool_path("gdalbuildvrt"));
+        buildvrt.arg("-q").arg(&tmp_vrt);
+        for tile in tiles {
+            buildvrt.arg(tile);
+        }
+        run_command_with_timeout(
+            buildvrt,
+            "gdalbuildvrt (GEBCO preview)",
+            Duration::from_secs(120),
+        )
+        .ok()?;
+
+        if shutdown_requested().load(Ordering::Relaxed) {
+            let _ = fs::remove_file(&tmp_vrt);
+            return None;
+        }
+
+        let tmp_tif = tmp_dir.join("gebco_preview.tmp.tif");
+        let mut translate = Command::new(gdal_tool_path("gdal_translate"));
+        translate.args([
+            "-q", "-outsize", "4096", "2048", "-ot", "Int16", "-of", "GTiff",
+        ]);
+        translate.arg(&tmp_vrt).arg(&tmp_tif);
+        run_command_with_timeout(
+            translate,
+            "gdal_translate (GEBCO preview)",
+            Duration::from_secs(300),
+        )
+        .ok()?;
+        let _ = fs::remove_file(&tmp_vrt);
+
+        if shutdown_requested().load(Ordering::Relaxed) {
+            let _ = fs::remove_file(&tmp_tif);
+            return None;
+        }
+
+        if fs::rename(&tmp_tif, &preview_tif).is_err() {
+            fs::copy(&tmp_tif, &preview_tif).ok()?;
+            let _ = fs::remove_file(&tmp_tif);
+        }
+    }
+
+    // ── Step 2: 1440×720 depth BIL (globe depth-fill texture) ────────────────
+    let depth_bil = cache_root.join("gebco_depth_1440x720.bil");
+    if !depth_bil.exists() {
+        let tmp_bil = tmp_dir.join("gebco_depth.tmp.bil");
+        let mut translate = Command::new(gdal_tool_path("gdal_translate"));
+        translate.args([
+            "-q", "-outsize", "1440", "720", "-ot", "Int16", "-of", "EHdr",
+        ]);
+        translate.arg(&preview_tif).arg(&tmp_bil);
+        run_command_with_timeout(
+            translate,
+            "gdal_translate (GEBCO depth BIL)",
+            Duration::from_secs(60),
+        )
+        .ok()?;
+
+        if shutdown_requested().load(Ordering::Relaxed) {
+            let _ = fs::remove_file(&tmp_bil);
+            return None;
+        }
+
+        // EHdr driver writes a companion .hdr; rename both.
+        let tmp_hdr = tmp_bil.with_extension("hdr");
+        let out_hdr = depth_bil.with_extension("hdr");
+        if fs::rename(&tmp_bil, &depth_bil).is_err() {
+            fs::copy(&tmp_bil, &depth_bil).ok()?;
+            let _ = fs::remove_file(&tmp_bil);
+        }
+        if tmp_hdr.exists() {
+            if fs::rename(&tmp_hdr, &out_hdr).is_err() {
+                let _ = fs::copy(&tmp_hdr, &out_hdr);
+                let _ = fs::remove_file(&tmp_hdr);
+            }
+        }
+    }
+
+    // ── Step 3: 200 m bathymetry contour GeoPackage ───────────────────────────
+    let contours_gpkg = cache_root.join("gebco_2025_contours_200m.gpkg");
+    if !contours_gpkg.exists() {
+        let tmp_gpkg = tmp_dir.join("gebco_contours.tmp.gpkg");
+        let mut contour = Command::new(gdal_tool_path("gdal_contour"));
+        contour.args([
+            "-q",
+            "-f",
+            "GPKG",
+            "-a",
+            "elevation_m",
+            "-i",
+            "200",
+            "-snodata",
+            "-32768",
+            "-nln",
+            "contour",
+        ]);
+        contour.arg(&preview_tif).arg(&tmp_gpkg);
+        run_command_with_timeout(
+            contour,
+            "gdal_contour (GEBCO 200 m)",
+            Duration::from_secs(600),
+        )
+        .ok()?;
+
+        if shutdown_requested().load(Ordering::Relaxed) {
+            let _ = fs::remove_file(&tmp_gpkg);
+            return None;
+        }
+
+        if fs::rename(&tmp_gpkg, &contours_gpkg).is_err() {
+            fs::copy(&tmp_gpkg, &contours_gpkg).ok()?;
+            let _ = fs::remove_file(&tmp_gpkg);
+        }
+    }
+
+    Some(())
+}
+
 pub fn shutdown_requested() -> &'static AtomicBool {
     static SHUTDOWN: OnceLock<AtomicBool> = OnceLock::new();
     SHUTDOWN.get_or_init(|| AtomicBool::new(false))

@@ -7,7 +7,12 @@ license.workspace = true
 [dependencies]
 eframe = { version = "0.31", default-features = false, features = ["wgpu", "default_fonts"] }
 egui = "0.31"
+image = { version = "0.25", default-features = false, features = ["tiff"] }
+tiff = "0.11"
 osmpbf = "0.2"
+rayon = "1"
+rfd = "0.15"
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+cell-format = { path = "../cell_format" }

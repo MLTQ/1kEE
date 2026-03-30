@@ -1,5 +1,6 @@
 use crate::args::BboxCommand;
 use crate::geojson::{ensure_cache_dir, merge_write_cells, merge_write_feature_cells};
+use crate::srtm::SrtmSampler;
 use crate::node_store::NodeStore;
 use crate::util::{
     GeoBounds, GeoPoint, RoadPolyline, WayFeature, bounds_intersect, canonical_building_class,
@@ -116,8 +117,15 @@ pub fn build_bbox_cache_with_progress(
         message: format!("Prepared {} candidate nodes", candidate_nodes.count()?),
     });
 
-    let build_stats =
-        collect_all_features_by_cell(&command, bounds, &mut candidate_nodes, progress)?;
+    let mut srtm = command.srtm_root.clone().map(SrtmSampler::new);
+
+    let build_stats = collect_all_features_by_cell(
+        &command,
+        bounds,
+        &mut candidate_nodes,
+        srtm.as_mut(),
+        progress,
+    )?;
 
     if command.build_admin {
         progress(RoadBuildProgress {
@@ -294,6 +302,7 @@ fn collect_all_features_by_cell(
     command: &BboxCommand,
     bounds: GeoBounds,
     candidate_nodes: &mut NodeStore,
+    mut srtm: Option<&mut SrtmSampler>,
     progress: &mut dyn FnMut(RoadBuildProgress),
 ) -> Result<FeatureBuildStats, String> {
     // Load all candidate nodes into RAM for O(1) lookups during the way scan,
@@ -505,6 +514,7 @@ fn collect_all_features_by_cell(
                     &mut waterways_by_cell,
                     &mut buildings_by_cell,
                     &mut trees_by_cell,
+                    srtm.as_mut().map(|s| &mut **s),
                 )?;
                 buffered = 0;
 
@@ -543,6 +553,7 @@ fn collect_all_features_by_cell(
         &mut waterways_by_cell,
         &mut buildings_by_cell,
         &mut trees_by_cell,
+        srtm.as_mut().map(|s| &mut **s),
     )?;
 
     // Way scan finished — clear checkpoint so future runs start fresh.
@@ -561,23 +572,24 @@ fn flush_all_chunks(
     waterways_by_cell: &mut HashMap<(i32, i32), Vec<WayFeature>>,
     buildings_by_cell: &mut HashMap<(i32, i32), Vec<WayFeature>>,
     trees_by_cell: &mut HashMap<(i32, i32), Vec<WayFeature>>,
+    mut srtm: Option<&mut SrtmSampler>,
 ) -> Result<usize, String> {
     let mut total = 0usize;
     if !roads_by_cell.is_empty() {
         let batch = std::mem::take(roads_by_cell);
-        total += merge_write_cells(cache_dir, &batch)?;
+        total += merge_write_cells(cache_dir, &batch, srtm.as_mut().map(|s| &mut **s))?;
     }
     if !waterways_by_cell.is_empty() {
         let batch = std::mem::take(waterways_by_cell);
-        total += merge_write_feature_cells(cache_dir, "waterway", &batch)?;
+        total += merge_write_feature_cells(cache_dir, "waterway", &batch, srtm.as_mut().map(|s| &mut **s))?;
     }
     if !buildings_by_cell.is_empty() {
         let batch = std::mem::take(buildings_by_cell);
-        total += merge_write_feature_cells(cache_dir, "building", &batch)?;
+        total += merge_write_feature_cells(cache_dir, "building", &batch, srtm.as_mut().map(|s| &mut **s))?;
     }
     if !trees_by_cell.is_empty() {
         let batch = std::mem::take(trees_by_cell);
-        total += merge_write_feature_cells(cache_dir, "tree", &batch)?;
+        total += merge_write_feature_cells(cache_dir, "tree", &batch, srtm.as_mut().map(|s| &mut **s))?;
     }
     Ok(total)
 }

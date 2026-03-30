@@ -50,7 +50,7 @@ pub fn is_pending(tile: TileKey) -> bool {
 }
 
 pub fn ensure_bucket_asset(
-    srtm_root: &Path,
+    srtm_root: Option<&Path>,
     cache_root: &Path,
     cache_db_path: &Path,
     connection: &Connection,
@@ -88,6 +88,9 @@ pub fn ensure_bucket_asset(
             lon_bucket,
         });
     }
+
+    // Cache miss — need SRTM root to build on-demand; skip silently if unavailable.
+    let srtm_root = srtm_root?;
 
     if is_pending(tile) {
         return None;

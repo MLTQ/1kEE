@@ -1,7 +1,8 @@
-use crate::args::BboxCommand;
+use crate::args::{BboxCommand, ContoursBboxCommand};
 use crate::job::{BuildEvent, BuildJob, JobHandle, spawn_job};
 use eframe::egui;
 use eframe::egui::Color32;
+use rusqlite::OpenFlags;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -78,17 +79,26 @@ pub struct BuilderApp {
     inspector: CacheInspector,
     active_job: Option<JobHandle>,
     drag_start: Option<egui::Pos2>,
+    /// Tiles already in the cache (from Scan Cache): (zoom_bucket, min_lat, max_lat, min_lon, max_lon)
+    cached_tiles: Vec<(i32, f32, f32, f32, f32)>,
+    /// Tiles completed in the current build run: (min_lat, max_lat, min_lon, max_lon)
+    live_tiles: Vec<(f32, f32, f32, f32)>,
 }
 
 #[derive(Clone)]
 struct BuilderForm {
     planet_path: String,
     cache_dir: String,
+    srtm_root: String,
     min_lat: String,
     max_lat: String,
     min_lon: String,
     max_lon: String,
     margin_deg: String,
+    // Contour-specific fields
+    contour_db: String,   // path to srtm_focus_cache.sqlite
+    gdal_bin_dir: String, // empty = use $PATH
+    use_native_engine: bool,
 }
 
 #[derive(Clone)]
@@ -132,6 +142,16 @@ impl BuilderApp {
             form: BuilderForm {
                 planet_path: "/Volumes/Hilbert/Data/planet-latest.osm.pbf".to_owned(),
                 cache_dir: default_cache_dir.display().to_string(),
+                srtm_root: String::new(),
+                contour_db: std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join("Derived")
+                    .join("terrain")
+                    .join("srtm_focus_cache.sqlite")
+                    .display()
+                    .to_string(),
+                gdal_bin_dir: String::new(),
+                use_native_engine: true,
                 min_lat: "37.60".to_owned(),
                 max_lat: "37.90".to_owned(),
                 min_lon: "-122.60".to_owned(),
@@ -152,6 +172,8 @@ impl BuilderApp {
             inspector: CacheInspector::default(),
             active_job: None,
             drag_start: None,
+            cached_tiles: Vec::new(),
+            live_tiles: Vec::new(),
         };
         app.refresh_inspector();
         app
@@ -179,6 +201,103 @@ impl BuilderApp {
         self.active_job = Some(spawn_job(BuildJob::Bbox(command)));
     }
 
+    fn scan_cache_tiles(&mut self) {
+        let db_path = PathBuf::from(self.form.contour_db.trim());
+        if !db_path.exists() {
+            self.push_log(format!("Contour DB not found: {}", db_path.display()));
+            return;
+        }
+        let Ok(conn) = rusqlite::Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+            self.push_log("Failed to open contour DB for scanning.".to_owned());
+            return;
+        };
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT zoom_bucket, lat_bucket, lon_bucket FROM contour_tile_manifest"
+        ) else {
+            self.push_log("Failed to query contour_tile_manifest.".to_owned());
+            return;
+        };
+        let specs = crate::contours::all_specs();
+        let mut tiles = Vec::new();
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, i32>(0)?, row.get::<_, i32>(1)?, row.get::<_, i32>(2)?))
+        }) {
+            for row in rows.flatten() {
+                let (zoom_bucket, lat_bucket, lon_bucket) = row;
+                if let Some(spec) = specs.iter().find(|s| s.zoom_bucket == zoom_bucket) {
+                    let step = spec.half_extent_deg * 0.45;
+                    let center_lat = lat_bucket as f32 * step;
+                    let center_lon = lon_bucket as f32 * step;
+                    tiles.push((
+                        zoom_bucket,
+                        center_lat - spec.half_extent_deg,
+                        center_lat + spec.half_extent_deg,
+                        center_lon - spec.half_extent_deg,
+                        center_lon + spec.half_extent_deg,
+                    ));
+                }
+            }
+        }
+        let count = tiles.len();
+        self.cached_tiles = tiles;
+        self.push_log(format!("Cache scan: {count} tiles found."));
+    }
+
+    fn start_contour_build(&mut self) {
+        if self.active_job.is_some() {
+            return;
+        }
+        let command = match self.contours_command() {
+            Ok(cmd) => cmd,
+            Err(e) => { self.push_log(e); return; }
+        };
+        self.status = "Building Contours".to_owned();
+        self.progress = 0.0;
+        self.progress_detail = "Starting contour export…".to_owned();
+        self.live_tiles.clear();
+        self.push_log(format!(
+            "Starting contour build for bbox [{}, {}] x [{}, {}]",
+            self.form.min_lat, self.form.max_lat, self.form.min_lon, self.form.max_lon,
+        ));
+        self.active_job = Some(spawn_job(BuildJob::ContoursBbox(command)));
+    }
+
+    fn contours_command(&self) -> Result<ContoursBboxCommand, String> {
+        let parse_num = |label: &str, value: &str| {
+            value.parse::<f32>().map_err(|_| format!("Invalid {} value '{}'", label, value))
+        };
+        let srtm_root = {
+            let t = self.form.srtm_root.trim();
+            if t.is_empty() {
+                return Err("SRTM Root is required for contour building.".to_owned());
+            }
+            PathBuf::from(t)
+        };
+        let cache_db = {
+            let t = self.form.contour_db.trim();
+            if t.is_empty() {
+                return Err("Contour DB path is required.".to_owned());
+            }
+            PathBuf::from(t)
+        };
+        Ok(ContoursBboxCommand {
+            srtm_root,
+            cache_db_path: cache_db,
+            tmp_dir: None,
+            min_lat: parse_num("min latitude", &self.form.min_lat)?,
+            max_lat: parse_num("max latitude", &self.form.max_lat)?,
+            min_lon: parse_num("min longitude", &self.form.min_lon)?,
+            max_lon: parse_num("max longitude", &self.form.max_lon)?,
+            zoom_buckets: (0..=6).collect(),
+            gdal_bin_dir: PathBuf::from(self.form.gdal_bin_dir.trim()),
+            engine: if self.form.use_native_engine {
+                crate::args::ContourEngine::Native
+            } else {
+                crate::args::ContourEngine::Gdal
+            },
+        })
+    }
+
     fn build_command(&self) -> Result<BboxCommand, String> {
         let parse_num = |label: &str, value: &str| {
             value
@@ -186,9 +305,18 @@ impl BuilderApp {
                 .map_err(|_| format!("Invalid {} value '{}'", label, value))
         };
 
+        let srtm_root = {
+            let trimmed = self.form.srtm_root.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(trimmed))
+            }
+        };
         let command = BboxCommand {
             planet_path: PathBuf::from(self.form.planet_path.trim()),
             cache_dir: PathBuf::from(self.form.cache_dir.trim()),
+            srtm_root,
             min_lat: parse_num("min latitude", &self.form.min_lat)?,
             max_lat: parse_num("max latitude", &self.form.max_lat)?,
             min_lon: parse_num("min longitude", &self.form.min_lon)?,
@@ -231,6 +359,12 @@ impl BuilderApp {
                     self.status = update.stage.clone();
                     self.progress = update.fraction.clamp(0.0, 1.0);
                     self.progress_detail = update.message.clone();
+                }
+                BuildEvent::Log(line) => {
+                    self.push_log(line);
+                }
+                BuildEvent::TileCompleted(min_lat, max_lat, min_lon, max_lon) => {
+                    self.live_tiles.push((min_lat, max_lat, min_lon, max_lon));
                 }
                 BuildEvent::Finished(result) => {
                     match result {
@@ -355,9 +489,38 @@ impl eframe::App for BuilderApp {
                 ui.separator();
 
                 ui.label("Planet PBF");
-                ui.text_edit_singleline(&mut self.form.planet_path);
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.form.planet_path);
+                    if ui.small_button("…").clicked() {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("PBF", &["pbf"])
+                            .pick_file()
+                        {
+                            self.form.planet_path = path.display().to_string();
+                        }
+                    }
+                });
                 ui.label("Cache Dir");
-                ui.text_edit_singleline(&mut self.form.cache_dir);
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.form.cache_dir);
+                    if ui.small_button("…").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            self.form.cache_dir = path.display().to_string();
+                        }
+                    }
+                });
+                ui.label("SRTM Root (optional — bakes elevation into .1kc files)");
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.form.srtm_root);
+                    if ui.small_button("…").clicked() {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            self.form.srtm_root = path.display().to_string();
+                        }
+                    }
+                    if !self.form.srtm_root.is_empty() && ui.small_button("✕").clicked() {
+                        self.form.srtm_root.clear();
+                    }
+                });
 
                 ui.separator();
                 ui.label("Bounding Box");
@@ -380,7 +543,26 @@ impl eframe::App for BuilderApp {
 
                 // ── World bbox map ────────────────────────────────────────────
                 ui.separator();
-                ui.label("Bounding Box Map");
+                ui.horizontal(|ui| {
+                    ui.label("Bounding Box Map");
+                    if ui.small_button("Scan Cache").clicked() {
+                        self.scan_cache_tiles();
+                    }
+                    if !self.cached_tiles.is_empty() {
+                        ui.label(
+                            egui::RichText::new(format!("({} cached)", self.cached_tiles.len()))
+                                .color(Color32::from_rgb(0, 180, 160))
+                                .small(),
+                        );
+                    }
+                    if !self.live_tiles.is_empty() {
+                        ui.label(
+                            egui::RichText::new(format!("({} built)", self.live_tiles.len()))
+                                .color(Color32::from_rgb(80, 255, 120))
+                                .small(),
+                        );
+                    }
+                });
 
                 let (response, painter) = ui
                     .allocate_painter(egui::Vec2::new(280.0, 140.0), egui::Sense::click_and_drag());
@@ -388,6 +570,32 @@ impl eframe::App for BuilderApp {
 
                 // Background
                 painter.rect_filled(rect, 0.0, Color32::from_rgb(8, 12, 28));
+
+                // Cached tiles (dim teal — existing cache coverage)
+                for &(zoom_bucket, min_lat, max_lat, min_lon, max_lon) in &self.cached_tiles {
+                    // Brighter for higher zoom buckets (more detail)
+                    let alpha = (25 + zoom_bucket as u8 * 12).min(120);
+                    let color = Color32::from_rgba_unmultiplied(0, 180, 160, alpha);
+                    let x0 = lon_to_x(rect, min_lon);
+                    let x1 = lon_to_x(rect, max_lon);
+                    let y0 = lat_to_y(rect, max_lat);
+                    let y1 = lat_to_y(rect, min_lat);
+                    let tile_rect = egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1))
+                        .expand(0.5);
+                    painter.rect_filled(tile_rect, 0.0, color);
+                }
+
+                // Live tiles (bright green — built in this session)
+                for &(min_lat, max_lat, min_lon, max_lon) in &self.live_tiles {
+                    let color = Color32::from_rgba_unmultiplied(80, 255, 120, 210);
+                    let x0 = lon_to_x(rect, min_lon);
+                    let x1 = lon_to_x(rect, max_lon);
+                    let y0 = lat_to_y(rect, max_lat);
+                    let y1 = lat_to_y(rect, min_lat);
+                    let tile_rect = egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1))
+                        .expand(0.5);
+                    painter.rect_filled(tile_rect, 0.0, color);
+                }
 
                 // Graticule lines
                 let graticule_color = Color32::from_rgb(20, 40, 80);
@@ -505,6 +713,43 @@ impl eframe::App for BuilderApp {
                 ui.checkbox(&mut self.assets.trees, "Trees / Forest");
                 ui.checkbox(&mut self.assets.admin, "Admin Boundaries");
 
+                // ── Terrain / Contours ────────────────────────────────────────
+                ui.separator();
+                ui.heading("Terrain / Contours");
+                ui.label("Contour DB folder (contains srtm_focus_cache.sqlite)");
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.form.contour_db);
+                    if ui.small_button("…").clicked() {
+                        // Pick a folder — avoids the macOS "Replace?" dialog that
+                        // save_file() triggers when the DB already exists.
+                        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                            self.form.contour_db = folder
+                                .join("srtm_focus_cache.sqlite")
+                                .display()
+                                .to_string();
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Engine:");
+                    ui.radio_value(&mut self.form.use_native_engine, true, "Native (fast, no GDAL)");
+                    ui.radio_value(&mut self.form.use_native_engine, false, "GDAL");
+                });
+                if !self.form.use_native_engine {
+                    ui.label("GDAL bin dir (empty = use $PATH)");
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut self.form.gdal_bin_dir);
+                        if ui.small_button("…").clicked() {
+                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                self.form.gdal_bin_dir = path.display().to_string();
+                            }
+                        }
+                        if !self.form.gdal_bin_dir.is_empty() && ui.small_button("✕").clicked() {
+                            self.form.gdal_bin_dir.clear();
+                        }
+                    });
+                }
+
                 ui.separator();
                 ui.add(
                     egui::ProgressBar::new(self.progress)
@@ -516,10 +761,16 @@ impl eframe::App for BuilderApp {
                 ui.horizontal(|ui| {
                     let building = self.active_job.is_some();
                     if ui
-                        .add_enabled(!building, egui::Button::new("Build Cache"))
+                        .add_enabled(!building, egui::Button::new("Build OSM Cache"))
                         .clicked()
                     {
                         self.start_build();
+                    }
+                    if ui
+                        .add_enabled(!building, egui::Button::new("Build Contours"))
+                        .clicked()
+                    {
+                        self.start_contour_build();
                     }
                     if ui.button("Refresh Inspector").clicked() {
                         self.refresh_inspector();

@@ -2,7 +2,9 @@ use crate::camera_registry;
 use crate::factal_stream;
 use crate::model::AppModel;
 use crate::moving_tracks;
+use crate::panels::world_map::srtm_focus_cache::db as focus_cache_db;
 use crate::settings_store;
+use crate::terrain_assets;
 use crate::theme;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -332,6 +334,150 @@ fn tab_paths(ui: &mut egui::Ui, model: &mut AppModel) {
         true,
         true,
     );
+    // ── Contour cache diagnostic ──────────────────────────────────────────────
+    // Show exactly where the app will look for srtm_focus_cache.sqlite and
+    // how many tiles it contains — a green path with 0 tiles means path
+    // mismatch (the real cache is elsewhere; this is an empty shell).
+    // Also shows SUM(contour_count) to detect "tiles in manifest but 0
+    // actual contour rows" (marching squares produced no output).
+    {
+        let db_path = focus_cache_db::focus_cache_db_path(model.selected_root.as_deref());
+        match &db_path {
+            Some(p) if p.exists() => {
+                struct CacheStats {
+                    tile_count: i64,
+                    total_contours: i64,
+                    zoom_summary: String,
+                }
+                let stats = rusqlite::Connection::open_with_flags(
+                    p,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .ok()
+                .and_then(|conn| {
+                    let tile_count: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM contour_tile_manifest",
+                        [],
+                        |row| row.get(0),
+                    ).unwrap_or(0);
+                    let total_contours: i64 = conn.query_row(
+                        "SELECT COALESCE(SUM(contour_count), 0) FROM contour_tile_manifest",
+                        [],
+                        |row| row.get(0),
+                    ).unwrap_or(0);
+                    // Per-zoom-bucket summary: "z0:123 z6:456"
+                    let mut stmt = conn.prepare(
+                        "SELECT zoom_bucket, COUNT(*), COALESCE(SUM(contour_count),0) \
+                         FROM contour_tile_manifest GROUP BY zoom_bucket ORDER BY zoom_bucket"
+                    ).ok()?;
+                    let rows: Vec<(i32, i64, i64)> = stmt.query_map([], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    }).ok()?.flatten().collect();
+                    let zoom_summary = rows.iter()
+                        .map(|(z, tiles, contours)| format!("z{z}:{tiles}t/{contours}c"))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    Some(CacheStats { tile_count, total_contours, zoom_summary })
+                });
+
+                if let Some(s) = stats {
+                    let has_tiles = s.tile_count > 0;
+                    let has_contours = s.total_contours > 0;
+                    let (indicator, color) = if !has_tiles {
+                        ("⚠ 0 tiles — wrong file?", egui::Color32::from_rgb(220, 160, 40))
+                    } else if !has_contours {
+                        ("⚠ 0 contour lines — marching squares may have failed!", egui::Color32::from_rgb(220, 100, 60))
+                    } else {
+                        ("✓", egui::Color32::from_rgb(80, 200, 100))
+                    };
+                    ui.colored_label(
+                        color,
+                        format!(
+                            "Contour cache ({} tiles, {} lines) {}: {}",
+                            s.tile_count, s.total_contours, indicator, p.display()
+                        ),
+                    );
+                    if !s.zoom_summary.is_empty() {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(150, 180, 200),
+                            format!("  Per zoom: {}", s.zoom_summary),
+                        );
+                    }
+                } else {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 160, 40),
+                        format!("Contour cache (could not read): {}", p.display()),
+                    );
+                }
+            }
+            Some(p) => {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 100, 60),
+                    format!("Contour cache (NOT FOUND): {}", p.display()),
+                );
+            }
+            None => {
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 100, 60),
+                    "Contour cache: could not resolve path (set Derived Root)",
+                );
+            }
+        }
+    }
+    ui.add_space(4.0);
+
+    // ── Derived-directory asset diagnostics ───────────────────────────────────
+    // Show the resolved Derived root and check for the specific files each
+    // layer needs, so a missing/wrong directory is immediately obvious.
+    {
+        let root = model.selected_root.as_deref();
+        let derived = terrain_assets::find_derived_root(root);
+
+        let ok_color   = egui::Color32::from_rgb(80, 200, 100);
+        let warn_color = egui::Color32::from_rgb(220, 100, 60);
+        let dim_color  = egui::Color32::from_rgb(150, 180, 200);
+
+        match &derived {
+            Some(d) => {
+                ui.colored_label(dim_color, format!("Derived root: {}", d.display()));
+
+                // Files that each layer depends on
+                let checks: &[(&str, &str)] = &[
+                    ("gebco_depth_1440x720.bil",        "Globe bathymetry fill (depth texture)"),
+                    ("gebco_2025_contours_200m.gpkg",   "Bathymetry isobaths (globe + local)"),
+                    ("gebco_2025_coastline_0m.gpkg",    "Global coastlines"),
+                ];
+                let building = crate::panels::world_map::srtm_focus_cache::is_gebco_derived_building();
+                for (filename, label) in checks {
+                    let path = d.join("terrain").join(filename);
+                    if path.exists() {
+                        ui.colored_label(
+                            ok_color,
+                            format!("  ✓ {label}: terrain/{filename}"),
+                        );
+                    } else if building && filename != &"gebco_2025_coastline_0m.gpkg" {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(180, 180, 60),
+                            format!("  ⏳ {label}: terrain/{filename} (building…)"),
+                        );
+                    } else {
+                        ui.colored_label(
+                            warn_color,
+                            format!("  ✗ {label}: terrain/{filename} NOT FOUND"),
+                        );
+                    }
+                }
+            }
+            None => {
+                ui.colored_label(
+                    warn_color,
+                    "Derived root: NOT RESOLVED — set Derived Root or Asset Root above",
+                );
+            }
+        }
+    }
+    ui.add_space(4.0);
+
     path_row(ui, "SRTM Root", &mut model.settings_srtm_root, true, true);
     path_row(
         ui,
