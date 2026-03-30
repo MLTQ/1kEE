@@ -403,9 +403,30 @@ pub fn load_lunar_region_for_view(
         }
     }
 
+    // Lunar tiles overlap significantly (~55% of tile width) because
+    // bucket_step = half_extent * 0.45.  On flat mare terrain this means the
+    // same iso-contour appears in 4+ tiles and is drawn multiple times.
+    // Fix: only include a contour line in the tile whose centre is CLOSEST to
+    // that line's midpoint (exclusive-region partition).  Each iso-line then
+    // appears exactly once in the merged set.
+    let bucket_step = srtm_focus_cache::lunar_half_extent_for_zoom(zoom) * 0.45;
     let mut merged = Vec::new();
-    for contours in guard.entries.values() {
-        merged.extend(contours.iter().cloned());
+    for (key, contours) in guard.entries.iter() {
+        let tile_lat = key.lat_bucket as f32 * bucket_step;
+        let tile_lon = key.lon_bucket as f32 * bucket_step;
+        let half_step = bucket_step * 0.5;
+        for contour in contours.iter() {
+            if contour.points.is_empty() {
+                continue;
+            }
+            let mid = &contour.points[contour.points.len() / 2];
+            // Only keep this line if its midpoint is within the tile's exclusive region.
+            if (mid.lat - tile_lat).abs() <= half_step
+                && (mid.lon - tile_lon).abs() <= half_step
+            {
+                merged.push(contour.clone());
+            }
+        }
     }
 
     if merged.is_empty() {

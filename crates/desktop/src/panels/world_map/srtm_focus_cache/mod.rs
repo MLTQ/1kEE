@@ -17,6 +17,12 @@ pub use zoom::{
     half_extent_for_zoom, zoom_bucket_for_zoom,
 };
 
+/// Half-extent in degrees for the lunar zoom spec at a given zoom level.
+/// Used by the contour merge step to partition tiles without overlap.
+pub fn lunar_half_extent_for_zoom(zoom: f32) -> f32 {
+    zoom::lunar_spec_for_zoom(zoom).half_extent_deg
+}
+
 const BUILD_TIMEOUT: Duration = Duration::from_secs(90);
 const CACHE_DB_NAME: &str = "srtm_focus_cache.sqlite";
 const LUNAR_CACHE_DB_NAME: &str = "lunar_focus_cache.sqlite";
