@@ -80,12 +80,14 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
             model.arcgis_features = arcgis_source::poll(&source_refs, ui.ctx().clone());
         }
 
-        // Trigger background SLDEM preview build when Moon Mode is active.
+        // Trigger background SLDEM preview + contour builds when Moon Mode is active.
         if model.moon_mode {
             srtm_focus_cache::ensure_lunar_preview(model.selected_root.as_deref());
-            if srtm_focus_cache::is_lunar_preview_building() {
+            if srtm_focus_cache::is_lunar_preview_building()
+                || srtm_focus_cache::is_lunar_contour_building()
+            {
                 ui.ctx()
-                    .request_repaint_after(std::time::Duration::from_millis(500));
+                    .request_repaint_after(std::time::Duration::from_millis(250));
             }
         }
 

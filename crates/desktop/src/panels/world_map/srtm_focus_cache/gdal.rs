@@ -617,6 +617,63 @@ pub fn build_focus_contours(
     Some(())
 }
 
+/// Build one lunar (SLDEM2015) contour tile.
+///
+/// Unlike the SRTM pipeline (which mosaics many 1°×1° tiles with gdalwarp),
+/// SLDEM2015 is a single JP2 file. We use `gdal_translate -projwin` to extract
+/// the geographic bounding box and scale raw Int16 DN values to Float32 elevation
+/// in metres (DN × 0.5 = elevation_m, encoded as -scale -18000 22000 -9000 11000),
+/// then run `gdal_contour` on that Float32 GeoTIFF.
+pub fn build_lunar_contour_tile(
+    jp2_path: &Path,
+    cache_root: &Path,
+    cache_db_path: &Path,
+    tile: TileKey,
+    bounds: GeoBounds,
+    spec: FocusContourSpec,
+) -> Option<()> {
+    if shutdown_requested().load(Ordering::Relaxed) {
+        return None;
+    }
+
+    let (tmp_tif_path, tmp_gpkg_path) = temp_tile_paths(cache_root, tile);
+    cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
+
+    if let Some(parent) = tmp_tif_path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+
+    // gdal_translate: window extraction + DN→elevation_m scaling.
+    // -projwin ulx uly lrx lry  (min_lon, max_lat, max_lon, min_lat)
+    let mut translate = Command::new(gdal_tool_path("gdal_translate"));
+    translate.args([
+        "-q",
+        "-projwin",
+        &bounds.min_lon.to_string(),
+        &bounds.max_lat.to_string(),
+        &bounds.max_lon.to_string(),
+        &bounds.min_lat.to_string(),
+        "-outsize",
+        &spec.raster_size.to_string(),
+        &spec.raster_size.to_string(),
+        "-scale", "-18000", "22000", "-9000", "11000",
+        "-ot", "Float32",
+        "-of", "GTiff",
+    ]);
+    translate.arg(jp2_path).arg(&tmp_tif_path);
+    run_command(translate, "gdal_translate (lunar tile)").ok()?;
+
+    if shutdown_requested().load(Ordering::Relaxed) {
+        cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
+        return None;
+    }
+
+    run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m).ok()?;
+    import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path).ok()?;
+    cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
+    Some(())
+}
+
 fn tile_paths_for_bounds(root: &Path, bounds: GeoBounds) -> Vec<PathBuf> {
     let mut tiles = Vec::new();
     let lat_start = bounds.min_lat.floor() as i32;
