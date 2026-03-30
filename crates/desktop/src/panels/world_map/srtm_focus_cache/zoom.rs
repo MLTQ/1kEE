@@ -97,6 +97,58 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
     }
 }
 
+/// Zoom specs for the lunar (SLDEM2015) contour pipeline.
+/// Same tile geometry as SRTM but coarser intervals — lunar relief spans
+/// ~20 km (vs ~18 km for Earth) and most features are broad maria or basins.
+pub fn lunar_spec_for_zoom(zoom: f32) -> FocusContourSpec {
+    if zoom < 1.0 {
+        FocusContourSpec {
+            half_extent_deg: 3.6,
+            raster_size: 384,
+            interval_m: 1000,
+            simplify_step: 5,
+            feature_budget: 320,
+            zoom_bucket: 0,
+        }
+    } else if zoom < 2.0 {
+        FocusContourSpec {
+            half_extent_deg: 2.2,
+            raster_size: 512,
+            interval_m: 500,
+            simplify_step: 4,
+            feature_budget: 360,
+            zoom_bucket: 1,
+        }
+    } else if zoom < 3.0 {
+        FocusContourSpec {
+            half_extent_deg: 1.4,
+            raster_size: 576,
+            interval_m: 200,
+            simplify_step: 4,
+            feature_budget: 400,
+            zoom_bucket: 2,
+        }
+    } else if zoom < 4.5 {
+        FocusContourSpec {
+            half_extent_deg: 0.9,
+            raster_size: 640,
+            interval_m: 100,
+            simplify_step: 3,
+            feature_budget: 440,
+            zoom_bucket: 3,
+        }
+    } else {
+        FocusContourSpec {
+            half_extent_deg: 0.55,
+            raster_size: 704,
+            interval_m: 50,
+            simplify_step: 3,
+            feature_budget: 480,
+            zoom_bucket: 4,
+        }
+    }
+}
+
 impl GeoBounds {
     pub fn around(focus: GeoPoint, half_extent_deg: f32) -> Self {
         Self {

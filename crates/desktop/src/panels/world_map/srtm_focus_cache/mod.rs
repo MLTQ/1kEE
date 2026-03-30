@@ -19,6 +19,7 @@ pub use zoom::{
 
 const BUILD_TIMEOUT: Duration = Duration::from_secs(90);
 const CACHE_DB_NAME: &str = "srtm_focus_cache.sqlite";
+const LUNAR_CACHE_DB_NAME: &str = "lunar_focus_cache.sqlite";
 const TEMP_DIR_NAME: &str = "srtm_focus_tmp";
 
 #[derive(Clone)]
@@ -398,4 +399,70 @@ pub fn terminate_active_gdal_jobs() {
 
 pub fn is_global_coastline_building() -> bool {
     gdal::global_coastline_building().load(Ordering::Relaxed)
+}
+
+pub fn lunar_cache_db_path(selected_root: Option<&Path>) -> Option<PathBuf> {
+    Some(db::focus_cache_root(selected_root)?.join(LUNAR_CACHE_DB_NAME))
+}
+
+/// Returns `true` while any lunar contour tile build threads are running.
+pub fn is_lunar_contour_building() -> bool {
+    builders::lunar_pending_set()
+        .lock()
+        .map(|g| !g.is_empty())
+        .unwrap_or(false)
+}
+
+/// Ensure lunar (SLDEM2015) contour tiles exist for the region around `focus`
+/// at the current zoom level.  Mirrors `ensure_focus_contour_region` but
+/// sources from a single JP2 file via `gdal_translate -projwin` instead of
+/// mosaicking SRTM tiles.  Coverage is clipped to ±60° latitude.
+pub fn ensure_lunar_contour_region(
+    selected_root: Option<&Path>,
+    focus: GeoPoint,
+    zoom: f32,
+) -> Vec<FocusContourAsset> {
+    let Some(jp2_path) = crate::terrain_assets::find_sldem_jp2(selected_root) else {
+        return Vec::new();
+    };
+    let Some(cache_root) = db::focus_cache_root(selected_root) else {
+        return Vec::new();
+    };
+    let Some(cache_db_path) = lunar_cache_db_path(selected_root) else {
+        return Vec::new();
+    };
+    let Ok(connection) = db::open_cache_db(&cache_db_path) else {
+        return Vec::new();
+    };
+
+    let spec = zoom::lunar_spec_for_zoom(zoom);
+    let bucket_step = spec.half_extent_deg * 0.45;
+    let center_lat_bucket = (focus.lat / bucket_step).round() as i32;
+    let center_lon_bucket = (focus.lon / bucket_step).round() as i32;
+    let mut assets = Vec::new();
+
+    const RADIUS: i32 = 2;
+    for lat_bucket in (center_lat_bucket - RADIUS)..=(center_lat_bucket + RADIUS) {
+        // Skip tiles whose centre falls outside SLDEM2015 coverage (±60° lat).
+        let bucket_lat = lat_bucket as f32 * bucket_step;
+        if bucket_lat.abs() > 60.0 + spec.half_extent_deg {
+            continue;
+        }
+        for lon_bucket in (center_lon_bucket - RADIUS)..=(center_lon_bucket + RADIUS) {
+            if let Some(asset) = builders::ensure_lunar_bucket_asset(
+                &jp2_path,
+                &cache_root,
+                &cache_db_path,
+                &connection,
+                spec,
+                lat_bucket,
+                lon_bucket,
+                bucket_step,
+            ) {
+                assets.push(asset);
+            }
+        }
+    }
+
+    assets
 }
