@@ -11,6 +11,7 @@ pub struct TerrainInventory {
     pub runtime_height_preview: bool,
     pub runtime_contours_200m: bool,
     pub runtime_contours_500m: bool,
+    pub sldem2015_preview: bool,
     pub primary_runtime_source: &'static str,
 }
 
@@ -51,6 +52,9 @@ impl TerrainInventory {
         let runtime_contours_500m = derived_root
             .join("terrain/gebco_2025_contours_500m.gpkg")
             .exists();
+        let sldem2015_preview = derived_root
+            .join("terrain/sldem2015_preview_4096.png")
+            .exists();
 
         let primary_runtime_source = if srtm_tiles > 0 {
             "SRTM streamed land tiles + GEBCO global fallback"
@@ -74,6 +78,7 @@ impl TerrainInventory {
             runtime_height_preview,
             runtime_contours_200m,
             runtime_contours_500m,
+            sldem2015_preview,
             primary_runtime_source,
         }
     }
@@ -94,14 +99,15 @@ impl TerrainInventory {
 
     pub fn status_summary(&self) -> String {
         format!(
-            "GEBCO topo {} tiles | TID {} tiles | Natural Earth relief {} | SRTM {} tiles | Runtime height {} | 200m contours {} | 500m contours {}",
+            "GEBCO topo {} tiles | TID {} tiles | Natural Earth relief {} | SRTM {} tiles | Runtime height {} | 200m contours {} | 500m contours {} | SLDEM2015 preview {}",
             self.gebco_topography_tiles,
             self.gebco_tid_tiles,
             yes_no(self.natural_earth_relief),
             self.srtm_tiles,
             yes_no(self.runtime_height_preview),
             yes_no(self.runtime_contours_200m),
-            yes_no(self.runtime_contours_500m)
+            yes_no(self.runtime_contours_500m),
+            yes_no(self.sldem2015_preview),
         )
     }
 
@@ -289,6 +295,30 @@ fn is_matching_tif(path: PathBuf, prefix: &str) -> bool {
     };
 
     extension_ok && prefix_ok
+}
+
+/// Find the SLDEM2015 JP2 file.  Checks the configured Data root, then the
+/// selected root, then several well-known external-volume paths.
+pub fn find_sldem_jp2(selected_root: Option<&Path>) -> Option<PathBuf> {
+    let filename = "SLDEM2015 Lunar Topography.JP2";
+
+    // Check configured / selected Data root
+    if let Some(data_root) = find_data_root(selected_root) {
+        let candidate = data_root.join(filename);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    // Well-known external volume locations
+    for prefix in &["/Volumes/Hilbert/Data", "/Volumes/Data", "/Volumes/Hilbert"] {
+        let candidate = PathBuf::from(prefix).join(filename);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
 }
 
 fn yes_no(value: bool) -> &'static str {

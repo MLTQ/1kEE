@@ -1,5 +1,5 @@
 use crate::model::GeoPoint;
-use crate::terrain_assets;
+use crate::terrain_assets::{self};
 use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -327,6 +327,47 @@ pub fn ensure_gebco_derived(
 
 pub fn is_gebco_derived_building() -> bool {
     gdal::gebco_derived_building().load(Ordering::Relaxed)
+}
+
+pub fn is_lunar_preview_building() -> bool {
+    gdal::lunar_preview_building().load(Ordering::Relaxed)
+}
+
+/// Ensure the SLDEM2015 lunar terrain preview PNG exists in the cache/terrain
+/// directory.  If the JP2 source file is found and the preview does not yet
+/// exist, triggers a background GDAL conversion.
+///
+/// Call this when Moon Mode is active; it is cheap when already built.
+pub fn ensure_lunar_preview(selected_root: Option<&Path>) {
+    let out_png = match db::focus_cache_root(selected_root) {
+        Some(root) => root.join("sldem2015_preview_4096.png"),
+        None => return,
+    };
+
+    if out_png.exists() {
+        return;
+    }
+
+    if gdal::lunar_preview_building().load(Ordering::Relaxed) {
+        return;
+    }
+
+    let jp2 = match terrain_assets::find_sldem_jp2(selected_root) {
+        Some(p) => p,
+        None => return,
+    };
+
+    let cache_root = match db::focus_cache_root(selected_root) {
+        Some(root) => root,
+        None => return,
+    };
+
+    gdal::lunar_preview_building().store(true, Ordering::SeqCst);
+    std::thread::spawn(move || {
+        let _ = gdal::build_lunar_preview(&jp2, &cache_root);
+        gdal::lunar_preview_building().store(false, Ordering::SeqCst);
+        crate::app::request_repaint();
+    });
 }
 
 pub fn terminate_active_gdal_jobs() {
