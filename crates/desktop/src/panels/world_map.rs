@@ -16,6 +16,7 @@ mod road_layer;
 #[path = "world_map/srtm_focus_cache/mod.rs"]
 pub(crate) mod srtm_focus_cache;
 mod srtm_stream;
+mod stellar_layer;
 mod terrain_field;
 mod terrain_raster;
 mod tree_layer;
@@ -258,6 +259,11 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                 ui.checkbox(&mut model.show_flights, "Flights")
                     .on_hover_text(flight_tracks::status());
                 if !model.globe_view.local_mode {
+                    ui.checkbox(&mut model.show_stellar_correspondence, "Stars")
+                        .on_hover_text(
+                            "Stellar correspondence: each star projected from the celestial sphere \
+                             onto its matching Earth coordinate (Dec → lat, RA → lon).",
+                        );
                     ui.checkbox(&mut model.show_reticle, "Reticle");
                 }
                 if model.globe_view.local_mode {

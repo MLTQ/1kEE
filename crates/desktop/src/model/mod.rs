@@ -56,6 +56,7 @@ pub struct AppModel {
     pub show_admin: bool,
     pub show_ships: bool,
     pub show_flights: bool,
+    pub show_stellar_correspondence: bool,
     /// GeoJSON layers uploaded by the user.
     pub geojson_layers: Vec<GeoJsonLayer>,
     /// ArcGIS FeatureServer sources added by the user.
@@ -276,6 +277,7 @@ impl AppModel {
             show_admin: false,
             show_ships: false,
             show_flights: false,
+            show_stellar_correspondence: false,
             geojson_layers: Vec::new(),
             arcgis_sources: Vec::new(),
             arcgis_features: Vec::new(),

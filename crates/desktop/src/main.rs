@@ -12,6 +12,7 @@ mod moving_tracks;
 mod osm_ingest;
 mod panels;
 mod settings_store;
+mod stellar_catalog;
 mod terrain_assets;
 mod terrain_precompute;
 mod theme;

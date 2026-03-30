@@ -108,6 +108,11 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         draw_graticule(painter, &layout, &model.globe_view);
     }
 
+    // ── Stellar correspondence layer ───────────────────────────────────────────
+    if model.show_stellar_correspondence && !model.globe_view.local_mode {
+        super::stellar_layer::draw_stellar_correspondence(painter, &layout, &model.globe_view);
+    }
+
     let selected_event_id = model.selected_event_id.as_deref();
     let selected_camera_id = model.selected_camera_id.as_deref();
     let nearby = model.nearby_cameras(250.0);
