@@ -47,33 +47,10 @@ pub fn lunar_pending_set() -> &'static Mutex<HashSet<TileKey>> {
     LUNAR_PENDING.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-/// Separate build slot counter for lunar (JP2) builds.
-/// The SLDEM2015 JP2 is a single ~22 GB file; all lunar tiles read from it
-/// concurrently, causing heavy I/O contention.  Capping to 2 parallel reads
-/// keeps throughput high while preventing starvation / excessive swap.
-fn max_lunar_build_slots() -> usize {
-    2
-}
-
-fn active_lunar_build_slots() -> &'static AtomicUsize {
-    static ACTIVE: OnceLock<AtomicUsize> = OnceLock::new();
-    ACTIVE.get_or_init(|| AtomicUsize::new(0))
-}
-
-pub fn try_acquire_lunar_build_slot() -> bool {
-    active_lunar_build_slots()
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-            (count < max_lunar_build_slots()).then_some(count + 1)
-        })
-        .is_ok()
-}
-
-pub fn release_lunar_build_slot() {
-    let current = active_lunar_build_slots().load(Ordering::SeqCst);
-    if current > 0 {
-        active_lunar_build_slots().fetch_sub(1, Ordering::SeqCst);
-    }
-}
+/// Maximum number of concurrent SLDEM2015 JP2 tile builds.
+/// The JP2 is a single ~22 GB file; all lunar builds compete for the same I/O.
+/// Capping at 2 keeps throughput high without thrashing disk/memory bandwidth.
+pub const MAX_CONCURRENT_LUNAR_BUILDS: usize = 2;
 
 pub fn is_pending(tile: TileKey) -> bool {
     pending_set()
@@ -193,18 +170,27 @@ pub fn ensure_lunar_bucket_asset(
         });
     }
 
+    // All lunar builds read from the same large JP2 file — cap concurrency to
+    // avoid I/O starvation.  Use the pending set's current size as ground truth
+    // so the limit is always accurate regardless of thread scheduling.
     let pending = lunar_pending_set();
-    if pending.lock().map(|g| g.contains(&tile)).unwrap_or(false) {
-        return None;
+    {
+        let guard = pending.lock().ok()?;
+        if guard.contains(&tile) {
+            return None; // already in-flight
+        }
+        if guard.len() >= MAX_CONCURRENT_LUNAR_BUILDS {
+            return None; // at concurrency limit
+        }
     }
 
-    if !try_acquire_lunar_build_slot() {
-        return None;
+    if !try_acquire_build_slot() {
+        return None; // also respect the global SRTM/misc slot budget
     }
 
     let mut guard = pending.lock().ok()?;
     if !guard.insert(tile) {
-        release_lunar_build_slot();
+        release_build_slot();
         return None;
     }
     drop(guard);
@@ -224,7 +210,7 @@ pub fn ensure_lunar_bucket_asset(
         if let Ok(mut guard) = lunar_pending_set().lock() {
             guard.remove(&tile);
         }
-        release_lunar_build_slot();
+        release_build_slot();
         crate::app::request_repaint();
     });
 
