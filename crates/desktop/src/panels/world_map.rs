@@ -239,8 +239,10 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                 if ui.add(globe_btn).clicked() && model.globe_view.local_mode {
                     model.globe_view.local_mode = false;
                 }
-                if ui.add_enabled(!model.moon_mode, local_btn)
-                    .on_disabled_hover_text("LOCAL terrain view is Earth-only (no SRTM on the Moon)")
+                let local_disabled = model.moon_mode
+                    && crate::terrain_assets::find_sldem_jp2(model.selected_root.as_deref()).is_none();
+                if ui.add_enabled(!local_disabled, local_btn)
+                    .on_disabled_hover_text("LOCAL lunar terrain requires SLDEM2015 JP2 data")
                     .clicked()
                     && !model.globe_view.local_mode
                 {
