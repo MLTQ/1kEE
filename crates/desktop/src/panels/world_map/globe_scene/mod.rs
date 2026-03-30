@@ -64,6 +64,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             model.globe_view.pitch,
             ppp,
             false, // graticule always off in GPU pass — drawn CPU-side instead
+            model.moon_mode,
             theme::scene_backdrop(),
             theme::topo_color(),
             theme::wireframe_color(),
@@ -84,15 +85,19 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     if model.show_reticle {
         draw_hud_frame(painter, rect);
     }
-    if model.show_bathymetry {
-        geography::draw_global_bathymetry(painter, &layout, &model.globe_view, selected_root);
-    }
-    if model.show_coastlines {
-        geography::draw_global_coastlines(painter, &layout, &model.globe_view, selected_root);
-    }
-    geography::draw_global_topo(painter, &layout, &model.globe_view, selected_root);
 
-    geography::draw_srtm_on_globe(painter, &layout, &model.globe_view, &lod, selected_root);
+    if !model.moon_mode {
+        if model.show_bathymetry {
+            geography::draw_global_bathymetry(painter, &layout, &model.globe_view, selected_root);
+        }
+        if model.show_coastlines {
+            geography::draw_global_coastlines(painter, &layout, &model.globe_view, selected_root);
+        }
+        geography::draw_global_topo(painter, &layout, &model.globe_view, selected_root);
+        geography::draw_srtm_on_globe(painter, &layout, &model.globe_view, &lod, selected_root);
+    } else {
+        geography::draw_lunar_topo(painter, &layout, &model.globe_view, selected_root);
+    }
 
     // ── GeoJSON user overlay layers ────────────────────────────────────────
     if !model.geojson_layers.is_empty() {

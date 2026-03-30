@@ -431,6 +431,67 @@ pub fn build_gebco_derived(tiles: &[PathBuf], cache_root: &Path) -> Option<()> {
     Some(())
 }
 
+pub fn lunar_preview_building() -> &'static AtomicBool {
+    static BUILDING: OnceLock<AtomicBool> = OnceLock::new();
+    BUILDING.get_or_init(|| AtomicBool::new(false))
+}
+
+/// Build the SLDEM2015 lunar terrain preview PNG into `cache_root`
+/// (= `Derived/terrain/`).
+///
+/// Output: `sldem2015_preview_4096.png` — 4096×1366 UInt16 PNG.
+/// The PNG is scaled so that raw JP2 DN value -18000 → u16 0 and
+/// +22000 → u16 65535, mapping to elevation_m = -9000 m … +11000 m.
+/// (Actual data range: DN -17438…+21567, i.e. -8719 m … +10783 m.)
+/// Coverage: 60°S to 60°N (the full SLDEM2015 extent).
+///
+/// Skipped if the output already exists.
+pub fn build_lunar_preview(jp2_path: &Path, cache_root: &Path) -> Option<()> {
+    if shutdown_requested().load(Ordering::Relaxed) {
+        return None;
+    }
+    let out_png = cache_root.join("sldem2015_preview_4096.png");
+    if out_png.exists() {
+        return Some(());
+    }
+
+    let tmp_dir = cache_root.join(super::TEMP_DIR_NAME);
+    fs::create_dir_all(&tmp_dir).ok()?;
+    let tmp_png = tmp_dir.join("sldem2015_preview.tmp.png");
+
+    // gdal_translate: downsample to 4096×1366, scale DN range [-18000, 22000]
+    // to UInt16 [0, 65535], output as PNG (lossless 16-bit).
+    // 4096 wide × 1366 tall is proportional to 360°×120° at 4096px wide.
+    // Actual data min/max DN: -17438 … +21567 — use -18000/+22000 for headroom.
+    let mut translate = Command::new(gdal_tool_path("gdal_translate"));
+    translate.args([
+        "-q",
+        "-outsize", "4096", "1366",
+        "-ot", "UInt16",
+        "-of", "PNG",
+        "-scale", "-18000", "22000", "0", "65535",
+    ]);
+    translate.arg(jp2_path).arg(&tmp_png);
+    run_command_with_timeout(
+        translate,
+        "gdal_translate (SLDEM2015 lunar preview)",
+        Duration::from_secs(300),
+    )
+    .ok()?;
+
+    if shutdown_requested().load(Ordering::Relaxed) {
+        let _ = fs::remove_file(&tmp_png);
+        return None;
+    }
+
+    if fs::rename(&tmp_png, &out_png).is_err() {
+        fs::copy(&tmp_png, &out_png).ok()?;
+        let _ = fs::remove_file(&tmp_png);
+    }
+
+    Some(())
+}
+
 pub fn shutdown_requested() -> &'static AtomicBool {
     static SHUTDOWN: OnceLock<AtomicBool> = OnceLock::new();
     SHUTDOWN.get_or_init(|| AtomicBool::new(false))
