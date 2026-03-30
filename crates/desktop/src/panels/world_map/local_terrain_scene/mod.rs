@@ -128,23 +128,45 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             .map(|s| s.ready_assets < s.total_assets)
             .unwrap_or(contours.is_none())
     };
-    if still_loading && !model.moon_mode {
-        let ready_buckets = srtm_focus_cache::ready_tile_buckets(
-            model.selected_root.as_deref(),
-            viewport_center,
-            render_zoom,
-            LOCAL_STREAM_RADIUS,
-        );
-        dissolve::draw_tile_pulse_grid(
-            painter,
-            &layout,
-            &model.globe_view,
-            viewport_center,
-            render_zoom,
-            LOCAL_STREAM_RADIUS,
-            time,
-            &ready_buckets,
-        );
+    if still_loading {
+        if model.moon_mode {
+            let ready_buckets = srtm_focus_cache::ready_lunar_tile_buckets(
+                model.selected_root.as_deref(),
+                viewport_center,
+                render_zoom,
+                LOCAL_STREAM_RADIUS,
+            );
+            let half_extent = srtm_focus_cache::lunar_half_extent_for_zoom(render_zoom);
+            dissolve::draw_tile_pulse_grid(
+                painter,
+                &layout,
+                &model.globe_view,
+                viewport_center,
+                render_zoom,
+                LOCAL_STREAM_RADIUS,
+                time,
+                &ready_buckets,
+                Some(half_extent),
+            );
+        } else {
+            let ready_buckets = srtm_focus_cache::ready_tile_buckets(
+                model.selected_root.as_deref(),
+                viewport_center,
+                render_zoom,
+                LOCAL_STREAM_RADIUS,
+            );
+            dissolve::draw_tile_pulse_grid(
+                painter,
+                &layout,
+                &model.globe_view,
+                viewport_center,
+                render_zoom,
+                LOCAL_STREAM_RADIUS,
+                time,
+                &ready_buckets,
+                None,
+            );
+        }
     }
 
     let contours_slice = contours.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
@@ -434,13 +456,27 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         rect,
         if model.moon_mode { "LOCAL LUNAR TERRAIN" } else { "LOCAL EVENT TERRAIN" },
         render_zoom,
+        model.moon_mode,
     );
+    let (lunar_ready, lunar_building, lunar_total) = if model.moon_mode {
+        srtm_focus_cache::lunar_tile_counts(
+            model.selected_root.as_deref(),
+            viewport_center,
+            render_zoom,
+            LOCAL_STREAM_RADIUS,
+        )
+    } else {
+        (0, 0, 0)
+    };
     ui_overlays::draw_progress_overlay(
         painter,
         rect,
         cache_status,
         osm_ingest::osmium_cell_progress(),
         osm_ingest::active_job_note().as_deref(),
+        lunar_building,
+        lunar_ready,
+        lunar_total,
     );
 
     GlobeScene {
