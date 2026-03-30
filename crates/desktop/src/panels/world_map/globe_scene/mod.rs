@@ -118,7 +118,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let nearby = model.nearby_cameras(250.0);
 
     // ── Replay flares (shown instead of live markers while replay is active) ──
-    if model.replay_mode {
+    if model.replay_mode && !model.moon_mode {
         if let Some(state) = &model.replay_state {
             let wall_elapsed = state.wall_elapsed();
             for flare in &state.active_flares {
@@ -148,7 +148,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         }
     }
 
-    let event_markers: Vec<_> = if !model.show_event_markers || model.replay_mode {
+    let event_markers: Vec<_> = if !model.show_event_markers || model.replay_mode || model.moon_mode {
         Vec::new()
     } else {
         model
@@ -191,7 +191,9 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             .collect()
     };
 
-    let camera_markers: Vec<_> = {
+    let camera_markers: Vec<_> = if model.moon_mode {
+        Vec::new()
+    } else {
         nearby
             .iter()
             .filter_map(|camera| {

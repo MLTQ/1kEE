@@ -60,6 +60,10 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
                     .clicked()
                 {
                     model.moon_mode = !model.moon_mode;
+                    // Moon mode has no local terrain view — always return to globe.
+                    if model.moon_mode {
+                        model.globe_view.local_mode = false;
+                    }
                     let new_theme = if model.moon_mode {
                         crate::theme::MapTheme::Lunar
                     } else {
