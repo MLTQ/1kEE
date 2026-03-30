@@ -10,7 +10,7 @@ use std::time::Duration;
 pub mod builders;
 pub mod db;
 pub mod gdal;
-pub mod zoom;
+pub mod zoom; // pub so ui_overlays can access lunar_spec_for_zoom
 
 pub use zoom::{
     bucket_radius_for_target_radius_miles, contour_interval_for_zoom, feature_budget_for_zoom,
@@ -21,6 +21,41 @@ pub use zoom::{
 /// Used by the contour merge step to partition tiles without overlap.
 pub fn lunar_half_extent_for_zoom(zoom: f32) -> f32 {
     zoom::lunar_spec_for_zoom(zoom).half_extent_deg
+}
+
+/// Returns the set of `(lat_bucket, lon_bucket)` pairs that are already built
+/// in the *lunar* cache DB for the given zoom level.  Parallel to
+/// `ready_tile_buckets` but queries `lunar_focus_cache.sqlite`.
+pub fn ready_lunar_tile_buckets(
+    selected_root: Option<&Path>,
+    focus: GeoPoint,
+    zoom: f32,
+    radius: i32,
+) -> HashSet<(i32, i32)> {
+    let mut set = HashSet::new();
+    let Some(cache_db_path) = lunar_cache_db_path(selected_root) else {
+        return set;
+    };
+    let Ok(connection) = db::open_cache_db(&cache_db_path) else {
+        return set;
+    };
+    let spec = zoom::lunar_spec_for_zoom(zoom);
+    let bucket_step = spec.half_extent_deg * 0.45;
+    let center_lat_bucket = (focus.lat / bucket_step).round() as i32;
+    let center_lon_bucket = (focus.lon / bucket_step).round() as i32;
+    for lat_bucket in (center_lat_bucket - radius)..=(center_lat_bucket + radius) {
+        for lon_bucket in (center_lon_bucket - radius)..=(center_lon_bucket + radius) {
+            let tile = TileKey {
+                zoom_bucket: spec.zoom_bucket,
+                lat_bucket,
+                lon_bucket,
+            };
+            if db::tile_exists(&connection, tile).unwrap_or(false) {
+                set.insert((lat_bucket, lon_bucket));
+            }
+        }
+    }
+    set
 }
 
 const BUILD_TIMEOUT: Duration = Duration::from_secs(90);
@@ -45,7 +80,7 @@ pub struct FocusContourRegionStatus {
 }
 
 #[derive(Clone, Copy)]
-pub(self) struct FocusContourSpec {
+pub struct FocusContourSpec {
     pub half_extent_deg: f32,
     pub raster_size: u32,
     pub interval_m: i32,
@@ -417,6 +452,52 @@ pub fn is_lunar_contour_building() -> bool {
         .lock()
         .map(|g| !g.is_empty())
         .unwrap_or(false)
+}
+
+/// (ready, building, total) for the lunar tile grid around `focus`.
+/// Used by the progress overlay in lunar local terrain mode.
+pub fn lunar_tile_counts(
+    selected_root: Option<&Path>,
+    focus: GeoPoint,
+    zoom: f32,
+    radius: i32,
+) -> (usize, usize, usize) {
+    let Some(cache_db_path) = lunar_cache_db_path(selected_root) else {
+        return (0, 0, 0);
+    };
+    let Ok(connection) = db::open_cache_db(&cache_db_path) else {
+        return (0, 0, 0);
+    };
+    let spec = zoom::lunar_spec_for_zoom(zoom);
+    let bucket_step = spec.half_extent_deg * 0.45;
+    let center_lat_bucket = (focus.lat / bucket_step).round() as i32;
+    let center_lon_bucket = (focus.lon / bucket_step).round() as i32;
+
+    let building = builders::lunar_pending_set()
+        .lock()
+        .map(|g| g.len())
+        .unwrap_or(0);
+
+    let mut ready = 0usize;
+    let mut total = 0usize;
+    for lat_bucket in (center_lat_bucket - radius)..=(center_lat_bucket + radius) {
+        let bucket_lat = lat_bucket as f32 * bucket_step;
+        if bucket_lat.abs() > 60.0 + spec.half_extent_deg {
+            continue; // outside SLDEM coverage
+        }
+        for lon_bucket in (center_lon_bucket - radius)..=(center_lon_bucket + radius) {
+            total += 1;
+            let tile = TileKey {
+                zoom_bucket: spec.zoom_bucket,
+                lat_bucket,
+                lon_bucket,
+            };
+            if db::tile_exists(&connection, tile).unwrap_or(false) {
+                ready += 1;
+            }
+        }
+    }
+    (ready, building, total)
 }
 
 /// Ensure lunar (SLDEM2015) contour tiles exist for the region around `focus`
