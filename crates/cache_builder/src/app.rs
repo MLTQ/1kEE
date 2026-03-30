@@ -112,7 +112,7 @@ struct AssetSelection {
 
 #[derive(Default)]
 struct CacheInspector {
-    road_cell_count: usize,
+    cell_file_count: usize,
     node_cache_count: usize,
     total_bytes: u64,
     latest_files: Vec<String>,
@@ -393,22 +393,33 @@ impl BuilderApp {
         let mut files = Vec::new();
         let mut total_bytes = 0u64;
         let mut node_cache_count = 0usize;
-        if let Ok(entries) = fs::read_dir(&cache_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let ext = path.extension().and_then(|e| e.to_str());
-                if !matches!(ext, Some("1kc") | Some("geojson")) {
+        // Cell files live in subdirectories (road_cells/, waterway_cells/, etc.),
+        // not directly in cache_dir — scan one level of subdirectories.
+        if let Ok(top_entries) = fs::read_dir(&cache_dir) {
+            for top_entry in top_entries.flatten() {
+                let top_path = top_entry.path();
+                if !top_path.is_dir() {
                     continue;
                 }
-                let metadata = entry.metadata().ok();
-                let modified = metadata
-                    .as_ref()
-                    .and_then(|meta| meta.modified().ok())
-                    .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
-                    .map(|duration| duration.as_secs())
-                    .unwrap_or_default();
-                total_bytes += metadata.as_ref().map(|meta| meta.len()).unwrap_or_default();
-                files.push((modified, path));
+                let Ok(sub_entries) = fs::read_dir(&top_path) else {
+                    continue;
+                };
+                for entry in sub_entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|ext| ext.to_str()) != Some("geojson") {
+                        continue;
+                    }
+                    let metadata = entry.metadata().ok();
+                    let modified = metadata
+                        .as_ref()
+                        .and_then(|meta| meta.modified().ok())
+                        .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+                        .map(|duration| duration.as_secs())
+                        .unwrap_or_default();
+                    total_bytes +=
+                        metadata.as_ref().map(|meta| meta.len()).unwrap_or_default();
+                    files.push((modified, path));
+                }
             }
         }
         let state_dir = cache_dir.join(".builder_state");
@@ -425,7 +436,7 @@ impl BuilderApp {
         }
         files.sort_by(|left, right| right.0.cmp(&left.0));
 
-        self.inspector.road_cell_count = files.len();
+        self.inspector.cell_file_count = files.len();
         self.inspector.node_cache_count = node_cache_count;
         self.inspector.total_bytes = total_bytes;
         self.inspector.latest_files = files
@@ -553,12 +564,8 @@ impl eframe::App for BuilderApp {
                     }
                 });
 
-                let map_width = (ui.available_width()).max(560.0);
-                let map_height = map_width * (280.0 / 560.0);
-                let (response, painter) = ui.allocate_painter(
-                    egui::Vec2::new(map_width, map_height),
-                    egui::Sense::click_and_drag(),
-                );
+                let (response, painter) = ui
+                    .allocate_painter(egui::Vec2::new(280.0, 140.0), egui::Sense::click_and_drag());
                 let rect = response.rect;
 
                 // Background
@@ -591,9 +598,11 @@ impl eframe::App for BuilderApp {
                 }
 
                 // Graticule lines
-                let graticule_color  = Color32::from_rgb(20, 40, 80);
-                let equator_color    = Color32::from_rgb(40, 80, 120);
-                let lons = [-180i32, -150, -120, -90, -60, -30, 0, 30, 60, 90, 120, 150, 180];
+                let graticule_color = Color32::from_rgb(20, 40, 80);
+                let equator_color = Color32::from_rgb(40, 80, 120);
+                let lons = [
+                    -180i32, -150, -120, -90, -60, -30, 0, 30, 60, 90, 120, 150, 180,
+                ];
                 let lats = [-90i32, -60, -30, 0, 30, 60, 90];
                 for lon in lons {
                     let x = lon_to_x(rect, lon as f32);
@@ -604,7 +613,11 @@ impl eframe::App for BuilderApp {
                 }
                 for lat in lats {
                     let y = lat_to_y(rect, lat as f32);
-                    let color = if lat == 0 { equator_color } else { graticule_color };
+                    let color = if lat == 0 {
+                        equator_color
+                    } else {
+                        graticule_color
+                    };
                     painter.line_segment(
                         [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
                         egui::Stroke::new(1.0, color),
@@ -634,8 +647,8 @@ impl eframe::App for BuilderApp {
                 );
 
                 // Bbox rectangle from current form values
-                let bbox_color  = Color32::from_rgb(220, 160, 30);
-                let bbox_fill   = Color32::from_rgba_unmultiplied(220, 160, 30, 38); // ~15% opacity
+                let bbox_color = Color32::from_rgb(220, 160, 30);
+                let bbox_fill = Color32::from_rgba_unmultiplied(220, 160, 30, 38); // ~15% opacity
                 if let (Ok(min_lat), Ok(max_lat), Ok(min_lon), Ok(max_lon)) = (
                     self.form.min_lat.trim().parse::<f32>(),
                     self.form.max_lat.trim().parse::<f32>(),
@@ -646,12 +659,15 @@ impl eframe::App for BuilderApp {
                     let x1 = lon_to_x(rect, max_lon);
                     let y0 = lat_to_y(rect, max_lat);
                     let y1 = lat_to_y(rect, min_lat);
-                    let bbox_rect = egui::Rect::from_min_max(
-                        egui::pos2(x0, y0),
-                        egui::pos2(x1, y1),
-                    );
+                    let bbox_rect =
+                        egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1));
                     painter.rect_filled(bbox_rect, 0.0, bbox_fill);
-                    painter.rect_stroke(bbox_rect, 0.0, egui::Stroke::new(1.5, bbox_color), egui::StrokeKind::Middle);
+                    painter.rect_stroke(
+                        bbox_rect,
+                        0.0,
+                        egui::Stroke::new(1.5, bbox_color),
+                        egui::StrokeKind::Middle,
+                    );
                 }
 
                 // Drag interaction to set bbox
@@ -766,8 +782,8 @@ impl eframe::App for BuilderApp {
             ui.columns(2, |columns| {
                 columns[0].heading("Inspector");
                 columns[0].label(format!(
-                    "Road cell files: {}",
-                    self.inspector.road_cell_count
+                    "Cache cell files: {}",
+                    self.inspector.cell_file_count
                 ));
                 columns[0].label(format!("Node caches: {}", self.inspector.node_cache_count));
                 columns[0].label(format!(

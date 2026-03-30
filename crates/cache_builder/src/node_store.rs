@@ -306,7 +306,9 @@ impl NodeStore {
         // Load all relations first.
         let mut rel_stmt = self
             .connection
-            .prepare("SELECT relation_id, name, admin_level FROM admin_relations ORDER BY relation_id")
+            .prepare(
+                "SELECT relation_id, name, admin_level FROM admin_relations ORDER BY relation_id",
+            )
             .map_err(|error| error.to_string())?;
         let relations: Vec<(i64, Option<String>, u8)> = rel_stmt
             .query_map([], |row| {
@@ -329,13 +331,14 @@ impl NodeStore {
             .map_err(|error| error.to_string())?;
         let mut ways_by_relation: HashMap<i64, Vec<i64>> = HashMap::new();
         let rows = way_stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
-            })
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
             .map_err(|error| error.to_string())?;
         for row in rows {
             let (relation_id, way_id) = row.map_err(|error| error.to_string())?;
-            ways_by_relation.entry(relation_id).or_default().push(way_id);
+            ways_by_relation
+                .entry(relation_id)
+                .or_default()
+                .push(way_id);
         }
 
         Ok(relations
@@ -359,9 +362,7 @@ impl NodeStore {
             // Step 1: get ordered node IDs for this way.
             let mut node_stmt = self
                 .connection
-                .prepare(
-                    "SELECT node_id FROM admin_way_nodes WHERE way_id = ?1 ORDER BY seq",
-                )
+                .prepare("SELECT node_id FROM admin_way_nodes WHERE way_id = ?1 ORDER BY seq")
                 .map_err(|error| error.to_string())?;
             let node_ids: Vec<i64> = node_stmt
                 .query_map(params![way_id], |row| row.get::<_, i64>(0))
@@ -383,6 +384,37 @@ impl NodeStore {
         Ok(result)
     }
 
+    /// Load every candidate node into a `HashMap<id → GeoPoint>` for O(1) in-memory
+    /// lookups during the way-scan pass.  For large bounding boxes this may use several
+    /// hundred MiB of RAM but eliminates all per-way SQLite queries.
+    pub fn load_all_nodes(&self) -> Result<HashMap<i64, GeoPoint>, String> {
+        let count: i64 = self
+            .connection
+            .query_row("SELECT COUNT(*) FROM candidate_nodes", [], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        let mut map: HashMap<i64, GeoPoint> = HashMap::with_capacity(count as usize);
+        let mut stmt = self
+            .connection
+            .prepare("SELECT id, lat, lon FROM candidate_nodes")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    GeoPoint {
+                        lat: row.get(1)?,
+                        lon: row.get(2)?,
+                    },
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let (id, pt) = row.map_err(|e| e.to_string())?;
+            map.insert(id, pt);
+        }
+        Ok(map)
+    }
+
     /// Look up coordinates for a batch of node IDs.  Uses a single SQL `IN (…)` per
     /// chunk of 999 IDs (SQLite's default variable limit) instead of one round-trip per
     /// node, giving a 10-50× speedup for typical ways.
@@ -396,9 +428,8 @@ impl NodeStore {
 
         for chunk in refs.chunks(999) {
             let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let sql = format!(
-                "SELECT id, lat, lon FROM candidate_nodes WHERE id IN ({placeholders})"
-            );
+            let sql =
+                format!("SELECT id, lat, lon FROM candidate_nodes WHERE id IN ({placeholders})");
             let mut stmt = self
                 .connection
                 .prepare(&sql)

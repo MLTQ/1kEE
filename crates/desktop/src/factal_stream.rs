@@ -476,8 +476,9 @@ pub fn history_tick(model: &mut AppModel) {
                 let msg = format!("{n} historical events loaded");
                 model.replay_history_status = msg.clone();
                 model.push_log(format!("Factal history fetch complete: {n} event(s) stored."));
-                // If replay is open, rebuild now that we have data.
-                if model.replay_mode && model.replay_state.is_none() {
+                // Rebuild whenever replay is open — history may have arrived after
+                // the initial rebuild (which only had today's live events).
+                if model.replay_mode {
                     model.rebuild_replay_state();
                 }
             }

@@ -3,9 +3,9 @@ use crate::geojson::{ensure_cache_dir, merge_write_cells, merge_write_feature_ce
 use crate::srtm::SrtmSampler;
 use crate::node_store::NodeStore;
 use crate::util::{
-    GeoBounds, GeoPoint, RoadPolyline, WayFeature, bounds_intersect, canonical_road_class,
-    canonical_waterway_class, canonical_building_class, canonical_tree_class,
-    expand_bounds, focus_cells_for_bounds, point_in_bounds, polyline_bounds,
+    GeoBounds, GeoPoint, RoadPolyline, WayFeature, bounds_intersect, canonical_building_class,
+    canonical_road_class, canonical_tree_class, canonical_waterway_class, expand_bounds,
+    focus_cells_for_bounds, point_in_bounds, polyline_bounds,
 };
 use osmpbf::{BlobDecode, BlobReader};
 use std::collections::{HashMap, HashSet};
@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const ROAD_FLUSH_THRESHOLD: usize = 10_000;
-const NODE_INSERT_BATCH:    usize = 50_000;
+const ROAD_FLUSH_THRESHOLD: usize = 100_000;
+const NODE_INSERT_BATCH: usize = 50_000;
 
 // ── Position-tracking reader ──────────────────────────────────────────────────
 //
@@ -27,7 +27,7 @@ const NODE_INSERT_BATCH:    usize = 50_000;
 
 pub(crate) struct PosReader {
     inner: File,
-    pos:   Arc<AtomicU64>,
+    pos: Arc<AtomicU64>,
 }
 
 impl Read for PosReader {
@@ -54,8 +54,11 @@ pub(crate) fn open_planet_at(
         file.seek(SeekFrom::Start(start_offset))
             .map_err(|e| format!("Seek failed: {e}"))?;
     }
-    let pos    = Arc::new(AtomicU64::new(start_offset));
-    let reader = BlobReader::new(PosReader { inner: file, pos: pos.clone() });
+    let pos = Arc::new(AtomicU64::new(start_offset));
+    let reader = BlobReader::new(PosReader {
+        inner: file,
+        pos: pos.clone(),
+    });
     Ok((reader, pos))
 }
 
@@ -67,13 +70,13 @@ pub fn build_bbox_cache(command: BboxCommand) -> Result<(), String> {
 
 #[derive(Clone, Debug)]
 pub struct RoadBuildProgress {
-    pub stage:    String,
+    pub stage: String,
     pub fraction: f32,
-    pub message:  String,
+    pub message: String,
 }
 
 pub fn build_bbox_cache_with_progress(
-    command:  BboxCommand,
+    command: BboxCommand,
     progress: &mut dyn FnMut(RoadBuildProgress),
 ) -> Result<String, String> {
     if !command.planet_path.exists() {
@@ -90,13 +93,13 @@ pub fn build_bbox_cache_with_progress(
         min_lon: command.min_lon,
         max_lon: command.max_lon,
     };
-    let expanded         = expand_bounds(bounds, command.margin_degrees);
-    let node_store_path  = candidate_node_store_path(&command.cache_dir, bounds);
+    let expanded = expand_bounds(bounds, command.margin_degrees);
+    let node_store_path = candidate_node_store_path(&command.cache_dir, bounds);
 
     progress(RoadBuildProgress {
-        stage:    "Scanning Nodes".to_owned(),
+        stage: "Scanning Nodes".to_owned(),
         fraction: 0.02,
-        message:  format!(
+        message: format!(
             "Scanning nodes in bbox [{:.4},{:.4}] x [{:.4},{:.4}]",
             bounds.min_lat, bounds.max_lat, bounds.min_lon, bounds.max_lon
         ),
@@ -109,9 +112,9 @@ pub fn build_bbox_cache_with_progress(
         progress,
     )?;
     progress(RoadBuildProgress {
-        stage:    "Scanning Ways".to_owned(),
+        stage: "Scanning Ways".to_owned(),
         fraction: 0.40,
-        message:  format!("Prepared {} candidate nodes", candidate_nodes.count()?),
+        message: format!("Prepared {} candidate nodes", candidate_nodes.count()?),
     });
 
     let mut srtm = command.srtm_root.clone().map(SrtmSampler::new);
@@ -126,9 +129,9 @@ pub fn build_bbox_cache_with_progress(
 
     if command.build_admin {
         progress(RoadBuildProgress {
-            stage:    "Scanning Relations".to_owned(),
+            stage: "Scanning Relations".to_owned(),
             fraction: 0.83,
-            message:  "Scanning admin boundary relations…".to_owned(),
+            message: "Scanning admin boundary relations…".to_owned(),
         });
         crate::admin::load_or_build_admin_boundaries(
             &command,
@@ -139,9 +142,9 @@ pub fn build_bbox_cache_with_progress(
     }
 
     progress(RoadBuildProgress {
-        stage:    "Writing Cache".to_owned(),
+        stage: "Writing Cache".to_owned(),
         fraction: 0.82,
-        message:  format!(
+        message: format!(
             "Writing {} features across {} populated cells",
             build_stats.feature_count, build_stats.cell_count
         ),
@@ -154,9 +157,9 @@ pub fn build_bbox_cache_with_progress(
         command.cache_dir.display()
     );
     progress(RoadBuildProgress {
-        stage:    "Completed".to_owned(),
+        stage: "Completed".to_owned(),
         fraction: 1.0,
-        message:  summary.clone(),
+        message: summary.clone(),
     });
     Ok(summary)
 }
@@ -164,19 +167,19 @@ pub fn build_bbox_cache_with_progress(
 // ── Pass 1: candidate node collection ────────────────────────────────────────
 
 fn load_or_collect_candidate_nodes(
-    planet_path:     &Path,
-    bounds:          GeoBounds,
+    planet_path: &Path,
+    bounds: GeoBounds,
     node_store_path: &Path,
-    progress:        &mut dyn FnMut(RoadBuildProgress),
+    progress: &mut dyn FnMut(RoadBuildProgress),
 ) -> Result<NodeStore, String> {
     let mut node_store = NodeStore::open(node_store_path)?;
 
     if node_store.is_complete()? {
         let node_count = node_store.count()?;
         progress(RoadBuildProgress {
-            stage:    "Loaded Node Cache".to_owned(),
+            stage: "Loaded Node Cache".to_owned(),
             fraction: 0.32,
-            message:  format!(
+            message: format!(
                 "Loaded {} candidate nodes from {}",
                 node_count,
                 node_store_path.display()
@@ -193,9 +196,9 @@ fn load_or_collect_candidate_nodes(
         node_store.reset()?;
     } else {
         progress(RoadBuildProgress {
-            stage:    "Resuming Node Scan".to_owned(),
+            stage: "Resuming Node Scan".to_owned(),
             fraction: 0.03,
-            message:  format!(
+            message: format!(
                 "Resuming node scan from file offset {} ({} nodes collected so far)",
                 resume_offset.unwrap(),
                 node_store.count()?
@@ -203,41 +206,53 @@ fn load_or_collect_candidate_nodes(
         });
     }
 
-    collect_candidate_nodes(planet_path, bounds, &mut node_store, resume_offset, progress)?;
+    collect_candidate_nodes(
+        planet_path,
+        bounds,
+        &mut node_store,
+        resume_offset,
+        progress,
+    )?;
     node_store.mark_complete()?;
     node_store.clear_scan_offset("node_scan")?;
 
     let node_count = node_store.count()?;
     progress(RoadBuildProgress {
-        stage:    "Saved Node Cache".to_owned(),
+        stage: "Saved Node Cache".to_owned(),
         fraction: 0.35,
-        message:  format!("Saved {} candidate nodes to {}", node_count, node_store_path.display()),
+        message: format!(
+            "Saved {} candidate nodes to {}",
+            node_count,
+            node_store_path.display()
+        ),
     });
     Ok(node_store)
 }
 
 fn collect_candidate_nodes(
-    planet_path:   &Path,
-    bounds:        GeoBounds,
-    node_store:    &mut NodeStore,
+    planet_path: &Path,
+    bounds: GeoBounds,
+    node_store: &mut NodeStore,
     resume_offset: Option<u64>,
-    progress:      &mut dyn FnMut(RoadBuildProgress),
+    progress: &mut dyn FnMut(RoadBuildProgress),
 ) -> Result<(), String> {
     let start = resume_offset.unwrap_or(0);
     let (reader, pos) = open_planet_at(planet_path, start)?;
 
     let mut scanned = 0usize;
-    let mut kept    = 0usize;
+    let mut kept = 0usize;
     let mut batch: Vec<(i64, GeoPoint)> = Vec::with_capacity(NODE_INSERT_BATCH);
 
     for blob_result in reader {
-        let blob    = blob_result.map_err(|e| e.to_string())?;
+        let blob = blob_result.map_err(|e| e.to_string())?;
         let decoded = blob.decode().map_err(|e| e.to_string())?;
-        let BlobDecode::OsmData(block) = decoded else { continue };
+        let BlobDecode::OsmData(block) = decoded else {
+            continue;
+        };
 
         for element in block.elements() {
             let (node_id, lat, lon) = match element {
-                osmpbf::Element::Node(n)      => (n.id(), n.lat() as f32, n.lon() as f32),
+                osmpbf::Element::Node(n) => (n.id(), n.lat() as f32, n.lon() as f32),
                 osmpbf::Element::DenseNode(n) => (n.id(), n.lat() as f32, n.lon() as f32),
                 _ => continue,
             };
@@ -259,9 +274,12 @@ fn collect_candidate_nodes(
 
             if scanned % 2_000_000 < NODE_INSERT_BATCH {
                 progress(RoadBuildProgress {
-                    stage:    "Scanning Nodes".to_owned(),
+                    stage: "Scanning Nodes".to_owned(),
                     fraction: 0.30,
-                    message:  format!("Scanned {} elements; kept {} candidate nodes", scanned, kept),
+                    message: format!(
+                        "Scanned {} elements; kept {} candidate nodes",
+                        scanned, kept
+                    ),
                 });
             }
         }
@@ -276,60 +294,78 @@ fn collect_candidate_nodes(
 
 struct FeatureBuildStats {
     feature_count: usize,
-    cell_count:    usize,
+    cell_count: usize,
     written_cells: usize,
 }
 
 fn collect_all_features_by_cell(
-    command:         &BboxCommand,
-    bounds:          GeoBounds,
+    command: &BboxCommand,
+    bounds: GeoBounds,
     candidate_nodes: &mut NodeStore,
-    mut srtm:        Option<&mut SrtmSampler>,
-    progress:        &mut dyn FnMut(RoadBuildProgress),
+    mut srtm: Option<&mut SrtmSampler>,
+    progress: &mut dyn FnMut(RoadBuildProgress),
 ) -> Result<FeatureBuildStats, String> {
+    // Load all candidate nodes into RAM for O(1) lookups during the way scan,
+    // avoiding millions of SQLite queries.
+    progress(RoadBuildProgress {
+        stage: "Loading Node Map".to_owned(),
+        fraction: 0.40,
+        message: "Loading candidate nodes into memory…".to_owned(),
+    });
+    let node_map = candidate_nodes.load_all_nodes()?;
+    progress(RoadBuildProgress {
+        stage: "Scanning Ways".to_owned(),
+        fraction: 0.42,
+        message: format!("Loaded {} nodes into memory", node_map.len()),
+    });
+
     // Resume from the last way-scan checkpoint if available.
     let resume_offset = candidate_nodes.get_scan_offset("way_scan")?;
     if let Some(off) = resume_offset {
         progress(RoadBuildProgress {
-            stage:    "Resuming Way Scan".to_owned(),
-            fraction: 0.41,
-            message:  format!("Resuming way scan from file offset {off}"),
+            stage: "Resuming Way Scan".to_owned(),
+            fraction: 0.43,
+            message: format!("Resuming way scan from file offset {off}"),
         });
     }
 
-    let start         = resume_offset.unwrap_or(0);
+    let start = resume_offset.unwrap_or(0);
     let (reader, pos) = open_planet_at(&command.planet_path, start)?;
 
     // Per-feature-type accumulators
-    let mut seen_road_ids:      HashSet<i64> = HashSet::new();
-    let mut seen_waterway_ids:  HashSet<i64> = HashSet::new();
-    let mut seen_building_ids:  HashSet<i64> = HashSet::new();
-    let mut seen_tree_ids:      HashSet<i64> = HashSet::new();
+    let mut seen_road_ids: HashSet<i64> = HashSet::new();
+    let mut seen_waterway_ids: HashSet<i64> = HashSet::new();
+    let mut seen_building_ids: HashSet<i64> = HashSet::new();
+    let mut seen_tree_ids: HashSet<i64> = HashSet::new();
 
-    let mut roads_by_cell:      HashMap<(i32, i32), Vec<RoadPolyline>> = HashMap::new();
-    let mut waterways_by_cell:  HashMap<(i32, i32), Vec<WayFeature>>   = HashMap::new();
-    let mut buildings_by_cell:  HashMap<(i32, i32), Vec<WayFeature>>   = HashMap::new();
-    let mut trees_by_cell:      HashMap<(i32, i32), Vec<WayFeature>>   = HashMap::new();
+    let mut roads_by_cell: HashMap<(i32, i32), Vec<RoadPolyline>> = HashMap::new();
+    let mut waterways_by_cell: HashMap<(i32, i32), Vec<WayFeature>> = HashMap::new();
+    let mut buildings_by_cell: HashMap<(i32, i32), Vec<WayFeature>> = HashMap::new();
+    let mut trees_by_cell: HashMap<(i32, i32), Vec<WayFeature>> = HashMap::new();
 
-    let mut scanned_ways  = 0usize;
+    let mut scanned_ways = 0usize;
     let mut feature_count = 0usize;
     let mut touched_cells: HashSet<(i32, i32)> = HashSet::new();
     let mut written_cells = 0usize;
-    let mut buffered      = 0usize;
+    let mut buffered = 0usize;
 
     for blob_result in reader {
-        let blob    = blob_result.map_err(|e| e.to_string())?;
+        let blob = blob_result.map_err(|e| e.to_string())?;
         let decoded = blob.decode().map_err(|e| e.to_string())?;
-        let BlobDecode::OsmData(block) = decoded else { continue };
+        let BlobDecode::OsmData(block) = decoded else {
+            continue;
+        };
 
         for element in block.elements() {
-            let osmpbf::Element::Way(way) = element else { continue };
+            let osmpbf::Element::Way(way) = element else {
+                continue;
+            };
 
-            let mut road_class:     Option<&'static str> = None;
+            let mut road_class: Option<&'static str> = None;
             let mut waterway_class: Option<&'static str> = None;
             let mut building_class: Option<&'static str> = None;
-            let mut tree_class:     Option<&'static str> = None;
-            let mut name:           Option<String>       = None;
+            let mut tree_class: Option<&'static str> = None;
+            let mut name: Option<String> = None;
 
             for (key, value) in way.tags() {
                 if key == "highway" {
@@ -346,18 +382,27 @@ fn collect_all_features_by_cell(
             }
 
             // Skip entirely if nothing matched
-            let any_match = (command.build_roads      && road_class.is_some())
-                         || (command.build_waterways   && waterway_class.is_some())
-                         || (command.build_buildings   && building_class.is_some())
-                         || (command.build_trees       && tree_class.is_some());
-            if !any_match { continue; }
+            let any_match = (command.build_roads && road_class.is_some())
+                || (command.build_waterways && waterway_class.is_some())
+                || (command.build_buildings && building_class.is_some())
+                || (command.build_trees && tree_class.is_some());
+            if !any_match {
+                continue;
+            }
 
             let refs: Vec<_> = way.refs().collect();
-            let points = candidate_nodes.points_for_refs(&refs).unwrap_or_default();
-            if points.len() < 2 { continue; }
+            let points: Vec<crate::util::GeoPoint> = refs
+                .iter()
+                .filter_map(|id| node_map.get(id).copied())
+                .collect();
+            if points.len() < 2 {
+                continue;
+            }
 
             let way_bounds = polyline_bounds(&points);
-            if !bounds_intersect(way_bounds, bounds) { continue; }
+            if !bounds_intersect(way_bounds, bounds) {
+                continue;
+            }
 
             scanned_ways += 1;
 
@@ -366,10 +411,10 @@ fn collect_all_features_by_cell(
                 if let Some(cls) = road_class {
                     if seen_road_ids.insert(way.id()) {
                         let road = RoadPolyline {
-                            way_id:     way.id(),
+                            way_id: way.id(),
                             road_class: cls.to_owned(),
-                            name:       name.clone(),
-                            points:     points.clone(),
+                            name: name.clone(),
+                            points: points.clone(),
                         };
                         let mut assigned = HashSet::new();
                         for cell in focus_cells_for_bounds(way_bounds) {
@@ -379,7 +424,7 @@ fn collect_all_features_by_cell(
                             }
                         }
                         feature_count += 1;
-                        buffered      += 1;
+                        buffered += 1;
                     }
                 }
             }
@@ -389,21 +434,24 @@ fn collect_all_features_by_cell(
                 if let Some(cls) = waterway_class {
                     if seen_waterway_ids.insert(way.id()) {
                         let feature = WayFeature {
-                            way_id:        way.id(),
+                            way_id: way.id(),
                             feature_class: cls.to_owned(),
-                            name:          name.clone(),
-                            points:        points.clone(),
-                            is_polygon:    false,
+                            name: name.clone(),
+                            points: points.clone(),
+                            is_polygon: false,
                         };
                         let mut assigned = HashSet::new();
                         for cell in focus_cells_for_bounds(way_bounds) {
                             if assigned.insert(cell) {
                                 touched_cells.insert(cell);
-                                waterways_by_cell.entry(cell).or_default().push(feature.clone());
+                                waterways_by_cell
+                                    .entry(cell)
+                                    .or_default()
+                                    .push(feature.clone());
                             }
                         }
                         feature_count += 1;
-                        buffered      += 1;
+                        buffered += 1;
                     }
                 }
             }
@@ -413,21 +461,24 @@ fn collect_all_features_by_cell(
                 if let Some(cls) = building_class {
                     if seen_building_ids.insert(way.id()) {
                         let feature = WayFeature {
-                            way_id:        way.id(),
+                            way_id: way.id(),
                             feature_class: cls.to_owned(),
-                            name:          name.clone(),
-                            points:        points.clone(),
-                            is_polygon:    true,
+                            name: name.clone(),
+                            points: points.clone(),
+                            is_polygon: true,
                         };
                         let mut assigned = HashSet::new();
                         for cell in focus_cells_for_bounds(way_bounds) {
                             if assigned.insert(cell) {
                                 touched_cells.insert(cell);
-                                buildings_by_cell.entry(cell).or_default().push(feature.clone());
+                                buildings_by_cell
+                                    .entry(cell)
+                                    .or_default()
+                                    .push(feature.clone());
                             }
                         }
                         feature_count += 1;
-                        buffered      += 1;
+                        buffered += 1;
                     }
                 }
             }
@@ -437,11 +488,11 @@ fn collect_all_features_by_cell(
                 if let Some(cls) = tree_class {
                     if seen_tree_ids.insert(way.id()) {
                         let feature = WayFeature {
-                            way_id:        way.id(),
+                            way_id: way.id(),
                             feature_class: cls.to_owned(),
-                            name:          name.clone(),
-                            points:        points.clone(),
-                            is_polygon:    true,
+                            name: name.clone(),
+                            points: points.clone(),
+                            is_polygon: true,
                         };
                         let mut assigned = HashSet::new();
                         for cell in focus_cells_for_bounds(way_bounds) {
@@ -451,7 +502,7 @@ fn collect_all_features_by_cell(
                             }
                         }
                         feature_count += 1;
-                        buffered      += 1;
+                        buffered += 1;
                     }
                 }
             }
@@ -472,9 +523,9 @@ fn collect_all_features_by_cell(
                 candidate_nodes.save_scan_offset("way_scan", checkpoint)?;
 
                 progress(RoadBuildProgress {
-                    stage:    "Writing Cache".to_owned(),
+                    stage: "Writing Cache".to_owned(),
                     fraction: 0.76,
-                    message:  format!(
+                    message: format!(
                         "Flushed features to {} cache files so far ({} features)",
                         written_cells, feature_count
                     ),
@@ -483,11 +534,13 @@ fn collect_all_features_by_cell(
 
             if scanned_ways % 250_000 == 0 {
                 progress(RoadBuildProgress {
-                    stage:    "Scanning Ways".to_owned(),
+                    stage: "Scanning Ways".to_owned(),
                     fraction: 0.75,
-                    message:  format!(
+                    message: format!(
                         "Scanned {} ways; kept {} features across {} cells",
-                        scanned_ways, feature_count, touched_cells.len()
+                        scanned_ways,
+                        feature_count,
+                        touched_cells.len()
                     ),
                 });
             }
@@ -514,12 +567,12 @@ fn collect_all_features_by_cell(
 }
 
 fn flush_all_chunks(
-    cache_dir:         &Path,
-    roads_by_cell:     &mut HashMap<(i32, i32), Vec<RoadPolyline>>,
+    cache_dir: &Path,
+    roads_by_cell: &mut HashMap<(i32, i32), Vec<RoadPolyline>>,
     waterways_by_cell: &mut HashMap<(i32, i32), Vec<WayFeature>>,
     buildings_by_cell: &mut HashMap<(i32, i32), Vec<WayFeature>>,
-    trees_by_cell:     &mut HashMap<(i32, i32), Vec<WayFeature>>,
-    mut srtm:          Option<&mut SrtmSampler>,
+    trees_by_cell: &mut HashMap<(i32, i32), Vec<WayFeature>>,
+    mut srtm: Option<&mut SrtmSampler>,
 ) -> Result<usize, String> {
     let mut total = 0usize;
     if !roads_by_cell.is_empty() {

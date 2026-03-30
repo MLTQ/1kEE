@@ -27,9 +27,8 @@ impl ElevatedBuilding {
             .iter()
             .copied()
             .map(|pt| {
-                let elev =
-                    srtm_stream::sample_elevation_m(selected_root, pt).unwrap_or(0.0)
-                        + ELEVATION_OFFSET_M;
+                let elev = srtm_stream::sample_elevation_m(selected_root, pt).unwrap_or(0.0)
+                    + ELEVATION_OFFSET_M;
                 (pt, elev)
             })
             .collect();

@@ -230,14 +230,11 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 
             // Load once, then render lowest-priority levels first so level 2
             // (country) draws last and sits on top.
-            let boundaries =
-                super::admin_layer::get_or_load_admin_boundaries(root, &[2, 4, 6, 8]);
+            let boundaries = super::admin_layer::get_or_load_admin_boundaries(root, &[2, 4, 6, 8]);
 
             for &level in &[8u8, 6, 4, 2] {
-                let stroke = egui::Stroke::new(
-                    theme::admin_stroke_width(level),
-                    theme::admin_color(level),
-                );
+                let stroke =
+                    egui::Stroke::new(theme::admin_stroke_width(level), theme::admin_color(level));
                 for boundary in boundaries.iter().filter(|b| b.admin_level == level) {
                     let pts: Vec<egui::Pos2> = boundary
                         .points

@@ -2,7 +2,7 @@ use crate::srtm::SrtmSampler;
 use crate::util::{GeoPoint, RoadPolyline, WayFeature, bounds_intersect, focus_cell_bounds};
 use cell_format::{
     CellFeature, CellPoint, TAG_ADMN, TAG_BLDG, TAG_ROAD, TAG_TREE, TAG_WATR,
-    cell_filename, admin_filename,
+    admin_filename, cell_filename,
     encode_road_class, encode_watr_class,
     read::read_single_chunk,
     write::write_cell,
