@@ -9,10 +9,11 @@ use super::srtm_stream;
 const MIN_ELEVATION_M: f32 = -11_000.0;
 const MAX_ELEVATION_M: f32 = 9_000.0;
 
-// SLDEM2015 preview is built with: -scale -16000 16000 0 65535
-// elevation_m = raw_dn * 0.5, so: elevation_m = MIN_LUNAR + normalized * (MAX_LUNAR - MIN_LUNAR)
-pub const MIN_LUNAR_ELEVATION_M: f32 = -8_000.0;
-pub const MAX_LUNAR_ELEVATION_M: f32 = 8_000.0;
+// SLDEM2015 preview is built with: -scale -18000 22000 0 65535
+// Actual data range: DN -17438…+21567 → elevation_m -8719…+10783.
+// elevation_m = MIN_LUNAR + normalized * (MAX_LUNAR - MIN_LUNAR)
+pub const MIN_LUNAR_ELEVATION_M: f32 = -9_000.0;
+pub const MAX_LUNAR_ELEVATION_M: f32 = 11_000.0;
 
 pub struct TerrainRaster {
     width: u32,
