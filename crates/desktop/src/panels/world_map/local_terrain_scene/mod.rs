@@ -47,6 +47,7 @@ pub(super) const BASE_VERTICAL_EXAGGERATION: f32 = 2.1;
 // Minimum local zoom value — allows zooming out to ~500 km half-span.
 pub const LOCAL_ZOOM_MIN: f32 = 1.0;
 
+#[derive(Clone, Copy)]
 pub(super) struct LocalLayout {
     pub(super) center: egui::Pos2,
     pub(super) focus_center: egui::Pos2,
@@ -688,20 +689,31 @@ fn draw_local_beam(
 
 // ── Elevation fill (hypsometric tint + hillshade) ─────────────────────────────
 
-static ELEV_FILL: std::sync::OnceLock<std::sync::Mutex<Option<ElevFillEntry>>> =
-    std::sync::OnceLock::new();
+type ElevFillKey = (i32, i32, i32, i32, i32, i32, i32, u8);
 
 struct ElevFillEntry {
-    key: (i32, i32, i32, i32, i32, i32, i32, u8),
+    key: ElevFillKey,
     mesh: egui::Mesh,
 }
+
+struct ElevFillState {
+    /// Key for which a background build is in-flight.
+    building_key: Option<ElevFillKey>,
+    /// Channel from the background thread.
+    result_rx: Option<std::sync::mpsc::Receiver<(ElevFillKey, egui::Mesh)>>,
+    /// Last successfully built mesh (may be stale while a new one is building).
+    ready: Option<ElevFillEntry>,
+}
+
+static ELEV_FILL: std::sync::OnceLock<std::sync::Mutex<ElevFillState>> =
+    std::sync::OnceLock::new();
 
 fn elev_fill_key(
     focus: GeoPoint,
     view: &GlobeViewState,
     layout: &LocalLayout,
     contour_count: usize,
-) -> (i32, i32, i32, i32, i32, i32, i32, u8) {
+) -> ElevFillKey {
     (
         (focus.lat * 100.0) as i32,
         (focus.lon * 100.0) as i32,
@@ -916,15 +928,50 @@ fn draw_elevation_fill(
     contours: &[contour_asset::ContourPath],
 ) {
     let key = elev_fill_key(focus, view, layout, contours.len());
-    let cache = ELEV_FILL.get_or_init(|| std::sync::Mutex::new(None));
-    let mut guard = cache.lock().unwrap();
+    let state_mutex = ELEV_FILL.get_or_init(|| {
+        std::sync::Mutex::new(ElevFillState {
+            building_key: None,
+            result_rx: None,
+            ready: None,
+        })
+    });
+    let mut state = state_mutex.lock().unwrap();
 
-    if guard.as_ref().map(|e| e.key != key).unwrap_or(true) {
-        let mesh = build_elev_fill_mesh(layout, view, focus, contours);
-        *guard = Some(ElevFillEntry { key, mesh });
+    // Poll for a completed background build (non-blocking).
+    let got_result = if let Some(rx) = &state.result_rx {
+        match rx.try_recv() {
+            Ok((built_key, mesh)) => Some((built_key, mesh)),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    if let Some((built_key, mesh)) = got_result {
+        state.ready = Some(ElevFillEntry { key: built_key, mesh });
+        state.building_key = None;
+        state.result_rx = None;
+        painter.ctx().request_repaint();
     }
 
-    if let Some(entry) = guard.as_ref() {
+    // Kick off a background build when the key has changed and no build is in-flight.
+    let need_build = state.ready.as_ref().map(|e| e.key != key).unwrap_or(true);
+    if need_build && state.building_key != Some(key) {
+        let layout_c = *layout;
+        let view_c = *view;
+        let contours_c: Vec<_> = contours.to_vec();
+        let ctx = painter.ctx().clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        state.building_key = Some(key);
+        state.result_rx = Some(rx);
+        std::thread::spawn(move || {
+            let mesh = build_elev_fill_mesh(&layout_c, &view_c, focus, &contours_c);
+            let _ = tx.send((key, mesh));
+            ctx.request_repaint();
+        });
+    }
+
+    // Render the last ready mesh (stale is fine while a new one is building).
+    if let Some(entry) = &state.ready {
         painter.add(egui::Shape::mesh(entry.mesh.clone()));
     }
 }
