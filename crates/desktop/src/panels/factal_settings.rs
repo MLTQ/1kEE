@@ -447,12 +447,18 @@ fn tab_paths(ui: &mut egui::Ui, model: &mut AppModel) {
                     ("gebco_2025_contours_200m.gpkg",   "Bathymetry isobaths (globe + local)"),
                     ("gebco_2025_coastline_0m.gpkg",    "Global coastlines"),
                 ];
+                let building = crate::panels::world_map::srtm_focus_cache::is_gebco_derived_building();
                 for (filename, label) in checks {
                     let path = d.join("terrain").join(filename);
                     if path.exists() {
                         ui.colored_label(
                             ok_color,
                             format!("  ✓ {label}: terrain/{filename}"),
+                        );
+                    } else if building && filename != &"gebco_2025_coastline_0m.gpkg" {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(180, 180, 60),
+                            format!("  ⏳ {label}: terrain/{filename} (building…)"),
                         );
                     } else {
                         ui.colored_label(

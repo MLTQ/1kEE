@@ -502,6 +502,9 @@ pub fn load_global_bathymetry(
     zoom: f32,
     ctx: egui::Context,
 ) -> Option<Arc<Vec<ContourPath>>> {
+    // Trigger background generation of derived GEBCO assets when missing.
+    // This is a no-op once both files exist and is cheap to call every frame.
+    srtm_focus_cache::ensure_gebco_derived(selected_root);
     let path = contour_path(selected_root, zoom)?;
     // Single LOD — no zoom-based switching so the cache never reloads on zoom
     // changes (which was causing contours to appear/disappear while panning).
