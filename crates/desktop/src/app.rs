@@ -69,6 +69,21 @@ impl eframe::App for DashboardApp {
         factal_stream::history_tick(&mut self.model);
         camera_registry::tick(&mut self.model);
 
+        // Advance stellar time.
+        if self.model.show_stellar_correspondence {
+            if self.model.stellar_live {
+                let now_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs_f64();
+                self.model.stellar_jd = crate::stellar_time::unix_to_jd(now_unix);
+            } else if self.model.stellar_anim_speed != 0.0 {
+                let dt = ctx.input(|i| i.stable_dt) as f64;
+                self.model.stellar_jd += self.model.stellar_anim_speed * dt;
+                ctx.request_repaint();
+            }
+        }
+
         // Advance the replay playhead and request a repaint while running.
         if let Some(state) = &mut self.model.replay_state {
             let needs_repaint = state.tick();
@@ -90,6 +105,7 @@ impl eframe::App for DashboardApp {
             panels::render_factal_brief(ctx, &mut self.model);
             panels::render_factal_settings(ctx, &mut self.model);
             panels::render_terrain_library(ctx, &mut self.model);
+            panels::render_stellar_observatory(ctx, &mut self.model);
             panels::render_status_log(ctx, &mut self.model);
             panels::render_event_list(ctx, &mut self.model);
             panels::render_camera_list(ctx, &mut self.model);

@@ -262,8 +262,24 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                     ui.checkbox(&mut model.show_stellar_correspondence, "Stars")
                         .on_hover_text(
                             "Stellar correspondence: each star projected from the celestial sphere \
-                             onto its matching Earth coordinate (Dec → lat, RA → lon).",
+                             onto its matching Earth coordinate (Dec → lat, RA − GMST → lon).",
                         );
+                    if model.show_stellar_correspondence {
+                        let obs_active = model.stellar_observatory_open;
+                        let obs_fill = if obs_active { theme::chrome_active_fill() } else { egui::Color32::TRANSPARENT };
+                        let obs_col  = if obs_active { theme::chrome_active_text() } else { theme::text_muted() };
+                        let obs_btn  = egui::Button::new(
+                            egui::RichText::new("Observatory").small().color(obs_col)
+                        )
+                        .fill(obs_fill)
+                        .corner_radius(4.0);
+                        if ui.add(obs_btn)
+                            .on_hover_text("Open time controls, historical presets, animation, and layer options")
+                            .clicked()
+                        {
+                            model.stellar_observatory_open = !model.stellar_observatory_open;
+                        }
+                    }
                     ui.checkbox(&mut model.show_reticle, "Reticle");
                 }
                 if model.globe_view.local_mode {

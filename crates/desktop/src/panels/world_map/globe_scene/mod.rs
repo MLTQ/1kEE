@@ -110,7 +110,30 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 
     // ── Stellar correspondence layer ───────────────────────────────────────────
     if model.show_stellar_correspondence && !model.globe_view.local_mode {
-        super::stellar_layer::draw_stellar_correspondence(painter, &layout, &model.globe_view);
+        super::stellar_layer::draw_stellar_correspondence(
+            painter,
+            &layout,
+            &model.globe_view,
+            model.stellar_jd,
+            model.stellar_precess,
+        );
+        if model.show_planet_trails {
+            super::stellar_layer::draw_planet_trails(
+                painter,
+                &layout,
+                &model.globe_view,
+                model.stellar_jd,
+                model.planet_trail_years,
+            );
+        }
+        if model.show_planets {
+            super::stellar_layer::draw_planets(
+                painter,
+                &layout,
+                &model.globe_view,
+                model.stellar_jd,
+            );
+        }
     }
 
     let selected_event_id = model.selected_event_id.as_deref();
