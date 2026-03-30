@@ -11,6 +11,7 @@ use super::srtm_focus_cache;
 // ── Module-level cache statics ────────────────────────────────────────────────
 // Lifted to module scope so blast_tile_caches() can clear them all at once.
 static LOCAL_CONTOUR_CACHE: OnceLock<Mutex<LocalRegionCache>> = OnceLock::new();
+static LUNAR_LOCAL_CONTOUR_CACHE: OnceLock<Mutex<LocalRegionCache>> = OnceLock::new();
 static GLOBE_CONTOUR_CACHE: OnceLock<Mutex<GlobeRegionCache>> = OnceLock::new();
 static LUNAR_GLOBE_CONTOUR_CACHE: OnceLock<Mutex<GlobeRegionCache>> = OnceLock::new();
 static GLOBAL_COASTLINE_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();
@@ -24,6 +25,13 @@ static GLOBAL_BATHYMETRY_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = 
 /// files are untouched and tiles will be re-read (not re-built) on demand.
 pub fn blast_tile_caches() {
     if let Some(c) = LOCAL_CONTOUR_CACHE.get() {
+        if let Ok(mut g) = c.lock() {
+            g.scene_key = None;
+            g.entries.clear();
+            g.in_flight.clear();
+        }
+    }
+    if let Some(c) = LUNAR_LOCAL_CONTOUR_CACHE.get() {
         if let Ok(mut g) = c.lock() {
             g.scene_key = None;
             g.entries.clear();
@@ -282,6 +290,127 @@ pub fn load_srtm_region_for_view(
         return None;
     }
 
+    Some(Arc::new(merged))
+}
+
+/// Lunar analogue of `load_srtm_region_for_view` — sources from SLDEM2015 tiles
+/// stored in `lunar_focus_cache.sqlite`.  Same streaming / caching pattern.
+pub fn load_lunar_region_for_view(
+    selected_root: Option<&Path>,
+    scene_anchor: crate::model::GeoPoint,
+    viewport_center: crate::model::GeoPoint,
+    zoom: f32,
+    radius: i32,
+    ctx: egui::Context,
+) -> Option<Arc<Vec<ContourPath>>> {
+    let assets =
+        srtm_focus_cache::ensure_lunar_contour_region(selected_root, viewport_center, zoom);
+    if assets.is_empty() {
+        return None;
+    }
+
+    const MAX_LOCAL_TILES: usize = 200;
+
+    let cache: &'static Mutex<LocalRegionCache> = LUNAR_LOCAL_CONTOUR_CACHE.get_or_init(|| {
+        Mutex::new(LocalRegionCache {
+            scene_key: None,
+            entries: HashMap::new(),
+            in_flight: HashSet::new(),
+        })
+    });
+
+    let per_asset_budget = (360usize / assets.len().max(1)).max(120);
+    let scene_key = SceneKey {
+        root: selected_root.map(Path::to_path_buf),
+        anchor_lat_bucket: (scene_anchor.lat * 20.0).round() as i32,
+        anchor_lon_bucket: (scene_anchor.lon * 20.0).round() as i32,
+        zoom_bucket: assets
+            .first()
+            .map(|asset| asset.zoom_bucket)
+            .unwrap_or_default(),
+    };
+
+    let missing: Vec<(CacheKey, srtm_focus_cache::FocusContourAsset)> = {
+        let mut guard = cache.lock().ok()?;
+        if guard.scene_key.as_ref() != Some(&scene_key) {
+            guard.scene_key = Some(scene_key);
+            guard.entries.clear();
+            guard.in_flight.clear();
+        }
+        let missing: Vec<_> = assets
+            .iter()
+            .filter_map(|asset| {
+                let key = CacheKey {
+                    path: asset.path.clone(),
+                    lat_bucket: asset.lat_bucket,
+                    lon_bucket: asset.lon_bucket,
+                    zoom_bucket: asset.zoom_bucket,
+                };
+                if guard.entries.contains_key(&key) || guard.in_flight.contains(&key) {
+                    None
+                } else {
+                    Some((key, asset.clone()))
+                }
+            })
+            .collect();
+        for (key, _) in &missing {
+            guard.in_flight.insert(key.clone());
+        }
+        missing
+    };
+
+    for (key, asset) in missing {
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = query_local_contours(
+                &key.path,
+                key.zoom_bucket,
+                key.lat_bucket,
+                key.lon_bucket,
+                asset.simplify_step,
+                per_asset_budget,
+            )
+            .ok()
+            .filter(|c| !c.is_empty());
+
+            if let Ok(mut g) = cache.lock() {
+                if let Some(contours) = result {
+                    g.entries
+                        .entry(key.clone())
+                        .or_insert_with(|| Arc::new(contours));
+                }
+                g.in_flight.remove(&key);
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    let mut guard = cache.lock().ok()?;
+
+    if guard.entries.len() > MAX_LOCAL_TILES {
+        let bucket_step = srtm_focus_cache::half_extent_for_zoom(zoom) * 0.45;
+        let clat = (viewport_center.lat / bucket_step).round() as i32;
+        let clon = (viewport_center.lon / bucket_step).round() as i32;
+        let mut keys: Vec<CacheKey> = guard.entries.keys().cloned().collect();
+        keys.sort_unstable_by_key(|k| {
+            let dlat = k.lat_bucket - clat;
+            let dlon = k.lon_bucket - clon;
+            -(dlat * dlat + dlon * dlon)
+        });
+        let excess = guard.entries.len() - MAX_LOCAL_TILES;
+        for k in keys.into_iter().take(excess) {
+            guard.entries.remove(&k);
+        }
+    }
+
+    let mut merged = Vec::new();
+    for contours in guard.entries.values() {
+        merged.extend(contours.iter().cloned());
+    }
+
+    if merged.is_empty() {
+        return None;
+    }
     Some(Arc::new(merged))
 }
 
