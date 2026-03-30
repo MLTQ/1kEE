@@ -4,6 +4,7 @@ use crate::model::AppModel;
 use crate::moving_tracks;
 use crate::panels::world_map::srtm_focus_cache::db as focus_cache_db;
 use crate::settings_store;
+use crate::terrain_assets;
 use crate::theme;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -419,6 +420,52 @@ fn tab_paths(ui: &mut egui::Ui, model: &mut AppModel) {
                 ui.colored_label(
                     egui::Color32::from_rgb(220, 100, 60),
                     "Contour cache: could not resolve path (set Derived Root)",
+                );
+            }
+        }
+    }
+    ui.add_space(4.0);
+
+    // ── Derived-directory asset diagnostics ───────────────────────────────────
+    // Show the resolved Derived root and check for the specific files each
+    // layer needs, so a missing/wrong directory is immediately obvious.
+    {
+        let root = model.selected_root.as_deref();
+        let derived = terrain_assets::find_derived_root(root);
+
+        let ok_color   = egui::Color32::from_rgb(80, 200, 100);
+        let warn_color = egui::Color32::from_rgb(220, 100, 60);
+        let dim_color  = egui::Color32::from_rgb(150, 180, 200);
+
+        match &derived {
+            Some(d) => {
+                ui.colored_label(dim_color, format!("Derived root: {}", d.display()));
+
+                // Files that each layer depends on
+                let checks: &[(&str, &str)] = &[
+                    ("gebco_depth_1440x720.bil",        "Globe bathymetry fill (depth texture)"),
+                    ("gebco_2025_contours_200m.gpkg",   "Bathymetry isobaths (globe + local)"),
+                    ("gebco_2025_coastline_0m.gpkg",    "Global coastlines"),
+                ];
+                for (filename, label) in checks {
+                    let path = d.join("terrain").join(filename);
+                    if path.exists() {
+                        ui.colored_label(
+                            ok_color,
+                            format!("  ✓ {label}: terrain/{filename}"),
+                        );
+                    } else {
+                        ui.colored_label(
+                            warn_color,
+                            format!("  ✗ {label}: terrain/{filename} NOT FOUND"),
+                        );
+                    }
+                }
+            }
+            None => {
+                ui.colored_label(
+                    warn_color,
+                    "Derived root: NOT RESOLVED — set Derived Root or Asset Root above",
                 );
             }
         }
