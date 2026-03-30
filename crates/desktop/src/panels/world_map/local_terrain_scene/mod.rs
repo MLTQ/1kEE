@@ -151,6 +151,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             &model.globe_view,
             viewport_center,
             contours_slice,
+            model.selected_root.as_deref(),
         );
     }
 
@@ -689,7 +690,7 @@ fn draw_local_beam(
 
 // ── Elevation fill (hypsometric tint + hillshade) ─────────────────────────────
 
-type ElevFillKey = (i32, i32, i32, i32, i32, i32, i32, u8);
+type ElevFillKey = (i32, i32, i32, i32, i32, i32, i32, i32, u8);
 
 struct ElevFillEntry {
     key: ElevFillKey,
@@ -713,6 +714,7 @@ fn elev_fill_key(
     view: &GlobeViewState,
     layout: &LocalLayout,
     contour_count: usize,
+    gebco_sample_count: usize,
 ) -> ElevFillKey {
     (
         (focus.lat * 100.0) as i32,
@@ -724,6 +726,8 @@ fn elev_fill_key(
         // Contour count changes as background threads finish loading tiles.
         // Layout scale changes on window resize.  Both must invalidate the mesh.
         contour_count as i32 ^ (layout.horizontal_scale * 0.5) as i32,
+        // GEBCO sample count: invalidates when bathymetry data finishes loading.
+        gebco_sample_count as i32,
         theme::hot_color().r(), // proxy for theme identity
     )
 }
@@ -766,6 +770,7 @@ fn build_elev_fill_mesh(
     view: &GlobeViewState,
     focus: GeoPoint,
     contours: &[contour_asset::ContourPath],
+    gebco_samples: &[(f32, f32, f32)],
 ) -> egui::Mesh {
     const N: usize = 60; // 61×61 = 3,721 vertices, 7,200 triangles
 
@@ -781,11 +786,11 @@ fn build_elev_fill_mesh(
     // from the contour polylines, then use inverse-distance-weighted (IDW) interpolation
     // to estimate elevation at each fill-mesh vertex.
     //
-    // This avoids any dependency on SRTM or GEBCO files at render time — if the
-    // contour lines loaded correctly, the fill elevations will be correct too.
+    // GEBCO bathymetry midpoints are merged in so that ocean areas receive proper
+    // negative elevation estimates (dark blue) rather than extrapolated land values.
     const MAX_SAMPLES: usize = 400;
     let stride = (contours.len() / MAX_SAMPLES).max(1);
-    let samples: Vec<(f32, f32, f32)> = contours
+    let mut samples: Vec<(f32, f32, f32)> = contours
         .iter()
         .step_by(stride)
         .filter_map(|c| {
@@ -798,6 +803,9 @@ fn build_elev_fill_mesh(
             Some((mid.lat, mid.lon, c.elevation_m))
         })
         .collect();
+
+    // Append GEBCO ocean-floor samples (already filtered to viewport by caller).
+    samples.extend_from_slice(gebco_samples);
 
     // IDW elevation estimate for a (lat, lon) given the sample set.
     // Power = 2 (inverse square distance).  Sea level (0.0) if no samples.
@@ -926,8 +934,56 @@ fn draw_elevation_fill(
     view: &GlobeViewState,
     focus: GeoPoint,
     contours: &[contour_asset::ContourPath],
+    selected_root: Option<&std::path::Path>,
 ) {
-    let key = elev_fill_key(focus, view, layout, contours.len());
+    // Load GEBCO bathymetry contours and extract midpoints within the viewport.
+    // These provide ocean-floor elevation samples so IDW gives negative elevations
+    // for ocean areas instead of extrapolating from land contours.
+    let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
+    let margin = half_extent_deg * 2.0;
+    let min_lat = focus.lat - margin;
+    let max_lat = focus.lat + margin;
+    let min_lon = focus.lon - margin;
+    let max_lon = focus.lon + margin;
+
+    let bathy_zoom = view.local_zoom.clamp(1.0, 8.0);
+    let gebco_samples: Vec<(f32, f32, f32)> =
+        if let Some(bathy) = contour_asset::load_global_bathymetry(
+            selected_root,
+            bathy_zoom,
+            painter.ctx().clone(),
+        ) {
+            bathy
+                .iter()
+                .filter(|c| {
+                    c.points.iter().any(|p| {
+                        p.lat >= min_lat && p.lat <= max_lat && p.lon >= min_lon && p.lon <= max_lon
+                    })
+                })
+                .filter_map(|c| {
+                    // Pick the midpoint of each GEBCO arc that falls within viewport.
+                    let mid_candidates: Vec<_> = c
+                        .points
+                        .iter()
+                        .filter(|p| {
+                            p.lat >= min_lat
+                                && p.lat <= max_lat
+                                && p.lon >= min_lon
+                                && p.lon <= max_lon
+                        })
+                        .collect();
+                    if mid_candidates.is_empty() {
+                        return None;
+                    }
+                    let mid = mid_candidates[mid_candidates.len() / 2];
+                    Some((mid.lat, mid.lon, c.elevation_m))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+    let key = elev_fill_key(focus, view, layout, contours.len(), gebco_samples.len());
     let state_mutex = ELEV_FILL.get_or_init(|| {
         std::sync::Mutex::new(ElevFillState {
             building_key: None,
@@ -959,12 +1015,13 @@ fn draw_elevation_fill(
         let layout_c = *layout;
         let view_c = *view;
         let contours_c: Vec<_> = contours.to_vec();
+        let gebco_c = gebco_samples;
         let ctx = painter.ctx().clone();
         let (tx, rx) = std::sync::mpsc::channel();
         state.building_key = Some(key);
         state.result_rx = Some(rx);
         std::thread::spawn(move || {
-            let mesh = build_elev_fill_mesh(&layout_c, &view_c, focus, &contours_c);
+            let mesh = build_elev_fill_mesh(&layout_c, &view_c, focus, &contours_c, &gebco_c);
             let _ = tx.send((key, mesh));
             ctx.request_repaint();
         });
