@@ -107,6 +107,61 @@ pub fn project_geo(
     })
 }
 
+/// Like `project_geo` but skips `terrain_field::elevation` — uses a constant
+/// radius offset instead.  Eliminates 6 `exp()` calls per point; the ±1.5%
+/// terrain-driven radius variation is imperceptible on thin line strokes.
+fn project_geo_flat(
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    point: GeoPoint,
+    radius_offset: f32,
+) -> Option<ProjectedPoint> {
+    let lat = point.lat.to_radians();
+    let lon = point.lon.to_radians();
+    let radius = 1.0_f32 + radius_offset;
+
+    let mut x = radius * lat.cos() * lon.cos();
+    let mut y = radius * lat.sin();
+    let mut z = radius * lat.cos() * lon.sin();
+
+    let yaw_cos = view.yaw.cos();
+    let yaw_sin = view.yaw.sin();
+    let x_yaw = x * yaw_cos + z * yaw_sin;
+    let z_yaw = -x * yaw_sin + z * yaw_cos;
+    x = x_yaw;
+    z = z_yaw;
+
+    let pitch_cos = view.pitch.cos();
+    let pitch_sin = view.pitch.sin();
+    let y_pitch = y * pitch_cos - z * pitch_sin;
+    let z_pitch = y * pitch_sin + z * pitch_cos;
+    y = y_pitch;
+    z = z_pitch;
+
+    let depth = layout.camera_distance - z;
+    if depth <= 0.05 {
+        return None;
+    }
+
+    let perspective = (layout.radius * layout.focal_length) / depth;
+    let pos = egui::pos2(
+        layout.center.x - x * perspective,
+        layout.center.y - y * perspective,
+    );
+
+    Some(ProjectedPoint {
+        pos,
+        depth: ((z + 1.0) * 0.5).clamp(0.0, 1.0),
+        front_facing: z >= 0.0,
+    })
+}
+
+/// Draw a geographic polyline on the globe, clipping at the horizon.
+///
+/// Uses a flat (constant-radius) projection — no terrain field — for
+/// performance. Back-facing segments are skipped entirely (they are
+/// nearly invisible at the alpha values used and were the source of
+/// "laser" artifacts when single orphan points straddled the horizon).
 pub(super) fn draw_geo_path(
     painter: &egui::Painter,
     layout: &GlobeLayout,
@@ -114,72 +169,28 @@ pub(super) fn draw_geo_path(
     path: &[GeoPoint],
     altitude_scale: f32,
     front_color: egui::Color32,
-    backface_alpha: f32,
+    _backface_alpha: f32,
 ) {
-    let mut front_segment = Vec::new();
-    let mut back_segment = Vec::new();
+    let stroke = egui::Stroke::new(1.15, front_color.gamma_multiply(0.92));
+    let mut segment: Vec<egui::Pos2> = Vec::new();
 
     for point in path {
-        if let Some(projected) = project_geo(layout, view, *point, altitude_scale) {
-            if projected.front_facing {
-                if back_segment.len() >= 2 {
-                    painter.add(egui::Shape::line(
-                        std::mem::take(&mut back_segment),
-                        egui::Stroke::new(0.55, front_color.gamma_multiply(backface_alpha)),
-                    ));
+        match project_geo_flat(layout, view, *point, altitude_scale) {
+            Some(p) if p.front_facing => segment.push(p.pos),
+            _ => {
+                // Back-facing or behind near-plane — break the current segment.
+                // Always clear (even a single-point orphan) to prevent the orphan
+                // being joined to the next visible run, which produced "laser" lines.
+                if segment.len() >= 2 {
+                    painter.add(egui::Shape::line(std::mem::take(&mut segment), stroke));
+                } else {
+                    segment.clear();
                 }
-                front_segment.push(projected.pos);
-            } else {
-                if front_segment.len() >= 2 {
-                    painter.add(egui::Shape::line(
-                        std::mem::take(&mut front_segment),
-                        egui::Stroke::new(1.15, front_color.gamma_multiply(0.88)),
-                    ));
-                }
-                back_segment.push(projected.pos);
             }
-        } else {
-            flush_segments(
-                painter,
-                &mut front_segment,
-                &mut back_segment,
-                front_color,
-                backface_alpha,
-            );
         }
     }
 
-    flush_segments(
-        painter,
-        &mut front_segment,
-        &mut back_segment,
-        front_color,
-        backface_alpha,
-    );
-}
-
-pub(super) fn flush_segments(
-    painter: &egui::Painter,
-    front_segment: &mut Vec<egui::Pos2>,
-    back_segment: &mut Vec<egui::Pos2>,
-    front_color: egui::Color32,
-    backface_alpha: f32,
-) {
-    if front_segment.len() >= 2 {
-        painter.add(egui::Shape::line(
-            std::mem::take(front_segment),
-            egui::Stroke::new(0.95, front_color.gamma_multiply(0.92)),
-        ));
-    } else {
-        front_segment.clear();
-    }
-
-    if back_segment.len() >= 2 {
-        painter.add(egui::Shape::line(
-            std::mem::take(back_segment),
-            egui::Stroke::new(0.4, front_color.gamma_multiply(backface_alpha)),
-        ));
-    } else {
-        back_segment.clear();
+    if segment.len() >= 2 {
+        painter.add(egui::Shape::line(segment, stroke));
     }
 }
