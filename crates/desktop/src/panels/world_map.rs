@@ -237,7 +237,11 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                 if ui.add(globe_btn).clicked() && model.globe_view.local_mode {
                     model.globe_view.local_mode = false;
                 }
-                if ui.add(local_btn).clicked() && !model.globe_view.local_mode {
+                if ui.add_enabled(!model.moon_mode, local_btn)
+                    .on_disabled_hover_text("LOCAL terrain view is Earth-only (no SRTM on the Moon)")
+                    .clicked()
+                    && !model.globe_view.local_mode
+                {
                     // Snap local_center to whatever the globe is centered on.
                     model.globe_view.local_center = model.globe_view.globe_center_latlon();
                     model.globe_view.local_mode = true;
