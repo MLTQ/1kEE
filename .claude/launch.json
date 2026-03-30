@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "1kEE Desktop",
+      "runtimeExecutable": "cargo",
+      "runtimeArgs": ["run", "-p", "one-thousand-electric-eye-desktop"],
+      "port": 0
+    },
+    {
+      "name": "Cache Builder",
+      "runtimeExecutable": "cargo",
+      "runtimeArgs": ["run", "-p", "one-thousand-electric-eye-cache-builder"],
+      "port": 0
+    }
+  ]
+}
