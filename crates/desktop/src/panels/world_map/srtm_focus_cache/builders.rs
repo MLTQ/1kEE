@@ -47,6 +47,11 @@ pub fn lunar_pending_set() -> &'static Mutex<HashSet<TileKey>> {
     LUNAR_PENDING.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// Maximum number of concurrent SLDEM2015 JP2 tile builds.
+/// The JP2 is a single ~22 GB file; all lunar builds compete for the same I/O.
+/// Capping at 2 keeps throughput high without thrashing disk/memory bandwidth.
+pub const MAX_CONCURRENT_LUNAR_BUILDS: usize = 2;
+
 pub fn is_pending(tile: TileKey) -> bool {
     pending_set()
         .lock()
@@ -165,13 +170,22 @@ pub fn ensure_lunar_bucket_asset(
         });
     }
 
+    // All lunar builds read from the same large JP2 file — cap concurrency to
+    // avoid I/O starvation.  Use the pending set's current size as ground truth
+    // so the limit is always accurate regardless of thread scheduling.
     let pending = lunar_pending_set();
-    if pending.lock().map(|g| g.contains(&tile)).unwrap_or(false) {
-        return None;
+    {
+        let guard = pending.lock().ok()?;
+        if guard.contains(&tile) {
+            return None; // already in-flight
+        }
+        if guard.len() >= MAX_CONCURRENT_LUNAR_BUILDS {
+            return None; // at concurrency limit
+        }
     }
 
     if !try_acquire_build_slot() {
-        return None;
+        return None; // also respect the global SRTM/misc slot budget
     }
 
     let mut guard = pending.lock().ok()?;

@@ -283,7 +283,14 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         );
         if lunar_total > 0 && lunar_ready < lunar_total {
             draw_lunar_build_overlay(
-                painter, rect, lunar_ready, lunar_building, lunar_total, time,
+                painter,
+                rect,
+                &layout,
+                &model.globe_view,
+                lunar_ready,
+                lunar_building,
+                lunar_total,
+                time,
             );
         }
     }
@@ -570,6 +577,8 @@ fn draw_graticule(painter: &egui::Painter, layout: &GlobeLayout, view: &GlobeVie
 fn draw_lunar_build_overlay(
     painter: &egui::Painter,
     rect: egui::Rect,
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
     ready: usize,
     building: usize,
     total: usize,
@@ -614,18 +623,18 @@ fn draw_lunar_build_overlay(
         painter.rect_filled(filled, 3.0, accent);
     }
 
-    // ── Pulsing ring around the globe ─────────────────────────────────────
-    // A slow expanding ring tells you at a glance that background work is
-    // happening even when the card is out of peripheral vision.
+    // ── Pulsing ring centred on the reticle ──────────────────────────────
+    // Project view.local_center (the reticle position) so the ring is
+    // always concentric with the red crosshair, regardless of orbit angle.
+    // Fall back to layout.center if the reticle is on the far hemisphere.
+    let ring_center = projection::project_geo(layout, view, view.local_center, 0.0)
+        .map(|p| p.pos)
+        .unwrap_or(layout.center);
     let pulse = (time as f32 * 0.9).sin() * 0.5 + 0.5;
     let ring_alpha = (0.06 + pulse * 0.10) * (1.0 - progress * 0.6);
-    // We don't have direct access to the layout here, but rect.center() is
-    // close enough for a full-globe ring.  Use a generous radius so it hugs
-    // the sphere edge regardless of zoom.
-    let globe_r = (rect.width().min(rect.height()) * 0.38).max(60.0);
-    let ring_r = globe_r + 6.0 + pulse * 8.0;
+    let ring_r = layout.radius + 6.0 + pulse * 8.0;
     painter.circle_stroke(
-        rect.center(),
+        ring_center,
         ring_r,
         egui::Stroke::new(
             2.5 + pulse * 1.5,

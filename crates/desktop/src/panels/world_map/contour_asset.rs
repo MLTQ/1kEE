@@ -29,6 +29,7 @@ pub fn blast_tile_caches() {
             g.scene_key = None;
             g.entries.clear();
             g.in_flight.clear();
+            g.zoom_fallback = None;
         }
     }
     if let Some(c) = LUNAR_LOCAL_CONTOUR_CACHE.get() {
@@ -36,6 +37,7 @@ pub fn blast_tile_caches() {
             g.scene_key = None;
             g.entries.clear();
             g.in_flight.clear();
+            g.zoom_fallback = None;
         }
     }
     if let Some(c) = GLOBE_CONTOUR_CACHE.get() {
@@ -118,6 +120,10 @@ struct LocalRegionCache {
     /// (each finishing thread calls ctx.request_repaint(), which would
     /// otherwise trigger another batch of thread spawns for still-loading tiles).
     in_flight: HashSet<CacheKey>,
+    /// Contours from the previous zoom level, kept as a fallback placeholder
+    /// while tiles at the new zoom level are building / loading.  Cleared as
+    /// soon as the new zoom has at least one tile in `entries`.
+    zoom_fallback: Option<Arc<Vec<ContourPath>>>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -152,6 +158,7 @@ pub fn load_srtm_region_for_view(
             scene_key: None,
             entries: HashMap::new(),
             in_flight: HashSet::new(),
+            zoom_fallback: None,
         })
     });
     let feature_budget = srtm_focus_cache::feature_budget_for_zoom(zoom);
@@ -316,23 +323,38 @@ pub fn load_lunar_region_for_view(
             scene_key: None,
             entries: HashMap::new(),
             in_flight: HashSet::new(),
+            zoom_fallback: None,
         })
     });
 
+    let current_zoom_bucket = assets
+        .first()
+        .map(|asset| asset.zoom_bucket)
+        .unwrap_or_default();
     let per_asset_budget = (360usize / assets.len().max(1)).max(120);
     let scene_key = SceneKey {
         root: selected_root.map(Path::to_path_buf),
         anchor_lat_bucket: (scene_anchor.lat * 20.0).round() as i32,
         anchor_lon_bucket: (scene_anchor.lon * 20.0).round() as i32,
-        zoom_bucket: assets
-            .first()
-            .map(|asset| asset.zoom_bucket)
-            .unwrap_or_default(),
+        zoom_bucket: current_zoom_bucket,
     };
 
     let missing: Vec<(CacheKey, srtm_focus_cache::FocusContourAsset)> = {
         let mut guard = cache.lock().ok()?;
         if guard.scene_key.as_ref() != Some(&scene_key) {
+            // Scene changed (usually a zoom level change).  Build a fallback
+            // snapshot from the entries we have now so the user keeps seeing
+            // the old resolution while the new tiles are building.
+            let old_merged: Vec<ContourPath> = guard
+                .entries
+                .values()
+                .flat_map(|v| v.iter().cloned())
+                .collect();
+            guard.zoom_fallback = if old_merged.is_empty() {
+                None
+            } else {
+                Some(Arc::new(old_merged))
+            };
             guard.scene_key = Some(scene_key);
             guard.entries.clear();
             guard.in_flight.clear();
@@ -388,7 +410,8 @@ pub fn load_lunar_region_for_view(
     let mut guard = cache.lock().ok()?;
 
     if guard.entries.len() > MAX_LOCAL_TILES {
-        let bucket_step = srtm_focus_cache::half_extent_for_zoom(zoom) * 0.45;
+        // Evict the tiles farthest from the current viewport.
+        let bucket_step = srtm_focus_cache::lunar_half_extent_for_zoom(zoom) * 0.45;
         let clat = (viewport_center.lat / bucket_step).round() as i32;
         let clon = (viewport_center.lon / bucket_step).round() as i32;
         let mut keys: Vec<CacheKey> = guard.entries.keys().cloned().collect();
@@ -430,8 +453,13 @@ pub fn load_lunar_region_for_view(
     }
 
     if merged.is_empty() {
-        return None;
+        // No new-zoom tiles loaded yet — return the fallback from the previous
+        // zoom level so the screen isn't blank while tiles are building.
+        return guard.zoom_fallback.clone();
     }
+
+    // We have live tiles — discard the fallback to save memory.
+    guard.zoom_fallback = None;
     Some(Arc::new(merged))
 }
 
