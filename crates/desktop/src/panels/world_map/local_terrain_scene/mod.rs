@@ -84,20 +84,35 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let viewport_center = model.globe_view.local_center;
     let render_zoom = local_render_zoom(model.globe_view.local_zoom);
 
-    let contours = contour_asset::load_srtm_region_for_view(
-        model.selected_root.as_deref(),
-        focus,
-        viewport_center,
-        render_zoom,
-        LOCAL_STREAM_RADIUS,
-        painter.ctx().clone(),
-    );
-    let cache_status = srtm_focus_cache::focus_contour_region_status(
-        model.selected_root.as_deref(),
-        viewport_center,
-        render_zoom,
-        LOCAL_STREAM_RADIUS,
-    );
+    let contours = if model.moon_mode {
+        contour_asset::load_lunar_region_for_view(
+            model.selected_root.as_deref(),
+            focus,
+            viewport_center,
+            render_zoom,
+            LOCAL_STREAM_RADIUS,
+            painter.ctx().clone(),
+        )
+    } else {
+        contour_asset::load_srtm_region_for_view(
+            model.selected_root.as_deref(),
+            focus,
+            viewport_center,
+            render_zoom,
+            LOCAL_STREAM_RADIUS,
+            painter.ctx().clone(),
+        )
+    };
+    let cache_status = if model.moon_mode {
+        None // lunar status tracked via is_lunar_contour_building()
+    } else {
+        srtm_focus_cache::focus_contour_region_status(
+            model.selected_root.as_deref(),
+            viewport_center,
+            render_zoom,
+            LOCAL_STREAM_RADIUS,
+        )
+    };
 
     let nearby = if model.focused_city().is_none() {
         model.nearby_cameras(250.0)
@@ -106,26 +121,52 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     };
 
     // Pulsing tile-grid glow: only draw cells that are NOT yet ready in the cache.
-    let still_loading = cache_status
-        .map(|s| s.ready_assets < s.total_assets)
-        .unwrap_or(contours.is_none());
+    let still_loading = if model.moon_mode {
+        srtm_focus_cache::is_lunar_contour_building() || contours.is_none()
+    } else {
+        cache_status
+            .map(|s| s.ready_assets < s.total_assets)
+            .unwrap_or(contours.is_none())
+    };
     if still_loading {
-        let ready_buckets = srtm_focus_cache::ready_tile_buckets(
-            model.selected_root.as_deref(),
-            viewport_center,
-            render_zoom,
-            LOCAL_STREAM_RADIUS,
-        );
-        dissolve::draw_tile_pulse_grid(
-            painter,
-            &layout,
-            &model.globe_view,
-            viewport_center,
-            render_zoom,
-            LOCAL_STREAM_RADIUS,
-            time,
-            &ready_buckets,
-        );
+        if model.moon_mode {
+            let ready_buckets = srtm_focus_cache::ready_lunar_tile_buckets(
+                model.selected_root.as_deref(),
+                viewport_center,
+                render_zoom,
+                LOCAL_STREAM_RADIUS,
+            );
+            let half_extent = srtm_focus_cache::lunar_half_extent_for_zoom(render_zoom);
+            dissolve::draw_tile_pulse_grid(
+                painter,
+                &layout,
+                &model.globe_view,
+                viewport_center,
+                render_zoom,
+                LOCAL_STREAM_RADIUS,
+                time,
+                &ready_buckets,
+                Some(half_extent),
+            );
+        } else {
+            let ready_buckets = srtm_focus_cache::ready_tile_buckets(
+                model.selected_root.as_deref(),
+                viewport_center,
+                render_zoom,
+                LOCAL_STREAM_RADIUS,
+            );
+            dissolve::draw_tile_pulse_grid(
+                painter,
+                &layout,
+                &model.globe_view,
+                viewport_center,
+                render_zoom,
+                LOCAL_STREAM_RADIUS,
+                time,
+                &ready_buckets,
+                None,
+            );
+        }
     }
 
     let contours_slice = contours.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
@@ -140,6 +181,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             render_zoom,
             contours_slice,
             1.0,
+            model.moon_mode,
         );
     }
 
@@ -152,6 +194,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             viewport_center,
             contours_slice,
             model.selected_root.as_deref(),
+            model.moon_mode,
         );
     }
 
@@ -165,9 +208,11 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             render_zoom,
             contours_slice,
             1.0,
+            model.moon_mode,
         );
     }
-    if !contours_slice.is_empty() {
+    // OSM layers (roads, water, trees, buildings) are Earth-only — no data on the Moon.
+    if !contours_slice.is_empty() && !model.moon_mode {
         super::road_layer::draw_roads(
             painter,
             &layout,
@@ -216,10 +261,8 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         );
     }
 
-    // ── Admin boundaries ───────────────────────────────────────────────────
-    // Rendered outside the contour guard so they appear at any zoom level,
-    // matching coastlines/bathymetry which also skip the contour check.
-    if model.show_admin {
+    // ── Admin boundaries (Earth only) ─────────────────────────────────────
+    if model.show_admin && !model.moon_mode {
         if let Some(root) = model.selected_root.as_deref() {
             let half_extent_deg = visual_half_extent_for_zoom(model.globe_view.local_zoom);
             let km_per_deg_lat = 111.32f32;
@@ -377,7 +420,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         .or_else(|| event_markers.first())
         .map(|(_, pos)| *pos);
     markers::draw_camera_links(painter, anchor, &camera_markers);
-    if model.show_coastlines {
+    if model.show_coastlines && !model.moon_mode {
         geography::draw_coastlines_local(
             painter,
             &layout,
@@ -387,7 +430,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             model.selected_root.as_deref(),
         );
     }
-    if model.show_bathymetry {
+    if model.show_bathymetry && !model.moon_mode {
         geography::draw_bathymetry_local(
             painter,
             &layout,
@@ -408,13 +451,32 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             &model.geojson_layers,
         );
     }
-    ui_overlays::draw_legend(painter, rect, "LOCAL EVENT TERRAIN", render_zoom);
+    ui_overlays::draw_legend(
+        painter,
+        rect,
+        if model.moon_mode { "LOCAL LUNAR TERRAIN" } else { "LOCAL EVENT TERRAIN" },
+        render_zoom,
+        model.moon_mode,
+    );
+    let (lunar_ready, lunar_building, lunar_total) = if model.moon_mode {
+        srtm_focus_cache::lunar_tile_counts(
+            model.selected_root.as_deref(),
+            viewport_center,
+            render_zoom,
+            LOCAL_STREAM_RADIUS,
+        )
+    } else {
+        (0, 0, 0)
+    };
     ui_overlays::draw_progress_overlay(
         painter,
         rect,
         cache_status,
         osm_ingest::osmium_cell_progress(),
         osm_ingest::active_job_note().as_deref(),
+        lunar_building,
+        lunar_ready,
+        lunar_total,
     );
 
     GlobeScene {
@@ -464,13 +526,20 @@ pub fn paint_transition_overlay(
         render_zoom,
         contours.as_ref(),
         progress,
+        model.moon_mode,
     );
 }
 
 pub fn is_active(model: &AppModel) -> bool {
-    model.globe_view.local_mode
-        && model.terrain_focus_location().is_some()
-        && terrain_assets::find_srtm_root(model.selected_root.as_deref()).is_some()
+    if !model.globe_view.local_mode || model.terrain_focus_location().is_none() {
+        return false;
+    }
+    if model.moon_mode {
+        // Lunar local mode: requires SLDEM2015 JP2 source.
+        terrain_assets::find_sldem_jp2(model.selected_root.as_deref()).is_some()
+    } else {
+        terrain_assets::find_srtm_root(model.selected_root.as_deref()).is_some()
+    }
 }
 
 #[allow(dead_code)]
@@ -484,6 +553,10 @@ pub fn has_pending_cache(model: &AppModel) -> bool {
         return false;
     };
 
+    if model.moon_mode {
+        return srtm_focus_cache::is_lunar_contour_building();
+    }
+
     let render_zoom = local_render_zoom(model.globe_view.local_zoom);
     srtm_focus_cache::focus_contour_region_status(
         model.selected_root.as_deref(),
@@ -492,7 +565,6 @@ pub fn has_pending_cache(model: &AppModel) -> bool {
         LOCAL_STREAM_RADIUS,
     )
     .map(|status| status.ready_assets < status.total_assets)
-    // None means the cache DB doesn't exist yet — tiles are definitely not loaded.
     .unwrap_or(true)
 }
 
@@ -738,6 +810,28 @@ fn elev_lerp(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
     )
 }
 
+fn elevation_fill_color_lunar(elev_m: f32) -> egui::Color32 {
+    // Monochrome regolith palette: dark mare basalt → mid highland → sunlit peak.
+    // Moon elevation range here: ~-9000 m (SPA basin) to +11000 m (highland rims).
+    let mare    = egui::Color32::from_rgb(28,  27,  32);  // dark mare basalt
+    let lowland = egui::Color32::from_rgb(60,  58,  68);  // low highland
+    let mid     = egui::Color32::from_rgb(110, 108, 118); // mid highland (most surface)
+    let high    = egui::Color32::from_rgb(168, 165, 152); // high terrain
+    let peak    = egui::Color32::from_rgb(215, 210, 188); // sunlit peaks / rims
+
+    if elev_m < -2000.0 {
+        elev_lerp(lowland, mare, ((-elev_m - 2000.0) / 6000.0).min(1.0))
+    } else if elev_m < 0.0 {
+        elev_lerp(mid, lowland, -elev_m / 2000.0)
+    } else if elev_m < 3000.0 {
+        elev_lerp(mid, high, elev_m / 3000.0)
+    } else if elev_m < 7000.0 {
+        elev_lerp(high, peak, (elev_m - 3000.0) / 4000.0)
+    } else {
+        peak
+    }
+}
+
 fn elevation_fill_color(elev_m: f32) -> egui::Color32 {
     // Use theme colors that are clearly distinguishable from the dark canvas background.
     // canvas_background() ≈ rgb(18,44,56) — very dark.
@@ -768,6 +862,7 @@ fn build_elev_fill_mesh(
     focus: GeoPoint,
     contours: &[contour_asset::ContourPath],
     gebco_samples: &[(f32, f32, f32)],
+    moon_mode: bool,
 ) -> egui::Mesh {
     const N: usize = 60; // 61×61 = 3,721 vertices, 7,200 triangles
 
@@ -873,7 +968,7 @@ fn build_elev_fill_mesh(
             // clearly visible against the near-black canvas background.
             let shade = 0.60 + 0.40 * (nx * lx / llen + ny * ly / llen + nz * lz / llen).max(0.0);
 
-            let base = elevation_fill_color(elev);
+            let base = if moon_mode { elevation_fill_color_lunar(elev) } else { elevation_fill_color(elev) };
             // Apply hillshade to RGB only — gamma_multiply would also reduce alpha,
             // making the mesh semi-transparent.  Keep alpha=255 (fully opaque).
             let color = egui::Color32::from_rgb(
@@ -932,6 +1027,7 @@ fn draw_elevation_fill(
     focus: GeoPoint,
     contours: &[contour_asset::ContourPath],
     selected_root: Option<&std::path::Path>,
+    moon_mode: bool,
 ) {
     // Load GEBCO bathymetry contours and extract midpoints within the viewport.
     // These provide ocean-floor elevation samples so IDW gives negative elevations
@@ -944,8 +1040,10 @@ fn draw_elevation_fill(
     let max_lon = focus.lon + margin;
 
     let bathy_zoom = view.local_zoom.clamp(1.0, 8.0);
-    let gebco_samples: Vec<(f32, f32, f32)> =
-        if let Some(bathy) = contour_asset::load_global_bathymetry(
+    // Moon has no oceans — skip GEBCO bathymetry samples entirely.
+    let gebco_samples: Vec<(f32, f32, f32)> = if moon_mode {
+        Vec::new()
+    } else if let Some(bathy) = contour_asset::load_global_bathymetry(
             selected_root,
             bathy_zoom,
             painter.ctx().clone(),
@@ -980,7 +1078,7 @@ fn draw_elevation_fill(
             Vec::new()
         };
 
-    let key = elev_fill_key(focus, view, layout, contours.len(), gebco_samples.len());
+    let key = elev_fill_key(focus, view, layout, contours.len(), gebco_samples.len() + if moon_mode { 100_000 } else { 0 });
     let state_mutex = ELEV_FILL.get_or_init(|| {
         std::sync::Mutex::new(ElevFillState {
             building_key: None,
@@ -1018,7 +1116,7 @@ fn draw_elevation_fill(
         state.building_key = Some(key);
         state.result_rx = Some(rx);
         std::thread::spawn(move || {
-            let mesh = build_elev_fill_mesh(&layout_c, &view_c, focus, &contours_c, &gebco_c);
+            let mesh = build_elev_fill_mesh(&layout_c, &view_c, focus, &contours_c, &gebco_c, moon_mode);
             let _ = tx.send((key, mesh));
             ctx.request_repaint();
         });
@@ -1038,7 +1136,11 @@ fn draw_contour_stack(
     _render_zoom: f32,
     contours: &[contour_asset::ContourPath],
     alpha: f32,
+    moon_mode: bool,
 ) {
+    // Major contour every 2× the minor interval. SRTM minor=5-50m so major at 50m rem.
+    // Lunar minor=50-1000m so major at 1000m rem (two minor intervals up in any spec).
+    let major_rem: i32 = if moon_mode { 1_000 } else { 50 };
     let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
     let km_per_deg_lat = 111.32f32;
     let km_per_deg_lon = km_per_deg_lat * focus.lat.to_radians().cos().abs().max(0.2);
@@ -1070,7 +1172,7 @@ fn draw_contour_stack(
             continue;
         }
 
-        let major = (contour.elevation_m.round() as i32).rem_euclid(50) == 0;
+        let major = (contour.elevation_m.round() as i32).rem_euclid(major_rem) == 0;
         let stroke = egui::Stroke::new(
             if major { 1.35 } else { 0.7 } * (0.72 + alpha * 0.28),
             if major {

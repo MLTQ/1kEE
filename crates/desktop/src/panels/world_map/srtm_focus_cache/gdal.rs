@@ -431,6 +431,67 @@ pub fn build_gebco_derived(tiles: &[PathBuf], cache_root: &Path) -> Option<()> {
     Some(())
 }
 
+pub fn lunar_preview_building() -> &'static AtomicBool {
+    static BUILDING: OnceLock<AtomicBool> = OnceLock::new();
+    BUILDING.get_or_init(|| AtomicBool::new(false))
+}
+
+/// Build the SLDEM2015 lunar terrain preview PNG into `cache_root`
+/// (= `Derived/terrain/`).
+///
+/// Output: `sldem2015_preview_4096.png` — 4096×1366 UInt16 PNG.
+/// The PNG is scaled so that raw JP2 DN value -18000 → u16 0 and
+/// +22000 → u16 65535, mapping to elevation_m = -9000 m … +11000 m.
+/// (Actual data range: DN -17438…+21567, i.e. -8719 m … +10783 m.)
+/// Coverage: 60°S to 60°N (the full SLDEM2015 extent).
+///
+/// Skipped if the output already exists.
+pub fn build_lunar_preview(jp2_path: &Path, cache_root: &Path) -> Option<()> {
+    if shutdown_requested().load(Ordering::Relaxed) {
+        return None;
+    }
+    let out_png = cache_root.join("sldem2015_preview_4096.png");
+    if out_png.exists() {
+        return Some(());
+    }
+
+    let tmp_dir = cache_root.join(super::TEMP_DIR_NAME);
+    fs::create_dir_all(&tmp_dir).ok()?;
+    let tmp_png = tmp_dir.join("sldem2015_preview.tmp.png");
+
+    // gdal_translate: downsample to 4096×1366, scale DN range [-18000, 22000]
+    // to UInt16 [0, 65535], output as PNG (lossless 16-bit).
+    // 4096 wide × 1366 tall is proportional to 360°×120° at 4096px wide.
+    // Actual data min/max DN: -17438 … +21567 — use -18000/+22000 for headroom.
+    let mut translate = Command::new(gdal_tool_path("gdal_translate"));
+    translate.args([
+        "-q",
+        "-outsize", "4096", "1366",
+        "-ot", "UInt16",
+        "-of", "PNG",
+        "-scale", "-18000", "22000", "0", "65535",
+    ]);
+    translate.arg(jp2_path).arg(&tmp_png);
+    run_command_with_timeout(
+        translate,
+        "gdal_translate (SLDEM2015 lunar preview)",
+        Duration::from_secs(300),
+    )
+    .ok()?;
+
+    if shutdown_requested().load(Ordering::Relaxed) {
+        let _ = fs::remove_file(&tmp_png);
+        return None;
+    }
+
+    if fs::rename(&tmp_png, &out_png).is_err() {
+        fs::copy(&tmp_png, &out_png).ok()?;
+        let _ = fs::remove_file(&tmp_png);
+    }
+
+    Some(())
+}
+
 pub fn shutdown_requested() -> &'static AtomicBool {
     static SHUTDOWN: OnceLock<AtomicBool> = OnceLock::new();
     SHUTDOWN.get_or_init(|| AtomicBool::new(false))
@@ -552,6 +613,66 @@ pub fn build_focus_contours(
     }
     let _ = fs::remove_file(&tmp_coast_gpkg_path);
 
+    cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
+    Some(())
+}
+
+/// Build one lunar (SLDEM2015) contour tile.
+///
+/// Unlike the SRTM pipeline (which mosaics many 1°×1° tiles with gdalwarp),
+/// SLDEM2015 is a single JP2 file. We use `gdal_translate -projwin` to extract
+/// the geographic bounding box and scale raw Int16 DN values to Float32 elevation
+/// in metres (DN × 0.5 = elevation_m, encoded as -scale -18000 22000 -9000 11000),
+/// then run `gdal_contour` on that Float32 GeoTIFF.
+pub fn build_lunar_contour_tile(
+    jp2_path: &Path,
+    cache_root: &Path,
+    cache_db_path: &Path,
+    tile: TileKey,
+    bounds: GeoBounds,
+    spec: FocusContourSpec,
+) -> Option<()> {
+    if shutdown_requested().load(Ordering::Relaxed) {
+        return None;
+    }
+
+    let (tmp_tif_path, tmp_gpkg_path) = temp_tile_paths(cache_root, tile);
+    cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
+
+    if let Some(parent) = tmp_tif_path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+
+    // gdal_translate: window extraction + DN→elevation_m scaling.
+    // -projwin ulx uly lrx lry  (min_lon, max_lat, max_lon, min_lat)
+    let mut translate = Command::new(gdal_tool_path("gdal_translate"));
+    translate.args([
+        "-q",
+        "-projwin",
+        &bounds.min_lon.to_string(),
+        &bounds.max_lat.to_string(),
+        &bounds.max_lon.to_string(),
+        &bounds.min_lat.to_string(),
+        "-outsize",
+        &spec.raster_size.to_string(),
+        &spec.raster_size.to_string(),
+        "-scale", "-18000", "22000", "-9000", "11000",
+        "-ot", "Float32",
+        "-of", "GTiff",
+    ]);
+    translate.arg(jp2_path).arg(&tmp_tif_path);
+    // JP2 reads from SLDEM2015 are slow — the file is ~22 GB and a single
+    // region extraction can take several minutes even on fast storage.
+    // Use a generous 10-minute timeout instead of the 90-second default.
+    run_command_with_timeout(translate, "gdal_translate (lunar tile)", Duration::from_secs(600)).ok()?;
+
+    if shutdown_requested().load(Ordering::Relaxed) {
+        cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
+        return None;
+    }
+
+    run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m).ok()?;
+    import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path).ok()?;
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
     Some(())
 }

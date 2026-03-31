@@ -8,8 +8,13 @@ pub(super) fn draw_legend(
     rect: egui::Rect,
     title: &str,
     render_zoom: f32,
+    moon_mode: bool,
 ) {
-    let interval_m = srtm_focus_cache::contour_interval_for_zoom(render_zoom);
+    let interval_m = if moon_mode {
+        super::super::srtm_focus_cache::zoom::lunar_spec_for_zoom(render_zoom).interval_m
+    } else {
+        srtm_focus_cache::contour_interval_for_zoom(render_zoom)
+    };
     let half_extent_km = visual_half_extent_for_zoom(render_zoom) * 111.32;
     painter.text(
         egui::pos2(rect.left() + 24.0, rect.bottom() - 86.0),
@@ -22,15 +27,18 @@ pub(super) fn draw_legend(
     );
 }
 
-/// Draw the bottom-right progress overlay.  Handles SRTM cache progress and
-/// osmium cell-extraction progress as stacked cards; each card is only shown
-/// when its data is available so they coexist without gaps when both are active.
+/// Draw the bottom-right progress overlay.  Handles SRTM cache progress,
+/// lunar GDAL build progress, and osmium cell-extraction progress as stacked
+/// cards; each card is only shown when relevant.
 pub(super) fn draw_progress_overlay(
     painter: &egui::Painter,
     rect: egui::Rect,
     cache_status: Option<srtm_focus_cache::FocusContourRegionStatus>,
     osmium_progress: Option<(u32, u32)>,
     job_note: Option<&str>,
+    lunar_tiles_building: usize,
+    lunar_tiles_ready: usize,
+    lunar_tiles_total: usize,
 ) {
     const CARD_W: f32 = 200.0;
     const CARD_H: f32 = 36.0;
@@ -42,8 +50,9 @@ pub(super) fn draw_progress_overlay(
         .map(|s| s.total_assets > 0 && s.ready_assets < s.total_assets)
         .unwrap_or(false);
     let osmium_active = osmium_progress.is_some();
+    let lunar_active = lunar_tiles_total > 0 && lunar_tiles_ready < lunar_tiles_total;
 
-    if !cache_active && !osmium_active {
+    if !cache_active && !osmium_active && !lunar_active {
         return;
     }
 
@@ -72,6 +81,30 @@ pub(super) fn draw_progress_overlay(
             ),
             progress,
             theme::topo_color(),
+        );
+        bottom_y = frame.top() - GAP;
+    }
+
+    // ── Lunar GDAL build card ──────────────────────────────────────────────
+    if lunar_active {
+        let progress = (lunar_tiles_ready as f32 / lunar_tiles_total as f32).clamp(0.0, 1.0);
+        let frame = egui::Rect::from_min_size(
+            egui::pos2(rect.right() - RIGHT_MARGIN - CARD_W, bottom_y - CARD_H),
+            egui::vec2(CARD_W, CARD_H),
+        );
+        let bar = egui::Rect::from_min_size(
+            frame.left_bottom() + egui::vec2(0.0, -10.0),
+            egui::vec2(frame.width(), 6.0),
+        );
+        draw_progress_card(
+            painter,
+            frame,
+            bar,
+            &format!(
+                "SLDEM {lunar_tiles_ready} / {lunar_tiles_total}  ·  {lunar_tiles_building} BUILDING"
+            ),
+            progress,
+            egui::Color32::from_rgb(155, 200, 248), // lunar blue-white
         );
         bottom_y = frame.top() - GAP;
     }

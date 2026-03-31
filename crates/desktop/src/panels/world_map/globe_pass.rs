@@ -32,7 +32,8 @@ use eframe::wgpu;
 //   80      16   grid_col            vec4<f32>
 //   96      16   hot_col             vec4<f32>
 //  112       4   show_graticule      u32
-//  116      12   _pad                [u32; 3]
+//  116       4   moon_mode           u32
+//  120       8   _pad                [u32; 2]
 //  128 bytes total
 //
 #[repr(C)]
@@ -54,7 +55,8 @@ pub struct GlobeUniforms {
     pub hot_col: [f32; 4],
     // ── Flags ──────────────────────────────────────────────────────────────
     pub show_graticule: u32,
-    pub _pad: [u32; 3],
+    pub moon_mode: u32,
+    pub _pad: [u32; 2],
 }
 
 /// Convert an egui `Color32` (sRGB, [0, 255]) to linear-float `[f32; 4]`.
@@ -188,6 +190,7 @@ impl GlobeCallback {
         pitch: f32,
         pixels_per_point: f32,
         show_graticule: bool,
+        moon_mode: bool,
         ocean_col: egui::Color32,
         land_col: egui::Color32,
         mount_col: egui::Color32,
@@ -209,7 +212,8 @@ impl GlobeCallback {
                 grid_col: color_to_linear(grid_col),
                 hot_col: color_to_linear(hot_col),
                 show_graticule: show_graticule as u32,
-                _pad: [0; 3],
+                moon_mode: moon_mode as u32,
+                _pad: [0; 2],
             },
         }
     }
@@ -270,9 +274,9 @@ struct Uniforms {
     hot_col:   vec4<f32>,
     // Flags  (bytes 112..127)
     show_graticule: u32,
+    moon_mode:      u32,
     _pad0: u32,
     _pad1: u32,
-    _pad2: u32,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -343,6 +347,48 @@ fn surface_color(e_norm: f32) -> vec3<f32> {
     } else {
         let t = clamp((e_norm - 0.72) / 0.28, 0.0, 1.0);
         return mix(land, mount, t);
+    }
+}
+
+// ── Lunar terrain helpers ───────────────────────────────────────────────────
+
+/// Synthetic lunar elevation for the globe backdrop — returns [0, 1].
+/// Models major near-side mare (dark basaltic depressions) as negative
+/// Gaussians subtracted from a uniform highland baseline.
+fn lunar_terrain_elev(lat_deg: f32, lon_deg: f32) -> f32 {
+    // Default: heavily-cratered highland at ~0.72 normalised height.
+    var h = 0.72f;
+
+    // Near-side maria — large basaltic plains (depressions relative to mean sphere)
+    h -= gauss(lat_deg, lon_deg,  20.0,  -57.0, 22.0) * 0.52; // Oceanus Procellarum (huge)
+    h -= gauss(lat_deg, lon_deg,  32.0,  -17.0,  9.5) * 0.46; // Mare Imbrium
+    h -= gauss(lat_deg, lon_deg,   8.0,   30.0,  7.5) * 0.40; // Mare Tranquillitatis
+    h -= gauss(lat_deg, lon_deg,  27.0,   19.0,  6.5) * 0.36; // Mare Serenitatis
+    h -= gauss(lat_deg, lon_deg,  17.0,   59.0,  4.5) * 0.32; // Mare Crisium
+    h -= gauss(lat_deg, lon_deg, -21.0,  -15.0,  5.5) * 0.30; // Mare Nubium
+    h -= gauss(lat_deg, lon_deg,  -4.0,   52.0,  5.5) * 0.28; // Mare Fecunditatis
+    h -= gauss(lat_deg, lon_deg, -24.0,  -38.0,  4.0) * 0.26; // Mare Humorum
+    h -= gauss(lat_deg, lon_deg,  14.0,    3.0,  3.5) * 0.22; // Mare Vaporum
+    h -= gauss(lat_deg, lon_deg,  45.0,  -30.0,  5.0) * 0.20; // Sinus Iridum area
+
+    // South Pole-Aitken basin (far side, very large and deep)
+    h -= gauss(lat_deg, lon_deg, -56.0,  180.0, 18.0) * 0.38;
+
+    return clamp(h, 0.0, 1.0);
+}
+
+/// Surface colour for the Moon: maps elevation [0,1] to a greyscale regolith palette.
+fn surface_color_moon(e: f32) -> vec3<f32> {
+    let mare     = u.ocean_col.rgb;    // dark basalt  (low elevation)
+    let regolith = u.land_col.rgb;     // mid regolith
+    let highland = u.mount_col.rgb;    // bright highland (high elevation)
+
+    if e < 0.38 {
+        let t = e / 0.38;
+        return mix(mare, regolith, t);
+    } else {
+        let t = clamp((e - 0.38) / 0.62, 0.0, 1.0);
+        return mix(regolith, highland, t);
     }
 }
 
@@ -444,9 +490,11 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let disc = b*b - 4.0*a*c;
 
     if disc < 0.0 {
+        if u.moon_mode != 0u {
+            // Moon has no atmosphere: pure black beyond the limb.
+            return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+        }
         // ── Outside sphere — very faint limb halo only ────────────────────
-        // Keep this extremely subtle so the globe reads as a clean disc
-        // against the background rather than having a visible coloured bloom.
         let edge_dist = sqrt(dx*dx + dy*dy) / u.radius - 1.0;
         let halo      = exp(-edge_dist * 12.0) * 0.045;
         return vec4<f32>(u.ocean_col.rgb * halo * 2.0, halo);
@@ -480,24 +528,31 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let lon_deg = lon_rad * (180.0 / PI);
 
     // ── Terrain elevation & base colour ───────────────────────────────────
-    let elev   = terrain_elev(lat_deg, lon_deg);
-    let e_norm = elev / 1.6;
-    var rgb    = surface_color(e_norm);
-
-    // ── Lambertian shading (sun in canonical space) ────────────────────────
-    // Fixed sun direction: high, slightly south-west, in front of the globe.
-    let sun   = normalize(vec3<f32>(0.32, 0.55, 0.77));
-    let shade = clamp(dot(vec3<f32>(x2, y2, z2), sun), 0.0, 1.0);
-    rgb = rgb * (0.30 + 0.70 * shade);
-
-    // ── Rim atmosphere (view-space fresnel) ───────────────────────────────
-    // Camera is at (0,0,cam_dist) in view space; hit is on unit sphere.
-    // Blend toward the ocean colour (nearly black) so the limb darkens
-    // naturally instead of glowing the theme accent colour.
+    var rgb: vec3<f32>;
     let to_cam  = normalize(vec3<f32>(-hit.x, -hit.y, u.camera_distance - hit.z));
     let rim     = 1.0 - clamp(dot(hit, to_cam), 0.0, 1.0);
-    let atm     = pow(rim, 3.0) * 0.55;
-    rgb = mix(rgb, u.ocean_col.rgb * 0.4, atm);
+    let sun     = normalize(vec3<f32>(0.32, 0.55, 0.77));
+    let shade   = clamp(dot(vec3<f32>(x2, y2, z2), sun), 0.0, 1.0);
+
+    if u.moon_mode != 0u {
+        let elev  = lunar_terrain_elev(lat_deg, lon_deg);
+        rgb = surface_color_moon(elev);
+        // Sharper Lambertian (no atmosphere softening): terminator is crisper.
+        rgb = rgb * (0.08 + 0.92 * shade);
+        // No atmospheric halo — just a gentle limb darkening from the rim factor.
+        rgb = rgb * (1.0 - pow(rim, 4.0) * 0.65);
+    } else {
+        let elev   = terrain_elev(lat_deg, lon_deg);
+        let e_norm = elev / 1.6;
+        rgb = surface_color(e_norm);
+
+        // ── Lambertian shading ─────────────────────────────────────────────
+        rgb = rgb * (0.30 + 0.70 * shade);
+
+        // ── Rim atmosphere (view-space fresnel) ───────────────────────────
+        let atm = pow(rim, 3.0) * 0.55;
+        rgb = mix(rgb, u.ocean_col.rgb * 0.4, atm);
+    }
 
     // ── Graticule ──────────────────────────────────────────────────────────
     if u.show_graticule != 0u {

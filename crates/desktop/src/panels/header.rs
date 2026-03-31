@@ -36,6 +36,43 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
                     model.terrain_library_open = true;
                 }
 
+                let moon_label = if model.moon_mode { "EARTH" } else { "MOON" };
+                let moon_btn = egui::Button::new(
+                    egui::RichText::new(moon_label)
+                        .color(if model.moon_mode {
+                            egui::Color32::from_rgb(126, 208, 229)
+                        } else {
+                            egui::Color32::from_rgb(210, 206, 194)
+                        }),
+                )
+                .fill(if model.moon_mode {
+                    egui::Color32::from_rgba_premultiplied(10, 30, 45, 200)
+                } else {
+                    egui::Color32::from_rgba_premultiplied(28, 26, 22, 200)
+                });
+                if ui
+                    .add(moon_btn)
+                    .on_hover_text(if model.moon_mode {
+                        "Switch back to Earth (GEBCO/SRTM terrain)"
+                    } else {
+                        "Switch to Moon Mode (SLDEM2015 LRO/LOLA lunar topology)"
+                    })
+                    .clicked()
+                {
+                    model.moon_mode = !model.moon_mode;
+                    // Moon mode has no local terrain view — always return to globe.
+                    if model.moon_mode {
+                        model.globe_view.local_mode = false;
+                    }
+                    let new_theme = if model.moon_mode {
+                        crate::theme::MapTheme::Lunar
+                    } else {
+                        crate::theme::MapTheme::Topo
+                    };
+                    model.map_theme = new_theme;
+                    crate::theme::set_theme(ui.ctx(), new_theme);
+                }
+
                 if ui.button("Import GeoJSON").clicked() {
                     import_geojson(model);
                 }

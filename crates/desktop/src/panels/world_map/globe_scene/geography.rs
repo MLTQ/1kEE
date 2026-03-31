@@ -1,11 +1,23 @@
 use crate::model::{GeoJsonFeature, GeoJsonGeometry, GeoJsonLayer, GeoPoint, GlobeViewState};
 use crate::theme;
-
 use super::GlobeLayout;
 use super::camera::GlobeLod;
 use super::contour_asset;
 use super::gebco_depth_fill;
 use super::projection::{draw_geo_path, project_geo};
+
+// ── Lunar feature labels ──────────────────────────────────────────────────────
+// Major maria and craters with lat/lon in degrees (IAU selenographic coordinates).
+const LUNAR_FEATURES: &[(&str, f32, f32)] = &[
+    ("Oceanus Procellarum", 18.4, -57.4),
+    ("Mare Imbrium",        32.8, -15.6),
+    ("Mare Tranquillitatis",  8.5,  31.4),
+    ("Mare Serenitatis",    28.0,  17.5),
+    ("Mare Crisium",        17.0,  59.1),
+    ("Mare Nubium",        -21.3, -16.6),
+    ("Mare Fecunditatis",   -4.5,  51.3),
+    ("Mare Humorum",       -24.4, -38.6),
+];
 
 pub(super) fn draw_global_coastlines(
     painter: &egui::Painter,
@@ -345,3 +357,75 @@ pub(super) fn draw_srtm_on_globe(
         );
     }
 }
+
+/// Draw lunar contour lines and feature labels on the globe when Moon Mode is active.
+/// Contours are sourced from the SLDEM2015 JP2 tile cache; labels name major maria.
+pub(super) fn draw_lunar_topo(
+    painter: &egui::Painter,
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    selected_root: Option<&std::path::Path>,
+) {
+    // ── Contour lines ─────────────────────────────────────────────────────────
+    // Fade in from zoom 0.6 → 1.4 so they don't clutter the full-disc view.
+    let contour_alpha = ((view.zoom - 0.6) / 0.8).clamp(0.0, 1.0);
+    if contour_alpha > 0.01 {
+        if let Some(contours) = contour_asset::load_lunar_for_globe(
+            selected_root,
+            view.local_center,
+            view.zoom,
+            painter.ctx().clone(),
+        ) {
+            for contour in contours.iter() {
+                // Major contours at multiples of 2× the minor interval.
+                // At 500 m interval: every 1000 m is major.
+                let major = (contour.elevation_m.round() as i32).rem_euclid(1_000) == 0;
+                // Highland (positive) → warm grey; mare/basin (negative) → cool dark.
+                let color = if contour.elevation_m >= 0.0 {
+                    if major {
+                        theme::hot_color()
+                    } else {
+                        theme::contour_color()
+                    }
+                } else {
+                    // Below datum — bluish-grey to hint at the dark maria floors.
+                    let base = egui::Color32::from_rgb(90, 100, 130);
+                    if major { base } else { base.gamma_multiply(0.55) }
+                };
+                draw_geo_path(
+                    painter,
+                    layout,
+                    view,
+                    &contour.points,
+                    0.015,
+                    color.gamma_multiply(contour_alpha),
+                    0.05 * contour_alpha,
+                );
+            }
+        }
+    }
+
+    // ── Feature labels ────────────────────────────────────────────────────────
+    if view.zoom < 0.8 {
+        return;
+    }
+    let alpha = ((view.zoom - 0.8) / 0.8).clamp(0.0, 1.0);
+    let label_color = theme::text_muted().gamma_multiply(alpha * 0.75);
+
+    for &(name, lat, lon) in LUNAR_FEATURES {
+        let Some(proj) = project_geo(layout, view, GeoPoint { lat, lon }, 0.0) else {
+            continue;
+        };
+        if !proj.front_facing {
+            continue;
+        }
+        painter.text(
+            proj.pos,
+            egui::Align2::CENTER_CENTER,
+            name,
+            egui::FontId::monospace(10.0),
+            label_color,
+        );
+    }
+}
+

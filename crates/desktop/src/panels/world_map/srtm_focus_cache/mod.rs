@@ -1,5 +1,5 @@
 use crate::model::GeoPoint;
-use crate::terrain_assets;
+use crate::terrain_assets::{self};
 use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -10,15 +10,57 @@ use std::time::Duration;
 pub mod builders;
 pub mod db;
 pub mod gdal;
-pub mod zoom;
+pub mod zoom; // pub so ui_overlays can access lunar_spec_for_zoom
 
 pub use zoom::{
     bucket_radius_for_target_radius_miles, contour_interval_for_zoom, feature_budget_for_zoom,
     half_extent_for_zoom, zoom_bucket_for_zoom,
 };
 
+/// Half-extent in degrees for the lunar zoom spec at a given zoom level.
+/// Used by the contour merge step to partition tiles without overlap.
+pub fn lunar_half_extent_for_zoom(zoom: f32) -> f32 {
+    zoom::lunar_spec_for_zoom(zoom).half_extent_deg
+}
+
+/// Returns the set of `(lat_bucket, lon_bucket)` pairs that are already built
+/// in the *lunar* cache DB for the given zoom level.  Parallel to
+/// `ready_tile_buckets` but queries `lunar_focus_cache.sqlite`.
+pub fn ready_lunar_tile_buckets(
+    selected_root: Option<&Path>,
+    focus: GeoPoint,
+    zoom: f32,
+    radius: i32,
+) -> HashSet<(i32, i32)> {
+    let mut set = HashSet::new();
+    let Some(cache_db_path) = lunar_cache_db_path(selected_root) else {
+        return set;
+    };
+    let Ok(connection) = db::open_cache_db(&cache_db_path) else {
+        return set;
+    };
+    let spec = zoom::lunar_spec_for_zoom(zoom);
+    let bucket_step = spec.half_extent_deg * 0.45;
+    let center_lat_bucket = (focus.lat / bucket_step).round() as i32;
+    let center_lon_bucket = (focus.lon / bucket_step).round() as i32;
+    for lat_bucket in (center_lat_bucket - radius)..=(center_lat_bucket + radius) {
+        for lon_bucket in (center_lon_bucket - radius)..=(center_lon_bucket + radius) {
+            let tile = TileKey {
+                zoom_bucket: spec.zoom_bucket,
+                lat_bucket,
+                lon_bucket,
+            };
+            if db::tile_exists(&connection, tile).unwrap_or(false) {
+                set.insert((lat_bucket, lon_bucket));
+            }
+        }
+    }
+    set
+}
+
 const BUILD_TIMEOUT: Duration = Duration::from_secs(90);
 const CACHE_DB_NAME: &str = "srtm_focus_cache.sqlite";
+const LUNAR_CACHE_DB_NAME: &str = "lunar_focus_cache.sqlite";
 const TEMP_DIR_NAME: &str = "srtm_focus_tmp";
 
 #[derive(Clone)]
@@ -38,7 +80,7 @@ pub struct FocusContourRegionStatus {
 }
 
 #[derive(Clone, Copy)]
-pub(self) struct FocusContourSpec {
+pub struct FocusContourSpec {
     pub half_extent_deg: f32,
     pub raster_size: u32,
     pub interval_m: i32,
@@ -329,6 +371,47 @@ pub fn is_gebco_derived_building() -> bool {
     gdal::gebco_derived_building().load(Ordering::Relaxed)
 }
 
+pub fn is_lunar_preview_building() -> bool {
+    gdal::lunar_preview_building().load(Ordering::Relaxed)
+}
+
+/// Ensure the SLDEM2015 lunar terrain preview PNG exists in the cache/terrain
+/// directory.  If the JP2 source file is found and the preview does not yet
+/// exist, triggers a background GDAL conversion.
+///
+/// Call this when Moon Mode is active; it is cheap when already built.
+pub fn ensure_lunar_preview(selected_root: Option<&Path>) {
+    let out_png = match db::focus_cache_root(selected_root) {
+        Some(root) => root.join("sldem2015_preview_4096.png"),
+        None => return,
+    };
+
+    if out_png.exists() {
+        return;
+    }
+
+    if gdal::lunar_preview_building().load(Ordering::Relaxed) {
+        return;
+    }
+
+    let jp2 = match terrain_assets::find_sldem_jp2(selected_root) {
+        Some(p) => p,
+        None => return,
+    };
+
+    let cache_root = match db::focus_cache_root(selected_root) {
+        Some(root) => root,
+        None => return,
+    };
+
+    gdal::lunar_preview_building().store(true, Ordering::SeqCst);
+    std::thread::spawn(move || {
+        let _ = gdal::build_lunar_preview(&jp2, &cache_root);
+        gdal::lunar_preview_building().store(false, Ordering::SeqCst);
+        crate::app::request_repaint();
+    });
+}
+
 pub fn terminate_active_gdal_jobs() {
     gdal::shutdown_requested().store(true, Ordering::SeqCst);
 
@@ -357,4 +440,116 @@ pub fn terminate_active_gdal_jobs() {
 
 pub fn is_global_coastline_building() -> bool {
     gdal::global_coastline_building().load(Ordering::Relaxed)
+}
+
+pub fn lunar_cache_db_path(selected_root: Option<&Path>) -> Option<PathBuf> {
+    Some(db::focus_cache_root(selected_root)?.join(LUNAR_CACHE_DB_NAME))
+}
+
+/// Returns `true` while any lunar contour tile build threads are running.
+pub fn is_lunar_contour_building() -> bool {
+    builders::lunar_pending_set()
+        .lock()
+        .map(|g| !g.is_empty())
+        .unwrap_or(false)
+}
+
+/// (ready, building, total) for the lunar tile grid around `focus`.
+/// Used by the progress overlay in lunar local terrain mode.
+pub fn lunar_tile_counts(
+    selected_root: Option<&Path>,
+    focus: GeoPoint,
+    zoom: f32,
+    radius: i32,
+) -> (usize, usize, usize) {
+    let Some(cache_db_path) = lunar_cache_db_path(selected_root) else {
+        return (0, 0, 0);
+    };
+    let Ok(connection) = db::open_cache_db(&cache_db_path) else {
+        return (0, 0, 0);
+    };
+    let spec = zoom::lunar_spec_for_zoom(zoom);
+    let bucket_step = spec.half_extent_deg * 0.45;
+    let center_lat_bucket = (focus.lat / bucket_step).round() as i32;
+    let center_lon_bucket = (focus.lon / bucket_step).round() as i32;
+
+    let building = builders::lunar_pending_set()
+        .lock()
+        .map(|g| g.len())
+        .unwrap_or(0);
+
+    let mut ready = 0usize;
+    let mut total = 0usize;
+    for lat_bucket in (center_lat_bucket - radius)..=(center_lat_bucket + radius) {
+        let bucket_lat = lat_bucket as f32 * bucket_step;
+        if bucket_lat.abs() > 60.0 + spec.half_extent_deg {
+            continue; // outside SLDEM coverage
+        }
+        for lon_bucket in (center_lon_bucket - radius)..=(center_lon_bucket + radius) {
+            total += 1;
+            let tile = TileKey {
+                zoom_bucket: spec.zoom_bucket,
+                lat_bucket,
+                lon_bucket,
+            };
+            if db::tile_exists(&connection, tile).unwrap_or(false) {
+                ready += 1;
+            }
+        }
+    }
+    (ready, building, total)
+}
+
+/// Ensure lunar (SLDEM2015) contour tiles exist for the region around `focus`
+/// at the current zoom level.  Mirrors `ensure_focus_contour_region` but
+/// sources from a single JP2 file via `gdal_translate -projwin` instead of
+/// mosaicking SRTM tiles.  Coverage is clipped to ±60° latitude.
+pub fn ensure_lunar_contour_region(
+    selected_root: Option<&Path>,
+    focus: GeoPoint,
+    zoom: f32,
+) -> Vec<FocusContourAsset> {
+    let Some(jp2_path) = crate::terrain_assets::find_sldem_jp2(selected_root) else {
+        return Vec::new();
+    };
+    let Some(cache_root) = db::focus_cache_root(selected_root) else {
+        return Vec::new();
+    };
+    let Some(cache_db_path) = lunar_cache_db_path(selected_root) else {
+        return Vec::new();
+    };
+    let Ok(connection) = db::open_cache_db(&cache_db_path) else {
+        return Vec::new();
+    };
+
+    let spec = zoom::lunar_spec_for_zoom(zoom);
+    let bucket_step = spec.half_extent_deg * 0.45;
+    let center_lat_bucket = (focus.lat / bucket_step).round() as i32;
+    let center_lon_bucket = (focus.lon / bucket_step).round() as i32;
+    let mut assets = Vec::new();
+
+    const RADIUS: i32 = 2;
+    for lat_bucket in (center_lat_bucket - RADIUS)..=(center_lat_bucket + RADIUS) {
+        // Skip tiles whose centre falls outside SLDEM2015 coverage (±60° lat).
+        let bucket_lat = lat_bucket as f32 * bucket_step;
+        if bucket_lat.abs() > 60.0 + spec.half_extent_deg {
+            continue;
+        }
+        for lon_bucket in (center_lon_bucket - RADIUS)..=(center_lon_bucket + RADIUS) {
+            if let Some(asset) = builders::ensure_lunar_bucket_asset(
+                &jp2_path,
+                &cache_root,
+                &cache_db_path,
+                &connection,
+                spec,
+                lat_bucket,
+                lon_bucket,
+                bucket_step,
+            ) {
+                assets.push(asset);
+            }
+        }
+    }
+
+    assets
 }

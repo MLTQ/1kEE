@@ -24,13 +24,15 @@ pub(super) fn draw_tile_pulse_grid(
     radius: i32,
     time: f64,
     ready_buckets: &std::collections::HashSet<(i32, i32)>,
+    half_extent_override: Option<f32>,
 ) {
     const GRID: usize = 50; // 50×50 = 2 500 cells per tile
     const DISSOLVE_CYCLE: f64 = 7.0; // seconds for one full sweep
     const EDGE_BAND: f32 = 0.14; // fraction of cycle that counts as "burning"
     const CELL_INSET: f32 = 0.10; // fractional gap between cells (10% each side)
 
-    let half_extent = srtm_focus_cache::half_extent_for_zoom(render_zoom);
+    let half_extent = half_extent_override
+        .unwrap_or_else(|| srtm_focus_cache::half_extent_for_zoom(render_zoom));
     let bucket_step = half_extent * 0.45;
     let visual_half = visual_half_extent_for_zoom(view.local_zoom);
     let km_per_deg_lat = 111.32f32;

@@ -6,6 +6,7 @@ use super::camera::{self, GlobeLod};
 use super::contour_asset;
 use super::gebco_depth_fill;
 use super::globe_pass;
+use super::srtm_focus_cache;
 use super::terrain_field;
 
 mod geography;
@@ -64,6 +65,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             model.globe_view.pitch,
             ppp,
             false, // graticule always off in GPU pass — drawn CPU-side instead
+            model.moon_mode,
             theme::scene_backdrop(),
             theme::topo_color(),
             theme::wireframe_color(),
@@ -84,15 +86,19 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     if model.show_reticle {
         draw_hud_frame(painter, rect);
     }
-    if model.show_bathymetry {
-        geography::draw_global_bathymetry(painter, &layout, &model.globe_view, selected_root);
-    }
-    if model.show_coastlines {
-        geography::draw_global_coastlines(painter, &layout, &model.globe_view, selected_root);
-    }
-    geography::draw_global_topo(painter, &layout, &model.globe_view, selected_root);
 
-    geography::draw_srtm_on_globe(painter, &layout, &model.globe_view, &lod, selected_root);
+    if !model.moon_mode {
+        if model.show_bathymetry {
+            geography::draw_global_bathymetry(painter, &layout, &model.globe_view, selected_root);
+        }
+        if model.show_coastlines {
+            geography::draw_global_coastlines(painter, &layout, &model.globe_view, selected_root);
+        }
+        geography::draw_global_topo(painter, &layout, &model.globe_view, selected_root);
+        geography::draw_srtm_on_globe(painter, &layout, &model.globe_view, &lod, selected_root);
+    } else {
+        geography::draw_lunar_topo(painter, &layout, &model.globe_view, selected_root);
+    }
 
     // ── GeoJSON user overlay layers ────────────────────────────────────────
     if !model.geojson_layers.is_empty() {
@@ -113,7 +119,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let nearby = model.nearby_cameras(250.0);
 
     // ── Replay flares (shown instead of live markers while replay is active) ──
-    if model.replay_mode {
+    if model.replay_mode && !model.moon_mode {
         if let Some(state) = &model.replay_state {
             let wall_elapsed = state.wall_elapsed();
             for flare in &state.active_flares {
@@ -143,7 +149,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         }
     }
 
-    let event_markers: Vec<_> = if !model.show_event_markers || model.replay_mode {
+    let event_markers: Vec<_> = if !model.show_event_markers || model.replay_mode || model.moon_mode {
         Vec::new()
     } else {
         model
@@ -186,7 +192,9 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             .collect()
     };
 
-    let camera_markers: Vec<_> = {
+    let camera_markers: Vec<_> = if model.moon_mode {
+        Vec::new()
+    } else {
         nearby
             .iter()
             .filter_map(|camera| {
@@ -264,6 +272,28 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         markers::draw_camera_links(painter, *event_marker, &camera_markers);
     }
     draw_legend(painter, rect, &layout, &model.globe_view, &lod);
+
+    // ── Lunar contour build progress ────────────────────────────────────────
+    if model.moon_mode {
+        let (lunar_ready, lunar_building, lunar_total) = srtm_focus_cache::lunar_tile_counts(
+            selected_root,
+            model.globe_view.local_center,
+            1.5, // fixed globe tile zoom (mirrors GLOBE_TILE_ZOOM in contour_asset)
+            2,   // radius
+        );
+        if lunar_total > 0 && lunar_ready < lunar_total {
+            draw_lunar_build_overlay(
+                painter,
+                rect,
+                &layout,
+                &model.globe_view,
+                lunar_ready,
+                lunar_building,
+                lunar_total,
+                time,
+            );
+        }
+    }
 
     let flight_markers: Vec<(String, egui::Pos2)> =
         if model.show_flights && !model.globe_view.local_mode {
@@ -541,4 +571,74 @@ fn draw_legend(
 
 fn draw_graticule(painter: &egui::Painter, layout: &GlobeLayout, view: &GlobeViewState) {
     super::graticule::draw_graticule(painter, layout, view);
+}
+
+/// Progress card + pulsing globe ring shown while lunar contour tiles are building.
+fn draw_lunar_build_overlay(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    ready: usize,
+    building: usize,
+    total: usize,
+    time: f64,
+) {
+    // ── Progress card (bottom-right) ──────────────────────────────────────
+    const CARD_W: f32 = 220.0;
+    const CARD_H: f32 = 36.0;
+    let frame = egui::Rect::from_min_size(
+        egui::pos2(rect.right() - 12.0 - CARD_W, rect.bottom() - 12.0 - CARD_H),
+        egui::vec2(CARD_W, CARD_H),
+    );
+    let bar = egui::Rect::from_min_size(
+        frame.left_bottom() + egui::vec2(0.0, -10.0),
+        egui::vec2(frame.width(), 6.0),
+    );
+    let progress = (ready as f32 / total as f32).clamp(0.0, 1.0);
+    let accent = egui::Color32::from_rgb(155, 200, 248); // lunar blue-white
+
+    painter.rect_filled(frame, 6.0, theme::panel_fill(208));
+    painter.rect_stroke(
+        frame,
+        6.0,
+        egui::Stroke::new(1.0, theme::panel_stroke()),
+        egui::StrokeKind::Outside,
+    );
+    painter.text(
+        frame.left_top() + egui::vec2(8.0, 6.0),
+        egui::Align2::LEFT_TOP,
+        format!("SLDEM {ready} / {total}  ·  {building} BUILDING"),
+        egui::FontId::monospace(10.5),
+        theme::text_muted(),
+    );
+    // Track
+    painter.rect_filled(bar, 3.0, theme::panel_fill(230).gamma_multiply(2.5));
+    // Fill
+    if progress > 0.0 {
+        let filled = egui::Rect::from_min_max(
+            bar.min,
+            egui::pos2(bar.left() + bar.width() * progress, bar.bottom()),
+        );
+        painter.rect_filled(filled, 3.0, accent);
+    }
+
+    // ── Pulsing ring centred on the reticle ──────────────────────────────
+    // Project view.local_center (the reticle position) so the ring is
+    // always concentric with the red crosshair, regardless of orbit angle.
+    // Fall back to layout.center if the reticle is on the far hemisphere.
+    let ring_center = projection::project_geo(layout, view, view.local_center, 0.0)
+        .map(|p| p.pos)
+        .unwrap_or(layout.center);
+    let pulse = (time as f32 * 0.9).sin() * 0.5 + 0.5;
+    let ring_alpha = (0.06 + pulse * 0.10) * (1.0 - progress * 0.6);
+    let ring_r = layout.radius + 6.0 + pulse * 8.0;
+    painter.circle_stroke(
+        ring_center,
+        ring_r,
+        egui::Stroke::new(
+            2.5 + pulse * 1.5,
+            accent.gamma_multiply(ring_alpha),
+        ),
+    );
 }

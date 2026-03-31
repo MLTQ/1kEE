@@ -80,6 +80,17 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
             model.arcgis_features = arcgis_source::poll(&source_refs, ui.ctx().clone());
         }
 
+        // Trigger background SLDEM preview + contour builds when Moon Mode is active.
+        if model.moon_mode {
+            srtm_focus_cache::ensure_lunar_preview(model.selected_root.as_deref());
+            if srtm_focus_cache::is_lunar_preview_building()
+                || srtm_focus_cache::is_lunar_contour_building()
+            {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(250));
+            }
+        }
+
         let local_terrain_mode = local_terrain_scene::is_active(model);
         layer_import::ensure_visible_road_layers(model, local_terrain_mode);
         layer_import::ensure_visible_water_layers(model, local_terrain_mode);
@@ -228,7 +239,13 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                 if ui.add(globe_btn).clicked() && model.globe_view.local_mode {
                     model.globe_view.local_mode = false;
                 }
-                if ui.add(local_btn).clicked() && !model.globe_view.local_mode {
+                let local_disabled = model.moon_mode
+                    && crate::terrain_assets::find_sldem_jp2(model.selected_root.as_deref()).is_none();
+                if ui.add_enabled(!local_disabled, local_btn)
+                    .on_disabled_hover_text("LOCAL lunar terrain requires SLDEM2015 JP2 data")
+                    .clicked()
+                    && !model.globe_view.local_mode
+                {
                     // Snap local_center to whatever the globe is centered on.
                     model.globe_view.local_center = model.globe_view.globe_center_latlon();
                     model.globe_view.local_mode = true;
