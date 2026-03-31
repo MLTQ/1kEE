@@ -62,7 +62,7 @@ pub fn default_cache_db_path(derived_terrain_dir: &Path) -> PathBuf {
     derived_terrain_dir.join(CACHE_DB_NAME)
 }
 
-fn open_cache_db(path: &Path) -> rusqlite::Result<Connection> {
+pub fn open_cache_db(path: &Path) -> rusqlite::Result<Connection> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).ok();
     }
@@ -113,7 +113,7 @@ fn open_cache_db(path: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-fn tile_exists(conn: &Connection, tile: TileKey) -> bool {
+pub fn tile_exists(conn: &Connection, tile: TileKey) -> bool {
     conn.query_row(
         "SELECT 1 FROM contour_tile_manifest
          WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3 LIMIT 1",
@@ -125,7 +125,7 @@ fn tile_exists(conn: &Connection, tile: TileKey) -> bool {
     .unwrap_or(false)
 }
 
-fn import_tile(cache_db_path: &Path, tile: TileKey, gpkg_path: &Path) -> rusqlite::Result<()> {
+pub fn import_tile(cache_db_path: &Path, tile: TileKey, gpkg_path: &Path) -> rusqlite::Result<()> {
     let source = Connection::open(gpkg_path)?;
     source.busy_timeout(Duration::from_secs(30))?;
     let mut stmt = source
@@ -318,20 +318,20 @@ pub struct ContourBuildProgress {
 }
 
 impl ContourBuildProgress {
-    fn info(stage: impl Into<String>, fraction: f32, message: impl Into<String>) -> Self {
+    pub fn info(stage: impl Into<String>, fraction: f32, message: impl Into<String>) -> Self {
         Self { stage: stage.into(), fraction, message: message.into(), is_error: false, tile_bounds: None }
     }
-    fn error(stage: impl Into<String>, fraction: f32, message: impl Into<String>) -> Self {
+    pub fn error(stage: impl Into<String>, fraction: f32, message: impl Into<String>) -> Self {
         Self { stage: stage.into(), fraction, message: message.into(), is_error: true, tile_bounds: None }
     }
-    fn built(stage: impl Into<String>, fraction: f32, message: impl Into<String>, bounds: (f32, f32, f32, f32)) -> Self {
+    pub fn built(stage: impl Into<String>, fraction: f32, message: impl Into<String>, bounds: (f32, f32, f32, f32)) -> Self {
         Self { stage: stage.into(), fraction, message: message.into(), is_error: false, tile_bounds: Some(bounds) }
     }
 }
 
 /// Resolve the full path to a GDAL tool, checking the explicit bin dir first
 /// then common Homebrew locations, then falling back to bare name (PATH).
-fn resolve_gdal_tool(gdal_bin_dir: &Path, tool: &str) -> PathBuf {
+pub fn resolve_gdal_tool(gdal_bin_dir: &Path, tool: &str) -> PathBuf {
     // 1. Explicit bin dir from the user
     if gdal_bin_dir != Path::new("") {
         let candidate = gdal_bin_dir.join(tool);
@@ -896,7 +896,7 @@ pub fn build_contour_tiles_native(
 
 // ── Tile range helpers ────────────────────────────────────────────────────────
 
-fn bucket_range(coord_min: f32, coord_max: f32, step: f32) -> std::ops::RangeInclusive<i32> {
+pub fn bucket_range(coord_min: f32, coord_max: f32, step: f32) -> std::ops::RangeInclusive<i32> {
     let lo = (coord_min / step).floor() as i32;
     let hi = (coord_max / step).ceil() as i32;
     lo..=hi

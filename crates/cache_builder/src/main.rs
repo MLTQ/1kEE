@@ -4,6 +4,7 @@ mod args;
 mod contours;
 mod geojson;
 mod job;
+mod lunar;
 mod marching_squares;
 mod node_store;
 mod roads;
