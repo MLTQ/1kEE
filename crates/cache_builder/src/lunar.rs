@@ -5,17 +5,24 @@
 /// entire bbox into `lunar_focus_cache.sqlite` so the desktop finds them
 /// instantly and skips its own build.
 ///
-/// Pipeline per tile:
-///   gdal_translate -projwin … -scale -18000 22000 -9000 11000 → Float32 GeoTIFF
-///   gdal_contour -a elevation_m -i {interval_m}               → GPKG
-///   import_tile()                                              → lunar_focus_cache.sqlite
+/// Pipeline:
+///   gdal_translate (once per source chunk)                    → cached Int16 GeoTIFF
+///   native marching squares (many tiles in parallel)          → contour polylines
+///   SQLite writer thread                                      → lunar_focus_cache.sqlite
 use crate::contours::{
-    ContourBuildProgress, GeoBounds, TileKey, bucket_range, import_tile, open_cache_db,
+    ContourBuildProgress, FocusContourSpec, GeoBounds, TileKey, bucket_range, open_cache_db,
     resolve_gdal_tool, tile_exists,
 };
+use crate::marching_squares::{ContourLine, build_tile_contours_with_sampler};
+use rayon::prelude::*;
+use rusqlite::{Connection, params};
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 // ── Lunar zoom specs (matches desktop zoom::lunar_spec_for_zoom exactly) ─────
@@ -61,6 +68,15 @@ pub fn all_lunar_specs() -> [LunarSpec; 5] {
             zoom_bucket: 4,
         },
     ]
+}
+
+fn focus_spec(spec: LunarSpec) -> FocusContourSpec {
+    FocusContourSpec {
+        half_extent_deg: spec.half_extent_deg,
+        raster_size: spec.raster_size,
+        interval_m: spec.interval_m,
+        zoom_bucket: spec.zoom_bucket,
+    }
 }
 
 const SOURCE_CHUNK_CENTER_STEP_DEG: f32 = 4.0;
@@ -115,62 +131,12 @@ fn run_gdal_jp2(cmd: Command, label: &str) -> std::io::Result<()> {
     run_gdal_with_timeout(cmd, label, Duration::from_secs(600))
 }
 
-fn run_gdal_contour_lunar(
-    gdal_contour: &Path,
-    in_tif: &Path,
-    out_gpkg: &Path,
-    interval_m: i32,
-) -> std::io::Result<()> {
-    let mut cmd = Command::new(gdal_contour);
-    cmd.args([
-        "-q",
-        "-f",
-        "GPKG",
-        "-a",
-        "elevation_m",
-        "-i",
-        &interval_m.to_string(),
-        "-nln",
-        "contour",
-    ]);
-    cmd.arg(in_tif).arg(out_gpkg);
-    // Contour generation at fine intervals (50 m) on lunar terrain can take ~60 s
-    let timeout = Duration::from_secs(300);
-    let start = Instant::now();
-    let mut child = cmd.spawn()?;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return if status.success() {
-                Ok(())
-            } else {
-                Err(std::io::Error::other(format!(
-                    "gdal_contour failed with {status}"
-                )))
-            };
-        }
-        if start.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "gdal_contour timed out",
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
-}
-
-fn cleanup(paths: &[&Path]) {
-    for p in paths {
-        let _ = fs::remove_file(p);
-    }
-}
-
 #[derive(Clone)]
 struct SourceChunk {
     path: PathBuf,
     bounds: GeoBounds,
     raster_size: u32,
+    spec: LunarSpec,
 }
 
 fn source_chunk_root(cache_db_path: &Path) -> PathBuf {
@@ -205,6 +171,7 @@ fn source_chunk_for_bounds(
             max_lon: chunk_center_lon + SOURCE_CHUNK_HALF_EXTENT_DEG,
         },
         raster_size: raster_size.max(spec.raster_size),
+        spec,
     }
 }
 
@@ -276,10 +243,231 @@ fn ensure_source_chunk(
         "-co",
         "BLOCKYSIZE=512",
     ]);
+    translate.env("GDAL_NUM_THREADS", "ALL_CPUS");
+    translate.env("OPJ_NUM_THREADS", "ALL_CPUS");
     translate.arg(jp2_path).arg(&tmp_chunk);
     run_gdal_jp2(translate, "gdal_translate (lunar source chunk)").map_err(|e| e.to_string())?;
     persist_temp_file(&tmp_chunk, &chunk.path).map_err(|e| e.to_string())?;
     Ok(chunk)
+}
+
+struct LunarChunkRaster {
+    width: u32,
+    height: u32,
+    bounds: GeoBounds,
+    samples: Vec<f32>,
+}
+
+impl LunarChunkRaster {
+    fn load(path: &Path, bounds: GeoBounds) -> Option<Self> {
+        use std::fs::File;
+        use tiff::decoder::{Decoder, DecodingResult};
+
+        let file = File::open(path)
+            .map_err(|e| eprintln!("[1kEE] lunar chunk open error {}: {e}", path.display()))
+            .ok()?;
+        let mut decoder = Decoder::new(file)
+            .map_err(|e| eprintln!("[1kEE] lunar chunk TIFF init error {}: {e}", path.display()))
+            .ok()?;
+        let (width, height) = decoder
+            .dimensions()
+            .map_err(|e| {
+                eprintln!(
+                    "[1kEE] lunar chunk dimensions error {}: {e}",
+                    path.display()
+                )
+            })
+            .ok()?;
+        let result = decoder
+            .read_image()
+            .map_err(|e| eprintln!("[1kEE] lunar chunk read error {}: {e}", path.display()))
+            .ok()?;
+
+        let samples: Vec<f32> = match result {
+            DecodingResult::I16(data) => data.into_iter().map(|s| s as f32).collect(),
+            DecodingResult::U16(data) => data.into_iter().map(|u| (u as i16) as f32).collect(),
+            DecodingResult::F32(data) => data,
+            DecodingResult::F64(data) => data.into_iter().map(|f| f as f32).collect(),
+            _ => {
+                eprintln!(
+                    "[1kEE] lunar chunk unsupported pixel format in {}",
+                    path.display()
+                );
+                return None;
+            }
+        };
+
+        if samples.len() != (width * height) as usize {
+            eprintln!(
+                "[1kEE] lunar chunk sample count mismatch {}: got {} expected {}",
+                path.display(),
+                samples.len(),
+                width * height
+            );
+            return None;
+        }
+
+        Some(Self {
+            width,
+            height,
+            bounds,
+            samples,
+        })
+    }
+
+    fn get(&self, x: u32, y: u32) -> f32 {
+        self.samples
+            .get((y * self.width + x) as usize)
+            .copied()
+            .unwrap_or(f32::NAN)
+    }
+
+    fn sample(&self, lat: f32, lon: f32) -> f32 {
+        let u = ((lon - self.bounds.min_lon) / (self.bounds.max_lon - self.bounds.min_lon))
+            .clamp(0.0, 0.999_999);
+        let v = ((self.bounds.max_lat - lat) / (self.bounds.max_lat - self.bounds.min_lat))
+            .clamp(0.0, 0.999_999);
+
+        let x = u * self.width.saturating_sub(1) as f32;
+        let y = v * self.height.saturating_sub(1) as f32;
+        let x0 = x.floor() as u32;
+        let y0 = y.floor() as u32;
+        let x1 = (x0 + 1).min(self.width.saturating_sub(1));
+        let y1 = (y0 + 1).min(self.height.saturating_sub(1));
+        let tx = x - x0 as f32;
+        let ty = y - y0 as f32;
+
+        let tl = self.get(x0, y0);
+        let tr = self.get(x1, y0);
+        let bl = self.get(x0, y1);
+        let br = self.get(x1, y1);
+
+        let top = tl + (tr - tl) * tx;
+        let bottom = bl + (br - bl) * tx;
+        top + (bottom - top) * ty
+    }
+}
+
+struct LunarChunkSampler {
+    cache_db_path: PathBuf,
+    spec: LunarSpec,
+    loaded: Vec<(PathBuf, LunarChunkRaster)>,
+    missing: HashSet<PathBuf>,
+}
+
+impl LunarChunkSampler {
+    fn new(cache_db_path: PathBuf, spec: LunarSpec) -> Self {
+        Self {
+            cache_db_path,
+            spec,
+            loaded: Vec::new(),
+            missing: HashSet::new(),
+        }
+    }
+
+    fn sample(&mut self, lat: f32, lon: f32) -> f32 {
+        let chunk = source_chunk_for_bounds(
+            &self.cache_db_path,
+            GeoBounds {
+                min_lat: lat,
+                max_lat: lat,
+                min_lon: lon,
+                max_lon: lon,
+            },
+            self.spec,
+        );
+        if self.missing.contains(&chunk.path) {
+            return f32::NAN;
+        }
+        if let Some(idx) = self.loaded.iter().position(|(path, _)| *path == chunk.path) {
+            let entry = self.loaded.remove(idx);
+            let value = entry.1.sample(lat, lon);
+            self.loaded.insert(0, entry);
+            return value;
+        }
+        match LunarChunkRaster::load(&chunk.path, chunk.bounds) {
+            Some(raster) => {
+                let value = raster.sample(lat, lon);
+                self.loaded.insert(0, (chunk.path, raster));
+                if self.loaded.len() > 8 {
+                    self.loaded.pop();
+                }
+                value
+            }
+            None => {
+                self.missing.insert(chunk.path);
+                f32::NAN
+            }
+        }
+    }
+}
+
+fn encode_gpkg_linestring(points: &[(f32, f32)]) -> Vec<u8> {
+    let n = points.len() as u32;
+    let mut buf = Vec::with_capacity(8 + 1 + 4 + 4 + (n as usize) * 16);
+    buf.extend_from_slice(b"GP");
+    buf.push(0);
+    buf.push(0);
+    buf.extend_from_slice(&4326i32.to_le_bytes());
+    buf.push(0x01);
+    buf.extend_from_slice(&2u32.to_le_bytes());
+    buf.extend_from_slice(&n.to_le_bytes());
+    for &(lon, lat) in points {
+        buf.extend_from_slice(&(lon as f64).to_le_bytes());
+        buf.extend_from_slice(&(lat as f64).to_le_bytes());
+    }
+    buf
+}
+
+fn write_tile_native_lunar(
+    conn: &mut Connection,
+    tile: TileKey,
+    contours: &[ContourLine],
+) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "DELETE FROM contour_tiles WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
+        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
+    )?;
+    tx.execute(
+        "DELETE FROM contour_tile_manifest WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
+        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
+    )?;
+
+    for (fid, line) in contours.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO contour_tiles (zoom_bucket,lat_bucket,lon_bucket,fid,elevation_m,geom)
+             VALUES (?1,?2,?3,?4,?5,?6)",
+            params![
+                tile.zoom_bucket,
+                tile.lat_bucket,
+                tile.lon_bucket,
+                fid as i64,
+                line.elevation_m,
+                encode_gpkg_linestring(&line.points),
+            ],
+        )?;
+    }
+    tx.execute(
+        "INSERT INTO contour_tile_manifest (zoom_bucket,lat_bucket,lon_bucket,contour_count,built_at)
+         VALUES (?1,?2,?3,?4,unixepoch())",
+        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket, contours.len() as i64],
+    )?;
+
+    tx.execute(
+        "DELETE FROM coastline_tiles WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
+        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
+    )?;
+    tx.execute(
+        "DELETE FROM coastline_tile_manifest WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
+        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
+    )?;
+    tx.execute(
+        "INSERT INTO coastline_tile_manifest (zoom_bucket,lat_bucket,lon_bucket,line_count)
+         VALUES (?1,?2,?3,0)",
+        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
+    )?;
+    tx.commit()
 }
 
 // ── Main entry point ─────────────────────────────────────────────────────────
@@ -295,7 +483,6 @@ pub fn build_lunar_contour_tiles(
     command: LunarBuildCommand,
     progress: &mut dyn FnMut(ContourBuildProgress),
 ) -> Result<String, String> {
-    // ── Validate inputs ───────────────────────────────────────────────────────
     if !command.jp2_path.exists() {
         return Err(format!(
             "SLDEM JP2 not found: {}",
@@ -303,11 +490,7 @@ pub fn build_lunar_contour_tiles(
         ));
     }
     let gdal_translate = resolve_gdal_tool(&command.gdal_bin_dir, "gdal_translate");
-    let gdal_contour = resolve_gdal_tool(&command.gdal_bin_dir, "gdal_contour");
-    for (tool, name) in [
-        (&gdal_translate, "gdal_translate"),
-        (&gdal_contour, "gdal_contour"),
-    ] {
+    for (tool, name) in [(&gdal_translate, "gdal_translate")] {
         match Command::new(tool).arg("--version").output() {
             Ok(out) if out.status.success() => {
                 let ver = String::from_utf8_lossy(&out.stdout);
@@ -327,14 +510,6 @@ pub fn build_lunar_contour_tiles(
         }
     }
 
-    let tmp_dir = command.tmp_dir.clone().unwrap_or_else(|| {
-        command
-            .cache_db_path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join("lunar_focus_tmp")
-    });
-    fs::create_dir_all(&tmp_dir).map_err(|e| e.to_string())?;
     open_cache_db(&command.cache_db_path).map_err(|e| e.to_string())?;
 
     let specs = all_lunar_specs();
@@ -433,145 +608,181 @@ pub fn build_lunar_contour_tiles(
         ));
     }
 
-    // ── Sequential build (all tiles read from the same JP2 file) ─────────────
-    // Parallel reads from the same large JP2 cause heavy I/O contention and
-    // make each individual read slower.  Sequential is simpler and more reliable.
-    let mut built = 0usize;
-    let mut errors = 0usize;
+    {
+        let mut by_zoom: BTreeMap<i32, Vec<_>> = BTreeMap::new();
+        for item in work.drain(..) {
+            by_zoom.entry(item.tile.zoom_bucket).or_default().push(item);
+        }
+        let buckets: Vec<Vec<_>> = by_zoom.into_values().collect();
+        let max_len = buckets.iter().map(|v| v.len()).max().unwrap_or(0);
+        for i in 0..max_len {
+            for bucket in &buckets {
+                if let Some(item) = bucket.get(i) {
+                    work.push(TileWork {
+                        tile: item.tile,
+                        bounds: item.bounds,
+                        spec: item.spec,
+                    });
+                }
+            }
+        }
+    }
 
-    for (idx, item) in work.iter().enumerate() {
-        let fraction = idx as f32 / to_build as f32;
-        let center_lat =
-            (item.tile.lat_bucket as f32 * item.spec.half_extent_deg * 0.45).clamp(-89.999, 89.999);
-        let center_lon = item.tile.lon_bucket as f32 * item.spec.half_extent_deg * 0.45;
+    let mut source_chunks: BTreeMap<PathBuf, SourceChunk> = BTreeMap::new();
+    for item in &work {
+        let chunk = source_chunk_for_bounds(&command.cache_db_path, item.bounds, item.spec);
+        source_chunks.entry(chunk.path.clone()).or_insert(chunk);
+    }
+    let missing_chunks: Vec<SourceChunk> = source_chunks
+        .values()
+        .filter(|chunk| !chunk.path.exists())
+        .cloned()
+        .collect();
+
+    progress(ContourBuildProgress::info(
+        "Preparing",
+        0.0,
+        format!(
+            "{} source chunks needed ({} already cached)",
+            source_chunks.len(),
+            source_chunks.len().saturating_sub(missing_chunks.len())
+        ),
+    ));
+
+    for (index, chunk) in missing_chunks.iter().enumerate() {
+        let fraction = index as f32 / missing_chunks.len().max(1) as f32;
         progress(ContourBuildProgress::info(
-            "Building",
+            "Preparing",
             fraction,
             format!(
-                "[{}/{}] z{} lat{:.2} lon{:.2} ({} m interval)",
-                idx + 1,
-                to_build,
-                item.tile.zoom_bucket,
-                center_lat,
-                center_lon,
-                item.spec.interval_m,
+                "[{}/{}] decoding SLDEM chunk {}",
+                index + 1,
+                missing_chunks.len(),
+                chunk.path.display()
             ),
         ));
-
-        let stem = format!(
-            "z{}_lat{}_lon{}",
-            item.tile.zoom_bucket, item.tile.lat_bucket, item.tile.lon_bucket
-        );
-        let tmp_tif = tmp_dir.join(format!("{stem}.tmp.tif"));
-        let tmp_gpkg = tmp_dir.join(format!("{stem}.tmp.gpkg"));
-        cleanup(&[&tmp_tif, &tmp_gpkg]);
-
-        let chunk = match ensure_source_chunk(
+        ensure_source_chunk(
             &command.jp2_path,
             &command.cache_db_path,
             &gdal_translate,
-            item.spec,
-            item.bounds,
-        ) {
-            Ok(chunk) => chunk,
-            Err(e) => {
-                progress(ContourBuildProgress::error(
-                    "Building",
-                    fraction,
-                    format!(
-                        "source chunk failed for z{} ({:.2},{:.2}): {e}",
-                        item.tile.zoom_bucket, center_lat, center_lon
-                    ),
-                ));
-                cleanup(&[&tmp_tif, &tmp_gpkg]);
-                errors += 1;
-                continue;
-            }
-        };
-
-        // Step 1: gdal_translate — crop the cached source chunk to the exact tile
-        let mut translate = Command::new(&gdal_translate);
-        translate.args([
-            "-q",
-            "-projwin",
-            &item.bounds.min_lon.to_string(),
-            &item.bounds.max_lat.to_string(),
-            &item.bounds.max_lon.to_string(),
-            &item.bounds.min_lat.to_string(),
-            "-outsize",
-            &item.spec.raster_size.to_string(),
-            &item.spec.raster_size.to_string(),
-            "-ot",
-            "Int16",
-            "-of",
-            "GTiff",
-        ]);
-        translate.arg(&chunk.path).arg(&tmp_tif);
-
-        if let Err(e) = run_gdal_with_timeout(
-            translate,
-            "gdal_translate (lunar cached tile)",
-            Duration::from_secs(120),
-        ) {
-            progress(ContourBuildProgress::error(
-                "Building",
-                fraction,
-                format!(
-                    "gdal_translate failed for z{} ({:.2},{:.2}): {e}",
-                    item.tile.zoom_bucket, center_lat, center_lon
-                ),
-            ));
-            cleanup(&[&tmp_tif, &tmp_gpkg]);
-            errors += 1;
-            continue;
-        }
-
-        // Step 2: gdal_contour
-        if let Err(e) =
-            run_gdal_contour_lunar(&gdal_contour, &tmp_tif, &tmp_gpkg, item.spec.interval_m)
-        {
-            progress(ContourBuildProgress::error(
-                "Building",
-                fraction,
-                format!("gdal_contour failed: {e}"),
-            ));
-            cleanup(&[&tmp_tif, &tmp_gpkg]);
-            errors += 1;
-            continue;
-        }
-
-        // Step 3: import into DB
-        if let Err(e) = import_tile(&command.cache_db_path, item.tile, &tmp_gpkg) {
-            progress(ContourBuildProgress::error(
-                "Building",
-                fraction,
-                format!("DB import failed: {e}"),
-            ));
-            cleanup(&[&tmp_tif, &tmp_gpkg]);
-            errors += 1;
-            continue;
-        }
-
-        cleanup(&[&tmp_tif, &tmp_gpkg]);
-        built += 1;
-        progress(ContourBuildProgress::built(
-            "Building",
-            (idx + 1) as f32 / to_build as f32,
-            format!(
-                "Built tile z{} ({:.2},{:.2})",
-                item.tile.zoom_bucket, center_lat, center_lon
-            ),
-            (
-                item.bounds.min_lat,
-                item.bounds.max_lat,
-                item.bounds.min_lon,
-                item.bounds.max_lon,
-            ),
-        ));
+            chunk.spec,
+            chunk.bounds,
+        )?;
     }
 
-    let summary = format!(
+    progress(ContourBuildProgress::info(
+        "Building",
+        0.0,
+        format!(
+            "Native engine over cached chunks — {} tiles, {} source chunks",
+            to_build,
+            source_chunks.len()
+        ),
+    ));
+
+    type ComputeResult = (TileKey, GeoBounds, Vec<ContourLine>);
+    let (compute_tx, compute_rx) = mpsc::channel::<ComputeResult>();
+    enum Outcome {
+        Built(GeoBounds),
+        Error(String),
+    }
+    let (outcome_tx, rx) = mpsc::channel::<Outcome>();
+    let done_count = Arc::new(AtomicUsize::new(0));
+    let cache_db_owned = command.cache_db_path.clone();
+
+    std::thread::spawn(move || {
+        let num_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .expect("rayon pool");
+        pool.install(|| {
+            work.into_par_iter()
+                .map_init(
+                    || {
+                        LunarChunkSampler::new(
+                            cache_db_owned.clone(),
+                            LunarSpec {
+                                half_extent_deg: 0.55,
+                                raster_size: 704,
+                                interval_m: 50,
+                                zoom_bucket: 4,
+                            },
+                        )
+                    },
+                    |sampler, item| {
+                        sampler.spec = item.spec;
+                        let (contours, _) = build_tile_contours_with_sampler(
+                            focus_spec(item.spec),
+                            item.bounds,
+                            |lat, lon| sampler.sample(lat, lon),
+                        );
+                        (item.tile, item.bounds, contours)
+                    },
+                )
+                .for_each_with(compute_tx, |tx, result| {
+                    let _ = tx.send(result);
+                });
+        });
+    });
+
+    let cache_db_owned = command.cache_db_path.clone();
+    let done_arc = done_count.clone();
+    std::thread::spawn(move || {
+        let mut conn = match open_cache_db(&cache_db_owned) {
+            Ok(conn) => conn,
+            Err(e) => {
+                let _ = outcome_tx.send(Outcome::Error(format!("open cache DB failed: {e}")));
+                return;
+            }
+        };
+        for (tile, tile_bounds, contours) in compute_rx {
+            let outcome = write_tile_native_lunar(&mut conn, tile, &contours);
+            done_arc.fetch_add(1, Ordering::Relaxed);
+            let _ = outcome_tx.send(match outcome {
+                Ok(()) => Outcome::Built(tile_bounds),
+                Err(e) => Outcome::Error(format!(
+                    "z{} ({},{}) — {e}",
+                    tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket
+                )),
+            });
+        }
+    });
+
+    let mut built = 0usize;
+    let mut errors = 0usize;
+    for outcome in rx {
+        let done = done_count.load(Ordering::Relaxed);
+        let fraction = done as f32 / to_build.max(1) as f32;
+        match outcome {
+            Outcome::Built(tile_bounds) => {
+                built += 1;
+                progress(ContourBuildProgress::built(
+                    "Building",
+                    fraction,
+                    format!("{done}/{to_build} tiles built"),
+                    (
+                        tile_bounds.min_lat,
+                        tile_bounds.max_lat,
+                        tile_bounds.min_lon,
+                        tile_bounds.max_lon,
+                    ),
+                ));
+            }
+            Outcome::Error(message) => {
+                errors += 1;
+                progress(ContourBuildProgress::error("Building", fraction, message));
+            }
+        }
+    }
+
+    if let Ok(conn) = Connection::open(&command.cache_db_path) {
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)");
+    }
+
+    Ok(format!(
         "Lunar contours complete: {built} built, {skipped} already cached, {errors} errors, {total} total tiles"
-    );
-    Ok(summary)
+    ))
 }

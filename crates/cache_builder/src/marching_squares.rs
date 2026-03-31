@@ -223,17 +223,13 @@ pub struct ContourLine {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-/// Build all contour lines for one tile.
-///
-/// Returns `(contours, coastlines)` where `coastlines` are the 0 m iso-lines.
-/// Both vecs may be empty for ocean / nodata tiles.
-pub fn build_tile_contours(
-    sampler: &mut NativeSrtmSampler,
+pub fn build_tile_contours_with_sampler(
     spec: FocusContourSpec,
     bounds: GeoBounds,
+    mut sample: impl FnMut(f32, f32) -> f32,
 ) -> (Vec<ContourLine>, Vec<Vec<(f32, f32)>>) {
     let n = spec.raster_size as usize;
-    let grid = build_grid(sampler, n, bounds);
+    let grid = build_grid(n, bounds, &mut sample);
 
     let (mut min_e, mut max_e) = (f32::INFINITY, f32::NEG_INFINITY);
     for &v in &grid {
@@ -246,7 +242,6 @@ pub fn build_tile_contours(
         return (Vec::new(), Vec::new()); // all nodata
     }
 
-    // Coastline (0 m iso-line) handled separately
     let coast_segs = extract_segments(&grid, n, 0.0, bounds);
     let coastlines = if coast_segs.is_empty() {
         Vec::new()
@@ -257,7 +252,6 @@ pub fn build_tile_contours(
             .collect()
     };
 
-    // Contour intervals
     let interval = spec.interval_m as f32;
     let lo = ((min_e / interval).ceil() as i32) * spec.interval_m;
     let hi = ((max_e / interval).floor() as i32) * spec.interval_m;
@@ -285,9 +279,21 @@ pub fn build_tile_contours(
     (contours, coastlines)
 }
 
+/// Build all contour lines for one tile.
+///
+/// Returns `(contours, coastlines)` where `coastlines` are the 0 m iso-lines.
+/// Both vecs may be empty for ocean / nodata tiles.
+pub fn build_tile_contours(
+    sampler: &mut NativeSrtmSampler,
+    spec: FocusContourSpec,
+    bounds: GeoBounds,
+) -> (Vec<ContourLine>, Vec<Vec<(f32, f32)>>) {
+    build_tile_contours_with_sampler(spec, bounds, |lat, lon| sampler.sample(lat, lon))
+}
+
 // ── Grid building ─────────────────────────────────────────────────────────────
 
-fn build_grid(sampler: &mut NativeSrtmSampler, n: usize, bounds: GeoBounds) -> Vec<f32> {
+fn build_grid(n: usize, bounds: GeoBounds, sample: &mut dyn FnMut(f32, f32) -> f32) -> Vec<f32> {
     let dlat = (bounds.max_lat - bounds.min_lat) / n as f32;
     let dlon = (bounds.max_lon - bounds.min_lon) / n as f32;
     let mut grid = Vec::with_capacity(n * n);
@@ -295,7 +301,7 @@ fn build_grid(sampler: &mut NativeSrtmSampler, n: usize, bounds: GeoBounds) -> V
         let lat = bounds.max_lat - (row as f32 + 0.5) * dlat;
         for col in 0..n {
             let lon = bounds.min_lon + (col as f32 + 0.5) * dlon;
-            grid.push(sampler.sample(lat, lon));
+            grid.push(sample(lat, lon));
         }
     }
     grid
