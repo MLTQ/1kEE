@@ -31,8 +31,8 @@ pub(super) fn draw_tile_pulse_grid(
     const EDGE_BAND: f32 = 0.14; // fraction of cycle that counts as "burning"
     const CELL_INSET: f32 = 0.10; // fractional gap between cells (10% each side)
 
-    let half_extent = half_extent_override
-        .unwrap_or_else(|| srtm_focus_cache::half_extent_for_zoom(render_zoom));
+    let half_extent =
+        half_extent_override.unwrap_or_else(|| srtm_focus_cache::half_extent_for_zoom(render_zoom));
     let bucket_step = half_extent * 0.45;
     let visual_half = visual_half_extent_for_zoom(view.local_zoom);
     let km_per_deg_lat = 111.32f32;

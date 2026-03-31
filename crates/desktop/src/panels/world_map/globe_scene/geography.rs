@@ -1,22 +1,22 @@
-use crate::model::{GeoJsonFeature, GeoJsonGeometry, GeoJsonLayer, GeoPoint, GlobeViewState};
-use crate::theme;
 use super::GlobeLayout;
 use super::camera::GlobeLod;
 use super::contour_asset;
 use super::gebco_depth_fill;
 use super::projection::{draw_geo_path, project_geo};
+use crate::model::{GeoJsonFeature, GeoJsonGeometry, GeoJsonLayer, GeoPoint, GlobeViewState};
+use crate::theme;
 
 // ── Lunar feature labels ──────────────────────────────────────────────────────
 // Major maria and craters with lat/lon in degrees (IAU selenographic coordinates).
 const LUNAR_FEATURES: &[(&str, f32, f32)] = &[
     ("Oceanus Procellarum", 18.4, -57.4),
-    ("Mare Imbrium",        32.8, -15.6),
-    ("Mare Tranquillitatis",  8.5,  31.4),
-    ("Mare Serenitatis",    28.0,  17.5),
-    ("Mare Crisium",        17.0,  59.1),
-    ("Mare Nubium",        -21.3, -16.6),
-    ("Mare Fecunditatis",   -4.5,  51.3),
-    ("Mare Humorum",       -24.4, -38.6),
+    ("Mare Imbrium", 32.8, -15.6),
+    ("Mare Tranquillitatis", 8.5, 31.4),
+    ("Mare Serenitatis", 28.0, 17.5),
+    ("Mare Crisium", 17.0, 59.1),
+    ("Mare Nubium", -21.3, -16.6),
+    ("Mare Fecunditatis", -4.5, 51.3),
+    ("Mare Humorum", -24.4, -38.6),
 ];
 
 pub(super) fn draw_global_coastlines(
@@ -390,7 +390,11 @@ pub(super) fn draw_lunar_topo(
                 } else {
                     // Below datum — bluish-grey to hint at the dark maria floors.
                     let base = egui::Color32::from_rgb(90, 100, 130);
-                    if major { base } else { base.gamma_multiply(0.55) }
+                    if major {
+                        base
+                    } else {
+                        base.gamma_multiply(0.55)
+                    }
                 };
                 draw_geo_path(
                     painter,
@@ -428,4 +432,3 @@ pub(super) fn draw_lunar_topo(
         );
     }
 }
-

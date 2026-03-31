@@ -199,14 +199,8 @@ pub fn ensure_lunar_bucket_asset(
     let cache_root = cache_root.to_path_buf();
     let cache_db_path = cache_db_path.to_path_buf();
     std::thread::spawn(move || {
-        let _ = build_lunar_contour_tile(
-            &jp2_path,
-            &cache_root,
-            &cache_db_path,
-            tile,
-            bounds,
-            spec,
-        );
+        let _ =
+            build_lunar_contour_tile(&jp2_path, &cache_root, &cache_db_path, tile, bounds, spec);
         if let Ok(mut guard) = lunar_pending_set().lock() {
             guard.remove(&tile);
         }

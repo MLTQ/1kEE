@@ -355,38 +355,55 @@ fn tab_paths(ui: &mut egui::Ui, model: &mut AppModel) {
                 )
                 .ok()
                 .and_then(|conn| {
-                    let tile_count: i64 = conn.query_row(
-                        "SELECT COUNT(*) FROM contour_tile_manifest",
-                        [],
-                        |row| row.get(0),
-                    ).unwrap_or(0);
-                    let total_contours: i64 = conn.query_row(
-                        "SELECT COALESCE(SUM(contour_count), 0) FROM contour_tile_manifest",
-                        [],
-                        |row| row.get(0),
-                    ).unwrap_or(0);
+                    let tile_count: i64 = conn
+                        .query_row("SELECT COUNT(*) FROM contour_tile_manifest", [], |row| {
+                            row.get(0)
+                        })
+                        .unwrap_or(0);
+                    let total_contours: i64 = conn
+                        .query_row(
+                            "SELECT COALESCE(SUM(contour_count), 0) FROM contour_tile_manifest",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .unwrap_or(0);
                     // Per-zoom-bucket summary: "z0:123 z6:456"
-                    let mut stmt = conn.prepare(
-                        "SELECT zoom_bucket, COUNT(*), COALESCE(SUM(contour_count),0) \
-                         FROM contour_tile_manifest GROUP BY zoom_bucket ORDER BY zoom_bucket"
-                    ).ok()?;
-                    let rows: Vec<(i32, i64, i64)> = stmt.query_map([], |row| {
-                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-                    }).ok()?.flatten().collect();
-                    let zoom_summary = rows.iter()
+                    let mut stmt = conn
+                        .prepare(
+                            "SELECT zoom_bucket, COUNT(*), COALESCE(SUM(contour_count),0) \
+                         FROM contour_tile_manifest GROUP BY zoom_bucket ORDER BY zoom_bucket",
+                        )
+                        .ok()?;
+                    let rows: Vec<(i32, i64, i64)> = stmt
+                        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                        .ok()?
+                        .flatten()
+                        .collect();
+                    let zoom_summary = rows
+                        .iter()
                         .map(|(z, tiles, contours)| format!("z{z}:{tiles}t/{contours}c"))
                         .collect::<Vec<_>>()
                         .join(" ");
-                    Some(CacheStats { tile_count, total_contours, zoom_summary })
+                    Some(CacheStats {
+                        tile_count,
+                        total_contours,
+                        zoom_summary,
+                    })
                 });
 
                 if let Some(s) = stats {
                     let has_tiles = s.tile_count > 0;
                     let has_contours = s.total_contours > 0;
                     let (indicator, color) = if !has_tiles {
-                        ("⚠ 0 tiles — wrong file?", egui::Color32::from_rgb(220, 160, 40))
+                        (
+                            "⚠ 0 tiles — wrong file?",
+                            egui::Color32::from_rgb(220, 160, 40),
+                        )
                     } else if !has_contours {
-                        ("⚠ 0 contour lines — marching squares may have failed!", egui::Color32::from_rgb(220, 100, 60))
+                        (
+                            "⚠ 0 contour lines — marching squares may have failed!",
+                            egui::Color32::from_rgb(220, 100, 60),
+                        )
                     } else {
                         ("✓", egui::Color32::from_rgb(80, 200, 100))
                     };
@@ -394,7 +411,10 @@ fn tab_paths(ui: &mut egui::Ui, model: &mut AppModel) {
                         color,
                         format!(
                             "Contour cache ({} tiles, {} lines) {}: {}",
-                            s.tile_count, s.total_contours, indicator, p.display()
+                            s.tile_count,
+                            s.total_contours,
+                            indicator,
+                            p.display()
                         ),
                     );
                     if !s.zoom_summary.is_empty() {
@@ -433,9 +453,9 @@ fn tab_paths(ui: &mut egui::Ui, model: &mut AppModel) {
         let root = model.selected_root.as_deref();
         let derived = terrain_assets::find_derived_root(root);
 
-        let ok_color   = egui::Color32::from_rgb(80, 200, 100);
+        let ok_color = egui::Color32::from_rgb(80, 200, 100);
         let warn_color = egui::Color32::from_rgb(220, 100, 60);
-        let dim_color  = egui::Color32::from_rgb(150, 180, 200);
+        let dim_color = egui::Color32::from_rgb(150, 180, 200);
 
         match &derived {
             Some(d) => {
@@ -443,18 +463,22 @@ fn tab_paths(ui: &mut egui::Ui, model: &mut AppModel) {
 
                 // Files that each layer depends on
                 let checks: &[(&str, &str)] = &[
-                    ("gebco_depth_1440x720.bil",        "Globe bathymetry fill (depth texture)"),
-                    ("gebco_2025_contours_200m.gpkg",   "Bathymetry isobaths (globe + local)"),
-                    ("gebco_2025_coastline_0m.gpkg",    "Global coastlines"),
+                    (
+                        "gebco_depth_1440x720.bil",
+                        "Globe bathymetry fill (depth texture)",
+                    ),
+                    (
+                        "gebco_2025_contours_200m.gpkg",
+                        "Bathymetry isobaths (globe + local)",
+                    ),
+                    ("gebco_2025_coastline_0m.gpkg", "Global coastlines"),
                 ];
-                let building = crate::panels::world_map::srtm_focus_cache::is_gebco_derived_building();
+                let building =
+                    crate::panels::world_map::srtm_focus_cache::is_gebco_derived_building();
                 for (filename, label) in checks {
                     let path = d.join("terrain").join(filename);
                     if path.exists() {
-                        ui.colored_label(
-                            ok_color,
-                            format!("  ✓ {label}: terrain/{filename}"),
-                        );
+                        ui.colored_label(ok_color, format!("  ✓ {label}: terrain/{filename}"));
                     } else if building && filename != &"gebco_2025_coastline_0m.gpkg" {
                         ui.colored_label(
                             egui::Color32::from_rgb(180, 180, 60),

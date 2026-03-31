@@ -18,13 +18,13 @@ enum ActiveTab {
 
 #[derive(Clone)]
 struct LunarForm {
-    jp2_path:    String,
-    lunar_db:    String,
+    jp2_path: String,
+    lunar_db: String,
     gdal_bin_dir: String,
-    min_lat:     String,
-    max_lat:     String,
-    min_lon:     String,
-    max_lon:     String,
+    min_lat: String,
+    max_lat: String,
+    min_lon: String,
+    max_lon: String,
     /// Per-bucket checkbox state (index = zoom_bucket 0..=4)
     zoom_buckets: [bool; 5],
 }
@@ -214,9 +214,9 @@ impl BuilderApp {
                     .to_string(),
                 gdal_bin_dir: String::new(),
                 min_lat: "-60.0".to_owned(),
-                max_lat:  "60.0".to_owned(),
+                max_lat: "60.0".to_owned(),
                 min_lon: "-180.0".to_owned(),
-                max_lon:  "180.0".to_owned(),
+                max_lon: "180.0".to_owned(),
                 zoom_buckets: [true, true, false, false, false],
             },
             lunar_drag_start: None,
@@ -255,20 +255,26 @@ impl BuilderApp {
             self.push_log(format!("Contour DB not found: {}", db_path.display()));
             return;
         }
-        let Ok(conn) = rusqlite::Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        let Ok(conn) =
+            rusqlite::Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        else {
             self.push_log("Failed to open contour DB for scanning.".to_owned());
             return;
         };
-        let Ok(mut stmt) = conn.prepare(
-            "SELECT zoom_bucket, lat_bucket, lon_bucket FROM contour_tile_manifest"
-        ) else {
+        let Ok(mut stmt) =
+            conn.prepare("SELECT zoom_bucket, lat_bucket, lon_bucket FROM contour_tile_manifest")
+        else {
             self.push_log("Failed to query contour_tile_manifest.".to_owned());
             return;
         };
         let specs = crate::contours::all_specs();
         let mut tiles = Vec::new();
         if let Ok(rows) = stmt.query_map([], |row| {
-            Ok((row.get::<_, i32>(0)?, row.get::<_, i32>(1)?, row.get::<_, i32>(2)?))
+            Ok((
+                row.get::<_, i32>(0)?,
+                row.get::<_, i32>(1)?,
+                row.get::<_, i32>(2)?,
+            ))
         }) {
             for row in rows.flatten() {
                 let (zoom_bucket, lat_bucket, lon_bucket) = row;
@@ -297,7 +303,10 @@ impl BuilderApp {
         }
         let command = match self.contours_command() {
             Ok(cmd) => cmd,
-            Err(e) => { self.push_log(e); return; }
+            Err(e) => {
+                self.push_log(e);
+                return;
+            }
         };
         self.status = "Building Contours".to_owned();
         self.progress = 0.0;
@@ -312,7 +321,9 @@ impl BuilderApp {
 
     fn contours_command(&self) -> Result<ContoursBboxCommand, String> {
         let parse_num = |label: &str, value: &str| {
-            value.parse::<f32>().map_err(|_| format!("Invalid {} value '{}'", label, value))
+            value
+                .parse::<f32>()
+                .map_err(|_| format!("Invalid {} value '{}'", label, value))
         };
         let srtm_root = {
             let t = self.form.srtm_root.trim();
@@ -464,8 +475,7 @@ impl BuilderApp {
                         .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
                         .map(|duration| duration.as_secs())
                         .unwrap_or_default();
-                    total_bytes +=
-                        metadata.as_ref().map(|meta| meta.len()).unwrap_or_default();
+                    total_bytes += metadata.as_ref().map(|meta| meta.len()).unwrap_or_default();
                     files.push((modified, path));
                 }
             }
@@ -506,20 +516,26 @@ impl BuilderApp {
             self.push_log(format!("Lunar cache DB not found: {}", db_path.display()));
             return;
         }
-        let Ok(conn) = rusqlite::Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        let Ok(conn) =
+            rusqlite::Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        else {
             self.push_log("Failed to open lunar cache DB.".to_owned());
             return;
         };
-        let Ok(mut stmt) = conn.prepare(
-            "SELECT zoom_bucket, lat_bucket, lon_bucket FROM contour_tile_manifest"
-        ) else {
+        let Ok(mut stmt) =
+            conn.prepare("SELECT zoom_bucket, lat_bucket, lon_bucket FROM contour_tile_manifest")
+        else {
             self.push_log("Failed to query lunar contour_tile_manifest.".to_owned());
             return;
         };
         let specs = all_lunar_specs();
         let mut tiles = Vec::new();
         if let Ok(rows) = stmt.query_map([], |row| {
-            Ok((row.get::<_, i32>(0)?, row.get::<_, i32>(1)?, row.get::<_, i32>(2)?))
+            Ok((
+                row.get::<_, i32>(0)?,
+                row.get::<_, i32>(1)?,
+                row.get::<_, i32>(2)?,
+            ))
         }) {
             for row in rows.flatten() {
                 let (zoom_bucket, lat_bucket, lon_bucket) = row;
@@ -548,7 +564,10 @@ impl BuilderApp {
         }
         let command = match self.lunar_command() {
             Ok(cmd) => cmd,
-            Err(e) => { self.push_log(e); return; }
+            Err(e) => {
+                self.push_log(e);
+                return;
+            }
         };
         self.status = "Building Lunar Contours".to_owned();
         self.progress = 0.0;
@@ -556,8 +575,10 @@ impl BuilderApp {
         self.lunar_live_tiles.clear();
         self.push_log(format!(
             "Starting lunar build for bbox [{}, {}] x [{}, {}]",
-            self.lunar_form.min_lat, self.lunar_form.max_lat,
-            self.lunar_form.min_lon, self.lunar_form.max_lon,
+            self.lunar_form.min_lat,
+            self.lunar_form.max_lat,
+            self.lunar_form.min_lon,
+            self.lunar_form.max_lon,
         ));
         self.active_job = Some(spawn_job(BuildJob::LunarContours(command)));
     }
@@ -573,7 +594,8 @@ impl BuilderApp {
             return Err("Lunar cache DB path is required.".to_owned());
         }
         let parse = |label: &str, v: &str| {
-            v.parse::<f32>().map_err(|_| format!("Invalid {} '{}'", label, v))
+            v.parse::<f32>()
+                .map_err(|_| format!("Invalid {} '{}'", label, v))
         };
         let min_lat = parse("min lat", &f.min_lat)?;
         let max_lat = parse("max lat", &f.max_lat)?;
@@ -582,19 +604,25 @@ impl BuilderApp {
         if min_lat >= max_lat || min_lon >= max_lon {
             return Err("Invalid bbox: min must be less than max.".to_owned());
         }
-        let zoom_buckets: Vec<i32> = f.zoom_buckets.iter().enumerate()
+        let zoom_buckets: Vec<i32> = f
+            .zoom_buckets
+            .iter()
+            .enumerate()
             .filter_map(|(i, &on)| if on { Some(i as i32) } else { None })
             .collect();
         if zoom_buckets.is_empty() {
             return Err("Select at least one zoom level.".to_owned());
         }
         Ok(LunarBuildCommand {
-            jp2_path:      PathBuf::from(jp2),
+            jp2_path: PathBuf::from(jp2),
             cache_db_path: PathBuf::from(db),
-            tmp_dir:       None,
-            min_lat, max_lat, min_lon, max_lon,
+            tmp_dir: None,
+            min_lat,
+            max_lat,
+            min_lon,
+            max_lon,
             zoom_buckets,
-            gdal_bin_dir:  PathBuf::from(f.gdal_bin_dir.trim()),
+            gdal_bin_dir: PathBuf::from(f.gdal_bin_dir.trim()),
         })
     }
 
@@ -667,7 +695,10 @@ impl BuilderApp {
         let specs = all_lunar_specs();
         ui.horizontal_wrapped(|ui| {
             for (i, spec) in specs.iter().enumerate() {
-                let label = format!("Z{} ({}m, {:.1}°)", i, spec.interval_m, spec.half_extent_deg);
+                let label = format!(
+                    "Z{} ({}m, {:.1}°)",
+                    i, spec.interval_m, spec.half_extent_deg
+                );
                 ui.checkbox(&mut self.lunar_form.zoom_buckets[i], label);
             }
         });
@@ -695,10 +726,8 @@ impl BuilderApp {
             }
         });
 
-        let (response, painter) = ui.allocate_painter(
-            egui::Vec2::new(280.0, 140.0),
-            egui::Sense::click_and_drag(),
-        );
+        let (response, painter) =
+            ui.allocate_painter(egui::Vec2::new(280.0, 140.0), egui::Sense::click_and_drag());
         let rect = response.rect;
 
         // Background
@@ -706,7 +735,7 @@ impl BuilderApp {
 
         // SLDEM coverage band (±60° lat) — subtle highlight
         {
-            let y_top    = lat_to_y(rect,  60.0);
+            let y_top = lat_to_y(rect, 60.0);
             let y_bottom = lat_to_y(rect, -60.0);
             let band = egui::Rect::from_min_max(
                 egui::pos2(rect.left(), y_top),
@@ -722,7 +751,8 @@ impl BuilderApp {
             let tile_rect = egui::Rect::from_min_max(
                 egui::pos2(lon_to_x(rect, min_lon), lat_to_y(rect, max_lat)),
                 egui::pos2(lon_to_x(rect, max_lon), lat_to_y(rect, min_lat)),
-            ).expand(0.5);
+            )
+            .expand(0.5);
             painter.rect_filled(tile_rect, 0.0, color);
         }
         // Live tiles (bright green)
@@ -730,29 +760,40 @@ impl BuilderApp {
             let tile_rect = egui::Rect::from_min_max(
                 egui::pos2(lon_to_x(rect, min_lon), lat_to_y(rect, max_lat)),
                 egui::pos2(lon_to_x(rect, max_lon), lat_to_y(rect, min_lat)),
-            ).expand(0.5);
-            painter.rect_filled(tile_rect, 0.0, Color32::from_rgba_unmultiplied(80, 255, 120, 210));
+            )
+            .expand(0.5);
+            painter.rect_filled(
+                tile_rect,
+                0.0,
+                Color32::from_rgba_unmultiplied(80, 255, 120, 210),
+            );
         }
 
         // Graticule
-        let grid  = Color32::from_rgb(20, 40, 80);
+        let grid = Color32::from_rgb(20, 40, 80);
         let equat = Color32::from_rgb(40, 80, 120);
         for lon in [-180i32, -120, -60, 0, 60, 120, 180] {
             let x = lon_to_x(rect, lon as f32);
-            painter.line_segment([egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                egui::Stroke::new(1.0, grid));
+            painter.line_segment(
+                [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                egui::Stroke::new(1.0, grid),
+            );
         }
         for lat in [-90i32, -60, -30, 0, 30, 60, 90] {
             let y = lat_to_y(rect, lat as f32);
             let c = if lat == 0 { equat } else { grid };
-            painter.line_segment([egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-                egui::Stroke::new(if lat == 60 || lat == -60 { 1.5 } else { 1.0 }, c));
+            painter.line_segment(
+                [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+                egui::Stroke::new(if lat == 60 || lat == -60 { 1.5 } else { 1.0 }, c),
+            );
         }
         // ±60° labels
         for (lat, label) in [(60.0f32, "+60°"), (-60.0, "-60°")] {
             let y = lat_to_y(rect, lat);
-            painter.text(egui::pos2(rect.left() + 2.0, y - 7.0),
-                egui::Align2::LEFT_TOP, label,
+            painter.text(
+                egui::pos2(rect.left() + 2.0, y - 7.0),
+                egui::Align2::LEFT_TOP,
+                label,
                 egui::FontId::proportional(7.5),
                 Color32::from_rgb(80, 140, 220),
             );
@@ -761,7 +802,8 @@ impl BuilderApp {
         // Country outlines
         let coast = Color32::from_rgb(60, 90, 110);
         for ring in coastline_rings() {
-            let pts: Vec<egui::Pos2> = ring.iter()
+            let pts: Vec<egui::Pos2> = ring
+                .iter()
                 .map(|[lon, lat]| egui::pos2(lon_to_x(rect, *lon), lat_to_y(rect, *lat)))
                 .collect();
             if pts.len() >= 2 {
@@ -780,8 +822,14 @@ impl BuilderApp {
                 egui::pos2(lon_to_x(rect, min_lon), lat_to_y(rect, max_lat)),
                 egui::pos2(lon_to_x(rect, max_lon), lat_to_y(rect, min_lat)),
             );
-            painter.rect_filled(bbox_rect, 0.0, Color32::from_rgba_unmultiplied(220, 160, 30, 38));
-            painter.rect_stroke(bbox_rect, 0.0,
+            painter.rect_filled(
+                bbox_rect,
+                0.0,
+                Color32::from_rgba_unmultiplied(220, 160, 30, 38),
+            );
+            painter.rect_stroke(
+                bbox_rect,
+                0.0,
                 egui::Stroke::new(1.5, Color32::from_rgb(220, 160, 30)),
                 egui::StrokeKind::Middle,
             );
@@ -794,7 +842,7 @@ impl BuilderApp {
         if response.dragged() {
             if let (Some(start), Some(cur)) = (self.lunar_drag_start, response.hover_pos()) {
                 let (lon0, lat0) = (x_to_lon(rect, start.x), y_to_lat(rect, start.y));
-                let (lon1, lat1) = (x_to_lon(rect, cur.x),   y_to_lat(rect, cur.y));
+                let (lon1, lat1) = (x_to_lon(rect, cur.x), y_to_lat(rect, cur.y));
                 self.lunar_form.min_lat = format!("{:.2}", lat0.min(lat1).max(-60.0));
                 self.lunar_form.max_lat = format!("{:.2}", lat0.max(lat1).min(60.0));
                 self.lunar_form.min_lon = format!("{:.2}", lon0.min(lon1));
@@ -815,7 +863,10 @@ impl BuilderApp {
         );
         ui.horizontal(|ui| {
             let building = self.active_job.is_some();
-            if ui.add_enabled(!building, egui::Button::new("Build Lunar Contours")).clicked() {
+            if ui
+                .add_enabled(!building, egui::Button::new("Build Lunar Contours"))
+                .clicked()
+            {
                 self.start_lunar_build();
             }
             if ui.small_button("Scan Cache").clicked() {
@@ -856,7 +907,11 @@ impl eframe::App for BuilderApp {
             .show(ctx, |ui| {
                 // ── Tab bar ───────────────────────────────────────────────────
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.active_tab, ActiveTab::OsmContours, "OSM / Contours");
+                    ui.selectable_value(
+                        &mut self.active_tab,
+                        ActiveTab::OsmContours,
+                        "OSM / Contours",
+                    );
                     ui.selectable_value(&mut self.active_tab, ActiveTab::Lunar, "Lunar (SLDEM)");
                 });
                 ui.separator();
@@ -964,8 +1019,9 @@ impl eframe::App for BuilderApp {
                     let x1 = lon_to_x(rect, max_lon);
                     let y0 = lat_to_y(rect, max_lat);
                     let y1 = lat_to_y(rect, min_lat);
-                    let tile_rect = egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1))
-                        .expand(0.5);
+                    let tile_rect =
+                        egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1))
+                            .expand(0.5);
                     painter.rect_filled(tile_rect, 0.0, color);
                 }
 
@@ -976,8 +1032,9 @@ impl eframe::App for BuilderApp {
                     let x1 = lon_to_x(rect, max_lon);
                     let y0 = lat_to_y(rect, max_lat);
                     let y1 = lat_to_y(rect, min_lat);
-                    let tile_rect = egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1))
-                        .expand(0.5);
+                    let tile_rect =
+                        egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1))
+                            .expand(0.5);
                     painter.rect_filled(tile_rect, 0.0, color);
                 }
 
@@ -1107,16 +1164,18 @@ impl eframe::App for BuilderApp {
                         // Pick a folder — avoids the macOS "Replace?" dialog that
                         // save_file() triggers when the DB already exists.
                         if let Some(folder) = rfd::FileDialog::new().pick_folder() {
-                            self.form.contour_db = folder
-                                .join("srtm_focus_cache.sqlite")
-                                .display()
-                                .to_string();
+                            self.form.contour_db =
+                                folder.join("srtm_focus_cache.sqlite").display().to_string();
                         }
                     }
                 });
                 ui.horizontal(|ui| {
                     ui.label("Engine:");
-                    ui.radio_value(&mut self.form.use_native_engine, true, "Native (fast, no GDAL)");
+                    ui.radio_value(
+                        &mut self.form.use_native_engine,
+                        true,
+                        "Native (fast, no GDAL)",
+                    );
                     ui.radio_value(&mut self.form.use_native_engine, false, "GDAL");
                 });
                 if !self.form.use_native_engine {

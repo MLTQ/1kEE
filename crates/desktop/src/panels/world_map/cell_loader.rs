@@ -1,6 +1,8 @@
 use crate::model::GeoPoint;
 use crate::osm_ingest::GeoBounds;
-use cell_format::{TAG_BLDG, TAG_TREE, TAG_WATR, cell_filename, decode_class, read::read_single_chunk};
+use cell_format::{
+    TAG_BLDG, TAG_TREE, TAG_WATR, cell_filename, decode_class, read::read_single_chunk,
+};
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
@@ -54,7 +56,10 @@ pub fn load_features_from_cells(
                                 points: f
                                     .points
                                     .into_iter()
-                                    .map(|p| GeoPoint { lat: p.lat, lon: p.lon })
+                                    .map(|p| GeoPoint {
+                                        lat: p.lat,
+                                        lon: p.lon,
+                                    })
                                     .collect(),
                                 is_polygon: f.is_polygon,
                             });
@@ -65,9 +70,7 @@ pub fn load_features_from_cells(
             }
 
             // Legacy GeoJSON fallback.
-            let geojson_path = cell_dir.join(format!(
-                "{prefix}_cell_{lat:+04}_{lon:+05}.geojson"
-            ));
+            let geojson_path = cell_dir.join(format!("{prefix}_cell_{lat:+04}_{lon:+05}.geojson"));
             if !geojson_path.exists() {
                 continue;
             }

@@ -1,4 +1,6 @@
-use crate::{CellFeature, CellPoint, FLAG_HAS_ELEVATION, FLAG_HAS_NAME, FLAG_IS_POLYGON, MAGIC, VERSION};
+use crate::{
+    CellFeature, CellPoint, FLAG_HAS_ELEVATION, FLAG_HAS_NAME, FLAG_IS_POLYGON, MAGIC, VERSION,
+};
 
 /// Validate the file header and return the byte offset of the first chunk.
 ///
@@ -92,7 +94,9 @@ fn decode_features(data: &[u8]) -> Option<Vec<CellFeature>> {
             if pos + name_len > data.len() {
                 return None;
             }
-            let s = std::str::from_utf8(&data[pos..pos + name_len]).ok()?.to_owned();
+            let s = std::str::from_utf8(&data[pos..pos + name_len])
+                .ok()?
+                .to_owned();
             pos += name_len;
             Some(s)
         } else {

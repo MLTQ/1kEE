@@ -1,7 +1,7 @@
 use crate::arcgis_source;
 use crate::model::{
-    ActiveFlare, ArcGisFeature, EventRecord, FlightCategory, FlightTrack, GeoPoint,
-    GlobeViewState, MovingTrack,
+    ActiveFlare, ArcGisFeature, EventRecord, FlightCategory, FlightTrack, GeoPoint, GlobeViewState,
+    MovingTrack,
 };
 use crate::theme;
 
@@ -222,10 +222,7 @@ pub(super) fn draw_replay_flare(
             egui::Stroke::new(1.8 * ring_a, col.gamma_multiply(ring_a * 0.75)),
         );
         // Second inner ring for more pop on Critical.
-        if matches!(
-            flare.event.severity,
-            crate::model::EventSeverity::Critical
-        ) {
+        if matches!(flare.event.severity, crate::model::EventSeverity::Critical) {
             painter.circle_stroke(
                 base.pos,
                 ring_r * 0.6,
@@ -256,9 +253,18 @@ fn draw_beam(
         let a = (1.0 - tm).powi(2) * alpha;
         let p0 = egui::pos2(base.x + dx * t0, base.y + dy * t0);
         let p1 = egui::pos2(base.x + dx * t1, base.y + dy * t1);
-        painter.line_segment([p0, p1], egui::Stroke::new((22.0 * a).max(0.5), col.gamma_multiply(0.04 * a)));
-        painter.line_segment([p0, p1], egui::Stroke::new((11.0 * a).max(0.5), col.gamma_multiply(0.08 * a)));
-        painter.line_segment([p0, p1], egui::Stroke::new((4.5 * a).max(0.5), col.gamma_multiply(0.16 * a)));
+        painter.line_segment(
+            [p0, p1],
+            egui::Stroke::new((22.0 * a).max(0.5), col.gamma_multiply(0.04 * a)),
+        );
+        painter.line_segment(
+            [p0, p1],
+            egui::Stroke::new((11.0 * a).max(0.5), col.gamma_multiply(0.08 * a)),
+        );
+        painter.line_segment(
+            [p0, p1],
+            egui::Stroke::new((4.5 * a).max(0.5), col.gamma_multiply(0.16 * a)),
+        );
     }
 
     // Tapering core — cubic alpha, narrows to a spike.
@@ -273,19 +279,28 @@ fn draw_beam(
         let w_core = (1.7 * falloff.powf(0.7)).max(0.3);
         let p0 = egui::pos2(base.x + dx * t0, base.y + dy * t0);
         let p1 = egui::pos2(base.x + dx * t1, base.y + dy * t1);
-        painter.line_segment([p0, p1], egui::Stroke::new(w_glow, col.gamma_multiply(a * 0.30)));
-        painter.line_segment([p0, p1], egui::Stroke::new(w_core, col.gamma_multiply(a * 0.96)));
+        painter.line_segment(
+            [p0, p1],
+            egui::Stroke::new(w_glow, col.gamma_multiply(a * 0.30)),
+        );
+        painter.line_segment(
+            [p0, p1],
+            egui::Stroke::new(w_core, col.gamma_multiply(a * 0.96)),
+        );
     }
 }
 
-fn draw_ground_strike(
-    painter: &egui::Painter,
-    pos: egui::Pos2,
-    col: egui::Color32,
-    alpha: f32,
-) {
-    painter.circle_stroke(pos, 6.5, egui::Stroke::new(9.0, col.gamma_multiply(0.06 * alpha)));
-    painter.circle_stroke(pos, 4.8, egui::Stroke::new(1.1, col.gamma_multiply(0.60 * alpha)));
+fn draw_ground_strike(painter: &egui::Painter, pos: egui::Pos2, col: egui::Color32, alpha: f32) {
+    painter.circle_stroke(
+        pos,
+        6.5,
+        egui::Stroke::new(9.0, col.gamma_multiply(0.06 * alpha)),
+    );
+    painter.circle_stroke(
+        pos,
+        4.8,
+        egui::Stroke::new(1.1, col.gamma_multiply(0.60 * alpha)),
+    );
     painter.circle_filled(pos, 2.5, col.gamma_multiply(alpha));
 }
 

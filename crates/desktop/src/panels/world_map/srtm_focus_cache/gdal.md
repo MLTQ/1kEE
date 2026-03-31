@@ -17,6 +17,7 @@ Owns the desktop-side GDAL pipelines for terrain assets: SRTM focus contours, GE
 - **Does**: Build and reuse persistent `lunar_source_chunks/` GeoTIFFs under the terrain cache root.
 - **Interacts with**: `build_lunar_contour_tile`, `gdal_translate`.
 - **Rationale**: Moon Mode tiles overlap heavily; chunk reuse prevents repeated reads from the 22 GB SLDEM JP2.
+- **Notes**: Chunk creation is deduplicated across background tile threads, and each build uses a unique temp filename to avoid same-chunk races.
 
 ### `build_lunar_contour_tile`
 - **Does**: Crops the requested contour tile from a cached lunar source chunk, runs `gdal_contour`, and imports the result into the lunar SQLite cache.

@@ -12,7 +12,9 @@ fn db() -> &'static Mutex<Option<Connection>> {
 }
 
 fn with_conn<T, F: FnOnce(&mut Connection) -> rusqlite::Result<T>>(f: F) -> Result<T, String> {
-    let mut guard = db().lock().map_err(|_| "event store lock poisoned".to_string())?;
+    let mut guard = db()
+        .lock()
+        .map_err(|_| "event store lock poisoned".to_string())?;
     let conn = guard.as_mut().ok_or("event store not opened")?;
     f(conn).map_err(|e| e.to_string())
 }
@@ -69,7 +71,9 @@ pub fn upsert_events(events: &[EventRecord]) {
                  ON CONFLICT(factal_id) DO NOTHING",
             )?;
             for event in events {
-                let Some(brief) = &event.factal_brief else { continue };
+                let Some(brief) = &event.factal_brief else {
+                    continue;
+                };
                 let Some(unix) = brief.occurred_at_raw.as_deref().and_then(parse_iso_to_unix)
                 else {
                     continue;
@@ -145,11 +149,9 @@ pub fn load_events_in_range(from_unix: i64, to_unix: i64) -> Vec<(i64, EventReco
 /// Unix timestamp of the oldest stored event, or `None` if the store is empty.
 pub fn oldest_event_unix() -> Option<i64> {
     with_conn(|conn| {
-        conn.query_row(
-            "SELECT MIN(occurred_unix) FROM stored_events",
-            [],
-            |r| r.get::<_, Option<i64>>(0),
-        )
+        conn.query_row("SELECT MIN(occurred_unix) FROM stored_events", [], |r| {
+            r.get::<_, Option<i64>>(0)
+        })
     })
     .ok()
     .flatten()
@@ -158,11 +160,9 @@ pub fn oldest_event_unix() -> Option<i64> {
 /// Unix timestamp of the newest stored event, or `None` if the store is empty.
 pub fn newest_event_unix() -> Option<i64> {
     with_conn(|conn| {
-        conn.query_row(
-            "SELECT MAX(occurred_unix) FROM stored_events",
-            [],
-            |r| r.get::<_, Option<i64>>(0),
-        )
+        conn.query_row("SELECT MAX(occurred_unix) FROM stored_events", [], |r| {
+            r.get::<_, Option<i64>>(0)
+        })
     })
     .ok()
     .flatten()

@@ -18,21 +18,21 @@ pub enum ContourEngine {
 #[derive(Debug, Clone)]
 pub struct ContoursBboxCommand {
     pub srtm_root: PathBuf,
-    pub cache_db_path: PathBuf,  // path to srtm_focus_cache.sqlite
+    pub cache_db_path: PathBuf,   // path to srtm_focus_cache.sqlite
     pub tmp_dir: Option<PathBuf>, // default: cache_db parent / srtm_focus_tmp
     pub min_lat: f32,
     pub max_lat: f32,
     pub min_lon: f32,
     pub max_lon: f32,
-    pub zoom_buckets: Vec<i32>,  // default: all 0–6
-    pub gdal_bin_dir: PathBuf,   // "" = use $PATH
+    pub zoom_buckets: Vec<i32>, // default: all 0–6
+    pub gdal_bin_dir: PathBuf,  // "" = use $PATH
     pub engine: ContourEngine,
 }
 
 #[derive(Debug, Clone)]
 pub struct BboxCommand {
     pub planet_path: PathBuf,
-    pub cache_dir: PathBuf, // parent dir; subdirs created per feature
+    pub cache_dir: PathBuf,         // parent dir; subdirs created per feature
     pub srtm_root: Option<PathBuf>, // when set, elevations are baked into .1kc files
     pub min_lat: f32,
     pub max_lat: f32,
@@ -159,36 +159,36 @@ where
             .next()
             .ok_or_else(|| format!("Missing value for '{flag}'.\n\n{}", usage()))?;
         match flag.as_str() {
-            "--srtm-root"    => srtm_root = Some(PathBuf::from(value)),
-            "--cache-db"     => cache_db_path = Some(PathBuf::from(value)),
-            "--tmp-dir"      => tmp_dir = Some(PathBuf::from(value)),
-            "--min-lat"      => min_lat = Some(parse_f32("--min-lat", &value)?),
-            "--max-lat"      => max_lat = Some(parse_f32("--max-lat", &value)?),
-            "--min-lon"      => min_lon = Some(parse_f32("--min-lon", &value)?),
-            "--max-lon"      => max_lon = Some(parse_f32("--max-lon", &value)?),
-            "--gdal-bin"     => gdal_bin_dir = PathBuf::from(value),
-            "--engine"       => {
+            "--srtm-root" => srtm_root = Some(PathBuf::from(value)),
+            "--cache-db" => cache_db_path = Some(PathBuf::from(value)),
+            "--tmp-dir" => tmp_dir = Some(PathBuf::from(value)),
+            "--min-lat" => min_lat = Some(parse_f32("--min-lat", &value)?),
+            "--max-lat" => max_lat = Some(parse_f32("--max-lat", &value)?),
+            "--min-lon" => min_lon = Some(parse_f32("--min-lon", &value)?),
+            "--max-lon" => max_lon = Some(parse_f32("--max-lon", &value)?),
+            "--gdal-bin" => gdal_bin_dir = PathBuf::from(value),
+            "--engine" => {
                 engine = match value.as_str() {
-                    "gdal"   => ContourEngine::Gdal,
+                    "gdal" => ContourEngine::Gdal,
                     "native" => ContourEngine::Native,
-                    other => return Err(format!("Unknown --engine '{other}'. Use 'gdal' or 'native'.")),
+                    other => {
+                        return Err(format!(
+                            "Unknown --engine '{other}'. Use 'gdal' or 'native'."
+                        ));
+                    }
                 };
             }
             "--zoom-buckets" => {
-                let buckets: Result<Vec<i32>, _> = value
-                    .split(',')
-                    .map(|s| s.trim().parse::<i32>())
-                    .collect();
-                zoom_buckets = Some(
-                    buckets.map_err(|_| format!("Invalid --zoom-buckets '{value}'"))?,
-                );
+                let buckets: Result<Vec<i32>, _> =
+                    value.split(',').map(|s| s.trim().parse::<i32>()).collect();
+                zoom_buckets =
+                    Some(buckets.map_err(|_| format!("Invalid --zoom-buckets '{value}'"))?);
             }
             other => return Err(format!("Unknown flag '{other}'.\n\n{}", usage())),
         }
     }
 
-    let cache_db = cache_db_path
-        .ok_or_else(|| format!("Missing --cache-db.\n\n{}", usage()))?;
+    let cache_db = cache_db_path.ok_or_else(|| format!("Missing --cache-db.\n\n{}", usage()))?;
     let derived_tmp = tmp_dir.unwrap_or_else(|| {
         cache_db
             .parent()

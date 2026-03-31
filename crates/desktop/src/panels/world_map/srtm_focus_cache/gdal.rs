@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -555,6 +555,40 @@ fn temp_sibling(path: &Path, suffix: &str) -> PathBuf {
     path.with_file_name(format!("{stem}.{suffix}"))
 }
 
+fn unique_temp_token() -> u64 {
+    static NEXT: OnceLock<AtomicU64> = OnceLock::new();
+    NEXT.get_or_init(|| AtomicU64::new(1))
+        .fetch_add(1, Ordering::Relaxed)
+}
+
+fn lunar_source_chunk_pending() -> &'static Mutex<HashSet<PathBuf>> {
+    static PENDING: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn wait_for_lunar_source_chunk(path: &Path, timeout: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        if path.exists() {
+            return true;
+        }
+        if shutdown_requested().load(Ordering::Relaxed) {
+            return false;
+        }
+        let still_pending = lunar_source_chunk_pending()
+            .lock()
+            .map(|guard| guard.contains(path))
+            .unwrap_or(false);
+        if !still_pending {
+            return path.exists();
+        }
+        if start.elapsed() >= timeout {
+            return path.exists();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn persist_temp_file(tmp_path: &Path, final_path: &Path) -> std::io::Result<()> {
     if fs::rename(tmp_path, final_path).is_ok() {
         return Ok(());
@@ -575,51 +609,72 @@ fn ensure_lunar_source_chunk(
         return Some(chunk);
     }
 
-    let parent = chunk.path.parent()?;
-    fs::create_dir_all(parent).ok()?;
+    {
+        let mut guard = lunar_source_chunk_pending().lock().ok()?;
+        if !guard.insert(chunk.path.clone()) {
+            drop(guard);
+            return wait_for_lunar_source_chunk(&chunk.path, Duration::from_secs(120))
+                .then_some(chunk);
+        }
+    }
 
-    let tmp_chunk = temp_sibling(&chunk.path, &format!("{}.tmp.tif", std::process::id()));
-    let _ = fs::remove_file(&tmp_chunk);
+    let result = (|| {
+        let parent = chunk.path.parent()?;
+        fs::create_dir_all(parent).ok()?;
 
-    let mut translate = Command::new(gdal_tool_path("gdal_translate"));
-    translate.args([
-        "-q",
-        "-projwin",
-        &chunk.bounds.min_lon.to_string(),
-        &chunk.bounds.max_lat.to_string(),
-        &chunk.bounds.max_lon.to_string(),
-        &chunk.bounds.min_lat.to_string(),
-        "-outsize",
-        &chunk.raster_size.to_string(),
-        &chunk.raster_size.to_string(),
-        "-scale",
-        "-18000",
-        "22000",
-        "-9000",
-        "11000",
-        "-ot",
-        "Int16",
-        "-of",
-        "GTiff",
-        "-co",
-        "TILED=YES",
-        "-co",
-        "COMPRESS=LZW",
-        "-co",
-        "PREDICTOR=2",
-        "-co",
-        "BLOCKXSIZE=512",
-        "-co",
-        "BLOCKYSIZE=512",
-    ]);
-    translate.arg(jp2_path).arg(&tmp_chunk);
-    run_command_with_timeout(
-        translate,
-        "gdal_translate (lunar source chunk)",
-        Duration::from_secs(600),
-    )
-    .ok()?;
-    persist_temp_file(&tmp_chunk, &chunk.path).ok()?;
+        let tmp_chunk = temp_sibling(
+            &chunk.path,
+            &format!("{}.{}.tmp.tif", std::process::id(), unique_temp_token()),
+        );
+        let _ = fs::remove_file(&tmp_chunk);
+
+        let mut translate = Command::new(gdal_tool_path("gdal_translate"));
+        translate.args([
+            "-q",
+            "-projwin",
+            &chunk.bounds.min_lon.to_string(),
+            &chunk.bounds.max_lat.to_string(),
+            &chunk.bounds.max_lon.to_string(),
+            &chunk.bounds.min_lat.to_string(),
+            "-outsize",
+            &chunk.raster_size.to_string(),
+            &chunk.raster_size.to_string(),
+            "-scale",
+            "-18000",
+            "22000",
+            "-9000",
+            "11000",
+            "-ot",
+            "Int16",
+            "-of",
+            "GTiff",
+            "-co",
+            "TILED=YES",
+            "-co",
+            "COMPRESS=LZW",
+            "-co",
+            "PREDICTOR=2",
+            "-co",
+            "BLOCKXSIZE=512",
+            "-co",
+            "BLOCKYSIZE=512",
+        ]);
+        translate.arg(jp2_path).arg(&tmp_chunk);
+        run_command_with_timeout(
+            translate,
+            "gdal_translate (lunar source chunk)",
+            Duration::from_secs(600),
+        )
+        .ok()?;
+        persist_temp_file(&tmp_chunk, &chunk.path).ok()?;
+        Some(())
+    })();
+
+    if let Ok(mut guard) = lunar_source_chunk_pending().lock() {
+        guard.remove(&chunk.path);
+    }
+
+    result?;
     Some(chunk)
 }
 

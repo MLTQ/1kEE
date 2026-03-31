@@ -1,8 +1,7 @@
 use crate::model::GeoPoint;
 use cell_format::{
     CellFeature, CellPoint, TAG_ROAD, cell_filename, decode_road_class, encode_road_class,
-    read::read_single_chunk,
-    write::write_cell,
+    read::read_single_chunk, write::write_cell,
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -108,7 +107,10 @@ pub(super) fn ensure_cell_geojson_from_extract(
                     name: road_name,
                     points: points
                         .into_iter()
-                        .map(|p| CellPoint { lon: p.lon, lat: p.lat })
+                        .map(|p| CellPoint {
+                            lon: p.lon,
+                            lat: p.lat,
+                        })
                         .collect(),
                     elevations: None,
                 });
@@ -171,7 +173,10 @@ pub fn load_roads_for_bounds_from_vector_cache(
                         let points: Vec<GeoPoint> = f
                             .points
                             .into_iter()
-                            .map(|p| GeoPoint { lat: p.lat, lon: p.lon })
+                            .map(|p| GeoPoint {
+                                lat: p.lat,
+                                lon: p.lon,
+                            })
                             .collect();
                         if !bounds_intersect(polyline_bounds(&points), bounds) {
                             continue;
@@ -189,9 +194,8 @@ pub fn load_roads_for_bounds_from_vector_cache(
         }
 
         // Legacy GeoJSON fallback.
-        let geojson_path = cache_dir.join(format!(
-            "road_cell_{cell_lat:+04}_{cell_lon:+05}.geojson"
-        ));
+        let geojson_path =
+            cache_dir.join(format!("road_cell_{cell_lat:+04}_{cell_lon:+05}.geojson"));
         if !geojson_path.exists() {
             missing_cell = true;
             continue;
@@ -209,7 +213,10 @@ pub fn load_roads_for_bounds_from_vector_cache(
 
         for feature in features {
             let props = feature.get("properties").unwrap_or(&Value::Null);
-            let way_id = props.get("way_id").and_then(Value::as_i64).unwrap_or_default();
+            let way_id = props
+                .get("way_id")
+                .and_then(Value::as_i64)
+                .unwrap_or_default();
             let road_class = props
                 .get("class")
                 .and_then(Value::as_str)
@@ -308,13 +315,20 @@ pub(super) fn write_roads_to_vector_cells(
                 points: road
                     .points
                     .into_iter()
-                    .map(|p| CellPoint { lon: p.lon, lat: p.lat })
+                    .map(|p| CellPoint {
+                        lon: p.lon,
+                        lat: p.lat,
+                    })
                     .collect(),
                 elevations: None,
             })
             .collect();
 
-        let bytes = write_cell(cell_lat as i16, cell_lon as i16, &[(TAG_ROAD, &cell_features)]);
+        let bytes = write_cell(
+            cell_lat as i16,
+            cell_lon as i16,
+            &[(TAG_ROAD, &cell_features)],
+        );
         fs::write(&path, bytes).map_err(|e| e.to_string())?;
         written_cells += 1;
     }
@@ -355,7 +369,10 @@ fn load_all_roads_from_vector_cell(
                             points: f
                                 .points
                                 .into_iter()
-                                .map(|p| GeoPoint { lat: p.lat, lon: p.lon })
+                                .map(|p| GeoPoint {
+                                    lat: p.lat,
+                                    lon: p.lon,
+                                })
                                 .collect(),
                         })
                         .collect(),
@@ -365,9 +382,7 @@ fn load_all_roads_from_vector_cell(
     }
 
     // Legacy GeoJSON fallback.
-    let geojson_path = cache_dir.join(format!(
-        "road_cell_{cell_lat:+04}_{cell_lon:+05}.geojson"
-    ));
+    let geojson_path = cache_dir.join(format!("road_cell_{cell_lat:+04}_{cell_lon:+05}.geojson"));
     load_roads_from_geojson(&geojson_path)
 }
 
@@ -379,7 +394,10 @@ fn load_roads_from_geojson(path: &Path) -> Option<Vec<RoadPolyline>> {
 
     for feature in features {
         let props = feature.get("properties").unwrap_or(&Value::Null);
-        let way_id = props.get("way_id").and_then(Value::as_i64).unwrap_or_default();
+        let way_id = props
+            .get("way_id")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
         let road_class = props
             .get("class")
             .and_then(Value::as_str)
@@ -414,10 +432,7 @@ fn load_roads_from_geojson(path: &Path) -> Option<Vec<RoadPolyline>> {
 /// Extract cell lat/lon from a `.1kc` filename as a best-effort fallback.
 /// Returns (0, 0) on parse failure — the header coords are informational only.
 fn cell_coords_from_path(path: &Path) -> (i16, i16) {
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     // Expected stem: "road_cell_{:+04}_{:+05}"
     let parts: Vec<&str> = stem.split('_').collect();
     if parts.len() >= 4 {

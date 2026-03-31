@@ -5,11 +5,7 @@ use crate::{CellFeature, FLAG_HAS_ELEVATION, FLAG_HAS_NAME, FLAG_IS_POLYGON, MAG
 /// `cell_lat` and `cell_lon` are the integer floor coordinates of the cell
 /// (matching the filename convention).  `chunks` is a slice of `(tag,
 /// features)` pairs; each pair becomes one chunk in the output, in order.
-pub fn write_cell(
-    cell_lat: i16,
-    cell_lon: i16,
-    chunks: &[([u8; 4], &[CellFeature])],
-) -> Vec<u8> {
+pub fn write_cell(cell_lat: i16, cell_lon: i16, chunks: &[([u8; 4], &[CellFeature])]) -> Vec<u8> {
     // Pre-calculate capacity to avoid repeated reallocations.
     let mut capacity = 10; // header
     for (_, features) in chunks {

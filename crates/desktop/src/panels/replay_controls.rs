@@ -146,7 +146,11 @@ fn draw_scrub_bar(ui: &mut egui::Ui, model: &mut AppModel) {
     // Track background.
     painter.rect_filled(rect, 4.0, egui::Color32::from_rgb(18, 22, 32));
 
-    let progress = model.replay_state.as_ref().map(|s| s.progress()).unwrap_or(0.0);
+    let progress = model
+        .replay_state
+        .as_ref()
+        .map(|s| s.progress())
+        .unwrap_or(0.0);
     let sim_from = model.replay_state.as_ref().map(|s| s.sim_from).unwrap_or(0);
     let sim_to = model.replay_state.as_ref().map(|s| s.sim_to).unwrap_or(1);
     let sim_span = (sim_to - sim_from).max(1) as f32;
@@ -183,7 +187,10 @@ fn draw_scrub_bar(ui: &mut egui::Ui, model: &mut AppModel) {
     // Playhead line.
     let head_x = rect.left() + progress * rect.width();
     painter.line_segment(
-        [egui::pos2(head_x, rect.top()), egui::pos2(head_x, rect.bottom())],
+        [
+            egui::pos2(head_x, rect.top()),
+            egui::pos2(head_x, rect.bottom()),
+        ],
         egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 195, 255)),
     );
 
@@ -218,17 +225,14 @@ fn severity_tick_color(sev: &EventSeverity) -> egui::Color32 {
 
 /// Custom two-handled range slider spanning 365 days → now.
 /// Returns `true` if either value changed.
-fn draw_range_slider(
-    ui: &mut egui::Ui,
-    from_unix: &mut i64,
-    to_unix: &mut i64,
-    now: i64,
-) -> bool {
+fn draw_range_slider(ui: &mut egui::Ui, from_unix: &mut i64, to_unix: &mut i64, now: i64) -> bool {
     let height = 26.0f32;
     let handle_r = 7.0f32;
     let track_h = 4.0f32;
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), height), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::hover(),
+    );
 
     if !ui.is_rect_visible(rect) {
         return false;
@@ -260,10 +264,7 @@ fn draw_range_slider(
         egui::Sense::drag(),
     );
     let to_resp = ui.interact(
-        egui::Rect::from_center_size(
-            egui::pos2(to_x, mid_y),
-            egui::vec2(handle_r * 2.5, height),
-        ),
+        egui::Rect::from_center_size(egui::pos2(to_x, mid_y), egui::vec2(handle_r * 2.5, height)),
         ui.id().with("range_to"),
         egui::Sense::drag(),
     );
@@ -296,7 +297,11 @@ fn draw_range_slider(
         egui::pos2(rect.center().x, mid_y),
         egui::vec2(rect.width(), track_h),
     );
-    painter.rect_filled(track_rect, track_h / 2.0, egui::Color32::from_rgb(28, 33, 48));
+    painter.rect_filled(
+        track_rect,
+        track_h / 2.0,
+        egui::Color32::from_rgb(28, 33, 48),
+    );
 
     // Active range fill.
     painter.rect_filled(
@@ -318,7 +323,11 @@ fn draw_range_slider(
             egui::Color32::from_rgb(140, 190, 255)
         }
     };
-    painter.circle_filled(egui::pos2(from_x, mid_y), handle_r, handle_color(&from_resp));
+    painter.circle_filled(
+        egui::pos2(from_x, mid_y),
+        handle_r,
+        handle_color(&from_resp),
+    );
     painter.circle_filled(egui::pos2(to_x, mid_y), handle_r, handle_color(&to_resp));
 
     // "Today" tick at the far-right.
@@ -341,7 +350,11 @@ fn draw_date_inputs(ui: &mut egui::Ui, model: &mut AppModel) -> bool {
     let now = event_store::now_unix();
 
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("From").small().color(theme::text_muted()));
+        ui.label(
+            egui::RichText::new("From")
+                .small()
+                .color(theme::text_muted()),
+        );
         let from_resp = ui.add(
             egui::TextEdit::singleline(&mut model.replay_from_str)
                 .desired_width(82.0)
@@ -370,8 +383,7 @@ fn draw_date_inputs(ui: &mut egui::Ui, model: &mut AppModel) -> bool {
         );
         if to_resp.changed() {
             if let Some(unix) = event_store::parse_iso_to_unix(&model.replay_to_str) {
-                model.replay_to_unix =
-                    unix.clamp(model.replay_from_unix + 3_600, now);
+                model.replay_to_unix = unix.clamp(model.replay_from_unix + 3_600, now);
                 changed = true;
             }
         }
@@ -398,7 +410,11 @@ fn draw_transport(ui: &mut egui::Ui, model: &mut AppModel) {
         .unwrap_or(true);
 
     ui.horizontal(|ui| {
-        let pp_label = if is_paused || finished { "▶ Play" } else { "⏸ Pause" };
+        let pp_label = if is_paused || finished {
+            "▶ Play"
+        } else {
+            "⏸ Pause"
+        };
         let pp_fill = if !is_paused && !finished {
             egui::Color32::from_rgb(20, 80, 140)
         } else {

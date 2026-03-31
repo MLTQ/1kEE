@@ -25,11 +25,13 @@ impl SrtmTile {
     /// a silent failure mode where `image` rejects Int16 TIFFs tagged with
     /// SampleFormat=2 (SAMPLEFORMAT_INT) and `decode()` returns an error.
     fn load(path: &Path) -> Option<Self> {
-        use tiff::decoder::{Decoder, DecodingResult};
         use std::fs::File;
+        use tiff::decoder::{Decoder, DecodingResult};
 
         // Missing file = ocean/nodata area — expected, return None silently.
-        if !path.exists() { return None; }
+        if !path.exists() {
+            return None;
+        }
 
         let file = File::open(path)
             .map_err(|e| eprintln!("[1kEE] SRTM open error {}: {e}", path.display()))
@@ -38,11 +40,13 @@ impl SrtmTile {
             .map_err(|e| eprintln!("[1kEE] SRTM TIFF init error {}: {e}", path.display()))
             .ok()?;
 
-        let (width, height) = decoder.dimensions()
+        let (width, height) = decoder
+            .dimensions()
             .map_err(|e| eprintln!("[1kEE] SRTM dimensions error {}: {e}", path.display()))
             .ok()?;
 
-        let result = decoder.read_image()
+        let result = decoder
+            .read_image()
             .map_err(|e| eprintln!("[1kEE] SRTM read error {}: {e}", path.display()))
             .ok()?;
 
@@ -67,14 +71,22 @@ impl SrtmTile {
             DecodingResult::F32(data) => data
                 .into_iter()
                 .map(|f| {
-                    if f.is_nan() || f <= -32767.0 { f32::NAN } else { f }
+                    if f.is_nan() || f <= -32767.0 {
+                        f32::NAN
+                    } else {
+                        f
+                    }
                 })
                 .collect(),
             // Float64 — rare but possible after reprojection.
             DecodingResult::F64(data) => data
                 .into_iter()
                 .map(|f| {
-                    if f.is_nan() || f <= -32767.0 { f32::NAN } else { f as f32 }
+                    if f.is_nan() || f <= -32767.0 {
+                        f32::NAN
+                    } else {
+                        f as f32
+                    }
                 })
                 .collect(),
             _other => {
@@ -89,12 +101,18 @@ impl SrtmTile {
         if samples.len() != (width * height) as usize {
             eprintln!(
                 "[1kEE] SRTM sample count mismatch {}: got {} expected {}",
-                path.display(), samples.len(), width * height
+                path.display(),
+                samples.len(),
+                width * height
             );
             return None;
         }
 
-        Some(Self { width, height, samples })
+        Some(Self {
+            width,
+            height,
+            samples,
+        })
     }
 
     fn get(&self, x: u32, y: u32) -> f32 {
@@ -147,7 +165,11 @@ pub struct NativeSrtmSampler {
 
 impl NativeSrtmSampler {
     pub fn new(root: PathBuf) -> Self {
-        Self { root, tiles: Vec::new(), missing: HashSet::new() }
+        Self {
+            root,
+            tiles: Vec::new(),
+            missing: HashSet::new(),
+        }
     }
 
     pub fn sample(&mut self, lat: f32, lon: f32) -> f32 {
@@ -249,7 +271,10 @@ pub fn build_tile_contours(
             if !segs.is_empty() {
                 for poly in chain_segments(segs) {
                     if poly.len() >= 2 {
-                        contours.push(ContourLine { elevation_m: threshold, points: poly });
+                        contours.push(ContourLine {
+                            elevation_m: threshold,
+                            points: poly,
+                        });
                     }
                 }
             }
@@ -281,7 +306,12 @@ fn build_grid(sampler: &mut NativeSrtmSampler, n: usize, bounds: GeoBounds) -> V
 // Bit convention:  8=TL  4=TR  2=BR  1=BL  (set = above threshold)
 // Edge names:      N=top  E=right  S=bottom  W=left
 
-fn extract_segments(grid: &[f32], n: usize, threshold: f32, bounds: GeoBounds) -> Vec<[(f32, f32); 2]> {
+fn extract_segments(
+    grid: &[f32],
+    n: usize,
+    threshold: f32,
+    bounds: GeoBounds,
+) -> Vec<[(f32, f32); 2]> {
     let dlat = (bounds.max_lat - bounds.min_lat) / n as f32;
     let dlon = (bounds.max_lon - bounds.min_lon) / n as f32;
 
@@ -303,9 +333,9 @@ fn extract_segments(grid: &[f32], n: usize, threshold: f32, bounds: GeoBounds) -
             }
 
             let idx = ((tl > threshold) as u8) << 3
-                    | ((tr > threshold) as u8) << 2
-                    | ((br > threshold) as u8) << 1
-                    | ((bl > threshold) as u8);
+                | ((tr > threshold) as u8) << 2
+                | ((br > threshold) as u8) << 1
+                | ((bl > threshold) as u8);
 
             if idx == 0 || idx == 15 {
                 continue;
@@ -335,11 +365,11 @@ fn extract_segments(grid: &[f32], n: usize, threshold: f32, bounds: GeoBounds) -
             };
 
             match idx {
-                1  => segs.push([w_pt, s_pt]),
-                2  => segs.push([s_pt, e_pt]),
-                3  => segs.push([w_pt, e_pt]),
-                4  => segs.push([n_pt, e_pt]),
-                5  => {
+                1 => segs.push([w_pt, s_pt]),
+                2 => segs.push([s_pt, e_pt]),
+                3 => segs.push([w_pt, e_pt]),
+                4 => segs.push([n_pt, e_pt]),
+                5 => {
                     // Saddle: TR+BL above, TL+BR below
                     let avg = (tl + tr + br + bl) * 0.25;
                     if avg > threshold {
@@ -350,10 +380,10 @@ fn extract_segments(grid: &[f32], n: usize, threshold: f32, bounds: GeoBounds) -
                         segs.push([w_pt, s_pt]);
                     }
                 }
-                6  => segs.push([n_pt, s_pt]),
-                7  => segs.push([n_pt, w_pt]),
-                8  => segs.push([n_pt, w_pt]),
-                9  => segs.push([n_pt, s_pt]),
+                6 => segs.push([n_pt, s_pt]),
+                7 => segs.push([n_pt, w_pt]),
+                8 => segs.push([n_pt, w_pt]),
+                9 => segs.push([n_pt, s_pt]),
                 10 => {
                     // Saddle: TL+BR above, TR+BL below
                     let avg = (tl + tr + br + bl) * 0.25;
@@ -369,7 +399,7 @@ fn extract_segments(grid: &[f32], n: usize, threshold: f32, bounds: GeoBounds) -
                 12 => segs.push([w_pt, e_pt]),
                 13 => segs.push([s_pt, e_pt]),
                 14 => segs.push([w_pt, s_pt]),
-                _  => {}
+                _ => {}
             }
         }
     }
@@ -378,7 +408,11 @@ fn extract_segments(grid: &[f32], n: usize, threshold: f32, bounds: GeoBounds) -
 
 fn interp(v0: f32, v1: f32, threshold: f32) -> f32 {
     let dv = v1 - v0;
-    if dv.abs() < 1e-7 { 0.5 } else { ((threshold - v0) / dv).clamp(0.0, 1.0) }
+    if dv.abs() < 1e-7 {
+        0.5
+    } else {
+        ((threshold - v0) / dv).clamp(0.0, 1.0)
+    }
 }
 
 // ── Segment chaining ──────────────────────────────────────────────────────────
@@ -413,8 +447,11 @@ fn chain_segments(segments: Vec<[(f32, f32); 2]>) -> Vec<Vec<(f32, f32)>> {
                 Some(next_idx) => {
                     used[next_idx] = true;
                     let seg = &segments[next_idx];
-                    let new_pt =
-                        if ebits(seg[0]) == ebits(tail) { seg[1] } else { seg[0] };
+                    let new_pt = if ebits(seg[0]) == ebits(tail) {
+                        seg[1]
+                    } else {
+                        seg[0]
+                    };
                     poly.push_back(new_pt);
                 }
             }
@@ -428,8 +465,11 @@ fn chain_segments(segments: Vec<[(f32, f32); 2]>) -> Vec<Vec<(f32, f32)>> {
                 Some(next_idx) => {
                     used[next_idx] = true;
                     let seg = &segments[next_idx];
-                    let new_pt =
-                        if ebits(seg[0]) == ebits(head) { seg[1] } else { seg[0] };
+                    let new_pt = if ebits(seg[0]) == ebits(head) {
+                        seg[1]
+                    } else {
+                        seg[0]
+                    };
                     poly.push_front(new_pt);
                 }
             }
@@ -453,9 +493,5 @@ fn find_next(
     used: &[bool],
     pt: (f32, f32),
 ) -> Option<usize> {
-    ep_map
-        .get(&ebits(pt))?
-        .iter()
-        .find(|&&i| !used[i])
-        .copied()
+    ep_map.get(&ebits(pt))?.iter().find(|&&i| !used[i]).copied()
 }

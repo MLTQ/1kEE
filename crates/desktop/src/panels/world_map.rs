@@ -240,8 +240,10 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                     model.globe_view.local_mode = false;
                 }
                 let local_disabled = model.moon_mode
-                    && crate::terrain_assets::find_sldem_jp2(model.selected_root.as_deref()).is_none();
-                if ui.add_enabled(!local_disabled, local_btn)
+                    && crate::terrain_assets::find_sldem_jp2(model.selected_root.as_deref())
+                        .is_none();
+                if ui
+                    .add_enabled(!local_disabled, local_btn)
                     .on_disabled_hover_text("LOCAL lunar terrain requires SLDEM2015 JP2 data")
                     .clicked()
                     && !model.globe_view.local_mode
@@ -359,11 +361,10 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                     } else {
                         (egui::Color32::TRANSPARENT, theme::text_muted())
                     };
-                    let r_btn = egui::Button::new(
-                        egui::RichText::new("REPLAY").color(r_text).small(),
-                    )
-                    .fill(r_fill)
-                    .corner_radius(4.0);
+                    let r_btn =
+                        egui::Button::new(egui::RichText::new("REPLAY").color(r_text).small())
+                            .fill(r_fill)
+                            .corner_radius(4.0);
                     if ui
                         .add(r_btn)
                         .on_hover_text("Replay historical Factal events as animated flares")

@@ -168,13 +168,13 @@ fn apply_egui_style(ctx: &egui::Context, theme: MapTheme) {
                 None,
             ),
             MapTheme::Lunar => (
-                egui::Color32::from_rgb(5, 5, 7),   // panel: near-black space
+                egui::Color32::from_rgb(5, 5, 7), // panel: near-black space
                 egui::Color32::from_rgb(9, 9, 12),
                 egui::Color32::from_rgb(2, 2, 4),
-                egui::Color32::from_rgb(58, 57, 68),  // active: muted grey-blue
-                egui::Color32::from_rgb(44, 43, 52),  // hovered
-                egui::Color32::from_rgb(15, 15, 20),  // inactive
-                egui::Color32::from_rgb(7, 7, 10),    // window
+                egui::Color32::from_rgb(58, 57, 68), // active: muted grey-blue
+                egui::Color32::from_rgb(44, 43, 52), // hovered
+                egui::Color32::from_rgb(15, 15, 20), // inactive
+                egui::Color32::from_rgb(7, 7, 10),   // window
                 egui::Color32::from_rgb(78, 82, 104), // selection: cool grey-blue
                 egui::Color32::from_rgb(155, 200, 248), // hyperlink: pale ice-blue
                 Some(egui::Color32::from_rgb(218, 214, 204)), // text: pale warm grey

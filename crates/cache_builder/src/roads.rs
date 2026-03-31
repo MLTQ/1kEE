@@ -1,7 +1,7 @@
 use crate::args::BboxCommand;
 use crate::geojson::{ensure_cache_dir, merge_write_cells, merge_write_feature_cells};
-use crate::srtm::SrtmSampler;
 use crate::node_store::NodeStore;
+use crate::srtm::SrtmSampler;
 use crate::util::{
     GeoBounds, GeoPoint, RoadPolyline, WayFeature, bounds_intersect, canonical_building_class,
     canonical_road_class, canonical_tree_class, canonical_waterway_class, expand_bounds,
@@ -581,15 +581,26 @@ fn flush_all_chunks(
     }
     if !waterways_by_cell.is_empty() {
         let batch = std::mem::take(waterways_by_cell);
-        total += merge_write_feature_cells(cache_dir, "waterway", &batch, srtm.as_mut().map(|s| &mut **s))?;
+        total += merge_write_feature_cells(
+            cache_dir,
+            "waterway",
+            &batch,
+            srtm.as_mut().map(|s| &mut **s),
+        )?;
     }
     if !buildings_by_cell.is_empty() {
         let batch = std::mem::take(buildings_by_cell);
-        total += merge_write_feature_cells(cache_dir, "building", &batch, srtm.as_mut().map(|s| &mut **s))?;
+        total += merge_write_feature_cells(
+            cache_dir,
+            "building",
+            &batch,
+            srtm.as_mut().map(|s| &mut **s),
+        )?;
     }
     if !trees_by_cell.is_empty() {
         let batch = std::mem::take(trees_by_cell);
-        total += merge_write_feature_cells(cache_dir, "tree", &batch, srtm.as_mut().map(|s| &mut **s))?;
+        total +=
+            merge_write_feature_cells(cache_dir, "tree", &batch, srtm.as_mut().map(|s| &mut **s))?;
     }
     Ok(total)
 }

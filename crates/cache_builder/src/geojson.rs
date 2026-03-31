@@ -1,10 +1,8 @@
 use crate::srtm::SrtmSampler;
 use crate::util::{GeoPoint, RoadPolyline, WayFeature, bounds_intersect, focus_cell_bounds};
 use cell_format::{
-    CellFeature, CellPoint, TAG_ADMN, TAG_BLDG, TAG_ROAD, TAG_TREE, TAG_WATR,
-    admin_filename, cell_filename,
-    encode_road_class, encode_watr_class,
-    read::read_single_chunk,
+    CellFeature, CellPoint, TAG_ADMN, TAG_BLDG, TAG_ROAD, TAG_TREE, TAG_WATR, admin_filename,
+    cell_filename, encode_road_class, encode_watr_class, read::read_single_chunk,
     write::write_cell,
 };
 use serde_json::Value;
@@ -61,7 +59,12 @@ pub fn merge_write_cells(
                 continue;
             }
             let elevations = if let Some(s) = srtm.as_mut() {
-                Some(road.points.iter().map(|p| s.sample(p.lat, p.lon)).collect::<Vec<_>>())
+                Some(
+                    road.points
+                        .iter()
+                        .map(|p| s.sample(p.lat, p.lon))
+                        .collect::<Vec<_>>(),
+                )
             } else {
                 None
             };
@@ -112,11 +115,18 @@ pub fn merge_write_feature_cells(
                 continue;
             }
             let elevations = if let Some(s) = srtm.as_mut() {
-                Some(f.points.iter().map(|p| s.sample(p.lat, p.lon)).collect::<Vec<_>>())
+                Some(
+                    f.points
+                        .iter()
+                        .map(|p| s.sample(p.lat, p.lon))
+                        .collect::<Vec<_>>(),
+                )
             } else {
                 None
             };
-            cell_features.push(way_feature_to_cell_feature_with_elev(&f, prefix, elevations));
+            cell_features.push(way_feature_to_cell_feature_with_elev(
+                &f, prefix, elevations,
+            ));
         }
 
         let bytes = write_cell(cell_lat as i16, cell_lon as i16, &[(tag, &cell_features)]);
@@ -159,7 +169,10 @@ pub fn write_admin_level_file(
                 name: name.clone(),
                 points: ring
                     .iter()
-                    .map(|pt| CellPoint { lon: pt.lon, lat: pt.lat })
+                    .map(|pt| CellPoint {
+                        lon: pt.lon,
+                        lat: pt.lat,
+                    })
                     .collect(),
                 elevations: None,
             });
@@ -198,7 +211,14 @@ fn load_roads_from_binary(path: &Path) -> Option<Vec<RoadPolyline>> {
                 way_id: f.way_id,
                 road_class: cell_format::decode_road_class(f.class).to_owned(),
                 name: f.name,
-                points: f.points.into_iter().map(|p| GeoPoint { lat: p.lat, lon: p.lon }).collect(),
+                points: f
+                    .points
+                    .into_iter()
+                    .map(|p| GeoPoint {
+                        lat: p.lat,
+                        lon: p.lon,
+                    })
+                    .collect(),
             })
             .collect(),
     )
@@ -237,7 +257,14 @@ fn load_features_from_binary(path: &Path, tag: [u8; 4]) -> Option<Vec<WayFeature
                     way_id: f.way_id,
                     feature_class,
                     name: f.name,
-                    points: f.points.into_iter().map(|p| GeoPoint { lat: p.lat, lon: p.lon }).collect(),
+                    points: f
+                        .points
+                        .into_iter()
+                        .map(|p| GeoPoint {
+                            lat: p.lat,
+                            lon: p.lon,
+                        })
+                        .collect(),
                     is_polygon: f.is_polygon,
                 }
             })
@@ -253,7 +280,14 @@ fn road_to_cell_feature(road: RoadPolyline, elevations: Option<Vec<f32>>) -> Cel
         class: encode_road_class(&road.road_class),
         is_polygon: false,
         name: road.name,
-        points: road.points.into_iter().map(|p| CellPoint { lon: p.lon, lat: p.lat }).collect(),
+        points: road
+            .points
+            .into_iter()
+            .map(|p| CellPoint {
+                lon: p.lon,
+                lat: p.lat,
+            })
+            .collect(),
         elevations,
     }
 }
@@ -272,7 +306,14 @@ fn way_feature_to_cell_feature_with_elev(
         class,
         is_polygon: f.is_polygon,
         name: f.name.clone(),
-        points: f.points.iter().map(|p| CellPoint { lon: p.lon, lat: p.lat }).collect(),
+        points: f
+            .points
+            .iter()
+            .map(|p| CellPoint {
+                lon: p.lon,
+                lat: p.lat,
+            })
+            .collect(),
         elevations,
     }
 }
@@ -309,7 +350,10 @@ fn load_roads_from_geojson(path: &Path) -> Option<Vec<RoadPolyline>> {
 
     for feature in features {
         let props = feature.get("properties").unwrap_or(&Value::Null);
-        let way_id = props.get("way_id").and_then(Value::as_i64).unwrap_or_default();
+        let way_id = props
+            .get("way_id")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
         let road_class = props
             .get("class")
             .and_then(Value::as_str)
@@ -352,7 +396,10 @@ fn load_features_from_geojson(path: &Path) -> Option<Vec<WayFeature>> {
 
     for feature in features {
         let props = feature.get("properties").unwrap_or(&Value::Null);
-        let way_id = props.get("way_id").and_then(Value::as_i64).unwrap_or_default();
+        let way_id = props
+            .get("way_id")
+            .and_then(Value::as_i64)
+            .unwrap_or_default();
         let feature_class = props
             .get("class")
             .and_then(Value::as_str)

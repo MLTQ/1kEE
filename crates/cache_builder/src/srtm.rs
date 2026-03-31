@@ -71,8 +71,8 @@ impl SrtmSampler {
 // ── Tile loading ──────────────────────────────────────────────────────────────
 
 fn load_tile(path: &Path) -> Option<SrtmTile> {
-    use tiff::decoder::{Decoder, DecodingResult};
     use std::fs::File;
+    use tiff::decoder::{Decoder, DecodingResult};
 
     let file = File::open(path).ok()?;
     let mut decoder = Decoder::new(file).ok()?;
@@ -99,7 +99,13 @@ fn load_tile(path: &Path) -> Option<SrtmTile> {
             .collect(),
         DecodingResult::F64(data) => data
             .into_iter()
-            .map(|f| if f.is_nan() || f <= -32767.0 { 0.0 } else { f as f32 })
+            .map(|f| {
+                if f.is_nan() || f <= -32767.0 {
+                    0.0
+                } else {
+                    f as f32
+                }
+            })
             .collect(),
         _ => return None,
     };
@@ -108,7 +114,11 @@ fn load_tile(path: &Path) -> Option<SrtmTile> {
         return None;
     }
 
-    Some(SrtmTile { width, height, samples })
+    Some(SrtmTile {
+        width,
+        height,
+        samples,
+    })
 }
 
 fn tile_path(root: &Path, lat: f32, lon: f32) -> PathBuf {
@@ -155,6 +165,9 @@ impl SrtmTile {
     }
 
     fn get(&self, x: u32, y: u32) -> f32 {
-        self.samples.get((y * self.width + x) as usize).copied().unwrap_or(0.0)
+        self.samples
+            .get((y * self.width + x) as usize)
+            .copied()
+            .unwrap_or(0.0)
     }
 }

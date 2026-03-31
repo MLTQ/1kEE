@@ -149,7 +149,8 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         }
     }
 
-    let event_markers: Vec<_> = if !model.show_event_markers || model.replay_mode || model.moon_mode {
+    let event_markers: Vec<_> = if !model.show_event_markers || model.replay_mode || model.moon_mode
+    {
         Vec::new()
     } else {
         model
@@ -636,9 +637,6 @@ fn draw_lunar_build_overlay(
     painter.circle_stroke(
         ring_center,
         ring_r,
-        egui::Stroke::new(
-            2.5 + pulse * 1.5,
-            accent.gamma_multiply(ring_alpha),
-        ),
+        egui::Stroke::new(2.5 + pulse * 1.5, accent.gamma_multiply(ring_alpha)),
     );
 }

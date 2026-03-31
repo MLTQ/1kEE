@@ -729,10 +729,8 @@ impl AppModel {
 
     /// Reload the replay state from the event store with current settings.
     pub fn rebuild_replay_state(&mut self) {
-        let events = crate::event_store::load_events_in_range(
-            self.replay_from_unix,
-            self.replay_to_unix,
-        );
+        let events =
+            crate::event_store::load_events_in_range(self.replay_from_unix, self.replay_to_unix);
         let wall_duration = self.replay_duration_secs as f64;
         if events.is_empty() {
             self.replay_state = None;

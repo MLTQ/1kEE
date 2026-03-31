@@ -475,7 +475,9 @@ pub fn history_tick(model: &mut AppModel) {
             Ok(HistoryOutcome::Success(n)) => {
                 let msg = format!("{n} historical events loaded");
                 model.replay_history_status = msg.clone();
-                model.push_log(format!("Factal history fetch complete: {n} event(s) stored."));
+                model.push_log(format!(
+                    "Factal history fetch complete: {n} event(s) stored."
+                ));
                 // Rebuild whenever replay is open — history may have arrived after
                 // the initial rebuild (which only had today's live events).
                 if model.replay_mode {
@@ -500,10 +502,7 @@ pub fn is_history_fetching() -> bool {
 }
 
 fn fetch_and_store_history(api_key: &str, days_back: u32) -> HistoryOutcome {
-    let client = match Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-    {
+    let client = match Client::builder().timeout(Duration::from_secs(30)).build() {
         Ok(c) => c,
         Err(e) => return HistoryOutcome::Error(e.to_string()),
     };

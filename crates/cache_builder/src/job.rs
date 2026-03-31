@@ -46,24 +46,24 @@ pub fn spawn_job(job: BuildJob) -> JobHandle {
                     let _ = tx.send(BuildEvent::Log(p.message.clone()));
                 }
                 if let Some((min_lat, max_lat, min_lon, max_lon)) = p.tile_bounds {
-                    let _ = tx.send(BuildEvent::TileCompleted(min_lat, max_lat, min_lon, max_lon));
+                    let _ = tx.send(BuildEvent::TileCompleted(
+                        min_lat, max_lat, min_lon, max_lon,
+                    ));
                 }
                 let _ = tx.send(BuildEvent::Progress(RoadBuildProgress {
-                    stage:   p.stage,
+                    stage: p.stage,
                     fraction: p.fraction,
                     message: p.message,
                 }));
             };
             let result = match command.engine {
-                crate::args::ContourEngine::Native => {
-                    crate::contours::build_contour_tiles_native(
-                        &command.srtm_root,
-                        &command.cache_db_path,
-                        bounds,
-                        &command.zoom_buckets,
-                        &mut reporter,
-                    )
-                }
+                crate::args::ContourEngine::Native => crate::contours::build_contour_tiles_native(
+                    &command.srtm_root,
+                    &command.cache_db_path,
+                    bounds,
+                    &command.zoom_buckets,
+                    &mut reporter,
+                ),
                 crate::args::ContourEngine::Gdal => {
                     let tmp_dir = command.tmp_dir.unwrap_or_else(|| {
                         command
@@ -91,12 +91,14 @@ pub fn spawn_job(job: BuildJob) -> JobHandle {
                     let _ = tx.send(BuildEvent::Log(p.message.clone()));
                 }
                 if let Some((min_lat, max_lat, min_lon, max_lon)) = p.tile_bounds {
-                    let _ = tx.send(BuildEvent::TileCompleted(min_lat, max_lat, min_lon, max_lon));
+                    let _ = tx.send(BuildEvent::TileCompleted(
+                        min_lat, max_lat, min_lon, max_lon,
+                    ));
                 }
                 let _ = tx.send(BuildEvent::Progress(RoadBuildProgress {
-                    stage:    p.stage,
+                    stage: p.stage,
                     fraction: p.fraction,
-                    message:  p.message,
+                    message: p.message,
                 }));
             };
             let result = crate::lunar::build_lunar_contour_tiles(command, &mut reporter);
@@ -105,4 +107,3 @@ pub fn spawn_job(job: BuildJob) -> JobHandle {
     });
     JobHandle { receiver: rx }
 }
-

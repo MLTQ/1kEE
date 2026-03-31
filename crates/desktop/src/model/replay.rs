@@ -161,11 +161,14 @@ impl ReplayState {
         let target = (fraction as f64 * self.wall_duration).clamp(0.0, self.wall_duration);
         let was_paused = self.is_paused();
         self.elapsed_before_pause = target;
-        self.play_start = if was_paused { None } else { Some(Instant::now()) };
+        self.play_start = if was_paused {
+            None
+        } else {
+            Some(Instant::now())
+        };
         self.active_flares.clear();
         // Advance next_idx past all events that would have already fired.
-        let sim_now = self.sim_from as f64
-            + fraction as f64 * (self.sim_to - self.sim_from) as f64;
+        let sim_now = self.sim_from as f64 + fraction as f64 * (self.sim_to - self.sim_from) as f64;
         self.next_idx = self
             .events
             .partition_point(|(unix, _)| (*unix as f64) <= sim_now);

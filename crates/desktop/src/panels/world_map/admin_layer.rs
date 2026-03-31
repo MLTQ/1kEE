@@ -86,7 +86,10 @@ pub fn load_admin_boundaries(cache_root: &Path, levels: &[u8]) -> Vec<LoadedAdmi
                             points: f
                                 .points
                                 .into_iter()
-                                .map(|p| GeoPoint { lat: p.lat, lon: p.lon })
+                                .map(|p| GeoPoint {
+                                    lat: p.lat,
+                                    lon: p.lon,
+                                })
                                 .collect(),
                         });
                     }

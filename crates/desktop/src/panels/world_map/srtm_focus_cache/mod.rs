@@ -318,9 +318,7 @@ pub fn ensure_global_coastline_cache(selected_root: Option<&Path>) -> Option<Pat
 /// Any file that already exists is returned immediately; missing ones are
 /// built in a background thread and `None` is returned until complete.
 /// Callers should call every frame — the function is cheap when already built.
-pub fn ensure_gebco_derived(
-    selected_root: Option<&Path>,
-) -> (Option<PathBuf>, Option<PathBuf>) {
+pub fn ensure_gebco_derived(selected_root: Option<&Path>) -> (Option<PathBuf>, Option<PathBuf>) {
     let Some(data_root) = terrain_assets::find_data_root(selected_root) else {
         return (None, None);
     };

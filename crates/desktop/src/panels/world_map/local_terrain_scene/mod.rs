@@ -454,7 +454,11 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     ui_overlays::draw_legend(
         painter,
         rect,
-        if model.moon_mode { "LOCAL LUNAR TERRAIN" } else { "LOCAL EVENT TERRAIN" },
+        if model.moon_mode {
+            "LOCAL LUNAR TERRAIN"
+        } else {
+            "LOCAL EVENT TERRAIN"
+        },
         render_zoom,
         model.moon_mode,
     );
@@ -775,8 +779,7 @@ struct ElevFillState {
     ready: Option<ElevFillEntry>,
 }
 
-static ELEV_FILL: std::sync::OnceLock<std::sync::Mutex<ElevFillState>> =
-    std::sync::OnceLock::new();
+static ELEV_FILL: std::sync::OnceLock<std::sync::Mutex<ElevFillState>> = std::sync::OnceLock::new();
 
 fn elev_fill_key(
     focus: GeoPoint,
@@ -813,11 +816,11 @@ fn elev_lerp(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
 fn elevation_fill_color_lunar(elev_m: f32) -> egui::Color32 {
     // Monochrome regolith palette: dark mare basalt → mid highland → sunlit peak.
     // Moon elevation range here: ~-9000 m (SPA basin) to +11000 m (highland rims).
-    let mare    = egui::Color32::from_rgb(28,  27,  32);  // dark mare basalt
-    let lowland = egui::Color32::from_rgb(60,  58,  68);  // low highland
-    let mid     = egui::Color32::from_rgb(110, 108, 118); // mid highland (most surface)
-    let high    = egui::Color32::from_rgb(168, 165, 152); // high terrain
-    let peak    = egui::Color32::from_rgb(215, 210, 188); // sunlit peaks / rims
+    let mare = egui::Color32::from_rgb(28, 27, 32); // dark mare basalt
+    let lowland = egui::Color32::from_rgb(60, 58, 68); // low highland
+    let mid = egui::Color32::from_rgb(110, 108, 118); // mid highland (most surface)
+    let high = egui::Color32::from_rgb(168, 165, 152); // high terrain
+    let peak = egui::Color32::from_rgb(215, 210, 188); // sunlit peaks / rims
 
     if elev_m < -2000.0 {
         elev_lerp(lowland, mare, ((-elev_m - 2000.0) / 6000.0).min(1.0))
@@ -839,9 +842,9 @@ fn elevation_fill_color(elev_m: f32) -> egui::Color32 {
     // contour_color()     ≈ rgb(96,164,181) — noticeably lighter → clearly visible.
     // hot_color()         ≈ rgb(245,125,78) — warm/bright → peaks.
     let ocean = theme::canvas_background(); // deep water
-    let shore = theme::topo_color();        // shallow / coastline
-    let land  = theme::contour_color();     // main land surface — must contrast with bg
-    let peak  = theme::hot_color();         // mountain peaks
+    let shore = theme::topo_color(); // shallow / coastline
+    let land = theme::contour_color(); // main land surface — must contrast with bg
+    let peak = theme::hot_color(); // mountain peaks
 
     if elev_m < -500.0 {
         elev_lerp(shore, ocean, ((-elev_m - 500.0) / 3000.0).min(1.0))
@@ -926,8 +929,10 @@ fn build_elev_fill_mesh(
     let mut elevs = vec![0.0f32; side * side];
     for row in 0..side {
         for col in 0..side {
-            let lat = (focus.lat - half_extent_deg) + (row as f32 / N as f32) * 2.0 * half_extent_deg;
-            let lon = (focus.lon - half_extent_deg) + (col as f32 / N as f32) * 2.0 * half_extent_deg;
+            let lat =
+                (focus.lat - half_extent_deg) + (row as f32 / N as f32) * 2.0 * half_extent_deg;
+            let lon =
+                (focus.lon - half_extent_deg) + (col as f32 / N as f32) * 2.0 * half_extent_deg;
             elevs[row * side + col] = idw_elevation(lat, lon);
         }
     }
@@ -950,7 +955,8 @@ fn build_elev_fill_mesh(
                 (elev - elevs[row * side + col - 1]) / cell_size_m
             };
             let dzdy = if row > 0 && row < N {
-                (elevs[(row - 1) * side + col] - elevs[(row + 1) * side + col]) / (2.0 * cell_size_m)
+                (elevs[(row - 1) * side + col] - elevs[(row + 1) * side + col])
+                    / (2.0 * cell_size_m)
             } else if row == 0 {
                 (elev - elevs[side + col]) / cell_size_m
             } else {
@@ -968,7 +974,11 @@ fn build_elev_fill_mesh(
             // clearly visible against the near-black canvas background.
             let shade = 0.60 + 0.40 * (nx * lx / llen + ny * ly / llen + nz * lz / llen).max(0.0);
 
-            let base = if moon_mode { elevation_fill_color_lunar(elev) } else { elevation_fill_color(elev) };
+            let base = if moon_mode {
+                elevation_fill_color_lunar(elev)
+            } else {
+                elevation_fill_color(elev)
+            };
             // Apply hillshade to RGB only — gamma_multiply would also reduce alpha,
             // making the mesh semi-transparent.  Keep alpha=255 (fully opaque).
             let color = egui::Color32::from_rgb(
@@ -977,23 +987,36 @@ fn build_elev_fill_mesh(
                 (base.b() as f32 * shade).min(255.0) as u8,
             );
 
-            let lat = (focus.lat - half_extent_deg) + (row as f32 / N as f32) * 2.0 * half_extent_deg;
-            let lon = (focus.lon - half_extent_deg) + (col as f32 / N as f32) * 2.0 * half_extent_deg;
+            let lat =
+                (focus.lat - half_extent_deg) + (row as f32 / N as f32) * 2.0 * half_extent_deg;
+            let lon =
+                (focus.lon - half_extent_deg) + (col as f32 / N as f32) * 2.0 * half_extent_deg;
             let projected = projection::project_local(
-                layout, view, focus, GeoPoint { lat, lon }, elev, extent_x_km, extent_y_km,
+                layout,
+                view,
+                focus,
+                GeoPoint { lat, lon },
+                elev,
+                extent_x_km,
+                extent_y_km,
             );
-            let (pos, depth) = projected
-                .map(|p| (p.pos, p.depth))
-                .unwrap_or_else(|| (
+            let (pos, depth) = projected.map(|p| (p.pos, p.depth)).unwrap_or_else(|| {
+                (
                     egui::pos2(
-                        layout.focus_center.x + (col as f32 / N as f32 - 0.5) * layout.horizontal_scale * 2.0,
+                        layout.focus_center.x
+                            + (col as f32 / N as f32 - 0.5) * layout.horizontal_scale * 2.0,
                         layout.focus_center.y - (row as f32 / N as f32 - 0.5) * layout.height,
                     ),
                     0.5,
-                ));
+                )
+            });
 
             vertex_depths.push(depth);
-            mesh.vertices.push(egui::epaint::Vertex { pos, uv: egui::pos2(0.0, 0.0), color });
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos,
+                uv: egui::pos2(0.0, 0.0),
+                color,
+            });
         }
     }
 
@@ -1008,8 +1031,14 @@ fn build_elev_fill_mesh(
         }
     }
     tris.sort_unstable_by(|a, b| {
-        let da = (vertex_depths[a[0] as usize] + vertex_depths[a[1] as usize] + vertex_depths[a[2] as usize]) / 3.0;
-        let db = (vertex_depths[b[0] as usize] + vertex_depths[b[1] as usize] + vertex_depths[b[2] as usize]) / 3.0;
+        let da = (vertex_depths[a[0] as usize]
+            + vertex_depths[a[1] as usize]
+            + vertex_depths[a[2] as usize])
+            / 3.0;
+        let db = (vertex_depths[b[0] as usize]
+            + vertex_depths[b[1] as usize]
+            + vertex_depths[b[2] as usize])
+            / 3.0;
         // Descending: far triangles (high depth) first so near ones paint over them
         db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
     });
@@ -1043,42 +1072,43 @@ fn draw_elevation_fill(
     // Moon has no oceans — skip GEBCO bathymetry samples entirely.
     let gebco_samples: Vec<(f32, f32, f32)> = if moon_mode {
         Vec::new()
-    } else if let Some(bathy) = contour_asset::load_global_bathymetry(
-            selected_root,
-            bathy_zoom,
-            painter.ctx().clone(),
-        ) {
-            bathy
-                .iter()
-                .filter(|c| {
-                    c.points.iter().any(|p| {
+    } else if let Some(bathy) =
+        contour_asset::load_global_bathymetry(selected_root, bathy_zoom, painter.ctx().clone())
+    {
+        bathy
+            .iter()
+            .filter(|c| {
+                c.points.iter().any(|p| {
+                    p.lat >= min_lat && p.lat <= max_lat && p.lon >= min_lon && p.lon <= max_lon
+                })
+            })
+            .filter_map(|c| {
+                // Pick the midpoint of each GEBCO arc that falls within viewport.
+                let mid_candidates: Vec<_> = c
+                    .points
+                    .iter()
+                    .filter(|p| {
                         p.lat >= min_lat && p.lat <= max_lat && p.lon >= min_lon && p.lon <= max_lon
                     })
-                })
-                .filter_map(|c| {
-                    // Pick the midpoint of each GEBCO arc that falls within viewport.
-                    let mid_candidates: Vec<_> = c
-                        .points
-                        .iter()
-                        .filter(|p| {
-                            p.lat >= min_lat
-                                && p.lat <= max_lat
-                                && p.lon >= min_lon
-                                && p.lon <= max_lon
-                        })
-                        .collect();
-                    if mid_candidates.is_empty() {
-                        return None;
-                    }
-                    let mid = mid_candidates[mid_candidates.len() / 2];
-                    Some((mid.lat, mid.lon, c.elevation_m))
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+                    .collect();
+                if mid_candidates.is_empty() {
+                    return None;
+                }
+                let mid = mid_candidates[mid_candidates.len() / 2];
+                Some((mid.lat, mid.lon, c.elevation_m))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
-    let key = elev_fill_key(focus, view, layout, contours.len(), gebco_samples.len() + if moon_mode { 100_000 } else { 0 });
+    let key = elev_fill_key(
+        focus,
+        view,
+        layout,
+        contours.len(),
+        gebco_samples.len() + if moon_mode { 100_000 } else { 0 },
+    );
     let state_mutex = ELEV_FILL.get_or_init(|| {
         std::sync::Mutex::new(ElevFillState {
             building_key: None,
@@ -1098,7 +1128,10 @@ fn draw_elevation_fill(
         None
     };
     if let Some((built_key, mesh)) = got_result {
-        state.ready = Some(ElevFillEntry { key: built_key, mesh });
+        state.ready = Some(ElevFillEntry {
+            key: built_key,
+            mesh,
+        });
         state.building_key = None;
         state.result_rx = None;
         painter.ctx().request_repaint();
@@ -1116,7 +1149,8 @@ fn draw_elevation_fill(
         state.building_key = Some(key);
         state.result_rx = Some(rx);
         std::thread::spawn(move || {
-            let mesh = build_elev_fill_mesh(&layout_c, &view_c, focus, &contours_c, &gebco_c, moon_mode);
+            let mesh =
+                build_elev_fill_mesh(&layout_c, &view_c, focus, &contours_c, &gebco_c, moon_mode);
             let _ = tx.send((key, mesh));
             ctx.request_repaint();
         });
