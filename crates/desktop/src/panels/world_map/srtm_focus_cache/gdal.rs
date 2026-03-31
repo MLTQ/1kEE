@@ -12,6 +12,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+const LUNAR_SOURCE_CHUNK_CENTER_STEP_DEG: f32 = 4.0;
+const LUNAR_SOURCE_CHUNK_HALF_EXTENT_DEG: f32 = 6.0;
+const LUNAR_SOURCE_CHUNK_DIR: &str = "lunar_source_chunks";
+
 pub fn find_prebuilt_vrt(srtm_root: &Path) -> Option<PathBuf> {
     let parent = srtm_root.parent()?;
     // Try the canonical name first, then any .vrt in the parent directory.
@@ -465,11 +469,8 @@ pub fn build_lunar_preview(jp2_path: &Path, cache_root: &Path) -> Option<()> {
     // Actual data min/max DN: -17438 … +21567 — use -18000/+22000 for headroom.
     let mut translate = Command::new(gdal_tool_path("gdal_translate"));
     translate.args([
-        "-q",
-        "-outsize", "4096", "1366",
-        "-ot", "UInt16",
-        "-of", "PNG",
-        "-scale", "-18000", "22000", "0", "65535",
+        "-q", "-outsize", "4096", "1366", "-ot", "UInt16", "-of", "PNG", "-scale", "-18000",
+        "22000", "0", "65535",
     ]);
     translate.arg(jp2_path).arg(&tmp_png);
     run_command_with_timeout(
@@ -508,6 +509,118 @@ pub fn gdal_tool_path(tool: &str) -> PathBuf {
 
 pub fn run_command(command: Command, label: &str) -> std::io::Result<()> {
     run_command_with_timeout(command, label, BUILD_TIMEOUT)
+}
+
+#[derive(Clone)]
+struct LunarSourceChunk {
+    path: PathBuf,
+    bounds: GeoBounds,
+    raster_size: u32,
+}
+
+fn lunar_source_chunk_root(cache_root: &Path) -> PathBuf {
+    cache_root.join(LUNAR_SOURCE_CHUNK_DIR)
+}
+
+fn lunar_source_chunk_for_bounds(
+    cache_root: &Path,
+    bounds: GeoBounds,
+    spec: FocusContourSpec,
+) -> LunarSourceChunk {
+    let center_lat = (bounds.min_lat + bounds.max_lat) * 0.5;
+    let center_lon = (bounds.min_lon + bounds.max_lon) * 0.5;
+    let lat_bucket = (center_lat / LUNAR_SOURCE_CHUNK_CENTER_STEP_DEG).round() as i32;
+    let lon_bucket = (center_lon / LUNAR_SOURCE_CHUNK_CENTER_STEP_DEG).round() as i32;
+    let chunk_center_lat = lat_bucket as f32 * LUNAR_SOURCE_CHUNK_CENTER_STEP_DEG;
+    let chunk_center_lon = lon_bucket as f32 * LUNAR_SOURCE_CHUNK_CENTER_STEP_DEG;
+    let pixels_per_degree = spec.raster_size as f32 / (spec.half_extent_deg * 2.0);
+    let chunk_span = LUNAR_SOURCE_CHUNK_HALF_EXTENT_DEG * 2.0;
+    let raster_size = (chunk_span * pixels_per_degree).ceil() as u32;
+    let dir = lunar_source_chunk_root(cache_root).join(format!("z{}", spec.zoom_bucket));
+    let file_name = format!("lat{lat_bucket:+04}_lon{lon_bucket:+04}.tif");
+    LunarSourceChunk {
+        path: dir.join(file_name),
+        bounds: GeoBounds {
+            min_lat: (chunk_center_lat - LUNAR_SOURCE_CHUNK_HALF_EXTENT_DEG).clamp(-89.999, 89.999),
+            max_lat: (chunk_center_lat + LUNAR_SOURCE_CHUNK_HALF_EXTENT_DEG).clamp(-89.999, 89.999),
+            min_lon: chunk_center_lon - LUNAR_SOURCE_CHUNK_HALF_EXTENT_DEG,
+            max_lon: chunk_center_lon + LUNAR_SOURCE_CHUNK_HALF_EXTENT_DEG,
+        },
+        raster_size: raster_size.max(spec.raster_size),
+    }
+}
+
+fn temp_sibling(path: &Path, suffix: &str) -> PathBuf {
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("chunk");
+    path.with_file_name(format!("{stem}.{suffix}"))
+}
+
+fn persist_temp_file(tmp_path: &Path, final_path: &Path) -> std::io::Result<()> {
+    if fs::rename(tmp_path, final_path).is_ok() {
+        return Ok(());
+    }
+    fs::copy(tmp_path, final_path)?;
+    fs::remove_file(tmp_path)?;
+    Ok(())
+}
+
+fn ensure_lunar_source_chunk(
+    jp2_path: &Path,
+    cache_root: &Path,
+    bounds: GeoBounds,
+    spec: FocusContourSpec,
+) -> Option<LunarSourceChunk> {
+    let chunk = lunar_source_chunk_for_bounds(cache_root, bounds, spec);
+    if chunk.path.exists() {
+        return Some(chunk);
+    }
+
+    let parent = chunk.path.parent()?;
+    fs::create_dir_all(parent).ok()?;
+
+    let tmp_chunk = temp_sibling(&chunk.path, &format!("{}.tmp.tif", std::process::id()));
+    let _ = fs::remove_file(&tmp_chunk);
+
+    let mut translate = Command::new(gdal_tool_path("gdal_translate"));
+    translate.args([
+        "-q",
+        "-projwin",
+        &chunk.bounds.min_lon.to_string(),
+        &chunk.bounds.max_lat.to_string(),
+        &chunk.bounds.max_lon.to_string(),
+        &chunk.bounds.min_lat.to_string(),
+        "-outsize",
+        &chunk.raster_size.to_string(),
+        &chunk.raster_size.to_string(),
+        "-scale",
+        "-18000",
+        "22000",
+        "-9000",
+        "11000",
+        "-ot",
+        "Int16",
+        "-of",
+        "GTiff",
+        "-co",
+        "TILED=YES",
+        "-co",
+        "COMPRESS=LZW",
+        "-co",
+        "PREDICTOR=2",
+        "-co",
+        "BLOCKXSIZE=512",
+        "-co",
+        "BLOCKYSIZE=512",
+    ]);
+    translate.arg(jp2_path).arg(&tmp_chunk);
+    run_command_with_timeout(
+        translate,
+        "gdal_translate (lunar source chunk)",
+        Duration::from_secs(600),
+    )
+    .ok()?;
+    persist_temp_file(&tmp_chunk, &chunk.path).ok()?;
+    Some(chunk)
 }
 
 pub fn run_command_with_timeout(
@@ -643,7 +756,9 @@ pub fn build_lunar_contour_tile(
         fs::create_dir_all(parent).ok()?;
     }
 
-    // gdal_translate: window extraction + DN→elevation_m scaling.
+    let chunk = ensure_lunar_source_chunk(jp2_path, cache_root, bounds, spec)?;
+
+    // gdal_translate: crop from the cached source chunk into the exact tile.
     // -projwin ulx uly lrx lry  (min_lon, max_lat, max_lon, min_lat)
     let mut translate = Command::new(gdal_tool_path("gdal_translate"));
     translate.args([
@@ -656,15 +771,18 @@ pub fn build_lunar_contour_tile(
         "-outsize",
         &spec.raster_size.to_string(),
         &spec.raster_size.to_string(),
-        "-scale", "-18000", "22000", "-9000", "11000",
-        "-ot", "Float32",
-        "-of", "GTiff",
+        "-ot",
+        "Int16",
+        "-of",
+        "GTiff",
     ]);
-    translate.arg(jp2_path).arg(&tmp_tif_path);
-    // JP2 reads from SLDEM2015 are slow — the file is ~22 GB and a single
-    // region extraction can take several minutes even on fast storage.
-    // Use a generous 10-minute timeout instead of the 90-second default.
-    run_command_with_timeout(translate, "gdal_translate (lunar tile)", Duration::from_secs(600)).ok()?;
+    translate.arg(&chunk.path).arg(&tmp_tif_path);
+    run_command_with_timeout(
+        translate,
+        "gdal_translate (lunar cached tile)",
+        Duration::from_secs(120),
+    )
+    .ok()?;
 
     if shutdown_requested().load(Ordering::Relaxed) {
         cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);

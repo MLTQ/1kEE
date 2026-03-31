@@ -97,6 +97,8 @@ struct GlobeRegionCache {
     root: Option<PathBuf>,
     /// (lat_bucket, lon_bucket) → decoded contour paths
     tiles: HashMap<(i32, i32), Arc<Vec<ContourPath>>>,
+    /// Tiles already queued for a background DB read.
+    in_flight: HashSet<(i32, i32)>,
     /// Insertion order for deterministic eviction among equal-distance ties
     order: Vec<(i32, i32)>,
 }
@@ -107,6 +109,7 @@ impl Default for GlobeRegionCache {
             zoom_bucket: -1,
             root: None,
             tiles: HashMap::new(),
+            in_flight: HashSet::new(),
             order: Vec::new(),
         }
     }
@@ -240,7 +243,10 @@ pub fn load_srtm_region_for_view(
                 Ok(contours) => {
                     eprintln!(
                         "[1kEE] contour tile z{} ({},{}) → {} lines OK",
-                        key.zoom_bucket, key.lat_bucket, key.lon_bucket, contours.len()
+                        key.zoom_bucket,
+                        key.lat_bucket,
+                        key.lon_bucket,
+                        contours.len()
                     );
                 }
                 Err(e) => {
@@ -307,7 +313,7 @@ pub fn load_lunar_region_for_view(
     scene_anchor: crate::model::GeoPoint,
     viewport_center: crate::model::GeoPoint,
     zoom: f32,
-    radius: i32,
+    _radius: i32,
     ctx: egui::Context,
 ) -> Option<Arc<Vec<ContourPath>>> {
     let assets =
@@ -381,27 +387,23 @@ pub fn load_lunar_region_for_view(
         missing
     };
 
-    for (key, asset) in missing {
+    if !missing.is_empty() {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = query_local_contours(
-                &key.path,
-                key.zoom_bucket,
-                key.lat_bucket,
-                key.lon_bucket,
-                asset.simplify_step,
-                per_asset_budget,
-            )
-            .ok()
-            .filter(|c| !c.is_empty());
+            let loaded =
+                query_local_contours_batch(&missing[0].0.path, &missing, per_asset_budget).ok();
 
             if let Ok(mut g) = cache.lock() {
-                if let Some(contours) = result {
-                    g.entries
-                        .entry(key.clone())
-                        .or_insert_with(|| Arc::new(contours));
+                if let Some(loaded) = loaded {
+                    for (key, contours) in loaded {
+                        g.entries
+                            .entry(key.clone())
+                            .or_insert_with(|| Arc::new(contours));
+                    }
                 }
-                g.in_flight.remove(&key);
+                for (key, _) in &missing {
+                    g.in_flight.remove(key);
+                }
             }
             ctx.request_repaint();
         });
@@ -444,9 +446,7 @@ pub fn load_lunar_region_for_view(
             }
             let mid = &contour.points[contour.points.len() / 2];
             // Only keep this line if its midpoint is within the tile's exclusive region.
-            if (mid.lat - tile_lat).abs() <= half_step
-                && (mid.lon - tile_lon).abs() <= half_step
-            {
+            if (mid.lat - tile_lat).abs() <= half_step && (mid.lon - tile_lon).abs() <= half_step {
                 merged.push(contour.clone());
             }
         }
@@ -500,6 +500,7 @@ pub fn load_srtm_for_globe(
         guard.zoom_bucket = zoom_bucket;
         guard.root = root;
         guard.tiles.clear();
+        guard.in_flight.clear();
         guard.order.clear();
     }
 
@@ -514,33 +515,52 @@ pub fn load_srtm_for_globe(
     // Collect missing keys, then drop the lock before doing DB reads.
     let missing: Vec<srtm_focus_cache::FocusContourAsset> = assets
         .iter()
-        .filter(|a| !guard.tiles.contains_key(&(a.lat_bucket, a.lon_bucket)))
+        .filter(|a| {
+            let key = (a.lat_bucket, a.lon_bucket);
+            !guard.tiles.contains_key(&key) && !guard.in_flight.contains(&key)
+        })
         .cloned()
         .collect();
+    for asset in &missing {
+        guard.in_flight.insert((asset.lat_bucket, asset.lon_bucket));
+    }
     drop(guard);
 
-    // Spawn detached threads for each missing tile; return immediately with
-    // whatever is currently cached rather than blocking the render thread.
-    for asset in missing {
+    // Load all missing tiles over one SQLite connection to avoid a thundering
+    // herd of per-tile reader threads.
+    if !missing.is_empty() {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            if let Some(contours) = query_local_contours(
-                &asset.path,
-                asset.zoom_bucket,
-                asset.lat_bucket,
-                asset.lon_bucket,
-                asset.simplify_step,
-                per_asset_budget,
-            )
-            .ok()
-            .filter(|c| !c.is_empty())
-            {
-                if let Ok(mut g) = cache.lock() {
-                    let key = (asset.lat_bucket, asset.lon_bucket);
-                    if !g.tiles.contains_key(&key) {
-                        g.tiles.insert(key, Arc::new(contours));
-                        g.order.push(key);
+            let requests: Vec<_> = missing
+                .iter()
+                .cloned()
+                .map(|asset| {
+                    (
+                        CacheKey {
+                            path: asset.path.clone(),
+                            lat_bucket: asset.lat_bucket,
+                            lon_bucket: asset.lon_bucket,
+                            zoom_bucket: asset.zoom_bucket,
+                        },
+                        asset,
+                    )
+                })
+                .collect();
+            let loaded =
+                query_local_contours_batch(&requests[0].0.path, &requests, per_asset_budget).ok();
+
+            if let Ok(mut g) = cache.lock() {
+                if let Some(loaded) = loaded {
+                    for (key, contours) in loaded {
+                        let tile_key = (key.lat_bucket, key.lon_bucket);
+                        if !g.tiles.contains_key(&tile_key) {
+                            g.tiles.insert(tile_key, Arc::new(contours));
+                            g.order.push(tile_key);
+                        }
                     }
+                }
+                for asset in &missing {
+                    g.in_flight.remove(&(asset.lat_bucket, asset.lon_bucket));
                 }
             }
             ctx.request_repaint();
@@ -564,6 +584,7 @@ pub fn load_srtm_for_globe(
         let keep: std::collections::HashSet<(i32, i32)> =
             guard.order[..MAX_TILES].iter().copied().collect();
         guard.tiles.retain(|k, _| keep.contains(k));
+        guard.in_flight.retain(|k| keep.contains(k));
         guard.order.retain(|k| keep.contains(k));
     }
 
@@ -589,7 +610,7 @@ fn render_globe_tiles(guard: &GlobeRegionCache) -> Option<Arc<Vec<ContourPath>>>
 pub fn load_lunar_for_globe(
     selected_root: Option<&Path>,
     center: crate::model::GeoPoint,
-    zoom: f32,
+    _zoom: f32,
     ctx: egui::Context,
 ) -> Option<Arc<Vec<ContourPath>>> {
     const MAX_TILES: usize = 800;
@@ -610,6 +631,7 @@ pub fn load_lunar_for_globe(
         guard.zoom_bucket = zoom_bucket;
         guard.root = root;
         guard.tiles.clear();
+        guard.in_flight.clear();
         guard.order.clear();
     }
 
@@ -621,31 +643,50 @@ pub fn load_lunar_for_globe(
 
     let missing: Vec<srtm_focus_cache::FocusContourAsset> = assets
         .iter()
-        .filter(|a| !guard.tiles.contains_key(&(a.lat_bucket, a.lon_bucket)))
+        .filter(|a| {
+            let key = (a.lat_bucket, a.lon_bucket);
+            !guard.tiles.contains_key(&key) && !guard.in_flight.contains(&key)
+        })
         .cloned()
         .collect();
+    for asset in &missing {
+        guard.in_flight.insert((asset.lat_bucket, asset.lon_bucket));
+    }
     drop(guard);
 
-    for asset in missing {
+    if !missing.is_empty() {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            if let Some(contours) = query_local_contours(
-                &asset.path,
-                asset.zoom_bucket,
-                asset.lat_bucket,
-                asset.lon_bucket,
-                asset.simplify_step,
-                per_asset_budget,
-            )
-            .ok()
-            .filter(|c| !c.is_empty())
-            {
-                if let Ok(mut g) = cache.lock() {
-                    let key = (asset.lat_bucket, asset.lon_bucket);
-                    if !g.tiles.contains_key(&key) {
-                        g.tiles.insert(key, Arc::new(contours));
-                        g.order.push(key);
+            let requests: Vec<_> = missing
+                .iter()
+                .cloned()
+                .map(|asset| {
+                    (
+                        CacheKey {
+                            path: asset.path.clone(),
+                            lat_bucket: asset.lat_bucket,
+                            lon_bucket: asset.lon_bucket,
+                            zoom_bucket: asset.zoom_bucket,
+                        },
+                        asset,
+                    )
+                })
+                .collect();
+            let loaded =
+                query_local_contours_batch(&requests[0].0.path, &requests, per_asset_budget).ok();
+
+            if let Ok(mut g) = cache.lock() {
+                if let Some(loaded) = loaded {
+                    for (key, contours) in loaded {
+                        let tile_key = (key.lat_bucket, key.lon_bucket);
+                        if !g.tiles.contains_key(&tile_key) {
+                            g.tiles.insert(tile_key, Arc::new(contours));
+                            g.order.push(tile_key);
+                        }
                     }
+                }
+                for asset in &missing {
+                    g.in_flight.remove(&(asset.lat_bucket, asset.lon_bucket));
                 }
             }
             ctx.request_repaint();
@@ -662,9 +703,9 @@ pub fn load_lunar_for_globe(
         guard
             .order
             .sort_by_key(|&(lat, lon)| (lat - clat).pow(2) + (lon - clon).pow(2));
-        let keep: HashSet<(i32, i32)> =
-            guard.order[..MAX_TILES].iter().copied().collect();
+        let keep: HashSet<(i32, i32)> = guard.order[..MAX_TILES].iter().copied().collect();
         guard.tiles.retain(|k, _| keep.contains(k));
+        guard.in_flight.retain(|k| keep.contains(k));
         guard.order.retain(|k| keep.contains(k));
     }
 
@@ -1050,6 +1091,61 @@ fn query_local_contours(
     }
 
     Ok(contours)
+}
+
+fn query_local_contours_batch(
+    path: &Path,
+    requests: &[(CacheKey, srtm_focus_cache::FocusContourAsset)],
+    feature_budget: usize,
+) -> rusqlite::Result<Vec<(CacheKey, Vec<ContourPath>)>> {
+    let connection = Connection::open(path)?;
+    let mut statement = connection.prepare(
+        "SELECT geom, elevation_m
+         FROM contour_tiles
+         WHERE zoom_bucket = ?1 AND lat_bucket = ?2 AND lon_bucket = ?3
+         ORDER BY ABS(elevation_m), fid",
+    )?;
+
+    let mut results = Vec::with_capacity(requests.len());
+    for (key, asset) in requests {
+        let rows = statement.query_map(
+            params![key.zoom_bucket, key.lat_bucket, key.lon_bucket],
+            |row| {
+                let geometry: Vec<u8> = row.get(0)?;
+                let elevation_m: f32 = row.get(1)?;
+                Ok((geometry, elevation_m))
+            },
+        )?;
+
+        let mut contours = Vec::new();
+        for row in rows {
+            let (geometry, elevation_m) = row?;
+            for line in parse_gpkg_lines(&geometry) {
+                if line.len() < 2 {
+                    continue;
+                }
+                contours.push(ContourPath {
+                    elevation_m,
+                    points: simplify_line(line, asset.simplify_step),
+                });
+            }
+        }
+
+        if contours.len() > feature_budget {
+            let keep_step = contours.len().div_ceil(feature_budget.max(1));
+            contours = contours
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, contour)| (index % keep_step == 0).then_some(contour))
+                .collect();
+        }
+
+        if !contours.is_empty() {
+            results.push((key.clone(), contours));
+        }
+    }
+
+    Ok(results)
 }
 
 fn simplify_line(points: Vec<GeoPoint>, step: usize) -> Vec<GeoPoint> {
