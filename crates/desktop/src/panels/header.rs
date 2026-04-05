@@ -73,8 +73,8 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
                     crate::theme::set_theme(ui.ctx(), new_theme);
                 }
 
-                if ui.button("Import GeoJSON").clicked() {
-                    import_geojson(model);
+                if ui.button("Import Layer").clicked() {
+                    import_layer(model);
                 }
 
                 let blast_btn = egui::Button::new(
@@ -120,10 +120,12 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
         });
 }
 
-fn import_geojson(model: &mut AppModel) {
+fn import_layer(model: &mut AppModel) {
     let Some(path) = rfd::FileDialog::new()
+        .add_filter("Map layers", &["geojson", "json", "kml", "kmz"])
         .add_filter("GeoJSON", &["geojson", "json"])
-        .set_title("Import GeoJSON layer")
+        .add_filter("KML / KMZ", &["kml", "kmz"])
+        .set_title("Import map layer")
         .pick_file()
     else {
         return;
@@ -132,15 +134,24 @@ fn import_geojson(model: &mut AppModel) {
     let name = path
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "GeoJSON layer".into());
+        .unwrap_or_else(|| "Imported layer".into());
+    let format_label = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_uppercase())
+        .unwrap_or_else(|| "LAYER".into());
 
-    match std::fs::read_to_string(&path) {
-        Err(e) => model.push_log(format!("GeoJSON read error: {e}")),
-        Ok(text) => match GeoJsonLayer::parse(name.clone(), &text) {
-            Err(e) => model.push_log(format!("GeoJSON parse error in \"{name}\": {e}")),
+    match std::fs::read(&path) {
+        Err(e) => model.push_log(format!("Layer read error: {e}")),
+        Ok(bytes) => match GeoJsonLayer::parse_upload(
+            name.clone(),
+            path.extension().and_then(|ext| ext.to_str()),
+            &bytes,
+        ) {
+            Err(e) => model.push_log(format!("{format_label} parse error in \"{name}\": {e}")),
             Ok(layer) => {
                 model.push_log(format!(
-                    "GeoJSON layer \"{name}\" loaded — {} feature(s).",
+                    "{format_label} layer \"{name}\" loaded — {} feature(s).",
                     layer.features.len()
                 ));
                 model.geojson_layers.push(layer);

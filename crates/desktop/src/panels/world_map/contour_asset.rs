@@ -1272,6 +1272,7 @@ fn read_f64(bytes: &[u8], cursor: &mut usize, little: bool) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::OptionalExtension;
 
     #[test]
     fn reads_cached_sqlite_focus_contours() {

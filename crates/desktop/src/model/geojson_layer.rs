@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use serde_json::Value;
 
 use super::GeoPoint;
@@ -24,7 +26,8 @@ pub struct GeoJsonFeature {
 
 // ── Layer ─────────────────────────────────────────────────────────────────────
 
-/// A fully-parsed GeoJSON file loaded as a named, togglable overlay layer.
+/// A fully-parsed user-uploaded vector layer loaded as a named, togglable
+/// overlay layer.
 #[derive(Clone, Debug)]
 pub struct GeoJsonLayer {
     pub name: String,
@@ -46,6 +49,82 @@ impl GeoJsonLayer {
             features,
             visible: true,
         })
+    }
+
+    /// Parse a supported uploaded layer file into the shared overlay model.
+    pub fn parse_upload(
+        name: String,
+        extension: Option<&str>,
+        bytes: &[u8],
+    ) -> Result<Self, String> {
+        let extension = extension
+            .unwrap_or_default()
+            .trim()
+            .trim_start_matches('.')
+            .to_ascii_lowercase();
+
+        match extension.as_str() {
+            "geojson" | "json" => {
+                let text = decode_text(bytes, "GeoJSON")?;
+                Self::parse(name, &text)
+            }
+            "kml" => {
+                let text = decode_text(bytes, "KML")?;
+                Self::parse_kml(name, &text)
+            }
+            "kmz" => Self::parse_kmz(name, bytes),
+            other if !other.is_empty() => Err(format!("unsupported layer format .{other}")),
+            _ => Err("unsupported layer format".into()),
+        }
+    }
+
+    /// Parse raw KML text into a layer using the same geometry model as
+    /// uploaded GeoJSON.
+    pub fn parse_kml(name: String, xml: &str) -> Result<Self, String> {
+        let features = super::kml_layer::parse_kml_features(xml)?;
+        Ok(GeoJsonLayer {
+            color: palette_color(&name),
+            name,
+            features,
+            visible: true,
+        })
+    }
+
+    /// Parse a KMZ archive by loading `doc.kml` (or the first `.kml` entry)
+    /// and delegating to the KML parser.
+    pub fn parse_kmz(name: String, bytes: &[u8]) -> Result<Self, String> {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+            .map_err(|e| format!("KMZ archive error: {e}"))?;
+        let mut kml_entry_name = None;
+        for idx in 0..archive.len() {
+            let file = archive
+                .by_index(idx)
+                .map_err(|e| format!("KMZ archive error: {e}"))?;
+            let candidate = file.name().to_owned();
+            let file_name = Path::new(&candidate)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(candidate.as_str());
+            let is_doc = file_name.eq_ignore_ascii_case("doc.kml");
+            let is_kml = file_name.to_ascii_lowercase().ends_with(".kml");
+            drop(file);
+            if is_doc {
+                kml_entry_name = Some(candidate);
+                break;
+            }
+            if is_kml && kml_entry_name.is_none() {
+                kml_entry_name = Some(candidate);
+            }
+        }
+
+        let entry_name = kml_entry_name.ok_or("KMZ archive does not contain a KML document")?;
+        let mut file = archive
+            .by_name(&entry_name)
+            .map_err(|e| format!("KMZ archive error: {e}"))?;
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut file, &mut xml)
+            .map_err(|e| format!("KMZ KML read error: {e}"))?;
+        Self::parse_kml(name, xml.trim_start_matches('\u{feff}'))
     }
 }
 
@@ -198,6 +277,12 @@ fn parse_pos(c: &Value) -> Result<GeoPoint, String> {
 
 fn parse_positions(arr: &[Value]) -> Result<Vec<GeoPoint>, String> {
     arr.iter().map(parse_pos).collect()
+}
+
+fn decode_text(bytes: &[u8], label: &str) -> Result<String, String> {
+    String::from_utf8(bytes.to_vec())
+        .map(|text| text.trim_start_matches('\u{feff}').to_owned())
+        .map_err(|e| format!("{label} text must be UTF-8: {e}"))
 }
 
 // ── Label extraction ──────────────────────────────────────────────────────────

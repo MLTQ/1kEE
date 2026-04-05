@@ -6,8 +6,8 @@ Renders the top operational banner for the desktop app. It gives the analyst imm
 ## Components
 
 ### `render_header`
-- **Does**: Builds the top bar, exposes the settings window, asset-root picker, and terrain-library launcher, and displays stream, registry, terrain, OSM, selection summaries, and the resolved SRTM / planet source path when one is auto-detected
-- **Interacts with**: mutable `AppModel` in `model.rs`, `TerrainInventory` and `OsmInventory` via `AppModel`, `terrain_assets.rs`, `osm_ingest.rs`, `rfd` folder picker, theme helpers in `theme.rs`
+- **Does**: Builds the top bar, exposes the settings window, asset-root picker, terrain-library launcher, and user layer importer, and displays stream, registry, terrain, OSM, selection summaries, and the resolved SRTM / planet source path when one is auto-detected
+- **Interacts with**: mutable `AppModel` in `model.rs`, `TerrainInventory` and `OsmInventory` via `AppModel`, uploaded layer parsing in `geojson_layer.rs`, `terrain_assets.rs`, `osm_ingest.rs`, `rfd` file/folder pickers, theme helpers in `theme.rs`
 
 ### `metric_chip`
 - **Does**: Draws a compact labeled status pill

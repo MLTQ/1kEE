@@ -25,6 +25,7 @@ Implements the main geographic canvas for the demo. The current version wraps an
 ## Notes
 - The panel now uses a persistent 3D camera and zoom-dependent LOD.
 - The old descriptive text band at the top of the map has been replaced by a layer bar that owns coastline and major/minor road toggles and uses those road toggles to kick off focused OSM ingest.
+- User-imported overlay layers now share one toggle strip regardless of whether they came from GeoJSON, KML, or KMZ.
 - When the selected event carries a Factal payload, the layer bar now exposes a `Brief` button that opens the dedicated Factal detail window.
 - If the low-zoom globe coastline cache is missing, enabling coastlines now kicks off a background GEBCO-derived bootstrap instead of leaving the globe permanently blank on a fresh machine.
 - The terrain path now prefers streamed SRTM land tiles, and contour overlays are generated into a shared SQLite-backed GDAL focus cache off the UI thread instead of one file per streamed bucket.

@@ -374,10 +374,10 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                     }
                 }
 
-                // ── GeoJSON layer toggles ─────────────────────────────────
+                // ── Imported layer toggles ────────────────────────────────
                 if !model.geojson_layers.is_empty() {
                     ui.separator();
-                    ui.colored_label(theme::text_muted(), "GeoJSON");
+                    ui.colored_label(theme::text_muted(), "Layers");
                     let mut remove_idx: Option<usize> = None;
                     for (idx, layer) in model.geojson_layers.iter_mut().enumerate() {
                         let [r, g, b, _] = layer.color;

@@ -4,6 +4,7 @@ mod events;
 mod flights;
 mod geo;
 mod geojson_layer;
+mod kml_layer;
 pub mod replay;
 mod vessels;
 
@@ -57,7 +58,7 @@ pub struct AppModel {
     pub show_admin: bool,
     pub show_ships: bool,
     pub show_flights: bool,
-    /// GeoJSON layers uploaded by the user.
+    /// User-uploaded vector overlay layers (GeoJSON, KML, or KMZ).
     pub geojson_layers: Vec<GeoJsonLayer>,
     /// ArcGIS FeatureServer sources added by the user.
     pub arcgis_sources: Vec<ArcGisSourceRef>,

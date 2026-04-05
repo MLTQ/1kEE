@@ -1456,10 +1456,13 @@ mod tests {
         let event = model.selected_event().expect("selected event");
         let render_zoom = 6.0;
         let Some(contours) = (0..20).find_map(|_| {
-            let contours = contour_asset::load_srtm_for_focus(
+            let contours = contour_asset::load_srtm_region_for_view(
                 model.selected_root.as_deref(),
                 event.location,
+                event.location,
                 render_zoom,
+                2,
+                egui::Context::default(),
             );
             if contours.is_none() {
                 std::thread::sleep(std::time::Duration::from_millis(150));
