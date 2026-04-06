@@ -12,7 +12,9 @@ enum SidebarTab {
 pub fn render_camera_list(ctx: &egui::Context, model: &mut AppModel) {
     egui::SidePanel::right("camera_list")
         .resizable(true)
+        .min_width(300.0)
         .default_width(360.0)
+        .max_width(420.0)
         .frame(egui::Frame::new().fill(theme::section_background()))
         .show(ctx, |ui| {
             // ── Tab bar ───────────────────────────────────────────────────
@@ -139,10 +141,11 @@ fn tab_items(ui: &mut egui::Ui, model: &mut AppModel) {
     let mut url_buf: String = ui.data(|d| d.get_temp(url_id).unwrap_or_default());
 
     ui.horizontal(|ui| {
+        let input_width = (ui.available_width() - 96.0).max(140.0);
         let te = ui.add(
             egui::TextEdit::singleline(&mut url_buf)
                 .hint_text("ArcGIS FeatureServer URL\u{2026}")
-                .desired_width(ui.available_width() - 90.0),
+                .desired_width(input_width),
         );
         let add_clicked = ui.button("Add Source").clicked();
         if (add_clicked || (te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))))
@@ -173,35 +176,39 @@ fn tab_items(ui: &mut egui::Ui, model: &mut AppModel) {
     egui::ScrollArea::vertical().show(ui, |ui| {
         for (si, src_ref) in model.arcgis_sources.iter_mut().enumerate() {
             let snap = arcgis_source::source_snapshot(&src_ref.url);
-
-            ui.horizontal(|ui| {
-                // Source name / status
-                if let Some(ref s) = snap {
-                    if s.discovering {
-                        ui.label("Discovering\u{2026}");
-                    } else if let Some(ref e) = s.discover_error {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(200, 80, 80),
-                            format!("Error: {e}"),
-                        );
-                    } else {
-                        let layer_count = s.layers.as_ref().map(|l| l.len()).unwrap_or(0);
-                        ui.strong(format!(
-                            "{} ({} layer{})",
-                            s.display_name,
-                            layer_count,
-                            if layer_count == 1 { "" } else { "s" }
-                        ));
-                    }
+            let source_title = if let Some(ref s) = snap {
+                if s.discovering {
+                    "Discovering…".to_owned()
+                } else if let Some(ref e) = s.discover_error {
+                    format!("Error: {e}")
                 } else {
-                    ui.label(&src_ref.url);
+                    let layer_count = s.layers.as_ref().map(|l| l.len()).unwrap_or(0);
+                    format!(
+                        "{} ({} layer{})",
+                        s.display_name,
+                        layer_count,
+                        if layer_count == 1 { "" } else { "s" }
+                    )
                 }
+            } else {
+                src_ref.url.clone()
+            };
+            let source_color = match snap.as_ref() {
+                Some(s) if s.discover_error.is_some() => egui::Color32::from_rgb(200, 80, 80),
+                _ => ui.visuals().text_color(),
+            };
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.vertical(|ui| {
                     if ui.small_button("\u{2715}").clicked() {
                         to_remove = Some(si);
                     }
                 });
+                ui.add_sized(
+                    [ui.available_width(), 0.0],
+                    egui::Label::new(egui::RichText::new(source_title).color(source_color)).wrap(),
+                );
             });
 
             // Layer checkboxes
@@ -216,24 +223,27 @@ fn tab_items(ui: &mut egui::Ui, model: &mut AppModel) {
                                 ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                             ui.painter().circle_filled(rect.center(), 4.0, layer.color);
 
-                            if ui.checkbox(&mut enabled, &layer.name).changed() {
-                                if enabled {
-                                    src_ref.enabled_layer_ids.insert(layer.id);
-                                } else {
-                                    src_ref.enabled_layer_ids.remove(&layer.id);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                                let status =
+                                    s.layer_status.get(&layer.id).cloned().unwrap_or_default();
+                                if !status.is_empty() {
+                                    ui.colored_label(theme::text_muted(), status);
                                 }
-                            }
 
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    let status =
-                                        s.layer_status.get(&layer.id).cloned().unwrap_or_default();
-                                    if !status.is_empty() {
-                                        ui.colored_label(theme::text_muted(), status);
+                                let changed = ui
+                                    .add_sized(
+                                        [ui.available_width(), 0.0],
+                                        egui::Checkbox::new(&mut enabled, &layer.name),
+                                    )
+                                    .changed();
+                                if changed {
+                                    if enabled {
+                                        src_ref.enabled_layer_ids.insert(layer.id);
+                                    } else {
+                                        src_ref.enabled_layer_ids.remove(&layer.id);
                                     }
-                                },
-                            );
+                                }
+                            });
                         });
                     }
                 }
