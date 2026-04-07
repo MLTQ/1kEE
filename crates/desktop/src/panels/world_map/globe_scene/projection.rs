@@ -18,8 +18,10 @@ pub(super) fn project_geo_elevated(
     let lat = point.lat.to_radians();
     let lon = point.lon.to_radians();
     let elevation_signal = terrain_field::elevation(point) / 1.6;
-    let signed_elevation = elevation_signal.mul_add(2.0, -1.0);
-    let elevation = signed_elevation * altitude_scale;
+    // Clamp to non-negative so markers never project inside the sphere surface.
+    // signed_elevation would push flat/ocean areas to radius < 1.0, causing
+    // markers to appear sunken below the terrain and contour layers.
+    let elevation = elevation_signal * altitude_scale;
     let radius = (1.0 + elevation + extra_radius).max(0.82);
 
     let mut x = radius * lat.cos() * lon.cos();
@@ -67,8 +69,10 @@ pub fn project_geo(
     let lat = point.lat.to_radians();
     let lon = point.lon.to_radians();
     let elevation_signal = terrain_field::elevation(point) / 1.6;
-    let signed_elevation = elevation_signal.mul_add(2.0, -1.0);
-    let elevation = signed_elevation * altitude_scale;
+    // Clamp to non-negative: flat/ocean areas were producing signed_elevation < 0,
+    // pushing radius below 1.0 (inside the sphere). Markers in those areas appeared
+    // visually sunken below the terrain surface and contour layers (radius 1.015+).
+    let elevation = elevation_signal * altitude_scale;
     let radius = (1.0 + elevation).max(0.82);
 
     let mut x = radius * lat.cos() * lon.cos();
