@@ -26,7 +26,8 @@ pub(super) fn project_local(
     )
 }
 
-use crate::model::{AppModel, GeoPoint, GlobeViewState};
+use crate::arcgis_source;
+use crate::model::{AppModel, ArcGisFeature, GeoPoint, GlobeViewState};
 use crate::osm_ingest::{self, GeoBounds as OsmGeoBounds};
 use crate::terrain_assets;
 use crate::theme;
@@ -445,6 +446,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             painter,
             &layout,
             &model.globe_view,
+            model.selected_root.as_deref(),
             viewport_center,
             extent_x_km,
             extent_y_km,
@@ -483,12 +485,28 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         lunar_total,
     );
 
+    let arcgis_feature_markers = if !model.arcgis_features.is_empty() {
+        draw_arcgis_features_local(
+            painter,
+            &layout,
+            &model.globe_view,
+            model.selected_root.as_deref(),
+            viewport_center,
+            extent_x_km,
+            extent_y_km,
+            &model.arcgis_features,
+            model.selected_arcgis_feature.as_ref(),
+        )
+    } else {
+        Vec::new()
+    };
+
     GlobeScene {
         event_markers,
         camera_markers,
         ship_markers: Vec::new(),
         flight_markers: Vec::new(),
-        arcgis_feature_markers: Vec::new(),
+        arcgis_feature_markers,
         beam_elevation_m: Some(beam_elevation_m),
     }
 }
@@ -1249,6 +1267,7 @@ fn draw_geojson_layers_local(
     painter: &egui::Painter,
     layout: &LocalLayout,
     view: &GlobeViewState,
+    selected_root: Option<&Path>,
     focus: GeoPoint,
     extent_x_km: f32,
     extent_y_km: f32,
@@ -1280,12 +1299,15 @@ fn draw_geojson_layers_local(
             match &feature.geometry {
                 GeoJsonGeometry::Point(pt) => {
                     if in_view_pt(pt) {
+                        let elev = srtm_stream::sample_elevation_m(selected_root, *pt)
+                            .unwrap_or(0.0)
+                            + 18.0;
                         if let Some(pp) = projection::project_local(
                             layout,
                             view,
                             focus,
                             *pt,
-                            0.0,
+                            elev,
                             extent_x_km,
                             extent_y_km,
                         ) {
@@ -1303,6 +1325,7 @@ fn draw_geojson_layers_local(
                         painter,
                         layout,
                         view,
+                        selected_root,
                         focus,
                         pts,
                         extent_x_km,
@@ -1316,6 +1339,7 @@ fn draw_geojson_layers_local(
                             painter,
                             layout,
                             view,
+                            selected_root,
                             focus,
                             line,
                             extent_x_km,
@@ -1330,6 +1354,7 @@ fn draw_geojson_layers_local(
                             painter,
                             layout,
                             view,
+                            selected_root,
                             focus,
                             ring,
                             extent_x_km,
@@ -1345,6 +1370,7 @@ fn draw_geojson_layers_local(
                                 painter,
                                 layout,
                                 view,
+                                selected_root,
                                 focus,
                                 ring,
                                 extent_x_km,
@@ -1378,12 +1404,15 @@ fn draw_geojson_layers_local(
             };
             if let Some(pt) = anchor {
                 if in_view_pt(&pt) {
+                    let label_elev = srtm_stream::sample_elevation_m(selected_root, pt)
+                        .unwrap_or(0.0)
+                        + 18.0;
                     if let Some(pp) = projection::project_local(
                         layout,
                         view,
                         focus,
                         pt,
-                        0.0,
+                        label_elev,
                         extent_x_km,
                         extent_y_km,
                     ) {
@@ -1401,11 +1430,74 @@ fn draw_geojson_layers_local(
     }
 }
 
+/// Draw ArcGIS features as elevated dot markers in the local terrain scene.
+/// Returns (source_url, object_id, screen_pos) for click detection.
+fn draw_arcgis_features_local(
+    painter: &egui::Painter,
+    layout: &LocalLayout,
+    view: &GlobeViewState,
+    selected_root: Option<&Path>,
+    focus: GeoPoint,
+    extent_x_km: f32,
+    extent_y_km: f32,
+    features: &[ArcGisFeature],
+    selected: Option<&(String, i64)>,
+) -> Vec<(String, i64, egui::Pos2)> {
+    let mut markers_out = Vec::new();
+    for feat in features {
+        let elev =
+            srtm_stream::sample_elevation_m(selected_root, feat.location).unwrap_or(0.0) + 18.0;
+        let Some(pp) = projection::project_local(
+            layout,
+            view,
+            focus,
+            feat.location,
+            elev,
+            extent_x_km,
+            extent_y_km,
+        ) else {
+            continue;
+        };
+
+        let col = arcgis_source::feature_color(feat);
+        let pos = pp.pos;
+        let has_cas = feat.has_casualties();
+
+        let is_selected = selected
+            .map(|(u, id)| u == &feat.source_url && *id == feat.object_id)
+            .unwrap_or(false);
+        if is_selected {
+            painter.circle_stroke(
+                pos,
+                if has_cas { 13.0 } else { 11.0 },
+                egui::Stroke::new(1.5, egui::Color32::WHITE),
+            );
+        }
+
+        painter.circle_stroke(
+            pos,
+            if has_cas { 9.0 } else { 6.5 },
+            egui::Stroke::new(2.5, col.gamma_multiply(0.12)),
+        );
+        if has_cas {
+            painter.circle_stroke(pos, 6.5, egui::Stroke::new(1.5, col.gamma_multiply(0.22)));
+        }
+
+        painter.circle_filled(pos, if has_cas { 3.5 } else { 2.5 }, col);
+        painter.circle_filled(pos, 1.2, col.gamma_multiply(1.4));
+
+        markers_out.push((feat.source_url.clone(), feat.object_id, pos));
+    }
+    markers_out
+}
+
 /// Project a polyline into local-terrain screen space and add a line shape.
+/// Each vertex is elevated to the terrain surface so lines hug the topology.
 fn project_and_draw_line(
     painter: &egui::Painter,
     layout: &LocalLayout,
     view: &GlobeViewState,
+    selected_root: Option<&Path>,
     focus: GeoPoint,
     pts: &[GeoPoint],
     extent_x_km: f32,
@@ -1415,7 +1507,8 @@ fn project_and_draw_line(
     let projected: Vec<egui::Pos2> = pts
         .iter()
         .filter_map(|p| {
-            projection::project_local(layout, view, focus, *p, 0.0, extent_x_km, extent_y_km)
+            let elev = srtm_stream::sample_elevation_m(selected_root, *p).unwrap_or(0.0) + 3.0;
+            projection::project_local(layout, view, focus, *p, elev, extent_x_km, extent_y_km)
         })
         .map(|pp| pp.pos)
         .collect();
