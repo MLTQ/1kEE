@@ -33,7 +33,7 @@ use crate::terrain_assets;
 use crate::theme;
 use std::path::Path;
 
-use super::contour_asset;
+use super::contour_asset::{self, ContourPath};
 use super::globe_scene::GlobeScene;
 use super::srtm_focus_cache;
 use super::srtm_stream;
@@ -447,6 +447,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             &layout,
             &model.globe_view,
             model.selected_root.as_deref(),
+            contours.as_deref(),
             viewport_center,
             extent_x_km,
             extent_y_km,
@@ -491,6 +492,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             &layout,
             &model.globe_view,
             model.selected_root.as_deref(),
+            contours.as_deref(),
             viewport_center,
             extent_x_km,
             extent_y_km,
@@ -1262,12 +1264,50 @@ pub fn water_cache_building() -> bool {
     super::water_layer::water_cache_building()
 }
 
+/// Sample terrain elevation at `point`, trying SRTM first and falling back to
+/// the highest contour line within 0.25° if SRTM tiles aren't available.
+/// Returns metres above sea level (0.0 if no data at all).
+fn sample_terrain_elevation_m(
+    selected_root: Option<&Path>,
+    point: GeoPoint,
+    contours: Option<&[ContourPath]>,
+) -> f32 {
+    if let Some(elev) = srtm_stream::sample_elevation_m(selected_root, point) {
+        // SRTM no-data sentinel comes back as 0.0; treat anything above -100 m
+        // as valid (catches genuine low-lying land and coastal areas).
+        if elev > -100.0 {
+            return elev;
+        }
+    }
+    // Fallback: highest contour elevation with a point within 0.25° of target.
+    // This is always available once the focus-cache tiles have loaded, so it
+    // covers the case where SRTM source files are absent or not yet readable.
+    if let Some(contours) = contours {
+        const RADIUS: f32 = 0.25;
+        let max_elev = contours
+            .iter()
+            .filter(|c| c.elevation_m > 0.0)
+            .filter(|c| {
+                c.points.iter().any(|p| {
+                    (p.lat - point.lat).abs() < RADIUS && (p.lon - point.lon).abs() < RADIUS
+                })
+            })
+            .map(|c| c.elevation_m)
+            .fold(0.0f32, f32::max);
+        if max_elev > 0.0 {
+            return max_elev;
+        }
+    }
+    0.0
+}
+
 /// Draw all visible GeoJSON layers in the local oblique terrain view.
 fn draw_geojson_layers_local(
     painter: &egui::Painter,
     layout: &LocalLayout,
     view: &GlobeViewState,
     selected_root: Option<&Path>,
+    contours: Option<&[ContourPath]>,
     focus: GeoPoint,
     extent_x_km: f32,
     extent_y_km: f32,
@@ -1299,9 +1339,8 @@ fn draw_geojson_layers_local(
             match &feature.geometry {
                 GeoJsonGeometry::Point(pt) => {
                     if in_view_pt(pt) {
-                        let elev = srtm_stream::sample_elevation_m(selected_root, *pt)
-                            .unwrap_or(0.0)
-                            + 18.0;
+                        let elev =
+                            sample_terrain_elevation_m(selected_root, *pt, contours) + 18.0;
                         if let Some(pp) = projection::project_local(
                             layout,
                             view,
@@ -1326,6 +1365,7 @@ fn draw_geojson_layers_local(
                         layout,
                         view,
                         selected_root,
+                        contours,
                         focus,
                         pts,
                         extent_x_km,
@@ -1404,9 +1444,8 @@ fn draw_geojson_layers_local(
             };
             if let Some(pt) = anchor {
                 if in_view_pt(&pt) {
-                    let label_elev = srtm_stream::sample_elevation_m(selected_root, pt)
-                        .unwrap_or(0.0)
-                        + 18.0;
+                    let label_elev =
+                        sample_terrain_elevation_m(selected_root, pt, contours) + 18.0;
                     if let Some(pp) = projection::project_local(
                         layout,
                         view,
@@ -1437,6 +1476,7 @@ fn draw_arcgis_features_local(
     layout: &LocalLayout,
     view: &GlobeViewState,
     selected_root: Option<&Path>,
+    contours: Option<&[ContourPath]>,
     focus: GeoPoint,
     extent_x_km: f32,
     extent_y_km: f32,
@@ -1446,7 +1486,7 @@ fn draw_arcgis_features_local(
     let mut markers_out = Vec::new();
     for feat in features {
         let elev =
-            srtm_stream::sample_elevation_m(selected_root, feat.location).unwrap_or(0.0) + 18.0;
+            sample_terrain_elevation_m(selected_root, feat.location, contours) + 18.0;
         let Some(pp) = projection::project_local(
             layout,
             view,
@@ -1498,6 +1538,7 @@ fn project_and_draw_line(
     layout: &LocalLayout,
     view: &GlobeViewState,
     selected_root: Option<&Path>,
+    contours: Option<&[ContourPath]>,
     focus: GeoPoint,
     pts: &[GeoPoint],
     extent_x_km: f32,
@@ -1507,7 +1548,7 @@ fn project_and_draw_line(
     let projected: Vec<egui::Pos2> = pts
         .iter()
         .filter_map(|p| {
-            let elev = srtm_stream::sample_elevation_m(selected_root, *p).unwrap_or(0.0) + 3.0;
+            let elev = sample_terrain_elevation_m(selected_root, *p, contours) + 3.0;
             projection::project_local(layout, view, focus, *p, elev, extent_x_km, extent_y_km)
         })
         .map(|pp| pp.pos)

@@ -1,7 +1,6 @@
 use crate::model::GeoPoint;
 use crate::terrain_assets;
 use image::ImageReader;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -24,7 +23,6 @@ struct CachedTile {
 
 struct TileCache {
     tiles: Vec<CachedTile>,
-    missing: HashSet<PathBuf>,
 }
 
 #[allow(dead_code)]
@@ -40,18 +38,17 @@ pub fn sample_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> Opti
     let root = terrain_assets::find_srtm_root(selected_root)?;
     let path = tile_path(&root, point);
 
-    static CACHE: OnceLock<Mutex<TileCache>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| {
-        Mutex::new(TileCache {
-            tiles: Vec::new(),
-            missing: HashSet::new(),
-        })
-    });
-    let mut guard = cache.lock().ok()?;
-
-    if guard.missing.contains(&path) {
+    // Fast gate: skip non-existent tiles without touching the cache lock.
+    // We intentionally do NOT maintain a permanent "missing" set — the old
+    // approach would lock out tiles forever if they failed to load on the
+    // first frame (e.g. before GDAL tools or slow-disk files were ready).
+    if !path.exists() {
         return None;
     }
+
+    static CACHE: OnceLock<Mutex<TileCache>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(TileCache { tiles: Vec::new() }));
+    let mut guard = cache.lock().ok()?;
 
     if let Some(index) = guard.tiles.iter().position(|tile| tile.path == path) {
         let cached = guard.tiles.remove(index);
@@ -60,13 +57,7 @@ pub fn sample_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> Opti
         return Some(value);
     }
 
-    let tile = match load_tile(path.clone()) {
-        Some(tile) => tile,
-        None => {
-            guard.missing.insert(path);
-            return None;
-        }
-    };
+    let tile = load_tile(path.clone())?;
 
     let value = tile.sample_elevation_m(point);
     guard.tiles.insert(0, CachedTile { path, tile });
