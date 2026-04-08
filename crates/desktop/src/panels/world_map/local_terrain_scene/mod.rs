@@ -1547,13 +1547,15 @@ fn draw_arcgis_features_local(
 }
 
 /// Project a polyline into local-terrain screen space and add a line shape.
-/// Each vertex is elevated to the terrain surface so lines hug the topology.
+/// Each vertex is elevated to the SRTM terrain surface (fast O(1) cached lookup).
+/// The contour-fallback path is intentionally NOT used here — it's O(n_contours×n_pts)
+/// per vertex and would beach-ball when rendering any GeoJSON with many vertices.
 fn project_and_draw_line(
     painter: &egui::Painter,
     layout: &LocalLayout,
     view: &GlobeViewState,
     selected_root: Option<&Path>,
-    contours: Option<&[ContourPath]>,
+    _contours: Option<&[ContourPath]>,
     focus: GeoPoint,
     pts: &[GeoPoint],
     extent_x_km: f32,
@@ -1563,7 +1565,7 @@ fn project_and_draw_line(
     let projected: Vec<egui::Pos2> = pts
         .iter()
         .filter_map(|p| {
-            let elev = sample_terrain_elevation_m(selected_root, *p, contours) + 3.0;
+            let elev = srtm_stream::sample_elevation_m(selected_root, *p).unwrap_or(0.0) + 3.0;
             projection::project_local(layout, view, focus, *p, elev, extent_x_km, extent_y_km)
         })
         .map(|pp| pp.pos)
