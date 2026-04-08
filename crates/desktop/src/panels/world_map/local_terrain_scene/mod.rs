@@ -342,8 +342,11 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                     if dlat > half_extent_deg * 2.5 || dlon > half_extent_deg * 2.5 {
                         return None;
                     }
-                    let elev =
-                        markers::marker_elevation_m(model.selected_root.as_deref(), event.location);
+                    let elev = sample_terrain_elevation_m(
+                        model.selected_root.as_deref(),
+                        event.location,
+                        contours.as_deref(),
+                    ) + 18.0;
                     let ground = projection::project_local(
                         &layout,
                         &model.globe_view,
@@ -399,7 +402,11 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 &model.globe_view,
                 viewport_center,
                 camera.location,
-                markers::marker_elevation_m(model.selected_root.as_deref(), camera.location),
+                sample_terrain_elevation_m(
+                    model.selected_root.as_deref(),
+                    camera.location,
+                    contours.as_deref(),
+                ) + 18.0,
                 extent_x_km,
                 extent_y_km,
             )
@@ -1279,23 +1286,28 @@ fn sample_terrain_elevation_m(
             return elev;
         }
     }
-    // Fallback: highest contour elevation with a point within 0.25° of target.
-    // This is always available once the focus-cache tiles have loaded, so it
-    // covers the case where SRTM source files are absent or not yet readable.
+    // Fallback: elevation of the contour line whose nearest point is closest
+    // to `point`.  This is available once the focus-cache tiles have loaded
+    // and gives a much better estimate than "highest within 0.25°" which can
+    // pick up a distant mountain peak.
     if let Some(contours) = contours {
-        const RADIUS: f32 = 0.25;
-        let max_elev = contours
-            .iter()
-            .filter(|c| c.elevation_m > 0.0)
-            .filter(|c| {
-                c.points.iter().any(|p| {
-                    (p.lat - point.lat).abs() < RADIUS && (p.lon - point.lon).abs() < RADIUS
-                })
-            })
-            .map(|c| c.elevation_m)
-            .fold(0.0f32, f32::max);
-        if max_elev > 0.0 {
-            return max_elev;
+        let mut best_dist2 = f32::INFINITY;
+        let mut best_elev = 0.0f32;
+        let mut found = false;
+        for c in contours {
+            for p in &c.points {
+                let dlat = p.lat - point.lat;
+                let dlon = p.lon - point.lon;
+                let dist2 = dlat * dlat + dlon * dlon;
+                if dist2 < best_dist2 {
+                    best_dist2 = dist2;
+                    best_elev = c.elevation_m;
+                    found = true;
+                }
+            }
+        }
+        if found {
+            return best_elev;
         }
     }
     0.0

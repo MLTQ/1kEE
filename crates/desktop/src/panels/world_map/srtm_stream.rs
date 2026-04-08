@@ -54,7 +54,7 @@ pub fn sample_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> Opti
         let cached = guard.tiles.remove(index);
         let value = cached.tile.sample_elevation_m(point);
         guard.tiles.insert(0, cached);
-        return Some(value);
+        return if value.is_nan() { None } else { Some(value) };
     }
 
     let tile = load_tile(path.clone())?;
@@ -65,7 +65,10 @@ pub fn sample_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> Opti
         guard.tiles.pop();
     }
 
-    Some(value)
+    // NaN means the bilinear sample hit a no-data pixel; return None so
+    // callers (sample_terrain_elevation_m, marker_elevation_m) can fall
+    // back to contour-based elevation instead of treating it as 0 m.
+    if value.is_nan() { None } else { Some(value) }
 }
 
 impl SrtmTile {
@@ -265,7 +268,7 @@ fn sample_pixel(tile: &SrtmTile, x: u32, y: u32) -> f32 {
     let index = (y * tile.width + x) as usize;
     let signed = tile.samples.get(index).copied().unwrap_or(i16::MIN);
     if signed == i16::MIN {
-        0.0 // SRTM no-data sentinel
+        f32::NAN // SRTM no-data sentinel — propagated so callers can fall back
     } else {
         signed as f32
     }
