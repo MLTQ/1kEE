@@ -27,3 +27,4 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 
 ## Notes
 - The scene-level tests are intentionally tolerant of missing local cache data: they return early when the shared focus cache is unavailable instead of making the suite depend on large fixture assets.
+- Point-like overlay markers keep a memoized contour-fallback elevation cache keyed by contour-set identity and source point, so layer-spread changes do not rescan the full contour stack every frame when SRTM samples are unavailable.

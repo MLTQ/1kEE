@@ -31,7 +31,9 @@ use crate::model::{AppModel, ArcGisFeature, GeoPoint, GlobeViewState};
 use crate::osm_ingest::{self, GeoBounds as OsmGeoBounds};
 use crate::terrain_assets;
 use crate::theme;
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use super::contour_asset::{self, ContourPath};
 use super::globe_scene::GlobeScene;
@@ -47,6 +49,7 @@ pub(super) const BASE_VERTICAL_EXAGGERATION: f32 = 2.1;
 
 // Minimum local zoom value — allows zooming out to ~500 km half-span.
 pub const LOCAL_ZOOM_MIN: f32 = 1.0;
+const MAX_CONTOUR_FALLBACK_CACHE_ENTRIES: usize = 16_384;
 
 #[derive(Clone, Copy)]
 pub(super) struct LocalLayout {
@@ -345,7 +348,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                     let elev = sample_terrain_elevation_m(
                         model.selected_root.as_deref(),
                         event.location,
-                        contours.as_ref().map(|v| v.as_slice()),
+                        contours.as_ref(),
                     ) + 18.0;
                     let ground = projection::project_local(
                         &layout,
@@ -405,7 +408,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 sample_terrain_elevation_m(
                     model.selected_root.as_deref(),
                     camera.location,
-                    contours.as_ref().map(|v| v.as_slice()),
+                    contours.as_ref(),
                 ) + 18.0,
                 extent_x_km,
                 extent_y_km,
@@ -454,7 +457,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             &layout,
             &model.globe_view,
             model.selected_root.as_deref(),
-            contours.as_ref().map(|v| v.as_slice()),
+            contours.as_ref(),
             viewport_center,
             extent_x_km,
             extent_y_km,
@@ -499,7 +502,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             &layout,
             &model.globe_view,
             model.selected_root.as_deref(),
-            contours.as_ref().map(|v| v.as_slice()),
+            contours.as_ref(),
             viewport_center,
             extent_x_km,
             extent_y_km,
@@ -1277,7 +1280,7 @@ pub fn water_cache_building() -> bool {
 fn sample_terrain_elevation_m(
     selected_root: Option<&Path>,
     point: GeoPoint,
-    contours: Option<&[ContourPath]>,
+    contours: Option<&Arc<Vec<ContourPath>>>,
 ) -> f32 {
     if let Some(elev) = srtm_stream::sample_elevation_m(selected_root, point) {
         // SRTM no-data sentinel comes back as 0.0; treat anything above -100 m
@@ -1286,31 +1289,65 @@ fn sample_terrain_elevation_m(
             return elev;
         }
     }
-    // Fallback: elevation of the contour line whose nearest point is closest
-    // to `point`.  This is available once the focus-cache tiles have loaded
-    // and gives a much better estimate than "highest within 0.25°" which can
-    // pick up a distant mountain peak.
-    if let Some(contours) = contours {
-        let mut best_dist2 = f32::INFINITY;
-        let mut best_elev = 0.0f32;
-        let mut found = false;
-        for c in contours {
-            for p in &c.points {
-                let dlat = p.lat - point.lat;
-                let dlon = p.lon - point.lon;
-                let dist2 = dlat * dlat + dlon * dlon;
-                if dist2 < best_dist2 {
-                    best_dist2 = dist2;
-                    best_elev = c.elevation_m;
-                    found = true;
-                }
-            }
-        }
-        if found {
-            return best_elev;
+    cached_contour_fallback_elevation_m(point, contours)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct ContourFallbackCacheKey {
+    contours_ptr: usize,
+    lat_bits: u32,
+    lon_bits: u32,
+}
+
+fn cached_contour_fallback_elevation_m(
+    point: GeoPoint,
+    contours: Option<&Arc<Vec<ContourPath>>>,
+) -> f32 {
+    let Some(contours) = contours else {
+        return 0.0;
+    };
+
+    static CACHE: OnceLock<Mutex<HashMap<ContourFallbackCacheKey, f32>>> = OnceLock::new();
+    let key = ContourFallbackCacheKey {
+        contours_ptr: Arc::as_ptr(contours) as usize,
+        lat_bits: point.lat.to_bits(),
+        lon_bits: point.lon.to_bits(),
+    };
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Ok(guard) = cache.lock() {
+        if let Some(elev) = guard.get(&key) {
+            return *elev;
         }
     }
-    0.0
+
+    let elevation = nearest_contour_elevation_m(point, contours.as_slice());
+    if let Ok(mut guard) = cache.lock() {
+        if guard.len() >= MAX_CONTOUR_FALLBACK_CACHE_ENTRIES {
+            guard.clear();
+        }
+        guard.insert(key, elevation);
+    }
+    elevation
+}
+
+fn nearest_contour_elevation_m(point: GeoPoint, contours: &[ContourPath]) -> f32 {
+    let mut best_dist2 = f32::INFINITY;
+    let mut best_elev = 0.0f32;
+    let mut found = false;
+    for contour in contours {
+        for contour_point in &contour.points {
+            let dlat = contour_point.lat - point.lat;
+            let dlon = contour_point.lon - point.lon;
+            let dist2 = dlat * dlat + dlon * dlon;
+            if dist2 < best_dist2 {
+                best_dist2 = dist2;
+                best_elev = contour.elevation_m;
+                found = true;
+            }
+        }
+    }
+    if found { best_elev } else { 0.0 }
 }
 
 /// Draw all visible GeoJSON layers in the local oblique terrain view.
@@ -1319,7 +1356,7 @@ fn draw_geojson_layers_local(
     layout: &LocalLayout,
     view: &GlobeViewState,
     selected_root: Option<&Path>,
-    contours: Option<&[ContourPath]>,
+    contours: Option<&Arc<Vec<ContourPath>>>,
     focus: GeoPoint,
     extent_x_km: f32,
     extent_y_km: f32,
@@ -1351,8 +1388,7 @@ fn draw_geojson_layers_local(
             match &feature.geometry {
                 GeoJsonGeometry::Point(pt) => {
                     if in_view_pt(pt) {
-                        let elev =
-                            sample_terrain_elevation_m(selected_root, *pt, contours) + 18.0;
+                        let elev = sample_terrain_elevation_m(selected_root, *pt, contours) + 18.0;
                         if let Some(pp) = projection::project_local(
                             layout,
                             view,
@@ -1459,8 +1495,7 @@ fn draw_geojson_layers_local(
             };
             if let Some(pt) = anchor {
                 if in_view_pt(&pt) {
-                    let label_elev =
-                        sample_terrain_elevation_m(selected_root, pt, contours) + 18.0;
+                    let label_elev = sample_terrain_elevation_m(selected_root, pt, contours) + 18.0;
                     if let Some(pp) = projection::project_local(
                         layout,
                         view,
@@ -1491,7 +1526,7 @@ fn draw_arcgis_features_local(
     layout: &LocalLayout,
     view: &GlobeViewState,
     selected_root: Option<&Path>,
-    contours: Option<&[ContourPath]>,
+    contours: Option<&Arc<Vec<ContourPath>>>,
     focus: GeoPoint,
     extent_x_km: f32,
     extent_y_km: f32,
@@ -1500,8 +1535,7 @@ fn draw_arcgis_features_local(
 ) -> Vec<(String, i64, egui::Pos2)> {
     let mut markers_out = Vec::new();
     for feat in features {
-        let elev =
-            sample_terrain_elevation_m(selected_root, feat.location, contours) + 18.0;
+        let elev = sample_terrain_elevation_m(selected_root, feat.location, contours) + 18.0;
         let Some(pp) = projection::project_local(
             layout,
             view,
@@ -1555,7 +1589,7 @@ fn project_and_draw_line(
     layout: &LocalLayout,
     view: &GlobeViewState,
     selected_root: Option<&Path>,
-    _contours: Option<&[ContourPath]>,
+    _contours: Option<&Arc<Vec<ContourPath>>>,
     focus: GeoPoint,
     pts: &[GeoPoint],
     extent_x_km: f32,
@@ -1673,5 +1707,30 @@ mod tests {
         assert!(!points.is_empty());
         assert!(max_x - min_x > 180.0);
         assert!(max_y - min_y > 140.0);
+    }
+
+    #[test]
+    fn contour_fallback_cache_is_scoped_to_each_contour_set() {
+        let point = GeoPoint {
+            lat: 40.0005,
+            lon: -73.9995,
+        };
+        let contour_a = Arc::new(vec![ContourPath {
+            elevation_m: 120.0,
+            points: vec![point],
+        }]);
+        let contour_b = Arc::new(vec![ContourPath {
+            elevation_m: 640.0,
+            points: vec![point],
+        }]);
+
+        assert_eq!(
+            cached_contour_fallback_elevation_m(point, Some(&contour_a)),
+            120.0
+        );
+        assert_eq!(
+            cached_contour_fallback_elevation_m(point, Some(&contour_b)),
+            640.0
+        );
     }
 }
