@@ -50,6 +50,7 @@ pub(super) const BASE_VERTICAL_EXAGGERATION: f32 = 2.1;
 // Minimum local zoom value — allows zooming out to ~500 km half-span.
 pub const LOCAL_ZOOM_MIN: f32 = 1.0;
 const MAX_CONTOUR_FALLBACK_CACHE_ENTRIES: usize = 16_384;
+const MAX_CONTOUR_RENDER_POINTS_TOTAL: usize = 120_000;
 
 #[derive(Clone, Copy)]
 pub(super) struct LocalLayout {
@@ -1218,14 +1219,24 @@ fn draw_contour_stack(
     let km_per_deg_lon = km_per_deg_lat * focus.lat.to_radians().cos().abs().max(0.2);
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
+    let mut remaining_points = MAX_CONTOUR_RENDER_POINTS_TOTAL;
 
     let mut ordered: Vec<_> = contours.iter().collect();
     ordered.sort_by(|left, right| left.elevation_m.total_cmp(&right.elevation_m));
 
     for contour in ordered {
+        if remaining_points < 2 {
+            break;
+        }
+        if contour.points.len() < 2 {
+            continue;
+        }
+
+        let sample_step = contour.points.len().div_ceil(remaining_points).max(1);
         let points: Vec<_> = contour
             .points
             .iter()
+            .step_by(sample_step)
             .filter_map(|point| {
                 projection::project_local(
                     layout,
@@ -1243,6 +1254,7 @@ fn draw_contour_stack(
         if points.len() < 2 {
             continue;
         }
+        remaining_points = remaining_points.saturating_sub(points.len());
 
         let major = (contour.elevation_m.round() as i32).rem_euclid(major_rem) == 0;
         let stroke = egui::Stroke::new(
