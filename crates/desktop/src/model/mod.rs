@@ -21,8 +21,20 @@ use crate::city_catalog;
 use crate::osm_ingest::{self, OsmInventory};
 use crate::settings_store;
 use crate::terrain_assets::{self, TerrainInventory};
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+
+const MAX_NEARBY_CAMERAS: usize = 200;
+
+#[derive(Clone)]
+struct NearbyCameraCache {
+    selected_event_id: Option<String>,
+    camera_registry_generation: u64,
+    radius_km_bits: u32,
+    total_matches: usize,
+    cameras: Vec<NearbyCamera>,
+}
 
 pub struct AppModel {
     pub events: Vec<EventRecord>,
@@ -105,6 +117,8 @@ pub struct AppModel {
     pub replay_history_status: String,
     pub terrain_inventory: TerrainInventory,
     pub osm_inventory: OsmInventory,
+    camera_registry_generation: u64,
+    nearby_camera_cache: RefCell<Option<NearbyCameraCache>>,
 }
 
 impl AppModel {
@@ -351,6 +365,8 @@ impl AppModel {
             },
             terrain_inventory,
             osm_inventory,
+            camera_registry_generation: 0,
+            nearby_camera_cache: RefCell::new(None),
         };
 
         if let Some(camera) = model.nearby_cameras(250.0).first() {
@@ -581,6 +597,7 @@ impl AppModel {
     pub fn replace_factal_events(&mut self, events: Vec<EventRecord>) {
         let previous_selected = self.selected_event_id.clone();
         self.events = events;
+        self.nearby_camera_cache.replace(None);
 
         if self.events.is_empty() {
             self.selected_event_id = None;
@@ -604,6 +621,8 @@ impl AppModel {
     pub fn replace_camera_registry(&mut self, cameras: Vec<CameraFeed>, source_label: &str) {
         let previous_selected = self.selected_camera_id.clone();
         self.cameras = cameras;
+        self.camera_registry_generation = self.camera_registry_generation.wrapping_add(1);
+        self.nearby_camera_cache.replace(None);
 
         if self.cameras.is_empty() {
             self.selected_camera_id = None;
@@ -671,9 +690,35 @@ impl AppModel {
         }
     }
 
-    pub fn nearby_cameras(&self, radius_km: f32) -> Vec<NearbyCamera> {
+    fn ensure_nearby_camera_cache(&self, radius_km: f32) {
+        let cache_key = (
+            self.selected_event_id.clone(),
+            self.camera_registry_generation,
+            radius_km.to_bits(),
+        );
+        let cache_is_fresh = self
+            .nearby_camera_cache
+            .borrow()
+            .as_ref()
+            .map(|cache| {
+                cache.selected_event_id == cache_key.0
+                    && cache.camera_registry_generation == cache_key.1
+                    && cache.radius_km_bits == cache_key.2
+            })
+            .unwrap_or(false);
+        if cache_is_fresh {
+            return;
+        }
+
         let Some(event) = self.selected_event() else {
-            return Vec::new();
+            self.nearby_camera_cache.replace(Some(NearbyCameraCache {
+                selected_event_id: cache_key.0,
+                camera_registry_generation: cache_key.1,
+                radius_km_bits: cache_key.2,
+                total_matches: 0,
+                cameras: Vec::new(),
+            }));
+            return;
         };
 
         let mut nearby: Vec<_> = self
@@ -695,8 +740,35 @@ impl AppModel {
             })
             .collect();
 
+        let total_matches = nearby.len();
         nearby.sort_by(|left, right| left.distance_km.total_cmp(&right.distance_km));
-        nearby
+        nearby.truncate(MAX_NEARBY_CAMERAS);
+
+        self.nearby_camera_cache.replace(Some(NearbyCameraCache {
+            selected_event_id: cache_key.0,
+            camera_registry_generation: cache_key.1,
+            radius_km_bits: cache_key.2,
+            total_matches,
+            cameras: nearby,
+        }));
+    }
+
+    pub fn nearby_cameras(&self, radius_km: f32) -> Vec<NearbyCamera> {
+        self.ensure_nearby_camera_cache(radius_km);
+        self.nearby_camera_cache
+            .borrow()
+            .as_ref()
+            .map(|cache| cache.cameras.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn nearby_cameras_total_matches(&self, radius_km: f32) -> usize {
+        self.ensure_nearby_camera_cache(radius_km);
+        self.nearby_camera_cache
+            .borrow()
+            .as_ref()
+            .map(|cache| cache.total_matches)
+            .unwrap_or(0)
     }
 
     /// Enter or exit replay mode.  On enter: loads history from the local

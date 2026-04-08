@@ -10,7 +10,7 @@ Presents the right sidebar for nearby cameras and map-item sources. It now owns 
 - **Interacts with**: `tab_cameras`, `tab_items`, `AppModel`
 
 ### `tab_cameras`
-- **Does**: Shows sorted nearby cameras with provider, type, distance, health, and action buttons
+- **Does**: Shows the nearest nearby cameras with provider, type, distance, health, and action buttons, and reports when the list is capped for performance
 - **Interacts with**: `AppModel::nearby_cameras`, `select_camera`, and `attempt_connect` in `model.rs`
 
 ### `tab_items`

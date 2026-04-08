@@ -82,6 +82,7 @@ Defines the shared domain and UI state for the 1kEE desktop demo. This file hold
 - Factal API key persistence is intentionally lightweight for now: the key is loaded into the model at startup and the live poller swaps in fresh events once authenticated.
 - Factal-backed events now preserve an optional raw-detail payload so the operator can inspect the original API item from a brief window without bloating the normalized event list UI.
 - Live camera-source keys now also persist in the model/settings path, and the camera registry status is explicit about `demo` vs `configured` vs `live` instead of treating mock cameras as a loaded source.
+- Nearby-camera queries are memoized per selected event and camera-registry generation, and the render-facing list is capped to the nearest 200 cameras so one dense event does not stall every frame.
 - The globe now starts in manual mode instead of auto-spin so the app does not enter a continuous repaint loop before the analyst touches anything.
 - The model now initializes and tracks a separate OSM runtime store so the planet-scale roads/buildings pipeline can evolve independently from terrain caching.
 - Coastline and major/minor road layer toggles now live in the model because both the map UI and the renderers need the same persistent visibility state.

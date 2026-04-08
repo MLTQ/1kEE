@@ -71,6 +71,7 @@ fn tab_cameras(ui: &mut egui::Ui, model: &mut AppModel) {
     ui.add_space(8.0);
 
     let nearby = model.nearby_cameras(250.0);
+    let total_matches = model.nearby_cameras_total_matches(250.0);
 
     if nearby.is_empty() {
         ui.label("Select an event to inspect nearby cameras.");
@@ -78,11 +79,21 @@ fn tab_cameras(ui: &mut egui::Ui, model: &mut AppModel) {
     }
 
     if let Some(event) = model.selected_event() {
-        ui.small(format!(
-            "{} cameras within 250 km of {}",
-            nearby.len(),
-            event.location_name
-        ));
+        let summary = if total_matches > nearby.len() {
+            format!(
+                "Showing nearest {} of {} cameras within 250 km of {}",
+                nearby.len(),
+                total_matches,
+                event.location_name
+            )
+        } else {
+            format!(
+                "{} cameras within 250 km of {}",
+                nearby.len(),
+                event.location_name
+            )
+        };
+        ui.small(summary);
     }
 
     ui.add_space(8.0);
