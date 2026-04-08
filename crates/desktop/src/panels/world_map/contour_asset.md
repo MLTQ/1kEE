@@ -6,7 +6,7 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 ## Components
 
 ### `LocalRegionCache`
-- **Does**: Tracks currently visible local-terrain tiles, in-flight reads, and zoom fallback geometry.
+- **Does**: Tracks currently visible local-terrain tiles, in-flight reads, zoom fallback geometry, and a cached merged contour set so local-mode repaints do not re-clone every loaded contour path.
 - **Interacts with**: `load_srtm_region_for_view`, `load_lunar_region_for_view`.
 
 ### `GlobeRegionCache`
@@ -32,4 +32,5 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 
 ## Notes
 - Lunar local rendering still performs the midpoint-based exclusive-region filter so overlapping tiles do not double-draw the same contour.
+- Earth and lunar local reads both batch missing tiles onto one worker thread per repaint batch, reducing repaint storms while focus tiles stream in.
 - Batched reads still execute one SQL query per tile, but they reuse a single SQLite connection and one worker thread per repaint batch.

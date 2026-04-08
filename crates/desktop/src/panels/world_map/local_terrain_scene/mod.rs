@@ -190,16 +190,18 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     }
 
     // ── Elevation fill (opaque — occludes the background contour pass above) ──
-    if model.fill_elevation && !contours_slice.is_empty() {
-        draw_elevation_fill(
-            painter,
-            &layout,
-            &model.globe_view,
-            viewport_center,
-            contours_slice,
-            model.selected_root.as_deref(),
-            model.moon_mode,
-        );
+    if model.fill_elevation {
+        if let Some(contours_arc) = contours.as_ref() {
+            draw_elevation_fill(
+                painter,
+                &layout,
+                &model.globe_view,
+                viewport_center,
+                contours_arc,
+                model.selected_root.as_deref(),
+                model.moon_mode,
+            );
+        }
     }
 
     // ── Surface contour pass (drawn after fill so lines on top are visible) ───
@@ -1084,7 +1086,7 @@ fn draw_elevation_fill(
     layout: &LocalLayout,
     view: &GlobeViewState,
     focus: GeoPoint,
-    contours: &[contour_asset::ContourPath],
+    contours: &Arc<Vec<contour_asset::ContourPath>>,
     selected_root: Option<&std::path::Path>,
     moon_mode: bool,
 ) {
@@ -1172,15 +1174,21 @@ fn draw_elevation_fill(
     if need_build && state.building_key != Some(key) {
         let layout_c = *layout;
         let view_c = *view;
-        let contours_c: Vec<_> = contours.to_vec();
+        let contours_c = Arc::clone(contours);
         let gebco_c = gebco_samples;
         let ctx = painter.ctx().clone();
         let (tx, rx) = std::sync::mpsc::channel();
         state.building_key = Some(key);
         state.result_rx = Some(rx);
         std::thread::spawn(move || {
-            let mesh =
-                build_elev_fill_mesh(&layout_c, &view_c, focus, &contours_c, &gebco_c, moon_mode);
+            let mesh = build_elev_fill_mesh(
+                &layout_c,
+                &view_c,
+                focus,
+                contours_c.as_slice(),
+                &gebco_c,
+                moon_mode,
+            );
             let _ = tx.send((key, mesh));
             ctx.request_repaint();
         });

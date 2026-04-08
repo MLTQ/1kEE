@@ -127,6 +127,10 @@ struct LocalRegionCache {
     /// while tiles at the new zoom level are building / loading.  Cleared as
     /// soon as the new zoom has at least one tile in `entries`.
     zoom_fallback: Option<Arc<Vec<ContourPath>>>,
+    /// Cached merged contour set for the current local scene. Rebuilt only
+    /// when tiles are inserted or evicted, not on every repaint.
+    merged: Option<Arc<Vec<ContourPath>>>,
+    merged_dirty: bool,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -162,6 +166,8 @@ pub fn load_srtm_region_for_view(
             entries: HashMap::new(),
             in_flight: HashSet::new(),
             zoom_fallback: None,
+            merged: None,
+            merged_dirty: true,
         })
     });
     let feature_budget = srtm_focus_cache::feature_budget_for_zoom(zoom);
@@ -190,6 +196,8 @@ pub fn load_srtm_region_for_view(
             guard.scene_key = Some(scene_key);
             guard.entries.clear();
             guard.in_flight.clear();
+            guard.merged = None;
+            guard.merged_dirty = true;
         }
         let missing: Vec<_> = assets
             .iter()
@@ -221,51 +229,28 @@ pub fn load_srtm_region_for_view(
 
     // Phase 2: spawn detached threads for each newly-claimed tile; return
     // immediately with whatever is currently cached rather than blocking.
-    for (key, asset) in missing {
+    if !missing.is_empty() {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let query_result = query_local_contours(
-                &key.path,
-                key.zoom_bucket,
-                key.lat_bucket,
-                key.lon_bucket,
-                asset.simplify_step,
-                per_asset_budget,
-            );
-            // Debug: log result so it's visible in Console.app / Terminal stderr.
-            match &query_result {
-                Ok(contours) if contours.is_empty() => {
-                    eprintln!(
-                        "[1kEE] contour tile z{} ({},{}) → 0 lines (empty tile or nodata)",
-                        key.zoom_bucket, key.lat_bucket, key.lon_bucket
-                    );
-                }
-                Ok(contours) => {
-                    eprintln!(
-                        "[1kEE] contour tile z{} ({},{}) → {} lines OK",
-                        key.zoom_bucket,
-                        key.lat_bucket,
-                        key.lon_bucket,
-                        contours.len()
-                    );
-                }
-                Err(e) => {
-                    eprintln!(
-                        "[1kEE] contour tile z{} ({},{}) → ERROR: {e}",
-                        key.zoom_bucket, key.lat_bucket, key.lon_bucket
-                    );
-                }
-            }
-            let result = query_result.ok().filter(|c| !c.is_empty());
+            let loaded =
+                query_local_contours_batch(&missing[0].0.path, &missing, per_asset_budget).ok();
 
             if let Ok(mut g) = cache.lock() {
-                if let Some(contours) = result {
-                    g.entries
-                        .entry(key.clone())
-                        .or_insert_with(|| Arc::new(contours));
+                let mut changed = false;
+                if let Some(loaded) = loaded {
+                    for (key, contours) in loaded {
+                        if !g.entries.contains_key(&key) {
+                            g.entries.insert(key.clone(), Arc::new(contours));
+                            changed = true;
+                        }
+                    }
                 }
-                // Always clear in-flight so a failed tile can be retried next frame.
-                g.in_flight.remove(&key);
+                for (key, _) in &missing {
+                    g.in_flight.remove(key);
+                }
+                if changed {
+                    g.merged_dirty = true;
+                }
             }
             ctx.request_repaint();
         });
@@ -291,19 +276,25 @@ pub fn load_srtm_region_for_view(
         for k in keys.into_iter().take(excess) {
             guard.entries.remove(&k);
         }
+        guard.merged_dirty = true;
     }
 
-    // Render ALL accumulated tiles, not just the current viewport grid.
+    if guard.entries.is_empty() {
+        return None;
+    }
+    if !guard.merged_dirty {
+        return guard.merged.clone();
+    }
+
+    // Merge once after tile changes, then reuse the Arc on later repaints.
     let mut merged = Vec::new();
     for contours in guard.entries.values() {
         merged.extend(contours.iter().cloned());
     }
-
-    if merged.is_empty() {
-        return None;
-    }
-
-    Some(Arc::new(merged))
+    let merged = Arc::new(merged);
+    guard.merged = Some(merged.clone());
+    guard.merged_dirty = false;
+    Some(merged)
 }
 
 /// Lunar analogue of `load_srtm_region_for_view` — sources from SLDEM2015 tiles
@@ -330,6 +321,8 @@ pub fn load_lunar_region_for_view(
             entries: HashMap::new(),
             in_flight: HashSet::new(),
             zoom_fallback: None,
+            merged: None,
+            merged_dirty: true,
         })
     });
 
@@ -364,6 +357,8 @@ pub fn load_lunar_region_for_view(
             guard.scene_key = Some(scene_key);
             guard.entries.clear();
             guard.in_flight.clear();
+            guard.merged = None;
+            guard.merged_dirty = true;
         }
         let missing: Vec<_> = assets
             .iter()
@@ -394,15 +389,20 @@ pub fn load_lunar_region_for_view(
                 query_local_contours_batch(&missing[0].0.path, &missing, per_asset_budget).ok();
 
             if let Ok(mut g) = cache.lock() {
+                let mut changed = false;
                 if let Some(loaded) = loaded {
                     for (key, contours) in loaded {
-                        g.entries
-                            .entry(key.clone())
-                            .or_insert_with(|| Arc::new(contours));
+                        if !g.entries.contains_key(&key) {
+                            g.entries.insert(key.clone(), Arc::new(contours));
+                            changed = true;
+                        }
                     }
                 }
                 for (key, _) in &missing {
                     g.in_flight.remove(key);
+                }
+                if changed {
+                    g.merged_dirty = true;
                 }
             }
             ctx.request_repaint();
@@ -426,41 +426,51 @@ pub fn load_lunar_region_for_view(
         for k in keys.into_iter().take(excess) {
             guard.entries.remove(&k);
         }
+        guard.merged_dirty = true;
     }
 
-    // Lunar tiles overlap significantly (~55% of tile width) because
-    // bucket_step = half_extent * 0.45.  On flat mare terrain this means the
-    // same iso-contour appears in 4+ tiles and is drawn multiple times.
-    // Fix: only include a contour line in the tile whose centre is CLOSEST to
-    // that line's midpoint (exclusive-region partition).  Each iso-line then
-    // appears exactly once in the merged set.
-    let bucket_step = srtm_focus_cache::lunar_half_extent_for_zoom(zoom) * 0.45;
-    let mut merged = Vec::new();
-    for (key, contours) in guard.entries.iter() {
-        let tile_lat = key.lat_bucket as f32 * bucket_step;
-        let tile_lon = key.lon_bucket as f32 * bucket_step;
-        let half_step = bucket_step * 0.5;
-        for contour in contours.iter() {
-            if contour.points.is_empty() {
-                continue;
-            }
-            let mid = &contour.points[contour.points.len() / 2];
-            // Only keep this line if its midpoint is within the tile's exclusive region.
-            if (mid.lat - tile_lat).abs() <= half_step && (mid.lon - tile_lon).abs() <= half_step {
-                merged.push(contour.clone());
-            }
-        }
-    }
-
-    if merged.is_empty() {
+    if guard.entries.is_empty() {
         // No new-zoom tiles loaded yet — return the fallback from the previous
         // zoom level so the screen isn't blank while tiles are building.
         return guard.zoom_fallback.clone();
     }
 
+    if guard.merged_dirty {
+        // Lunar tiles overlap significantly (~55% of tile width) because
+        // bucket_step = half_extent * 0.45.  On flat mare terrain this means the
+        // same iso-contour appears in 4+ tiles and is drawn multiple times.
+        // Fix: only include a contour line in the tile whose centre is CLOSEST to
+        // that line's midpoint (exclusive-region partition).  Each iso-line then
+        // appears exactly once in the merged set.
+        let bucket_step = srtm_focus_cache::lunar_half_extent_for_zoom(zoom) * 0.45;
+        let mut merged = Vec::new();
+        for (key, contours) in guard.entries.iter() {
+            let tile_lat = key.lat_bucket as f32 * bucket_step;
+            let tile_lon = key.lon_bucket as f32 * bucket_step;
+            let half_step = bucket_step * 0.5;
+            for contour in contours.iter() {
+                if contour.points.is_empty() {
+                    continue;
+                }
+                let mid = &contour.points[contour.points.len() / 2];
+                if (mid.lat - tile_lat).abs() <= half_step
+                    && (mid.lon - tile_lon).abs() <= half_step
+                {
+                    merged.push(contour.clone());
+                }
+            }
+        }
+
+        if merged.is_empty() {
+            return guard.zoom_fallback.clone();
+        }
+        guard.merged = Some(Arc::new(merged));
+        guard.merged_dirty = false;
+    }
+
     // We have live tiles — discard the fallback to save memory.
     guard.zoom_fallback = None;
-    Some(Arc::new(merged))
+    guard.merged.clone()
 }
 
 /// Load SRTM focus-tile contours for globe-mode rendering.
