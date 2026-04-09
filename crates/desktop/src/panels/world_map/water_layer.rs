@@ -46,10 +46,10 @@ impl ElevatedWater {
 
 struct WaterCache {
     tile_zoom: u8,
-    tile_x_min: u32,
-    tile_x_max: u32,
-    tile_y_min: u32,
-    tile_y_max: u32,
+    covered_min_lat: f32,
+    covered_max_lat: f32,
+    covered_min_lon: f32,
+    covered_max_lon: f32,
     water_gen: u64,
     /// Elevation-enriched features, built off the render thread.
     features_elevated: Vec<ElevatedWater>,
@@ -105,12 +105,6 @@ pub(super) fn draw_water(
     let km_per_deg_lon = km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
-
-    let (x0, y0) = osm_ingest::lat_lon_to_tile(bounds.max_lat, bounds.min_lon, tile_zoom);
-    let (x1, y1) = osm_ingest::lat_lon_to_tile(bounds.min_lat, bounds.max_lon, tile_zoom);
-    let (txmin, txmax) = (x0.min(x1), x0.max(x1));
-    let (tymin, tymax) = (y0.min(y1), y0.max(y1));
-    const MARGIN: u32 = 1;
     let current_gen = osm_ingest::water_data_generation();
 
     // ── Stale check + background build launch ─────────────────────────────
@@ -122,15 +116,25 @@ pub(super) fn draw_water(
         let stale = store.cache.as_ref().map_or(true, |c| {
             c.tile_zoom != tile_zoom
                 || c.water_gen != current_gen
-                || c.tile_x_min > txmin
-                || c.tile_x_max < txmax
-                || c.tile_y_min > tymin
-                || c.tile_y_max < tymax
+                || bounds.min_lat < c.covered_min_lat
+                || bounds.max_lat > c.covered_max_lat
+                || bounds.min_lon < c.covered_min_lon
+                || bounds.max_lon > c.covered_max_lon
         });
 
         if stale && !store.building {
-            let (lxmin, lxmax) = (txmin.saturating_sub(MARGIN), txmax + MARGIN);
-            let (lymin, lymax) = (tymin.saturating_sub(MARGIN), tymax + MARGIN);
+            const GEO_MARGIN_FACTOR: f32 = 0.75;
+            let lat_margin = (bounds.max_lat - bounds.min_lat) * GEO_MARGIN_FACTOR;
+            let lon_margin = (bounds.max_lon - bounds.min_lon) * GEO_MARGIN_FACTOR;
+            let load_bounds = osm_ingest::GeoBounds {
+                min_lat: (bounds.min_lat - lat_margin).max(-85.0),
+                max_lat: (bounds.max_lat + lat_margin).min(85.0),
+                min_lon: (bounds.min_lon - lon_margin).max(-180.0),
+                max_lon: (bounds.max_lon + lon_margin).min(180.0),
+            };
+            let (covered_min_lat, covered_max_lat) = (load_bounds.min_lat, load_bounds.max_lat);
+            let (covered_min_lon, covered_max_lon) = (load_bounds.min_lon, load_bounds.max_lon);
+
             store.building = true;
             drop(store);
 
@@ -138,7 +142,7 @@ pub(super) fn draw_water(
             std::thread::spawn(move || {
                 let root_ref = root_buf.as_deref();
                 let features_elevated =
-                    osm_ingest::load_water_for_bounds(root_ref, bounds, tile_zoom)
+                    osm_ingest::load_water_for_bounds(root_ref, load_bounds, tile_zoom)
                         .into_iter()
                         .map(|poly| ElevatedWater::from_polyline(&poly, root_ref))
                         .collect();
@@ -146,10 +150,10 @@ pub(super) fn draw_water(
                 if let Ok(mut store) = water_cache().lock() {
                     store.cache = Some(WaterCache {
                         tile_zoom,
-                        tile_x_min: lxmin,
-                        tile_x_max: lxmax,
-                        tile_y_min: lymin,
-                        tile_y_max: lymax,
+                        covered_min_lat,
+                        covered_max_lat,
+                        covered_min_lon,
+                        covered_max_lon,
                         water_gen: current_gen,
                         features_elevated,
                     });
