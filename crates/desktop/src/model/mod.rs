@@ -20,6 +20,7 @@ pub use vessels::*;
 use crate::city_catalog;
 use crate::osm_ingest::{self, OsmInventory};
 use crate::settings_store;
+use crate::stellar_time;
 use crate::terrain_assets::{self, TerrainInventory};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -58,6 +59,24 @@ pub struct AppModel {
     pub show_admin: bool,
     pub show_ships: bool,
     pub show_flights: bool,
+    pub show_stellar_correspondence: bool,
+    // ── Stellar Observatory ───────────────────────────────────────────────────
+    /// Julian Date for the stellar/planet layer (updated by live mode or animation).
+    pub stellar_jd: f64,
+    /// When true, `stellar_jd` tracks the real-time system clock each frame.
+    pub stellar_live: bool,
+    /// Animation speed in JD per real second (0.0 = paused).
+    pub stellar_anim_speed: f64,
+    /// Whether the Stellar Observatory floating panel is open.
+    pub stellar_observatory_open: bool,
+    /// Apply IAU 1976 precession to star coordinates from J2000.0 to `stellar_jd`.
+    pub stellar_precess: bool,
+    /// Show Sun, Moon, and planets as geographic positions.
+    pub show_planets: bool,
+    /// Draw planet ground tracks.
+    pub show_planet_trails: bool,
+    /// Trail length in years (0.0 = use each planet's default).
+    pub planet_trail_years: f32,
     /// User-uploaded vector overlay layers (GeoJSON, KML, or KMZ).
     pub geojson_layers: Vec<GeoJsonLayer>,
     /// ArcGIS FeatureServer sources added by the user.
@@ -279,6 +298,20 @@ impl AppModel {
             show_admin: false,
             show_ships: false,
             show_flights: false,
+            show_stellar_correspondence: false,
+            stellar_jd: stellar_time::unix_to_jd(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs_f64(),
+            ),
+            stellar_live: true,
+            stellar_anim_speed: 0.0,
+            stellar_observatory_open: false,
+            stellar_precess: true,
+            show_planets: true,
+            show_planet_trails: false,
+            planet_trail_years: 0.0,
             geojson_layers: Vec::new(),
             arcgis_sources: Vec::new(),
             arcgis_features: Vec::new(),
