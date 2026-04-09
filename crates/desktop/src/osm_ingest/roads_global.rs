@@ -37,69 +37,81 @@ pub(super) fn import_planet_roads(db_path: &Path, job: &OsmJob) -> Result<String
     let mut processed_ways = 0usize;
     let mut import_error: Option<String> = None;
     let mut seen_way_ids = HashSet::new();
-    reader
-        .for_each(|element| {
-            if import_error.is_some() {
-                return;
-            }
-            let Element::Way(way) = element else {
-                return;
-            };
 
-            let mut highway_class = None;
-            let mut road_name = None;
-            for (key, value) in way.tags() {
-                if key == "highway" {
-                    highway_class = canonical_road_class(value);
-                } else if key == "name" && road_name.is_none() {
-                    road_name = Some(value.to_owned());
+    let (tx, rx) = crossbeam_channel::bounded(10000);
+    let job_bounds = job.bounds;
+    
+    let reader_handle = std::thread::spawn(move || {
+        let result = reader.par_map_reduce(
+            |element| {
+                let Element::Way(way) = element else { return };
+                
+                let mut highway_class = None;
+                let mut road_name = None;
+                for (key, value) in way.tags() {
+                    if key == "highway" {
+                        highway_class = canonical_road_class(value);
+                    } else if key == "name" && road_name.is_none() {
+                        road_name = Some(value.to_owned());
+                    }
                 }
-            }
 
-            let Some(road_class) = highway_class else {
-                return;
-            };
-            if !seen_way_ids.insert(way.id()) {
-                return;
-            }
+                let Some(road_class) = highway_class else { return };
 
-            let points: Vec<_> = way
-                .node_locations()
-                .map(|location| GeoPoint {
-                    lat: location.lat() as f32,
-                    lon: location.lon() as f32,
-                })
-                .collect();
+                let points: Vec<_> = way
+                    .node_locations()
+                    .map(|location| GeoPoint {
+                        lat: location.lat() as f32,
+                        lon: location.lon() as f32,
+                    })
+                    .collect();
 
-            if points.len() < 2 {
-                return;
-            }
-            let bounds = polyline_bounds(&points);
-            if !bounds_intersect(bounds, job.bounds) {
-                return;
-            }
+                if points.len() < 2 { return }
+                
+                let bounds = polyline_bounds(&points);
+                if !bounds_intersect(bounds, job_bounds) { return }
 
-            processed_ways += 1;
-            if let Err(error) =
-                writer.insert_road(way.id(), road_class, road_name.as_deref(), &points)
-            {
-                import_error = Some(error);
-                return;
-            }
+                // Send matching roads to writer thread. Break/ignore if channel closes.
+                let _ = tx.send((way.id(), road_class, road_name, points));
+            },
+            || (),
+            |_, _| ()
+        );
+        result.map_err(|e| e.to_string())
+    });
 
-            if processed_ways % PROGRESS_FLUSH_INTERVAL == 0 {
-                let _ = writer.flush_progress();
-                let _ = update_job_note(
-                    db_path,
-                    job.id,
-                    &format!(
-                        "Scanned {} road ways · wrote {} tile features",
-                        processed_ways, writer.inserted_features
-                    ),
-                );
-            }
-        })
-        .map_err(|error| error.to_string())?;
+    while let Ok((way_id, road_class, road_name, points)) = rx.recv() {
+        if !seen_way_ids.insert(way_id) {
+            continue;
+        }
+
+        processed_ways += 1;
+        if let Err(error) = writer.insert_road(way_id, road_class, road_name.as_deref(), &points) {
+            import_error = Some(error);
+            break;
+        }
+
+        if processed_ways % PROGRESS_FLUSH_INTERVAL == 0 {
+            let _ = writer.flush_progress();
+            let _ = update_job_note(
+                db_path,
+                job.id,
+                &format!(
+                    "Scanned {} road ways · wrote {} tile features",
+                    processed_ways, writer.inserted_features
+                ),
+            );
+        }
+    }
+    
+    drop(rx);
+    
+    let reader_result = reader_handle.join().unwrap_or_else(|_| Err("OSM parser thread panicked".to_owned()));
+    if let Err(error) = reader_result {
+        if import_error.is_none() {
+            import_error = Some(error);
+        }
+    }
 
     if let Some(error) = import_error {
         let _ = writer.rollback();
