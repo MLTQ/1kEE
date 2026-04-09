@@ -63,9 +63,9 @@ pub fn invalidate_road_cache() {
     }
 }
 
-/// True while a background road-cache build is in progress.
-pub fn road_cache_building() -> bool {
-    road_cache().lock().map(|g| g.building).unwrap_or(false)
+/// The bounding box of the background road-cache build in progress, if any.
+pub fn road_cache_building_bounds() -> Option<osm_ingest::GeoBounds> {
+    road_cache().lock().ok().and_then(|g| g.building)
 }
 
 struct RoadCache {
@@ -86,7 +86,7 @@ struct RoadCache {
 
 struct RoadCacheStore {
     cache: Option<RoadCache>,
-    building: bool,
+    building: Option<osm_ingest::GeoBounds>,
 }
 
 fn road_cache() -> &'static Mutex<RoadCacheStore> {
@@ -94,7 +94,7 @@ fn road_cache() -> &'static Mutex<RoadCacheStore> {
     CACHE.get_or_init(|| {
         Mutex::new(RoadCacheStore {
             cache: None,
-            building: false,
+            building: None,
         })
     })
 }
@@ -147,7 +147,7 @@ pub(super) fn draw_roads(
                 || bounds.max_lon > c.covered_max_lon
         });
 
-        if stale && !store.building {
+        if stale && store.building.is_none() {
             // Build a load bbox that extends GEO_MARGIN_FACTOR beyond the
             // current viewport in each direction.
             let lat_margin = (bounds.max_lat - bounds.min_lat) * GEO_MARGIN_FACTOR;
@@ -161,7 +161,7 @@ pub(super) fn draw_roads(
             let (covered_min_lat, covered_max_lat) = (load_bounds.min_lat, load_bounds.max_lat);
             let (covered_min_lon, covered_max_lon) = (load_bounds.min_lon, load_bounds.max_lon);
 
-            store.building = true;
+            store.building = Some(load_bounds);
             drop(store); // release lock before spawning
 
             let root_buf = selected_root.map(|p| p.to_path_buf());
@@ -205,7 +205,7 @@ pub(super) fn draw_roads(
                         major_elevated,
                         minor_elevated,
                     });
-                    store.building = false;
+                    store.building = None;
                 }
                 crate::app::request_repaint();
             });

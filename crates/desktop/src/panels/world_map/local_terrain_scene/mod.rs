@@ -259,6 +259,13 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             render_zoom,
             model.show_buildings,
         );
+
+        draw_loading_boxes(
+            painter,
+            &layout,
+            &model.globe_view,
+            viewport_center,
+        );
     }
 
     // ── Admin boundaries (Earth only) ─────────────────────────────────────
@@ -1243,7 +1250,7 @@ pub fn invalidate_road_cache() {
 
 /// True while a background road-cache build is in progress.
 pub fn road_cache_building() -> bool {
-    super::road_layer::road_cache_building()
+    super::road_layer::road_cache_building_bounds().is_some()
 }
 
 /// Clear the water tile cache so the next draw reloads from SQLite.
@@ -1253,10 +1260,54 @@ pub fn invalidate_water_cache() {
 
 /// True while a background water-cache build is in progress.
 pub fn water_cache_building() -> bool {
-    super::water_layer::water_cache_building()
+    super::water_layer::water_cache_building_bounds().is_some()
 }
 
 /// Draw all visible GeoJSON layers in the local oblique terrain view.
+fn draw_loading_boxes(
+    painter: &egui::Painter,
+    layout: &LocalLayout,
+    view: &GlobeViewState,
+    focus: GeoPoint,
+) {
+    let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
+    let km_per_deg_lat = 111.32f32;
+    let km_per_deg_lon = km_per_deg_lat * focus.lat.to_radians().cos().abs().max(0.2);
+    let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
+    let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
+
+    let t = painter.ctx().input(|i| i.time);
+    let alpha = (t.sin() as f32 * 0.5 + 0.5) * 0.7 + 0.3;
+
+    let mut draw_box = |bounds: crate::osm_ingest::GeoBounds, color: egui::Color32| {
+        let p1 = GeoPoint { lat: bounds.min_lat, lon: bounds.min_lon };
+        let p2 = GeoPoint { lat: bounds.max_lat, lon: bounds.min_lon };
+        let p3 = GeoPoint { lat: bounds.max_lat, lon: bounds.max_lon };
+        let p4 = GeoPoint { lat: bounds.min_lat, lon: bounds.max_lon };
+
+        let mut pts = Vec::new();
+        for &p in &[p1, p2, p3, p4, p1] {
+            if let Some(proj) = projection::project_local(layout, view, focus, p, 10.0, extent_x_km, extent_y_km) {
+                pts.push(proj.pos);
+            }
+        }
+        if pts.len() >= 2 {
+            let stroke = egui::Stroke::new(2.0, color.linear_multiply(alpha));
+            painter.add(egui::Shape::line(pts, stroke));
+        }
+    };
+
+    if let Some(bounds) = super::road_layer::road_cache_building_bounds() {
+        draw_box(bounds, crate::theme::road_major_color());
+    }
+    if let Some(bounds) = super::water_layer::water_cache_building_bounds() {
+        draw_box(bounds, crate::theme::water_color());
+    }
+    if let Some(bounds) = super::waterway_layer::waterway_cache_building_bounds() {
+        draw_box(bounds, crate::theme::waterway_color());
+    }
+}
+
 fn draw_geojson_layers_local(
     painter: &egui::Painter,
     layout: &LocalLayout,

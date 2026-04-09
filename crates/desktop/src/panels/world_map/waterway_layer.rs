@@ -47,7 +47,7 @@ struct WaterwayCache {
 
 struct WaterwayCacheStore {
     cache: Option<WaterwayCache>,
-    building: bool,
+    building: Option<osm_ingest::GeoBounds>,
 }
 
 fn waterway_cache() -> &'static Mutex<WaterwayCacheStore> {
@@ -55,9 +55,14 @@ fn waterway_cache() -> &'static Mutex<WaterwayCacheStore> {
     CACHE.get_or_init(|| {
         Mutex::new(WaterwayCacheStore {
             cache: None,
-            building: false,
+            building: None,
         })
     })
+}
+
+/// The bounding box of the background waterway-cache build in progress, if any.
+pub fn waterway_cache_building_bounds() -> Option<osm_ingest::GeoBounds> {
+    waterway_cache().lock().ok().and_then(|g| g.building)
 }
 
 pub(super) fn draw_waterways(
@@ -104,7 +109,7 @@ pub(super) fn draw_waterways(
                 || bounds.max_lon > c.covered_max_lon
         });
 
-        if stale && !store.building {
+        if stale && store.building.is_none() {
             let lat_margin = (bounds.max_lat - bounds.min_lat) * GEO_MARGIN_FACTOR;
             let lon_margin = (bounds.max_lon - bounds.min_lon) * GEO_MARGIN_FACTOR;
             let load_bounds = osm_ingest::GeoBounds {
@@ -116,7 +121,7 @@ pub(super) fn draw_waterways(
             let (covered_min_lat, covered_max_lat) = (load_bounds.min_lat, load_bounds.max_lat);
             let (covered_min_lon, covered_max_lon) = (load_bounds.min_lon, load_bounds.max_lon);
 
-            store.building = true;
+            store.building = Some(load_bounds);
             drop(store);
 
             let root_buf = root.to_path_buf();
@@ -137,7 +142,7 @@ pub(super) fn draw_waterways(
                         covered_max_lon,
                         features,
                     });
-                    store.building = false;
+                    store.building = None;
                 }
                 crate::app::request_repaint();
             });

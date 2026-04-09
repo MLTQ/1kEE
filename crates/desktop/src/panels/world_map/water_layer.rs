@@ -57,7 +57,7 @@ struct WaterCache {
 
 struct WaterCacheStore {
     cache: Option<WaterCache>,
-    building: bool,
+    building: Option<osm_ingest::GeoBounds>,
 }
 
 fn water_cache() -> &'static Mutex<WaterCacheStore> {
@@ -65,7 +65,7 @@ fn water_cache() -> &'static Mutex<WaterCacheStore> {
     CACHE.get_or_init(|| {
         Mutex::new(WaterCacheStore {
             cache: None,
-            building: false,
+            building: None,
         })
     })
 }
@@ -78,8 +78,8 @@ pub fn invalidate_water_cache() {
 }
 
 /// True while a background water-cache build is in progress.
-pub fn water_cache_building() -> bool {
-    water_cache().lock().map(|g| g.building).unwrap_or(false)
+pub fn water_cache_building_bounds() -> Option<osm_ingest::GeoBounds> {
+    water_cache().lock().ok().and_then(|g| g.building)
 }
 
 pub(super) fn draw_water(
@@ -122,7 +122,7 @@ pub(super) fn draw_water(
                 || bounds.max_lon > c.covered_max_lon
         });
 
-        if stale && !store.building {
+        if stale && store.building.is_none() {
             const GEO_MARGIN_FACTOR: f32 = 0.75;
             let lat_margin = (bounds.max_lat - bounds.min_lat) * GEO_MARGIN_FACTOR;
             let lon_margin = (bounds.max_lon - bounds.min_lon) * GEO_MARGIN_FACTOR;
@@ -135,7 +135,7 @@ pub(super) fn draw_water(
             let (covered_min_lat, covered_max_lat) = (load_bounds.min_lat, load_bounds.max_lat);
             let (covered_min_lon, covered_max_lon) = (load_bounds.min_lon, load_bounds.max_lon);
 
-            store.building = true;
+            store.building = Some(load_bounds);
             drop(store);
 
             let root_buf = selected_root.map(|p| p.to_path_buf());
@@ -157,7 +157,7 @@ pub(super) fn draw_water(
                         water_gen: current_gen,
                         features_elevated,
                     });
-                    store.building = false;
+                    store.building = None;
                 }
                 crate::app::request_repaint();
             });

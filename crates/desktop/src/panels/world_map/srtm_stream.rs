@@ -47,31 +47,44 @@ pub fn sample_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> Opti
             missing: HashSet::new(),
         })
     });
-    let mut guard = cache.lock().ok()?;
+    // Block 1: Lock to check cache
+    {
+        let mut guard = cache.lock().ok()?;
 
-    if guard.missing.contains(&path) {
-        return None;
+        if guard.missing.contains(&path) {
+            return None;
+        }
+
+        if let Some(index) = guard.tiles.iter().position(|tile| tile.path == path) {
+            let cached = guard.tiles.remove(index);
+            let value = cached.tile.sample_elevation_m(point);
+            guard.tiles.insert(0, cached);
+            return Some(value);
+        }
     }
 
-    if let Some(index) = guard.tiles.iter().position(|tile| tile.path == path) {
-        let cached = guard.tiles.remove(index);
-        let value = cached.tile.sample_elevation_m(point);
-        guard.tiles.insert(0, cached);
-        return Some(value);
-    }
-
+    // Block 2: Load freely unlocked, avoiding UI halting or deadlock contention!
     let tile = match load_tile(path.clone()) {
         Some(tile) => tile,
         None => {
-            guard.missing.insert(path);
+            if let Ok(mut guard) = cache.lock() {
+                guard.missing.insert(path);
+            }
             return None;
         }
     };
 
     let value = tile.sample_elevation_m(point);
-    guard.tiles.insert(0, CachedTile { path, tile });
-    if guard.tiles.len() > MAX_CACHED_TILES {
-        guard.tiles.pop();
+
+    // Block 3: Re-acquire to append
+    if let Ok(mut guard) = cache.lock() {
+        // Check once more in case another thread simultaneously loaded it to prevent duplicates
+        if !guard.tiles.iter().any(|t| t.path == path) {
+            guard.tiles.insert(0, CachedTile { path, tile });
+            if guard.tiles.len() > MAX_CACHED_TILES {
+                guard.tiles.pop();
+            }
+        }
     }
 
     Some(value)
