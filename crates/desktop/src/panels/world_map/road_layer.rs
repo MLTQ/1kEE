@@ -109,7 +109,9 @@ pub(super) fn draw_roads(
     show_major_roads: bool,
     show_minor_roads: bool,
 ) {
-    let _ = render_zoom; // tile_zoom no longer drives cache invalidation
+    // Dynamically calculate the SQLite `road_tiles` zoom level to query based on render depth.
+    // If we're fully zoomed out, this drops to 4, preventing 1,000,000-tile queries!
+    let tile_zoom = super::local_terrain_scene::road_tile_zoom(render_zoom);
 
     if !show_major_roads && !show_minor_roads {
         if let Ok(mut g) = road_cache().lock() {
@@ -167,11 +169,11 @@ pub(super) fn draw_roads(
                 let root_ref = root_buf.as_deref();
                 // Load both classes whenever any road layer is enabled so the
                 // cache survives checkbox toggles and only drawing changes.
-                // tile_zoom=10 is a hint only; the GeoJSON cell path ignores it.
+                // tile_zoom is scaled based on render depth to avoid global grid locks.
                 let major_elevated = osm_ingest::load_roads_for_bounds(
                     root_ref,
                     load_bounds,
-                    10,
+                    tile_zoom,
                     RoadLayerKind::Major,
                 )
                 .into_iter()
@@ -180,7 +182,7 @@ pub(super) fn draw_roads(
                 let minor_elevated = osm_ingest::load_roads_for_bounds(
                     root_ref,
                     load_bounds,
-                    10,
+                    tile_zoom,
                     RoadLayerKind::Minor,
                 )
                 .into_iter()

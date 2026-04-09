@@ -1172,6 +1172,10 @@ fn draw_contour_stack(
     alpha: f32,
     moon_mode: bool,
 ) {
+    // 300_000 points prevents WGPU Validation Error index buffer overflow
+    // when 1600+ cached terrain tiles accumulate.
+    const MAX_CONTOUR_RENDER_POINTS: usize = 300_000;
+    
     // Major contour every 2× the minor interval. SRTM minor=5-50m so major at 50m rem.
     // Lunar minor=50-1000m so major at 1000m rem (two minor intervals up in any spec).
     let major_rem: i32 = if moon_mode { 1_000 } else { 50 };
@@ -1184,7 +1188,13 @@ fn draw_contour_stack(
     let mut ordered: Vec<_> = contours.iter().collect();
     ordered.sort_by(|left, right| left.elevation_m.total_cmp(&right.elevation_m));
 
+    let mut remaining_points = MAX_CONTOUR_RENDER_POINTS;
+
     for contour in ordered {
+        if remaining_points < 2 {
+            break;
+        }
+
         let points: Vec<_> = contour
             .points
             .iter()
@@ -1200,11 +1210,13 @@ fn draw_contour_stack(
                 )
                 .map(|projected| projected.pos)
             })
+            .take(remaining_points)
             .collect();
 
         if points.len() < 2 {
             continue;
         }
+        remaining_points = remaining_points.saturating_sub(points.len());
 
         let major = (contour.elevation_m.round() as i32).rem_euclid(major_rem) == 0;
         let stroke = egui::Stroke::new(
