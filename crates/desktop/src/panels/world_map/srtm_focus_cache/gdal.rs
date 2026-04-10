@@ -1,6 +1,6 @@
 use super::db::{
     cleanup_temp_tile_artifacts, import_coastline_into_cache, import_tile_into_cache,
-    journal_path_for, shm_path_for, temp_tile_paths, wal_path_for,
+    journal_path_for, mark_tile_empty, shm_path_for, temp_tile_paths, wal_path_for,
 };
 use super::{BUILD_TIMEOUT, FocusContourSpec, GeoBounds, TEMP_DIR_NAME, TileKey};
 use crate::settings_store;
@@ -440,60 +440,127 @@ pub fn lunar_preview_building() -> &'static AtomicBool {
     BUILDING.get_or_init(|| AtomicBool::new(false))
 }
 
-pub fn mars_vrt_building() -> &'static AtomicBool {
-    static BUILDING: OnceLock<AtomicBool> = OnceLock::new();
-    BUILDING.get_or_init(|| AtomicBool::new(false))
+// ── Mars spatial index ────────────────────────────────────────────────────────
+//
+// Every CTX DTM lives in its own orthographic projection centred on the stereo
+// pair.  `gdalbuildvrt` cannot mosaic files with incompatible CRS, and opening
+// 44 k files to build a warped VRT would take tens of minutes.
+//
+// Instead we parse the lat/lon centre of each DTM from its directory name
+// (the last underscore-separated token encodes it, e.g. "04S063W"),
+// cache the resulting index in a static, and for each contour-tile build we
+// query that index to find the handful of source tiles that overlap the
+// requested bounding box.  `gdalwarp` then reprojects those tiles on the fly
+// into Mars longlat.
+
+#[derive(Clone)]
+struct MarsIndexEntry {
+    lat: f32,
+    lon: f32, // east, –180 … +180
+    dem_path: PathBuf,
 }
 
-/// Scan `mars_root/mars_data/` for any raster tile files (.tif, .tiff, .img).
-/// Returns an empty Vec if the subdirectory doesn't exist or contains no tiles.
-pub fn find_mars_tiles(mars_root: &Path) -> Vec<PathBuf> {
-    let mars_data = mars_root.join("mars_data");
-    let Ok(entries) = fs::read_dir(&mars_data) else {
-        return Vec::new();
-    };
-    let mut tiles: Vec<PathBuf> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            matches!(
-                p.extension().and_then(|e| e.to_str()),
-                Some("tif" | "tiff" | "img")
-            )
-        })
-        .collect();
-    tiles.sort();
-    tiles
+fn mars_tile_index() -> &'static Mutex<Option<(PathBuf, Vec<MarsIndexEntry>)>> {
+    static INDEX: OnceLock<Mutex<Option<(PathBuf, Vec<MarsIndexEntry>)>>> = OnceLock::new();
+    INDEX.get_or_init(|| Mutex::new(None))
 }
 
-/// Build `output_vrt` from a list of Mars raster tiles using `gdalbuildvrt`.
-/// Writes a tile-list file alongside the VRT to stay under ARG_MAX limits.
-pub fn build_mars_vrt(tiles: &[PathBuf], output_vrt: &Path) -> Option<()> {
-    if shutdown_requested().load(Ordering::Relaxed) {
+/// Parse the approximate lat/lon centre from a CTX DTM directory name.
+///
+/// Directory names follow the pattern:
+///   `<img1_name>__<img2_name>`
+/// where each image name ends with a lat/lon suffix like `04S063W` (7 chars):
+///   - 2-digit latitude, hemisphere letter (N/S)
+///   - 3-digit *west* longitude, hemisphere letter (E/W)
+fn parse_ctx_center(dir_name: &str) -> Option<(f32, f32)> {
+    // Use the first image name (before `__`).
+    let first = dir_name.split("__").next()?;
+    // The lat/lon suffix is the last `_`-delimited token.
+    let suffix = first.rsplit('_').next()?;
+    if suffix.len() != 7 {
         return None;
     }
-    if let Some(parent) = output_vrt.parent() {
-        fs::create_dir_all(parent).ok()?;
+    let lat_deg: f32 = suffix[0..2].parse().ok()?;
+    let lat = match suffix.as_bytes()[2] {
+        b'S' => -lat_deg,
+        b'N' => lat_deg,
+        _ => return None,
+    };
+    let lon_deg: f32 = suffix[3..6].parse().ok()?;
+    let lon = match suffix.as_bytes()[6] {
+        b'W' => {
+            let l = -lon_deg;
+            if l < -180.0 { l + 360.0 } else { l }
+        }
+        b'E' => lon_deg,
+        _ => return None,
+    };
+    Some((lat, lon))
+}
+
+/// Walk `<data_root>/mars_data/` and build the spatial index.
+/// Each sub-directory is named after its CTX image pair; we parse the
+/// lat/lon from the name and record the path to `*-DEM-geoid-adj.tif`.
+fn build_mars_tile_index(data_root: &Path) -> Vec<MarsIndexEntry> {
+    let mars_data = data_root.join("mars_data");
+    let Ok(top_entries) = fs::read_dir(&mars_data) else {
+        return Vec::new();
+    };
+    let mut index = Vec::new();
+    for entry in top_entries.flatten() {
+        let dir_path = entry.path();
+        if !dir_path.is_dir() {
+            continue;
+        }
+        let Some(dir_name) = dir_path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let Some((lat, lon)) = parse_ctx_center(dir_name) else {
+            continue;
+        };
+        // The elevation file we want is `<dir_name>-DEM-geoid-adj.tif`.
+        let dem_path = dir_path.join(format!("{dir_name}-DEM-geoid-adj.tif"));
+        if dem_path.exists() {
+            index.push(MarsIndexEntry { lat, lon, dem_path });
+        }
+    }
+    index
+}
+
+/// Return the `*-DEM-geoid-adj.tif` files whose centre falls within
+/// `bounds` expanded by `SPATIAL_BUFFER_DEG` on every side.
+/// The first call scans `<data_root>/mars_data/` to build the index; all
+/// subsequent calls reuse the cached index (invalidated on `data_root` change).
+pub fn find_mars_tiles_for_bounds(data_root: &Path, bounds: GeoBounds) -> Vec<PathBuf> {
+    // Buffer to account for along-track extent of individual DTMs (~100–300 km).
+    const SPATIAL_BUFFER_DEG: f32 = 3.0;
+
+    let guard = mars_tile_index().lock();
+    let Ok(mut guard) = guard else {
+        return Vec::new();
+    };
+
+    // Build or invalidate the cached index.
+    let data_root_buf = data_root.to_path_buf();
+    if guard.as_ref().map(|(root, _)| root != &data_root_buf).unwrap_or(true) {
+        *guard = Some((data_root_buf, build_mars_tile_index(data_root)));
     }
 
-    // Write tile paths to a temp text file to avoid ARG_MAX limits.
-    let tile_list = output_vrt.with_extension("tile_list.txt");
-    let content: String = tiles
-        .iter()
-        .filter_map(|p| p.to_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    fs::write(&tile_list, content).ok()?;
+    let index = match guard.as_ref() {
+        Some((_, idx)) => idx,
+        None => return Vec::new(),
+    };
 
-    let mut cmd = Command::new(gdal_tool_path("gdalbuildvrt"));
-    cmd.args(["-q", "-input_file_list"]);
-    cmd.arg(&tile_list);
-    cmd.arg(output_vrt);
-    let result =
-        run_command_with_timeout(cmd, "gdalbuildvrt (mars ctx)", Duration::from_secs(300));
-    let _ = fs::remove_file(&tile_list);
-    result.ok()?;
-    Some(())
+    let min_lat = bounds.min_lat - SPATIAL_BUFFER_DEG;
+    let max_lat = bounds.max_lat + SPATIAL_BUFFER_DEG;
+    let min_lon = bounds.min_lon - SPATIAL_BUFFER_DEG;
+    let max_lon = bounds.max_lon + SPATIAL_BUFFER_DEG;
+
+    index
+        .iter()
+        .filter(|e| e.lat >= min_lat && e.lat <= max_lat && e.lon >= min_lon && e.lon <= max_lon)
+        .map(|e| e.dem_path.clone())
+        .collect()
 }
 
 /// Build the SLDEM2015 lunar terrain preview PNG into `cache_root`
@@ -914,8 +981,17 @@ pub fn build_lunar_contour_tile(
     Some(())
 }
 
+/// Build a Mars contour tile by:
+///   1. Querying the spatial index for source `*-DEM-geoid-adj.tif` files whose
+///      centre falls within a generous buffer around `bounds`.
+///   2. Warping the matching tiles (each in its own orthographic CRS) into Mars
+///      longlat using `gdalwarp`, clipping to `bounds`.
+///   3. Running `gdal_contour` on the result.
+///
+/// If no source tiles overlap the region the tile is marked empty in the cache
+/// (stored with contour_count = 0) so the region is not retried every frame.
 pub fn build_mars_contour_tile(
-    vrt_path: &Path,
+    data_root: &Path,
     cache_root: &Path,
     cache_db_path: &Path,
     tile: TileKey,
@@ -933,36 +1009,45 @@ pub fn build_mars_contour_tile(
         fs::create_dir_all(parent).ok()?;
     }
 
-    // gdal_translate: directly from VRT into the exact tile.
-    let mut translate = Command::new(gdal_tool_path("gdal_translate"));
-    translate.args([
+    // Find source tiles that cover this bounding box.
+    let source_tiles = find_mars_tiles_for_bounds(data_root, bounds);
+
+    if source_tiles.is_empty() {
+        // No CTX coverage here — store an empty tile so we don't retry.
+        mark_tile_empty(cache_db_path, tile).ok()?;
+        return Some(());
+    }
+
+    if shutdown_requested().load(Ordering::Relaxed) {
+        return None;
+    }
+
+    // gdalwarp: reproject all source tiles (each in unique orthographic CRS)
+    // into Mars longlat, clipping to the tile bounding box.
+    let mut warp = Command::new(gdal_tool_path("gdalwarp"));
+    warp.args([
         "-q",
-        "-projwin",
-        &bounds.min_lon.to_string(),
-        &bounds.max_lat.to_string(),
-        &bounds.max_lon.to_string(),
-        &bounds.min_lat.to_string(),
-        "-projwin_srs",
+        "-overwrite",
+        "-t_srs",
         "+proj=longlat +R=3396190 +no_defs",
-        "-outsize",
-        &spec.raster_size.to_string(),
-        &spec.raster_size.to_string(),
-        "-a_nodata",
-        "-32767",
-        "-ot",
-        "Float32", 
         "-r",
         "bilinear",
-        "-of",
-        "GTiff",
+        "-dstnodata",
+        "-32767",
+        "-te",
+        &format!("{:.6}", bounds.min_lon),
+        &format!("{:.6}", bounds.min_lat),
+        &format!("{:.6}", bounds.max_lon),
+        &format!("{:.6}", bounds.max_lat),
+        "-ts",
+        &spec.raster_size.to_string(),
+        &spec.raster_size.to_string(),
     ]);
-    translate.arg(vrt_path).arg(&tmp_tif_path);
-    run_command_with_timeout(
-        translate,
-        "gdal_translate (mars ctx tile)",
-        Duration::from_secs(120),
-    )
-    .ok()?;
+    for tile_path in &source_tiles {
+        warp.arg(tile_path);
+    }
+    warp.arg(&tmp_tif_path);
+    run_command_with_timeout(warp, "gdalwarp (mars ctx tile)", Duration::from_secs(180)).ok()?;
 
     if shutdown_requested().load(Ordering::Relaxed) {
         cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);

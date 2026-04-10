@@ -216,10 +216,10 @@ pub fn ensure_lunar_bucket_asset(
     None
 }
 
-/// Mars analogue of `ensure_bucket_asset` — sources from a single Mars CTX
-/// VRT instead of a directory of SRTM tiles.
+/// Mars analogue of `ensure_bucket_asset` — queries the spatial index for
+/// CTX DTM tiles covering this bucket and warps them to Mars longlat on demand.
 pub fn ensure_mars_bucket_asset(
-    vrt_path: &Path,
+    data_root: &Path,
     cache_root: &Path,
     cache_db_path: &Path,
     connection: &Connection,
@@ -260,12 +260,12 @@ pub fn ensure_mars_bucket_asset(
             return None; // already in-flight
         }
         if guard.len() >= MAX_CONCURRENT_LUNAR_BUILDS {
-            return None; // MRO CTX VRT can have the same limits
+            return None; // same concurrency cap as lunar
         }
     }
 
     if !try_acquire_build_slot() {
-        return None; 
+        return None;
     }
 
     let mut guard = pending.lock().ok()?;
@@ -275,12 +275,12 @@ pub fn ensure_mars_bucket_asset(
     }
     drop(guard);
 
-    let vrt_path = vrt_path.to_path_buf();
+    let data_root = data_root.to_path_buf();
     let cache_root = cache_root.to_path_buf();
     let cache_db_path = cache_db_path.to_path_buf();
     std::thread::spawn(move || {
         let _ =
-            build_mars_contour_tile(&vrt_path, &cache_root, &cache_db_path, tile, bounds, spec);
+            build_mars_contour_tile(&data_root, &cache_root, &cache_db_path, tile, bounds, spec);
         if let Ok(mut guard) = mars_pending_set().lock() {
             guard.remove(&tile);
         }
