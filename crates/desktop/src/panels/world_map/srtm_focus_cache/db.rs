@@ -89,10 +89,6 @@ pub fn import_tile_into_cache(
 ) -> rusqlite::Result<()> {
     let source = Connection::open(gpkg_path)?;
     source.busy_timeout(Duration::from_secs(30))?;
-    let mut statement = source
-        .prepare("SELECT fid, geom, elevation_m FROM contour ORDER BY ABS(elevation_m), fid")?;
-    let mut rows = statement.query([])?;
-
     let mut cache = open_cache_db(cache_db_path)?;
     let transaction = cache.transaction()?;
     transaction.execute(
@@ -106,30 +102,45 @@ pub fn import_tile_into_cache(
         params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
     )?;
 
+    let table_exists: bool = source
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='contour'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false);
+
     let mut contour_count = 0usize;
-    while let Some(row) = rows.next()? {
-        let fid: i64 = row.get(0)?;
-        let geometry: Vec<u8> = row.get(1)?;
-        let elevation_m: f32 = row.get(2)?;
-        transaction.execute(
-            "INSERT INTO contour_tiles (
-                 zoom_bucket,
-                 lat_bucket,
-                 lon_bucket,
-                 fid,
-                 elevation_m,
-                 geom
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                tile.zoom_bucket,
-                tile.lat_bucket,
-                tile.lon_bucket,
-                fid,
-                elevation_m,
-                geometry
-            ],
-        )?;
-        contour_count += 1;
+    if table_exists {
+        if let Ok(mut statement) = source.prepare("SELECT fid, geom, elevation_m FROM contour ORDER BY ABS(elevation_m), fid") {
+            if let Ok(mut rows) = statement.query([]) {
+                while let Some(row) = rows.next()? {
+                    let fid: i64 = row.get(0)?;
+                    let geometry: Vec<u8> = row.get(1)?;
+                    let elevation_m: f32 = row.get(2)?;
+                    transaction.execute(
+                        "INSERT INTO contour_tiles (
+                             zoom_bucket,
+                             lat_bucket,
+                             lon_bucket,
+                             fid,
+                             elevation_m,
+                             geom
+                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![
+                            tile.zoom_bucket,
+                            tile.lat_bucket,
+                            tile.lon_bucket,
+                            fid,
+                            elevation_m,
+                            geometry
+                        ],
+                    )?;
+                    contour_count += 1;
+                }
+            }
+        }
     }
 
     transaction.execute(

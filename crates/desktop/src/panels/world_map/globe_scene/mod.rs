@@ -65,7 +65,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             model.globe_view.pitch,
             ppp,
             false, // graticule always off in GPU pass — drawn CPU-side instead
-            model.moon_mode,
+            model.active_body,
             theme::scene_backdrop(),
             theme::topo_color(),
             theme::wireframe_color(),
@@ -87,7 +87,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         draw_hud_frame(painter, rect);
     }
 
-    if !model.moon_mode {
+    if model.active_body == crate::model::ActiveBody::Earth {
         if model.show_bathymetry {
             geography::draw_global_bathymetry(painter, &layout, &model.globe_view, selected_root);
         }
@@ -147,7 +147,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let nearby = model.nearby_cameras(250.0);
 
     // ── Replay flares (shown instead of live markers while replay is active) ──
-    if model.replay_mode && !model.moon_mode {
+    if model.replay_mode && model.active_body == crate::model::ActiveBody::Earth {
         if let Some(state) = &model.replay_state {
             let wall_elapsed = state.wall_elapsed();
             for flare in &state.active_flares {
@@ -177,7 +177,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         }
     }
 
-    let event_markers: Vec<_> = if !model.show_event_markers || model.replay_mode || model.moon_mode
+    let event_markers: Vec<_> = if !model.show_event_markers || model.replay_mode || model.active_body != crate::model::ActiveBody::Earth
     {
         Vec::new()
     } else {
@@ -221,7 +221,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             .collect()
     };
 
-    let camera_markers: Vec<_> = if model.moon_mode {
+    let camera_markers: Vec<_> = if model.active_body != crate::model::ActiveBody::Earth {
         Vec::new()
     } else {
         nearby
@@ -303,7 +303,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     draw_legend(painter, rect, &layout, &model.globe_view, &lod);
 
     // ── Lunar contour build progress ────────────────────────────────────────
-    if model.moon_mode {
+    if model.active_body != crate::model::ActiveBody::Earth {
         let (lunar_ready, lunar_building, lunar_total) = srtm_focus_cache::lunar_tile_counts(
             selected_root,
             model.globe_view.local_center,

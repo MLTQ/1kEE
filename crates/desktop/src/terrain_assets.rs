@@ -321,6 +321,29 @@ pub fn find_sldem_jp2(selected_root: Option<&Path>) -> Option<PathBuf> {
     None
 }
 
+/// Find the Mars Context Camera DTM root directory.
+pub fn find_mars_data_root(selected_root: Option<&Path>) -> Option<PathBuf> {
+    let dirname = "Mars";
+
+    // Check configured / selected Data root
+    if let Some(data_root) = find_data_root(selected_root) {
+        let candidate = data_root.join(dirname);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    // Well-known external volume locations
+    for prefix in &["/Volumes/Hilbert/Data", "/Volumes/Data", "/Volumes/Hilbert"] {
+        let candidate = PathBuf::from(prefix).join(dirname);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
 fn yes_no(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }

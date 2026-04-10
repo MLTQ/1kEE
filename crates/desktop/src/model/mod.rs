@@ -25,6 +25,19 @@ use crate::terrain_assets::{self, TerrainInventory};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActiveBody {
+    Earth,
+    Moon,
+    Mars,
+}
+
+impl Default for ActiveBody {
+    fn default() -> Self {
+        ActiveBody::Earth
+    }
+}
+
 pub struct AppModel {
     pub events: Vec<EventRecord>,
     pub cameras: Vec<CameraFeed>,
@@ -41,7 +54,7 @@ pub struct AppModel {
     pub globe_view: GlobeViewState,
     pub focused_city_id: Option<String>,
     pub cinematic_mode: bool,
-    pub moon_mode: bool,
+    pub active_body: ActiveBody,
     pub map_theme: crate::theme::MapTheme,
     pub show_event_markers: bool,
     pub show_coastlines: bool,
@@ -280,7 +293,7 @@ impl AppModel {
             }),
             focused_city_id: None,
             cinematic_mode: false,
-            moon_mode: false,
+            active_body: ActiveBody::Earth,
             map_theme: crate::theme::MapTheme::Topo,
             show_event_markers: true,
             show_coastlines: true,

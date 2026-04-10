@@ -149,6 +149,12 @@ pub fn lunar_spec_for_zoom(zoom: f32) -> FocusContourSpec {
     }
 }
 
+/// Zoom specs for the Mars CTX contour pipeline.
+pub fn mars_spec_for_zoom(zoom: f32) -> FocusContourSpec {
+    // Uses the same zoom tiers as the moon
+    lunar_spec_for_zoom(zoom)
+}
+
 impl GeoBounds {
     pub fn around(focus: GeoPoint, half_extent_deg: f32) -> Self {
         Self {

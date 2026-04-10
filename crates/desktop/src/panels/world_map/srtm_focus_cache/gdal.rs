@@ -644,8 +644,12 @@ fn ensure_lunar_source_chunk(
             "22000",
             "-9000",
             "11000",
+            "-a_nodata",
+            "-32768",
             "-ot",
             "Int16",
+            "-r",
+            "bilinear",
             "-of",
             "GTiff",
             "-co",
@@ -826,8 +830,12 @@ pub fn build_lunar_contour_tile(
         "-outsize",
         &spec.raster_size.to_string(),
         &spec.raster_size.to_string(),
+        "-a_nodata",
+        "-32768",
         "-ot",
         "Int16",
+        "-r",
+        "bilinear",
         "-of",
         "GTiff",
     ]);
@@ -835,6 +843,65 @@ pub fn build_lunar_contour_tile(
     run_command_with_timeout(
         translate,
         "gdal_translate (lunar cached tile)",
+        Duration::from_secs(120),
+    )
+    .ok()?;
+
+    if shutdown_requested().load(Ordering::Relaxed) {
+        cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
+        return None;
+    }
+
+    run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m).ok()?;
+    import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path).ok()?;
+    cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
+    Some(())
+}
+
+pub fn build_mars_contour_tile(
+    vrt_path: &Path,
+    cache_root: &Path,
+    cache_db_path: &Path,
+    tile: TileKey,
+    bounds: GeoBounds,
+    spec: FocusContourSpec,
+) -> Option<()> {
+    if shutdown_requested().load(Ordering::Relaxed) {
+        return None;
+    }
+
+    let (tmp_tif_path, tmp_gpkg_path) = temp_tile_paths(cache_root, tile);
+    cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
+
+    if let Some(parent) = tmp_tif_path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+
+    // gdal_translate: directly from VRT into the exact tile.
+    let mut translate = Command::new(gdal_tool_path("gdal_translate"));
+    translate.args([
+        "-q",
+        "-projwin",
+        &bounds.min_lon.to_string(),
+        &bounds.max_lat.to_string(),
+        &bounds.max_lon.to_string(),
+        &bounds.min_lat.to_string(),
+        "-outsize",
+        &spec.raster_size.to_string(),
+        &spec.raster_size.to_string(),
+        "-a_nodata",
+        "-32768",
+        "-ot",
+        "Float32", 
+        "-r",
+        "bilinear",
+        "-of",
+        "GTiff",
+    ]);
+    translate.arg(vrt_path).arg(&tmp_tif_path);
+    run_command_with_timeout(
+        translate,
+        "gdal_translate (mars ctx tile)",
         Duration::from_secs(120),
     )
     .ok()?;
@@ -921,6 +988,8 @@ fn run_gdal_contour(input_path: &Path, output_path: &Path, interval_m: i32) -> s
         "elevation_m",
         "-i",
         &interval_m.to_string(),
+        "-snodata",
+        "-32768",
         "-nln",
         "contour",
     ]);

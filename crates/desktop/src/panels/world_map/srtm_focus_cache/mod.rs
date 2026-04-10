@@ -58,6 +58,42 @@ pub fn ready_lunar_tile_buckets(
     set
 }
 
+pub fn mars_half_extent_for_zoom(zoom: f32) -> f32 {
+    zoom::mars_spec_for_zoom(zoom).half_extent_deg
+}
+
+pub fn ready_mars_tile_buckets(
+    selected_root: Option<&Path>,
+    focus: GeoPoint,
+    zoom: f32,
+    radius: i32,
+) -> HashSet<(i32, i32)> {
+    let mut set = HashSet::new();
+    let Some(cache_db_path) = mars_cache_db_path(selected_root) else {
+        return set;
+    };
+    let Ok(connection) = db::open_cache_db(&cache_db_path) else {
+        return set;
+    };
+    let spec = zoom::mars_spec_for_zoom(zoom);
+    let bucket_step = spec.half_extent_deg * 0.45;
+    let center_lat_bucket = (focus.lat / bucket_step).round() as i32;
+    let center_lon_bucket = (focus.lon / bucket_step).round() as i32;
+    for lat_bucket in (center_lat_bucket - radius)..=(center_lat_bucket + radius) {
+        for lon_bucket in (center_lon_bucket - radius)..=(center_lon_bucket + radius) {
+            let tile = TileKey {
+                zoom_bucket: spec.zoom_bucket,
+                lat_bucket,
+                lon_bucket,
+            };
+            if db::tile_exists(&connection, tile).unwrap_or(false) {
+                set.insert((lat_bucket, lon_bucket));
+            }
+        }
+    }
+    set
+}
+
 const BUILD_TIMEOUT: Duration = Duration::from_secs(90);
 const CACHE_DB_NAME: &str = "srtm_focus_cache.sqlite";
 const LUNAR_CACHE_DB_NAME: &str = "lunar_focus_cache.sqlite";
@@ -444,9 +480,20 @@ pub fn lunar_cache_db_path(selected_root: Option<&Path>) -> Option<PathBuf> {
     Some(db::focus_cache_root(selected_root)?.join(LUNAR_CACHE_DB_NAME))
 }
 
+pub fn mars_cache_db_path(selected_root: Option<&Path>) -> Option<PathBuf> {
+    Some(db::focus_cache_root(selected_root)?.join("mars_ctx_cache.sqlite"))
+}
+
 /// Returns `true` while any lunar contour tile build threads are running.
 pub fn is_lunar_contour_building() -> bool {
     builders::lunar_pending_set()
+        .lock()
+        .map(|g| !g.is_empty())
+        .unwrap_or(false)
+}
+
+pub fn is_mars_contour_building() -> bool {
+    builders::mars_pending_set()
         .lock()
         .map(|g| !g.is_empty())
         .unwrap_or(false)
@@ -482,6 +529,50 @@ pub fn lunar_tile_counts(
         let bucket_lat = lat_bucket as f32 * bucket_step;
         if bucket_lat.abs() > 60.0 + spec.half_extent_deg {
             continue; // outside SLDEM coverage
+        }
+        for lon_bucket in (center_lon_bucket - radius)..=(center_lon_bucket + radius) {
+            total += 1;
+            let tile = TileKey {
+                zoom_bucket: spec.zoom_bucket,
+                lat_bucket,
+                lon_bucket,
+            };
+            if db::tile_exists(&connection, tile).unwrap_or(false) {
+                ready += 1;
+            }
+        }
+    }
+    (ready, building, total)
+}
+
+pub fn mars_tile_counts(
+    selected_root: Option<&Path>,
+    focus: GeoPoint,
+    zoom: f32,
+    radius: i32,
+) -> (usize, usize, usize) {
+    let Some(cache_db_path) = mars_cache_db_path(selected_root) else {
+        return (0, 0, 0);
+    };
+    let Ok(connection) = db::open_cache_db(&cache_db_path) else {
+        return (0, 0, 0);
+    };
+    let spec = zoom::mars_spec_for_zoom(zoom);
+    let bucket_step = spec.half_extent_deg * 0.45;
+    let center_lat_bucket = (focus.lat / bucket_step).round() as i32;
+    let center_lon_bucket = (focus.lon / bucket_step).round() as i32;
+
+    let building = builders::mars_pending_set()
+        .lock()
+        .map(|g| g.len())
+        .unwrap_or(0);
+
+    let mut ready = 0usize;
+    let mut total = 0usize;
+    for lat_bucket in (center_lat_bucket - radius)..=(center_lat_bucket + radius) {
+        let bucket_lat = lat_bucket as f32 * bucket_step;
+        if bucket_lat.abs() > 80.0 + spec.half_extent_deg {
+            continue; // MRO CTX doesn't have good polar coverage
         }
         for lon_bucket in (center_lon_bucket - radius)..=(center_lon_bucket + radius) {
             total += 1;
@@ -536,6 +627,59 @@ pub fn ensure_lunar_contour_region(
         for lon_bucket in (center_lon_bucket - RADIUS)..=(center_lon_bucket + RADIUS) {
             if let Some(asset) = builders::ensure_lunar_bucket_asset(
                 &jp2_path,
+                &cache_root,
+                &cache_db_path,
+                &connection,
+                spec,
+                lat_bucket,
+                lon_bucket,
+                bucket_step,
+            ) {
+                assets.push(asset);
+            }
+        }
+    }
+
+    assets
+}
+
+pub fn ensure_mars_contour_region(
+    selected_root: Option<&Path>,
+    focus: GeoPoint,
+    zoom: f32,
+) -> Vec<FocusContourAsset> {
+    let Some(data_root) = crate::terrain_assets::find_mars_data_root(selected_root) else {
+        return Vec::new();
+    };
+    let vrt_path = data_root.join("mars_ctx.vrt");
+    if !vrt_path.exists() {
+        return Vec::new();
+    }
+    let Some(cache_root) = db::focus_cache_root(selected_root) else {
+        return Vec::new();
+    };
+    let Some(cache_db_path) = mars_cache_db_path(selected_root) else {
+        return Vec::new();
+    };
+    let Ok(connection) = db::open_cache_db(&cache_db_path) else {
+        return Vec::new();
+    };
+
+    let spec = zoom::mars_spec_for_zoom(zoom);
+    let bucket_step = spec.half_extent_deg * 0.45;
+    let center_lat_bucket = (focus.lat / bucket_step).round() as i32;
+    let center_lon_bucket = (focus.lon / bucket_step).round() as i32;
+    let mut assets = Vec::new();
+
+    const RADIUS: i32 = 2;
+    for lat_bucket in (center_lat_bucket - RADIUS)..=(center_lat_bucket + RADIUS) {
+        let bucket_lat = lat_bucket as f32 * bucket_step;
+        if bucket_lat.abs() > 80.0 + spec.half_extent_deg {
+            continue;
+        }
+        for lon_bucket in (center_lon_bucket - RADIUS)..=(center_lon_bucket + RADIUS) {
+            if let Some(asset) = builders::ensure_mars_bucket_asset(
+                &vrt_path,
                 &cache_root,
                 &cache_db_path,
                 &connection,

@@ -82,7 +82,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         }
 
         // Trigger background SLDEM preview + contour builds when Moon Mode is active.
-        if model.moon_mode {
+        if model.active_body == crate::model::ActiveBody::Moon {
             srtm_focus_cache::ensure_lunar_preview(model.selected_root.as_deref());
             if srtm_focus_cache::is_lunar_preview_building()
                 || srtm_focus_cache::is_lunar_contour_building()
@@ -240,9 +240,11 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                 if ui.add(globe_btn).clicked() && model.globe_view.local_mode {
                     model.globe_view.local_mode = false;
                 }
-                let local_disabled = model.moon_mode
-                    && crate::terrain_assets::find_sldem_jp2(model.selected_root.as_deref())
-                        .is_none();
+                let local_disabled = match model.active_body {
+                    crate::model::ActiveBody::Moon => crate::terrain_assets::find_sldem_jp2(model.selected_root.as_deref()).is_none(),
+                    crate::model::ActiveBody::Mars => crate::terrain_assets::find_mars_data_root(model.selected_root.as_deref()).is_none(),
+                    crate::model::ActiveBody::Earth => false,
+                };
                 if ui
                     .add_enabled(!local_disabled, local_btn)
                     .on_disabled_hover_text("LOCAL lunar terrain requires SLDEM2015 JP2 data")

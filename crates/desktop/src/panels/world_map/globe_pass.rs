@@ -32,7 +32,7 @@ use eframe::wgpu;
 //   80      16   grid_col            vec4<f32>
 //   96      16   hot_col             vec4<f32>
 //  112       4   show_graticule      u32
-//  116       4   moon_mode           u32
+//  116       4   active_body         u32
 //  120       8   _pad                [u32; 2]
 //  128 bytes total
 //
@@ -55,7 +55,7 @@ pub struct GlobeUniforms {
     pub hot_col: [f32; 4],
     // ── Flags ──────────────────────────────────────────────────────────────
     pub show_graticule: u32,
-    pub moon_mode: u32,
+    pub active_body: u32,
     pub _pad: [u32; 2],
 }
 
@@ -190,7 +190,7 @@ impl GlobeCallback {
         pitch: f32,
         pixels_per_point: f32,
         show_graticule: bool,
-        moon_mode: bool,
+        active_body: crate::model::ActiveBody,
         ocean_col: egui::Color32,
         land_col: egui::Color32,
         mount_col: egui::Color32,
@@ -212,7 +212,11 @@ impl GlobeCallback {
                 grid_col: color_to_linear(grid_col),
                 hot_col: color_to_linear(hot_col),
                 show_graticule: show_graticule as u32,
-                moon_mode: moon_mode as u32,
+                active_body: match active_body {
+                    crate::model::ActiveBody::Earth => 0,
+                    crate::model::ActiveBody::Moon => 1,
+                    crate::model::ActiveBody::Mars => 2,
+                },
                 _pad: [0; 2],
             },
         }
@@ -274,7 +278,7 @@ struct Uniforms {
     hot_col:   vec4<f32>,
     // Flags  (bytes 112..127)
     show_graticule: u32,
-    moon_mode:      u32,
+    active_body:    u32,
     _pad0: u32,
     _pad1: u32,
 }
@@ -392,6 +396,37 @@ fn surface_color_moon(e: f32) -> vec3<f32> {
     }
 }
 
+/// Mars synthetic terrain for the globe backdrop.
+fn mars_terrain_elev(lat_deg: f32, lon_deg: f32) -> f32 {
+    // Default base is intermediate between earth continents and moon.
+    var h = 0.65f;
+    
+    // Valles Marineris and Hellas Planitia
+    h -= gauss(lat_deg, lon_deg, -42.5,  70.5, 15.0) * 0.40; // Hellas basin
+    h -= gauss(lat_deg, lon_deg, -10.0, -70.0,  8.0) * 0.35; // Valles Marineris (approx)
+
+    // Tharsis ridge and Olympus Mons
+    h += gauss(lat_deg, lon_deg,   0.0, -105.0, 18.0) * 0.45; // Tharsis bulge
+    h += gauss(lat_deg, lon_deg,  18.6, -133.8,  5.0) * 0.35; // Olympus Mons
+    
+    return clamp(h, 0.0, 1.2);
+}
+
+/// Surface colour for Mars: maps elevation [0,1] to red/orange dusty palette.
+fn surface_color_mars(e: f32) -> vec3<f32> {
+    let basin = u.ocean_col.rgb;
+    let plain = u.land_col.rgb;
+    let rise  = u.mount_col.rgb;
+
+    if e < 0.3 {
+        let t = e / 0.3;
+        return mix(basin, plain, t);
+    } else {
+        let t = clamp((e - 0.3) / 0.7, 0.0, 1.0);
+        return mix(plain, rise, t);
+    }
+}
+
 // ── Graticule ───────────────────────────────────────────────────────────────
 
 /// α (0..1) for a graticule line centred at distance 0.
@@ -490,8 +525,8 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let disc = b*b - 4.0*a*c;
 
     if disc < 0.0 {
-        if u.moon_mode != 0u {
-            // Moon has no atmosphere: pure black beyond the limb.
+        if u.active_body != 0u {
+            // Moon and Mars have extremely thin/no atmosphere: pure black beyond the limb.
             return vec4<f32>(0.0, 0.0, 0.0, 0.0);
         }
         // ── Outside sphere — very faint limb halo only ────────────────────
@@ -534,13 +569,18 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let sun     = normalize(vec3<f32>(0.32, 0.55, 0.77));
     let shade   = clamp(dot(vec3<f32>(x2, y2, z2), sun), 0.0, 1.0);
 
-    if u.moon_mode != 0u {
+    if u.active_body == 1u { // Moon
         let elev  = lunar_terrain_elev(lat_deg, lon_deg);
         rgb = surface_color_moon(elev);
-        // Sharper Lambertian (no atmosphere softening): terminator is crisper.
         rgb = rgb * (0.08 + 0.92 * shade);
-        // No atmospheric halo — just a gentle limb darkening from the rim factor.
         rgb = rgb * (1.0 - pow(rim, 4.0) * 0.65);
+    } else if u.active_body == 2u { // Mars
+        let elev  = mars_terrain_elev(lat_deg, lon_deg);
+        let e_norm = elev / 1.2;
+        rgb = surface_color_mars(e_norm);
+        rgb = rgb * (0.15 + 0.85 * shade);
+        // Extremely thin / weak atmosphere edge.
+        rgb = rgb * (1.0 - pow(rim, 4.0) * 0.40);
     } else {
         let elev   = terrain_elev(lat_deg, lon_deg);
         let e_norm = elev / 1.6;

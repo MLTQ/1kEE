@@ -1,4 +1,4 @@
-use crate::model::{AppModel, GeoJsonLayer};
+use crate::model::{ActiveBody, AppModel, GeoJsonLayer};
 use crate::osm_ingest;
 use crate::panels::world_map::contour_asset;
 use crate::terrain_assets;
@@ -36,38 +36,48 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
                     model.terrain_library_open = true;
                 }
 
-                let moon_label = if model.moon_mode { "EARTH" } else { "MOON" };
-                let moon_btn = egui::Button::new(
-                    egui::RichText::new(moon_label)
-                        .color(if model.moon_mode {
-                            egui::Color32::from_rgb(126, 208, 229)
-                        } else {
-                            egui::Color32::from_rgb(210, 206, 194)
+                let body_label = match model.active_body {
+                    ActiveBody::Earth => "EARTH",
+                    ActiveBody::Moon => "MOON",
+                    ActiveBody::Mars => "MARS",
+                };
+                let body_btn = egui::Button::new(
+                    egui::RichText::new(body_label)
+                        .color(match model.active_body {
+                            ActiveBody::Earth => egui::Color32::from_rgb(210, 206, 194),
+                            ActiveBody::Moon => egui::Color32::from_rgb(126, 208, 229),
+                            ActiveBody::Mars => egui::Color32::from_rgb(238, 114, 91),
                         }),
                 )
-                .fill(if model.moon_mode {
-                    egui::Color32::from_rgba_premultiplied(10, 30, 45, 200)
-                } else {
-                    egui::Color32::from_rgba_premultiplied(28, 26, 22, 200)
+                .fill(match model.active_body {
+                    ActiveBody::Earth => egui::Color32::from_rgba_premultiplied(28, 26, 22, 200),
+                    ActiveBody::Moon => egui::Color32::from_rgba_premultiplied(10, 30, 45, 200),
+                    ActiveBody::Mars => egui::Color32::from_rgba_premultiplied(35, 14, 11, 200),
                 });
                 if ui
-                    .add(moon_btn)
-                    .on_hover_text(if model.moon_mode {
-                        "Switch back to Earth (GEBCO/SRTM terrain)"
-                    } else {
-                        "Switch to Moon Mode (SLDEM2015 LRO/LOLA lunar topology)"
+                    .add(body_btn)
+                    .on_hover_text(match model.active_body {
+                        ActiveBody::Earth => "Switch to Moon Mode",
+                        ActiveBody::Moon => "Switch to Mars Mode",
+                        ActiveBody::Mars => "Switch back to Earth",
                     })
                     .clicked()
                 {
-                    model.moon_mode = !model.moon_mode;
-                    // Moon mode has no local terrain view — always return to globe.
-                    if model.moon_mode {
+                    model.active_body = match model.active_body {
+                        ActiveBody::Earth => ActiveBody::Moon,
+                        ActiveBody::Moon => ActiveBody::Mars,
+                        ActiveBody::Mars => ActiveBody::Earth,
+                    };
+                    
+                    // Non-Earth modes have no local terrain view — always return to globe.
+                    if model.active_body != ActiveBody::Earth {
                         model.globe_view.local_mode = false;
                     }
-                    let new_theme = if model.moon_mode {
-                        crate::theme::MapTheme::Lunar
-                    } else {
-                        crate::theme::MapTheme::Topo
+                    
+                    let new_theme = match model.active_body {
+                        ActiveBody::Earth => crate::theme::MapTheme::Topo,
+                        ActiveBody::Moon => crate::theme::MapTheme::Lunar,
+                        ActiveBody::Mars => crate::theme::MapTheme::Topo, // Will hook into Mars Theme shortly.
                     };
                     model.map_theme = new_theme;
                     crate::theme::set_theme(ui.ctx(), new_theme);

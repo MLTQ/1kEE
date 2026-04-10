@@ -14,6 +14,8 @@ static LOCAL_CONTOUR_CACHE: OnceLock<Mutex<LocalRegionCache>> = OnceLock::new();
 static LUNAR_LOCAL_CONTOUR_CACHE: OnceLock<Mutex<LocalRegionCache>> = OnceLock::new();
 static GLOBE_CONTOUR_CACHE: OnceLock<Mutex<GlobeRegionCache>> = OnceLock::new();
 static LUNAR_GLOBE_CONTOUR_CACHE: OnceLock<Mutex<GlobeRegionCache>> = OnceLock::new();
+static MARS_LOCAL_CONTOUR_CACHE: OnceLock<Mutex<LocalRegionCache>> = OnceLock::new();
+static MARS_GLOBE_CONTOUR_CACHE: OnceLock<Mutex<GlobeRegionCache>> = OnceLock::new();
 static GLOBAL_COASTLINE_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();
 static GLOBAL_TOPO_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();
 static GLOBAL_BATHYMETRY_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();
@@ -40,12 +42,25 @@ pub fn blast_tile_caches() {
             g.zoom_fallback = None;
         }
     }
+    if let Some(c) = MARS_LOCAL_CONTOUR_CACHE.get() {
+        if let Ok(mut g) = c.lock() {
+            g.scene_key = None;
+            g.entries.clear();
+            g.in_flight.clear();
+            g.zoom_fallback = None;
+        }
+    }
     if let Some(c) = GLOBE_CONTOUR_CACHE.get() {
         if let Ok(mut g) = c.lock() {
             *g = GlobeRegionCache::default();
         }
     }
     if let Some(c) = LUNAR_GLOBE_CONTOUR_CACHE.get() {
+        if let Ok(mut g) = c.lock() {
+            *g = GlobeRegionCache::default();
+        }
+    }
+    if let Some(c) = MARS_GLOBE_CONTOUR_CACHE.get() {
         if let Ok(mut g) = c.lock() {
             *g = GlobeRegionCache::default();
         }
@@ -459,6 +474,149 @@ pub fn load_lunar_region_for_view(
     }
 
     // We have live tiles — discard the fallback to save memory.
+    guard.zoom_fallback = None;
+    Some(Arc::new(merged))
+}
+
+/// Mars analogue of `load_srtm_region_for_view` — sources from MRO CTX tiles
+/// stored in `mars_ctx_cache.sqlite`.
+pub fn load_mars_region_for_view(
+    selected_root: Option<&Path>,
+    scene_anchor: crate::model::GeoPoint,
+    viewport_center: crate::model::GeoPoint,
+    zoom: f32,
+    _radius: i32,
+    ctx: egui::Context,
+) -> Option<Arc<Vec<ContourPath>>> {
+    let assets =
+        srtm_focus_cache::ensure_mars_contour_region(selected_root, viewport_center, zoom);
+    if assets.is_empty() {
+        return None;
+    }
+
+    const MAX_LOCAL_TILES: usize = 200;
+
+    let cache: &'static Mutex<LocalRegionCache> = MARS_LOCAL_CONTOUR_CACHE.get_or_init(|| {
+        Mutex::new(LocalRegionCache {
+            scene_key: None,
+            entries: HashMap::new(),
+            in_flight: HashSet::new(),
+            zoom_fallback: None,
+        })
+    });
+
+    let current_zoom_bucket = assets
+        .first()
+        .map(|asset| asset.zoom_bucket)
+        .unwrap_or_default();
+    let per_asset_budget = (360usize / assets.len().max(1)).max(120);
+    let scene_key = SceneKey {
+        root: selected_root.map(Path::to_path_buf),
+        anchor_lat_bucket: (scene_anchor.lat * 20.0).round() as i32,
+        anchor_lon_bucket: (scene_anchor.lon * 20.0).round() as i32,
+        zoom_bucket: current_zoom_bucket,
+    };
+
+    let missing: Vec<(CacheKey, srtm_focus_cache::FocusContourAsset)> = {
+        let mut guard = cache.lock().ok()?;
+        if guard.scene_key.as_ref() != Some(&scene_key) {
+            let old_merged: Vec<ContourPath> = guard
+                .entries
+                .values()
+                .flat_map(|v| v.iter().cloned())
+                .collect();
+            guard.zoom_fallback = if old_merged.is_empty() {
+                None
+            } else {
+                Some(Arc::new(old_merged))
+            };
+            guard.scene_key = Some(scene_key);
+            guard.entries.clear();
+            guard.in_flight.clear();
+        }
+        let missing: Vec<_> = assets
+            .iter()
+            .filter_map(|asset| {
+                let key = CacheKey {
+                    path: asset.path.clone(),
+                    lat_bucket: asset.lat_bucket,
+                    lon_bucket: asset.lon_bucket,
+                    zoom_bucket: asset.zoom_bucket,
+                };
+                if guard.entries.contains_key(&key) || guard.in_flight.contains(&key) {
+                    None
+                } else {
+                    Some((key, asset.clone()))
+                }
+            })
+            .collect();
+        for (key, _) in &missing {
+            guard.in_flight.insert(key.clone());
+        }
+        missing
+    };
+
+    if !missing.is_empty() {
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let loaded =
+                query_local_contours_batch(&missing[0].0.path, &missing, per_asset_budget).ok();
+
+            if let Ok(mut g) = cache.lock() {
+                if let Some(loaded) = loaded {
+                    for (key, contours) in loaded {
+                        g.entries
+                            .entry(key.clone())
+                            .or_insert_with(|| Arc::new(contours));
+                    }
+                }
+                for (key, _) in &missing {
+                    g.in_flight.remove(key);
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    let mut guard = cache.lock().ok()?;
+
+    if guard.entries.len() > MAX_LOCAL_TILES {
+        let bucket_step = srtm_focus_cache::mars_half_extent_for_zoom(zoom) * 0.45;
+        let clat = (viewport_center.lat / bucket_step).round() as i32;
+        let clon = (viewport_center.lon / bucket_step).round() as i32;
+        let mut keys: Vec<CacheKey> = guard.entries.keys().cloned().collect();
+        keys.sort_unstable_by_key(|k| {
+            let dlat = k.lat_bucket - clat;
+            let dlon = k.lon_bucket - clon;
+            -(dlat * dlat + dlon * dlon)
+        });
+        let excess = guard.entries.len() - MAX_LOCAL_TILES;
+        for k in keys.into_iter().take(excess) {
+            guard.entries.remove(&k);
+        }
+    }
+
+    let bucket_step = srtm_focus_cache::mars_half_extent_for_zoom(zoom) * 0.45;
+    let mut merged = Vec::new();
+    for (key, contours) in guard.entries.iter() {
+        let tile_lat = key.lat_bucket as f32 * bucket_step;
+        let tile_lon = key.lon_bucket as f32 * bucket_step;
+        let half_step = bucket_step * 0.5;
+        for contour in contours.iter() {
+            if contour.points.is_empty() {
+                continue;
+            }
+            let mid = &contour.points[contour.points.len() / 2];
+            if (mid.lat - tile_lat).abs() <= half_step && (mid.lon - tile_lon).abs() <= half_step {
+                merged.push(contour.clone());
+            }
+        }
+    }
+
+    if merged.is_empty() {
+        return guard.zoom_fallback.clone();
+    }
+
     guard.zoom_fallback = None;
     Some(Arc::new(merged))
 }
