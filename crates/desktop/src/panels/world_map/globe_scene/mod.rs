@@ -96,8 +96,10 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         }
         geography::draw_global_topo(painter, &layout, &model.globe_view, selected_root);
         geography::draw_srtm_on_globe(painter, &layout, &model.globe_view, &lod, selected_root);
-    } else {
+    } else if model.active_body == crate::model::ActiveBody::Moon {
         geography::draw_lunar_topo(painter, &layout, &model.globe_view, selected_root);
+    } else if model.active_body == crate::model::ActiveBody::Mars {
+        geography::draw_mars_topo(painter, &layout, &model.globe_view, selected_root);
     }
 
     // ── GeoJSON user overlay layers ────────────────────────────────────────

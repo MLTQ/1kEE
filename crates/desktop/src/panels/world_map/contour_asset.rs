@@ -870,6 +870,114 @@ pub fn load_lunar_for_globe(
     render_globe_tiles(&guard)
 }
 
+/// Mars equivalent of `load_lunar_for_globe`. Triggers on-demand tile builds
+/// from the CTX VRT, accumulates results in a separate cache, and returns
+/// a merged arc over all ready tiles.
+pub fn load_mars_for_globe(
+    selected_root: Option<&Path>,
+    center: crate::model::GeoPoint,
+    _zoom: f32,
+    ctx: egui::Context,
+) -> Option<Arc<Vec<ContourPath>>> {
+    const MAX_TILES: usize = 800;
+    // Fixed zoom so tile footprint stays constant while orbiting.
+    const GLOBE_TILE_ZOOM: f32 = 1.5;
+
+    let assets =
+        srtm_focus_cache::ensure_mars_contour_region(selected_root, center, GLOBE_TILE_ZOOM);
+
+    let cache: &'static Mutex<GlobeRegionCache> =
+        MARS_GLOBE_CONTOUR_CACHE.get_or_init(|| Mutex::new(GlobeRegionCache::default()));
+    let mut guard = cache.lock().ok()?;
+
+    let zoom_bucket = srtm_focus_cache::zoom_bucket_for_zoom(GLOBE_TILE_ZOOM);
+    let root = selected_root.map(Path::to_path_buf);
+
+    if guard.zoom_bucket != zoom_bucket || guard.root != root {
+        guard.zoom_bucket = zoom_bucket;
+        guard.root = root;
+        guard.tiles.clear();
+        guard.in_flight.clear();
+        guard.order.clear();
+    }
+
+    if assets.is_empty() {
+        return render_globe_tiles(&guard);
+    }
+
+    let per_asset_budget = (360 / assets.len().max(1)).max(120);
+
+    let missing: Vec<srtm_focus_cache::FocusContourAsset> = assets
+        .iter()
+        .filter(|a| {
+            let key = (a.lat_bucket, a.lon_bucket);
+            !guard.tiles.contains_key(&key) && !guard.in_flight.contains(&key)
+        })
+        .cloned()
+        .collect();
+    for asset in &missing {
+        guard.in_flight.insert((asset.lat_bucket, asset.lon_bucket));
+    }
+    drop(guard);
+
+    if !missing.is_empty() {
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let requests: Vec<_> = missing
+                .iter()
+                .cloned()
+                .map(|asset| {
+                    (
+                        CacheKey {
+                            path: asset.path.clone(),
+                            lat_bucket: asset.lat_bucket,
+                            lon_bucket: asset.lon_bucket,
+                            zoom_bucket: asset.zoom_bucket,
+                        },
+                        asset,
+                    )
+                })
+                .collect();
+            let loaded =
+                query_local_contours_batch(&requests[0].0.path, &requests, per_asset_budget).ok();
+
+            if let Ok(mut g) = cache.lock() {
+                if let Some(loaded) = loaded {
+                    for (key, contours) in loaded {
+                        let tile_key = (key.lat_bucket, key.lon_bucket);
+                        if !g.tiles.contains_key(&tile_key) {
+                            g.tiles.insert(tile_key, Arc::new(contours));
+                            g.order.push(tile_key);
+                        }
+                    }
+                }
+                for asset in &missing {
+                    g.in_flight.remove(&(asset.lat_bucket, asset.lon_bucket));
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    let mut guard = cache.lock().ok()?;
+
+    if guard.tiles.len() > MAX_TILES {
+        let half_extent = srtm_focus_cache::half_extent_for_zoom(GLOBE_TILE_ZOOM);
+        let bucket_step = half_extent * 0.45;
+        let clat = (center.lat / bucket_step).round() as i32;
+        let clon = (center.lon / bucket_step).round() as i32;
+        guard
+            .order
+            .sort_by_key(|&(lat, lon)| (lat - clat).pow(2) + (lon - clon).pow(2));
+        let keep: HashSet<(i32, i32)> = guard.order[..MAX_TILES].iter().copied().collect();
+        guard.tiles.retain(|k, _| keep.contains(k));
+        guard.in_flight.retain(|k| keep.contains(k));
+        guard.order.retain(|k| keep.contains(k));
+    }
+
+    render_globe_tiles(&guard)
+}
+
 pub fn load_global_coastlines(
     selected_root: Option<&Path>,
     zoom: f32,
