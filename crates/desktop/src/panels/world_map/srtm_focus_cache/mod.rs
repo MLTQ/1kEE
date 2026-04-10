@@ -643,18 +643,67 @@ pub fn ensure_lunar_contour_region(
     assets
 }
 
+/// Find (or trigger a build of) the `mars_ctx.vrt` that sources the Mars
+/// contour pipeline.  Checked in priority order:
+///   1. `<mars_root>/mars_ctx.vrt`   (canonical location)
+///   2. Any `.vrt` file inside `<mars_root>/mars_data/`
+///   3. Auto-build from `.tif`/`.tiff`/`.img` tiles in `<mars_root>/mars_data/`
+///      (fires a one-shot background thread; returns `None` while building)
+pub fn ensure_mars_vrt(selected_root: Option<&Path>) -> Option<PathBuf> {
+    let data_root = terrain_assets::find_mars_data_root(selected_root)?;
+
+    // 1. Canonical VRT location.
+    let canonical = data_root.join("mars_ctx.vrt");
+    if canonical.exists() {
+        return Some(canonical);
+    }
+
+    // 2. Any existing VRT inside mars_data/.
+    let mars_data_dir = data_root.join("mars_data");
+    if mars_data_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&mars_data_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("vrt") {
+                    return Some(path);
+                }
+            }
+        }
+    }
+
+    // 3. No VRT found — try to build one from tiles in mars_data/.
+    if gdal::mars_vrt_building().load(Ordering::Relaxed) {
+        return None; // already building
+    }
+
+    let tiles = gdal::find_mars_tiles(&data_root);
+    if tiles.is_empty() {
+        return None; // no source data at all
+    }
+
+    gdal::mars_vrt_building().store(true, Ordering::SeqCst);
+    let vrt_out = canonical.clone();
+    std::thread::spawn(move || {
+        let _ = gdal::build_mars_vrt(&tiles, &vrt_out);
+        gdal::mars_vrt_building().store(false, Ordering::SeqCst);
+        crate::app::request_repaint();
+    });
+
+    None // caller retries next frame once the build completes
+}
+
+pub fn is_mars_vrt_building() -> bool {
+    gdal::mars_vrt_building().load(Ordering::Relaxed)
+}
+
 pub fn ensure_mars_contour_region(
     selected_root: Option<&Path>,
     focus: GeoPoint,
     zoom: f32,
 ) -> Vec<FocusContourAsset> {
-    let Some(data_root) = crate::terrain_assets::find_mars_data_root(selected_root) else {
+    let Some(vrt_path) = ensure_mars_vrt(selected_root) else {
         return Vec::new();
     };
-    let vrt_path = data_root.join("mars_ctx.vrt");
-    if !vrt_path.exists() {
-        return Vec::new();
-    }
     let Some(cache_root) = db::focus_cache_root(selected_root) else {
         return Vec::new();
     };

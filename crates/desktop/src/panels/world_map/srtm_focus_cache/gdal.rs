@@ -440,6 +440,62 @@ pub fn lunar_preview_building() -> &'static AtomicBool {
     BUILDING.get_or_init(|| AtomicBool::new(false))
 }
 
+pub fn mars_vrt_building() -> &'static AtomicBool {
+    static BUILDING: OnceLock<AtomicBool> = OnceLock::new();
+    BUILDING.get_or_init(|| AtomicBool::new(false))
+}
+
+/// Scan `mars_root/mars_data/` for any raster tile files (.tif, .tiff, .img).
+/// Returns an empty Vec if the subdirectory doesn't exist or contains no tiles.
+pub fn find_mars_tiles(mars_root: &Path) -> Vec<PathBuf> {
+    let mars_data = mars_root.join("mars_data");
+    let Ok(entries) = fs::read_dir(&mars_data) else {
+        return Vec::new();
+    };
+    let mut tiles: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            matches!(
+                p.extension().and_then(|e| e.to_str()),
+                Some("tif" | "tiff" | "img")
+            )
+        })
+        .collect();
+    tiles.sort();
+    tiles
+}
+
+/// Build `output_vrt` from a list of Mars raster tiles using `gdalbuildvrt`.
+/// Writes a tile-list file alongside the VRT to stay under ARG_MAX limits.
+pub fn build_mars_vrt(tiles: &[PathBuf], output_vrt: &Path) -> Option<()> {
+    if shutdown_requested().load(Ordering::Relaxed) {
+        return None;
+    }
+    if let Some(parent) = output_vrt.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+
+    // Write tile paths to a temp text file to avoid ARG_MAX limits.
+    let tile_list = output_vrt.with_extension("tile_list.txt");
+    let content: String = tiles
+        .iter()
+        .filter_map(|p| p.to_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&tile_list, content).ok()?;
+
+    let mut cmd = Command::new(gdal_tool_path("gdalbuildvrt"));
+    cmd.args(["-q", "-input_file_list"]);
+    cmd.arg(&tile_list);
+    cmd.arg(output_vrt);
+    let result =
+        run_command_with_timeout(cmd, "gdalbuildvrt (mars ctx)", Duration::from_secs(300));
+    let _ = fs::remove_file(&tile_list);
+    result.ok()?;
+    Some(())
+}
+
 /// Build the SLDEM2015 lunar terrain preview PNG into `cache_root`
 /// (= `Derived/terrain/`).
 ///

@@ -91,6 +91,15 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
                     .request_repaint_after(std::time::Duration::from_millis(250));
             }
         }
+        // Keep repainting while Mars VRT or contour tiles are being built.
+        if model.active_body == crate::model::ActiveBody::Mars {
+            if srtm_focus_cache::is_mars_vrt_building()
+                || srtm_focus_cache::is_mars_contour_building()
+            {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(250));
+            }
+        }
 
         let local_terrain_mode = local_terrain_scene::is_active(model);
         layer_import::ensure_visible_road_layers(model, local_terrain_mode);
