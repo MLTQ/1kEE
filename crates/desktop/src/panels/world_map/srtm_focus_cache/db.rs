@@ -82,6 +82,23 @@ pub fn tile_exists(connection: &Connection, tile: TileKey) -> rusqlite::Result<b
         .map(|value| value.is_some())
 }
 
+/// Return the contour count recorded for this tile, or `None` if the tile is
+/// not in the manifest at all.  A count of 0 means the tile was explicitly
+/// marked empty (no source coverage at build time) and can be upgraded when
+/// better data (e.g. MOLA) becomes available.
+pub fn tile_contour_count(connection: &Connection, tile: TileKey) -> rusqlite::Result<Option<i64>> {
+    connection
+        .query_row(
+            "SELECT contour_count
+             FROM contour_tile_manifest
+             WHERE zoom_bucket = ?1 AND lat_bucket = ?2 AND lon_bucket = ?3
+             LIMIT 1",
+            params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+}
+
 pub fn import_tile_into_cache(
     cache_db_path: &Path,
     tile: TileKey,

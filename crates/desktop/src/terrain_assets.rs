@@ -321,6 +321,32 @@ pub fn find_sldem_jp2(selected_root: Option<&Path>) -> Option<PathBuf> {
     None
 }
 
+/// Find all MOLA MEGDR topography tiles (`megt*.img`) under `Mars/MOLA/`.
+/// Returns a sorted list of paths; empty if the directory doesn't exist or
+/// contains no matching files.  The companion `.lbl` label files must sit
+/// alongside each `.img` for GDAL's PDS3 driver to read them correctly.
+pub fn find_mola_tiles(selected_root: Option<&Path>) -> Vec<PathBuf> {
+    let Some(mars_root) = find_mars_data_root(selected_root) else {
+        return Vec::new();
+    };
+    let mola_dir = mars_root.join("MOLA");
+    let Ok(entries) = fs::read_dir(&mola_dir) else {
+        return Vec::new();
+    };
+    let mut tiles: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().and_then(|e| e.to_str()) == Some("img")
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("megt"))
+        })
+        .collect();
+    tiles.sort();
+    tiles
+}
+
 /// Find the Mars Context Camera DTM root directory.
 pub fn find_mars_data_root(selected_root: Option<&Path>) -> Option<PathBuf> {
     let dirname = "Mars";

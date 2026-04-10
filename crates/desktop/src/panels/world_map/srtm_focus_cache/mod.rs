@@ -648,12 +648,14 @@ pub fn ensure_mars_contour_region(
     focus: GeoPoint,
     zoom: f32,
 ) -> Vec<FocusContourAsset> {
-    // The data lives in <mars_root>/mars_data/ as 44 k per-DTM subdirectories.
-    // We need the data root so builders can query the spatial index at build time.
+    // The CTX data lives in <mars_root>/mars_data/ as 44 k per-DTM subdirectories.
+    // MOLA tiles (global fallback) live in <mars_root>/MOLA/ as megt*.img files.
     let Some(data_root) = terrain_assets::find_mars_data_root(selected_root) else {
         return Vec::new();
     };
-    if !data_root.join("mars_data").is_dir() {
+    let has_ctx = data_root.join("mars_data").is_dir();
+    let mola_tiles = terrain_assets::find_mola_tiles(selected_root);
+    if !has_ctx && mola_tiles.is_empty() {
         return Vec::new();
     }
     let Some(cache_root) = db::focus_cache_root(selected_root) else {
@@ -681,6 +683,7 @@ pub fn ensure_mars_contour_region(
         for lon_bucket in (center_lon_bucket - RADIUS)..=(center_lon_bucket + RADIUS) {
             if let Some(asset) = builders::ensure_mars_bucket_asset(
                 &data_root,
+                &mola_tiles,
                 &cache_root,
                 &cache_db_path,
                 &connection,

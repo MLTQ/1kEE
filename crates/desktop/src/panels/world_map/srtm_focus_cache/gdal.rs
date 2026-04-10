@@ -981,17 +981,91 @@ pub fn build_lunar_contour_tile(
     Some(())
 }
 
+/// Build or reuse a VRT mosaicking all MOLA MEGDR topography tiles.
+/// Stored as `mola_megdr.vrt` alongside the source `.img` files so it only
+/// needs to be generated once.  Returns `None` if the tile list is empty or
+/// `gdalbuildvrt` fails.
+fn ensure_mola_vrt(mola_tiles: &[PathBuf]) -> Option<PathBuf> {
+    let vrt_path = mola_tiles.first()?.parent()?.join("mola_megdr.vrt");
+    if vrt_path.exists() {
+        return Some(vrt_path);
+    }
+    let mut cmd = Command::new(gdal_tool_path("gdalbuildvrt"));
+    cmd.arg("-q");
+    cmd.arg(&vrt_path);
+    for tile in mola_tiles {
+        cmd.arg(tile);
+    }
+    run_command_with_timeout(cmd, "gdalbuildvrt (MOLA mosaic)", Duration::from_secs(30)).ok()?;
+    vrt_path.exists().then_some(vrt_path)
+}
+
+/// Build a contour tile from the global MOLA VRT.  Used as a fallback when
+/// no CTX DTM covers the requested region.
+fn build_mars_mola_contour_tile(
+    mola_vrt: &Path,
+    cache_root: &Path,
+    cache_db_path: &Path,
+    tile: TileKey,
+    bounds: GeoBounds,
+    spec: FocusContourSpec,
+) -> Option<()> {
+    if shutdown_requested().load(Ordering::Relaxed) {
+        return None;
+    }
+
+    let (tmp_tif_path, tmp_gpkg_path) = temp_tile_paths(cache_root, tile);
+    cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
+    if let Some(parent) = tmp_tif_path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+
+    // MOLA tiles are simple cylindrical in IAU2000 Mars coords; warp to our
+    // target Mars longlat (same sphere radius) and crop to the tile bbox.
+    let mut warp = Command::new(gdal_tool_path("gdalwarp"));
+    warp.args([
+        "-q",
+        "-overwrite",
+        "-t_srs",
+        "+proj=longlat +R=3396190 +no_defs",
+        "-r",
+        "bilinear",
+        "-dstnodata",
+        "-32767",
+        "-te",
+        &format!("{:.6}", bounds.min_lon),
+        &format!("{:.6}", bounds.min_lat),
+        &format!("{:.6}", bounds.max_lon),
+        &format!("{:.6}", bounds.max_lat),
+        "-ts",
+        &spec.raster_size.to_string(),
+        &spec.raster_size.to_string(),
+    ]);
+    warp.arg(mola_vrt);
+    warp.arg(&tmp_tif_path);
+    run_command_with_timeout(warp, "gdalwarp (mars mola tile)", Duration::from_secs(120)).ok()?;
+
+    if shutdown_requested().load(Ordering::Relaxed) {
+        cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
+        return None;
+    }
+
+    run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m, Some(-32767)).ok()?;
+    import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path).ok()?;
+    cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
+    Some(())
+}
+
 /// Build a Mars contour tile by:
-///   1. Querying the spatial index for source `*-DEM-geoid-adj.tif` files whose
-///      centre falls within a generous buffer around `bounds`.
-///   2. Warping the matching tiles (each in its own orthographic CRS) into Mars
-///      longlat using `gdalwarp`, clipping to `bounds`.
-///   3. Running `gdal_contour` on the result.
-///
-/// If no source tiles overlap the region the tile is marked empty in the cache
-/// (stored with contour_count = 0) so the region is not retried every frame.
+///   1. Querying the spatial index for `*-DEM-geoid-adj.tif` files overlapping
+///      `bounds` (high-res CTX DTMs, ~20 m/px).
+///   2. If CTX tiles exist: warp them (each in its own orthographic CRS) into
+///      Mars longlat and run `gdal_contour`.
+///   3. If no CTX tiles: fall back to the MOLA MEGDR global DEM (~463 m/px)
+///      when `mola_tiles` is non-empty, otherwise mark the tile empty.
 pub fn build_mars_contour_tile(
     data_root: &Path,
+    mola_tiles: &[PathBuf],
     cache_root: &Path,
     cache_db_path: &Path,
     tile: TileKey,
@@ -1009,11 +1083,17 @@ pub fn build_mars_contour_tile(
         fs::create_dir_all(parent).ok()?;
     }
 
-    // Find source tiles that cover this bounding box.
+    // Find high-res CTX tiles that cover this bounding box.
     let source_tiles = find_mars_tiles_for_bounds(data_root, bounds);
 
     if source_tiles.is_empty() {
-        // No CTX coverage here — store an empty tile so we don't retry.
+        // No CTX coverage — try MOLA as a global fallback.
+        if let Some(mola_vrt) = ensure_mola_vrt(mola_tiles) {
+            return build_mars_mola_contour_tile(
+                &mola_vrt, cache_root, cache_db_path, tile, bounds, spec,
+            );
+        }
+        // No MOLA either — mark empty so we don't retry every frame.
         mark_tile_empty(cache_db_path, tile).ok()?;
         return Some(());
     }
