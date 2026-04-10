@@ -1,6 +1,7 @@
 use crate::args::{BboxCommand, ContoursBboxCommand};
 use crate::job::{BuildEvent, BuildJob, JobHandle, spawn_job};
 use crate::lunar::{LunarBuildCommand, all_lunar_specs};
+use crate::mars::MarsBuildCommand;
 use eframe::egui;
 use eframe::egui::Color32;
 use rusqlite::OpenFlags;
@@ -14,12 +15,26 @@ use std::time::{Duration, SystemTime};
 enum ActiveTab {
     OsmContours,
     Lunar,
+    Mars,
 }
 
 #[derive(Clone)]
 struct LunarForm {
     jp2_path: String,
     lunar_db: String,
+    gdal_bin_dir: String,
+    min_lat: String,
+    max_lat: String,
+    min_lon: String,
+    max_lon: String,
+    /// Per-bucket checkbox state (index = zoom_bucket 0..=4)
+    zoom_buckets: [bool; 5],
+}
+
+#[derive(Clone)]
+struct MarsForm {
+    data_root: String,
+    cache_db: String,
     gdal_bin_dir: String,
     min_lat: String,
     max_lat: String,
@@ -111,6 +126,15 @@ pub struct BuilderApp {
     lunar_cached_tiles: Vec<(i32, f32, f32, f32, f32)>,
     /// Lunar tiles built in the current session
     lunar_live_tiles: Vec<(f32, f32, f32, f32)>,
+    // ── Mars tab ──────────────────────────────────────────────────────────────
+    mars_form: MarsForm,
+    mars_drag_start: Option<egui::Pos2>,
+    /// Mars tiles already in mars_focus_cache.sqlite
+    mars_cached_tiles: Vec<(i32, f32, f32, f32, f32)>,
+    /// Mars tiles built in the current session
+    mars_live_tiles: Vec<(f32, f32, f32, f32)>,
+    /// Which tab started the active build job (for routing TileCompleted events).
+    active_job_tab: Option<ActiveTab>,
 }
 
 #[derive(Clone)]
@@ -222,6 +246,26 @@ impl BuilderApp {
             lunar_drag_start: None,
             lunar_cached_tiles: Vec::new(),
             lunar_live_tiles: Vec::new(),
+            mars_form: MarsForm {
+                data_root: String::new(),
+                cache_db: std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join("Derived")
+                    .join("terrain")
+                    .join("mars_focus_cache.sqlite")
+                    .display()
+                    .to_string(),
+                gdal_bin_dir: String::new(),
+                min_lat: "-90.0".to_owned(),
+                max_lat: "90.0".to_owned(),
+                min_lon: "-180.0".to_owned(),
+                max_lon: "180.0".to_owned(),
+                zoom_buckets: [true, true, false, false, false],
+            },
+            mars_drag_start: None,
+            mars_cached_tiles: Vec::new(),
+            mars_live_tiles: Vec::new(),
+            active_job_tab: None,
         };
         app.refresh_inspector();
         app
@@ -242,6 +286,7 @@ impl BuilderApp {
         self.status = "Building".to_owned();
         self.progress = 0.0;
         self.progress_detail = "Starting export…".to_owned();
+        self.active_job_tab = Some(ActiveTab::OsmContours);
         self.push_log(format!(
             "Starting export for bbox [{}, {}] x [{}, {}]",
             self.form.min_lat, self.form.max_lat, self.form.min_lon, self.form.max_lon
@@ -311,6 +356,7 @@ impl BuilderApp {
         self.status = "Building Contours".to_owned();
         self.progress = 0.0;
         self.progress_detail = "Starting contour export…".to_owned();
+        self.active_job_tab = Some(ActiveTab::OsmContours);
         self.live_tiles.clear();
         self.push_log(format!(
             "Starting contour build for bbox [{}, {}] x [{}, {}]",
@@ -423,7 +469,17 @@ impl BuilderApp {
                     self.push_log(line);
                 }
                 BuildEvent::TileCompleted(min_lat, max_lat, min_lon, max_lon) => {
-                    self.live_tiles.push((min_lat, max_lat, min_lon, max_lon));
+                    match self.active_job_tab {
+                        Some(ActiveTab::Lunar) => {
+                            self.lunar_live_tiles.push((min_lat, max_lat, min_lon, max_lon));
+                        }
+                        Some(ActiveTab::Mars) => {
+                            self.mars_live_tiles.push((min_lat, max_lat, min_lon, max_lon));
+                        }
+                        _ => {
+                            self.live_tiles.push((min_lat, max_lat, min_lon, max_lon));
+                        }
+                    }
                 }
                 BuildEvent::Finished(result) => {
                     match result {
@@ -440,6 +496,7 @@ impl BuilderApp {
                         }
                     }
                     self.active_job = None;
+                    self.active_job_tab = None;
                     self.refresh_inspector();
                     break;
                 }
@@ -572,6 +629,7 @@ impl BuilderApp {
         self.status = "Building Lunar Contours".to_owned();
         self.progress = 0.0;
         self.progress_detail = "Starting lunar build…".to_owned();
+        self.active_job_tab = Some(ActiveTab::Lunar);
         self.lunar_live_tiles.clear();
         self.push_log(format!(
             "Starting lunar build for bbox [{}, {}] x [{}, {}]",
@@ -615,6 +673,123 @@ impl BuilderApp {
         }
         Ok(LunarBuildCommand {
             jp2_path: PathBuf::from(jp2),
+            cache_db_path: PathBuf::from(db),
+            tmp_dir: None,
+            min_lat,
+            max_lat,
+            min_lon,
+            max_lon,
+            zoom_buckets,
+            gdal_bin_dir: PathBuf::from(f.gdal_bin_dir.trim()),
+        })
+    }
+
+    fn scan_mars_cache(&mut self) {
+        let db_path = PathBuf::from(self.mars_form.cache_db.trim());
+        if !db_path.exists() {
+            self.push_log(format!("Mars cache DB not found: {}", db_path.display()));
+            return;
+        }
+        let Ok(conn) =
+            rusqlite::Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        else {
+            self.push_log("Failed to open Mars cache DB.".to_owned());
+            return;
+        };
+        let Ok(mut stmt) =
+            conn.prepare("SELECT zoom_bucket, lat_bucket, lon_bucket FROM contour_tile_manifest")
+        else {
+            self.push_log("Failed to query Mars contour_tile_manifest.".to_owned());
+            return;
+        };
+        let specs = all_lunar_specs(); // Mars uses identical zoom specs
+        let mut tiles = Vec::new();
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i32>(0)?,
+                row.get::<_, i32>(1)?,
+                row.get::<_, i32>(2)?,
+            ))
+        }) {
+            for row in rows.flatten() {
+                let (zoom_bucket, lat_bucket, lon_bucket) = row;
+                if let Some(spec) = specs.iter().find(|s| s.zoom_bucket == zoom_bucket) {
+                    let step = spec.half_extent_deg * 0.45;
+                    let center_lat = lat_bucket as f32 * step;
+                    let center_lon = lon_bucket as f32 * step;
+                    tiles.push((
+                        zoom_bucket,
+                        center_lat - spec.half_extent_deg,
+                        center_lat + spec.half_extent_deg,
+                        center_lon - spec.half_extent_deg,
+                        center_lon + spec.half_extent_deg,
+                    ));
+                }
+            }
+        }
+        let count = tiles.len();
+        self.mars_cached_tiles = tiles;
+        self.push_log(format!("Mars cache scan: {count} tiles found."));
+    }
+
+    fn start_mars_build(&mut self) {
+        if self.active_job.is_some() {
+            return;
+        }
+        let command = match self.mars_command() {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                self.push_log(e);
+                return;
+            }
+        };
+        self.status = "Building Mars Contours".to_owned();
+        self.progress = 0.0;
+        self.progress_detail = "Starting Mars build…".to_owned();
+        self.active_job_tab = Some(ActiveTab::Mars);
+        self.mars_live_tiles.clear();
+        self.push_log(format!(
+            "Starting Mars build for bbox [{}, {}] x [{}, {}]",
+            self.mars_form.min_lat,
+            self.mars_form.max_lat,
+            self.mars_form.min_lon,
+            self.mars_form.max_lon,
+        ));
+        self.active_job = Some(spawn_job(BuildJob::MarsContours(command)));
+    }
+
+    fn mars_command(&self) -> Result<MarsBuildCommand, String> {
+        let f = &self.mars_form;
+        let data_root = f.data_root.trim();
+        if data_root.is_empty() {
+            return Err("Mars data root is required.".to_owned());
+        }
+        let db = f.cache_db.trim();
+        if db.is_empty() {
+            return Err("Mars cache DB path is required.".to_owned());
+        }
+        let parse = |label: &str, v: &str| {
+            v.parse::<f32>()
+                .map_err(|_| format!("Invalid {} '{}'", label, v))
+        };
+        let min_lat = parse("min lat", &f.min_lat)?;
+        let max_lat = parse("max lat", &f.max_lat)?;
+        let min_lon = parse("min lon", &f.min_lon)?;
+        let max_lon = parse("max lon", &f.max_lon)?;
+        if min_lat >= max_lat || min_lon >= max_lon {
+            return Err("Invalid bbox: min must be less than max.".to_owned());
+        }
+        let zoom_buckets: Vec<i32> = f
+            .zoom_buckets
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &on)| if on { Some(i as i32) } else { None })
+            .collect();
+        if zoom_buckets.is_empty() {
+            return Err("Select at least one zoom level.".to_owned());
+        }
+        Ok(MarsBuildCommand {
+            data_root: PathBuf::from(data_root),
             cache_db_path: PathBuf::from(db),
             tmp_dir: None,
             min_lat,
@@ -875,6 +1050,239 @@ impl BuilderApp {
         });
     }
 
+    fn show_mars_panel(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Mars Contours (CTX DTMs + MOLA)");
+        ui.label("Pre-build mars_focus_cache.sqlite from CTX stereo-pair DEMs with global MOLA fallback.");
+        ui.separator();
+
+        // ── Data root ────────────────────────────────────────────────────────
+        ui.label("Mars data root (contains mars_data/ and/or MOLA/)");
+        ui.horizontal(|ui| {
+            ui.text_edit_singleline(&mut self.mars_form.data_root);
+            if ui.small_button("…").clicked() {
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    self.mars_form.data_root = path.display().to_string();
+                }
+            }
+        });
+
+        // ── Cache DB ─────────────────────────────────────────────────────────
+        ui.label("Mars cache DB (mars_focus_cache.sqlite)");
+        ui.horizontal(|ui| {
+            ui.text_edit_singleline(&mut self.mars_form.cache_db);
+            if ui.small_button("…").clicked() {
+                if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                    self.mars_form.cache_db = folder
+                        .join("mars_focus_cache.sqlite")
+                        .display()
+                        .to_string();
+                }
+            }
+        });
+
+        // ── GDAL bin dir ─────────────────────────────────────────────────────
+        ui.label("GDAL bin dir (empty = use $PATH)");
+        ui.horizontal(|ui| {
+            ui.text_edit_singleline(&mut self.mars_form.gdal_bin_dir);
+            if ui.small_button("…").clicked() {
+                if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                    self.mars_form.gdal_bin_dir = path.display().to_string();
+                }
+            }
+            if !self.mars_form.gdal_bin_dir.is_empty() && ui.small_button("✕").clicked() {
+                self.mars_form.gdal_bin_dir.clear();
+            }
+        });
+
+        // ── Bounding box ─────────────────────────────────────────────────────
+        ui.separator();
+        ui.label("Bounding Box (global coverage)");
+        ui.horizontal(|ui| {
+            ui.label("Min Lat");
+            ui.add(egui::TextEdit::singleline(&mut self.mars_form.min_lat).desired_width(60.0));
+            ui.label("Max Lat");
+            ui.add(egui::TextEdit::singleline(&mut self.mars_form.max_lat).desired_width(60.0));
+        });
+        ui.horizontal(|ui| {
+            ui.label("Min Lon");
+            ui.add(egui::TextEdit::singleline(&mut self.mars_form.min_lon).desired_width(60.0));
+            ui.label("Max Lon");
+            ui.add(egui::TextEdit::singleline(&mut self.mars_form.max_lon).desired_width(60.0));
+        });
+
+        // ── Zoom levels ──────────────────────────────────────────────────────
+        ui.separator();
+        ui.label("Zoom levels to build:");
+        let specs = all_lunar_specs();
+        ui.horizontal_wrapped(|ui| {
+            for (i, spec) in specs.iter().enumerate() {
+                let label = format!(
+                    "Z{} ({}m, {:.1}°)",
+                    i, spec.interval_m, spec.half_extent_deg
+                );
+                ui.checkbox(&mut self.mars_form.zoom_buckets[i], label);
+            }
+        });
+
+        // ── World map ────────────────────────────────────────────────────────
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label("Coverage Map");
+            if ui.small_button("Scan Cache").clicked() {
+                self.scan_mars_cache();
+            }
+            if !self.mars_cached_tiles.is_empty() {
+                ui.label(
+                    egui::RichText::new(format!("({} cached)", self.mars_cached_tiles.len()))
+                        .color(Color32::from_rgb(200, 120, 60))
+                        .small(),
+                );
+            }
+            if !self.mars_live_tiles.is_empty() {
+                ui.label(
+                    egui::RichText::new(format!("({} built)", self.mars_live_tiles.len()))
+                        .color(Color32::from_rgb(255, 180, 80))
+                        .small(),
+                );
+            }
+        });
+
+        let (response, painter) =
+            ui.allocate_painter(egui::Vec2::new(280.0, 140.0), egui::Sense::click_and_drag());
+        let rect = response.rect;
+
+        // Background — dark reddish to evoke Mars
+        painter.rect_filled(rect, 0.0, Color32::from_rgb(18, 8, 6));
+
+        // Cached tiles (dim orange-red)
+        for &(zoom_bucket, min_lat, max_lat, min_lon, max_lon) in &self.mars_cached_tiles {
+            let alpha = (20 + zoom_bucket as u8 * 14).min(110);
+            let color = Color32::from_rgba_unmultiplied(200, 100, 40, alpha);
+            let tile_rect = egui::Rect::from_min_max(
+                egui::pos2(lon_to_x(rect, min_lon), lat_to_y(rect, max_lat)),
+                egui::pos2(lon_to_x(rect, max_lon), lat_to_y(rect, min_lat)),
+            )
+            .expand(0.5);
+            painter.rect_filled(tile_rect, 0.0, color);
+        }
+        // Live tiles (bright amber)
+        for &(min_lat, max_lat, min_lon, max_lon) in &self.mars_live_tiles {
+            let tile_rect = egui::Rect::from_min_max(
+                egui::pos2(lon_to_x(rect, min_lon), lat_to_y(rect, max_lat)),
+                egui::pos2(lon_to_x(rect, max_lon), lat_to_y(rect, min_lat)),
+            )
+            .expand(0.5);
+            painter.rect_filled(
+                tile_rect,
+                0.0,
+                Color32::from_rgba_unmultiplied(255, 180, 60, 210),
+            );
+        }
+
+        // Graticule
+        let grid = Color32::from_rgb(50, 20, 16);
+        let equat = Color32::from_rgb(90, 40, 30);
+        for lon in [-180i32, -120, -60, 0, 60, 120, 180] {
+            let x = lon_to_x(rect, lon as f32);
+            painter.line_segment(
+                [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                egui::Stroke::new(1.0, grid),
+            );
+        }
+        for lat in [-90i32, -60, -30, 0, 30, 60, 90] {
+            let y = lat_to_y(rect, lat as f32);
+            let c = if lat == 0 { equat } else { grid };
+            painter.line_segment(
+                [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+                egui::Stroke::new(1.0, c),
+            );
+        }
+        // Equator label
+        let eq_y = lat_to_y(rect, 0.0);
+        painter.text(
+            egui::pos2(rect.left() + 2.0, eq_y - 8.0),
+            egui::Align2::LEFT_TOP,
+            "Equator",
+            egui::FontId::proportional(8.0),
+            equat,
+        );
+
+        // Country outlines (Earth reference — helps orient the bbox picker)
+        let coast = Color32::from_rgb(50, 30, 24);
+        for ring in coastline_rings() {
+            let pts: Vec<egui::Pos2> = ring
+                .iter()
+                .map(|[lon, lat]| egui::pos2(lon_to_x(rect, *lon), lat_to_y(rect, *lat)))
+                .collect();
+            if pts.len() >= 2 {
+                painter.add(egui::Shape::line(pts, egui::Stroke::new(0.5, coast)));
+            }
+        }
+
+        // Current bbox rect
+        if let (Ok(min_lat), Ok(max_lat), Ok(min_lon), Ok(max_lon)) = (
+            self.mars_form.min_lat.trim().parse::<f32>(),
+            self.mars_form.max_lat.trim().parse::<f32>(),
+            self.mars_form.min_lon.trim().parse::<f32>(),
+            self.mars_form.max_lon.trim().parse::<f32>(),
+        ) {
+            let bbox_rect = egui::Rect::from_min_max(
+                egui::pos2(lon_to_x(rect, min_lon), lat_to_y(rect, max_lat)),
+                egui::pos2(lon_to_x(rect, max_lon), lat_to_y(rect, min_lat)),
+            );
+            painter.rect_filled(
+                bbox_rect,
+                0.0,
+                Color32::from_rgba_unmultiplied(240, 140, 40, 38),
+            );
+            painter.rect_stroke(
+                bbox_rect,
+                0.0,
+                egui::Stroke::new(1.5, Color32::from_rgb(240, 140, 40)),
+                egui::StrokeKind::Middle,
+            );
+        }
+
+        // Drag to set bbox
+        if response.drag_started() {
+            self.mars_drag_start = response.hover_pos();
+        }
+        if response.dragged() {
+            if let (Some(start), Some(cur)) = (self.mars_drag_start, response.hover_pos()) {
+                let (lon0, lat0) = (x_to_lon(rect, start.x), y_to_lat(rect, start.y));
+                let (lon1, lat1) = (x_to_lon(rect, cur.x), y_to_lat(rect, cur.y));
+                self.mars_form.min_lat = format!("{:.2}", lat0.min(lat1));
+                self.mars_form.max_lat = format!("{:.2}", lat0.max(lat1));
+                self.mars_form.min_lon = format!("{:.2}", lon0.min(lon1));
+                self.mars_form.max_lon = format!("{:.2}", lon0.max(lon1));
+            }
+        }
+        if response.drag_stopped() {
+            self.mars_drag_start = None;
+        }
+
+        // ── Progress & buttons ───────────────────────────────────────────────
+        ui.separator();
+        ui.add(
+            egui::ProgressBar::new(self.progress)
+                .animate(self.active_job.is_some())
+                .show_percentage()
+                .text(self.progress_detail.clone()),
+        );
+        ui.horizontal(|ui| {
+            let building = self.active_job.is_some();
+            if ui
+                .add_enabled(!building, egui::Button::new("Build Mars Contours"))
+                .clicked()
+            {
+                self.start_mars_build();
+            }
+            if ui.small_button("Scan Cache").clicked() {
+                self.scan_mars_cache();
+            }
+        });
+    }
+
     fn push_log(&mut self, line: String) {
         self.log_lines.push(line);
         if self.log_lines.len() > 200 {
@@ -913,11 +1321,16 @@ impl eframe::App for BuilderApp {
                         "OSM / Contours",
                     );
                     ui.selectable_value(&mut self.active_tab, ActiveTab::Lunar, "Lunar (SLDEM)");
+                    ui.selectable_value(&mut self.active_tab, ActiveTab::Mars, "Mars");
                 });
                 ui.separator();
 
                 if self.active_tab == ActiveTab::Lunar {
                     self.show_lunar_panel(ui);
+                    return;
+                }
+                if self.active_tab == ActiveTab::Mars {
+                    self.show_mars_panel(ui);
                     return;
                 }
 

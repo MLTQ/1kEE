@@ -6,6 +6,7 @@ mod geojson;
 mod job;
 mod lunar;
 mod marching_squares;
+mod mars;
 mod node_store;
 mod roads;
 mod srtm;

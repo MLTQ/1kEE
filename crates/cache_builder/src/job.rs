@@ -1,6 +1,7 @@
 use crate::args::{BboxCommand, ContoursBboxCommand};
 use crate::contours::{ContourBuildProgress, GeoBounds, build_contour_tiles};
 use crate::lunar::LunarBuildCommand;
+use crate::mars::MarsBuildCommand;
 use crate::roads::{RoadBuildProgress, build_bbox_cache_with_progress};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
@@ -9,6 +10,7 @@ pub enum BuildJob {
     Bbox(BboxCommand),
     ContoursBbox(ContoursBboxCommand),
     LunarContours(LunarBuildCommand),
+    MarsContours(MarsBuildCommand),
 }
 
 pub struct JobHandle {
@@ -102,6 +104,25 @@ pub fn spawn_job(job: BuildJob) -> JobHandle {
                 }));
             };
             let result = crate::lunar::build_lunar_contour_tiles(command, &mut reporter);
+            let _ = tx.send(BuildEvent::Finished(result));
+        }
+        BuildJob::MarsContours(command) => {
+            let mut reporter = |p: ContourBuildProgress| {
+                if p.is_error {
+                    let _ = tx.send(BuildEvent::Log(p.message.clone()));
+                }
+                if let Some((min_lat, max_lat, min_lon, max_lon)) = p.tile_bounds {
+                    let _ = tx.send(BuildEvent::TileCompleted(
+                        min_lat, max_lat, min_lon, max_lon,
+                    ));
+                }
+                let _ = tx.send(BuildEvent::Progress(RoadBuildProgress {
+                    stage: p.stage,
+                    fraction: p.fraction,
+                    message: p.message,
+                }));
+            };
+            let result = crate::mars::build_mars_contour_tiles(command, &mut reporter);
             let _ = tx.send(BuildEvent::Finished(result));
         }
     });
