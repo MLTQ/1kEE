@@ -149,6 +149,23 @@ def process_pair(
     msgs = []
     bytes_freed = 0
 
+    # ── Delete junk files first — free space before temp files are written ────
+    if do_delete:
+        for suffix in DELETE_SUFFIXES:
+            p = pair_dir / f"{name}{suffix}"
+            if p.exists():
+                sz = p.stat().st_size
+                if not dry_run:
+                    p.unlink()
+                bytes_freed += sz
+        for fname in DELETE_NAMES:
+            p = pair_dir / fname
+            if p.exists():
+                sz = p.stat().st_size
+                if not dry_run:
+                    p.unlink()
+                bytes_freed += sz
+
     # ── DEM conversion ────────────────────────────────────────────────────────
     if do_dem:
         dem = pair_dir / f"{name}-DEM-geoid-adj.tif"
@@ -184,23 +201,6 @@ def process_pair(
                     bytes_freed += before - after
                 else:
                     msgs.append("DRG FAILED")
-
-    # ── Delete junk files ─────────────────────────────────────────────────────
-    if do_delete:
-        for suffix in DELETE_SUFFIXES:
-            p = pair_dir / f"{name}{suffix}"
-            if p.exists():
-                sz = p.stat().st_size
-                if not dry_run:
-                    p.unlink()
-                bytes_freed += sz
-        for fname in DELETE_NAMES:
-            p = pair_dir / fname
-            if p.exists():
-                sz = p.stat().st_size
-                if not dry_run:
-                    p.unlink()
-                bytes_freed += sz
 
     return {"name": name, "msgs": msgs, "freed": bytes_freed}
 
