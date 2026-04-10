@@ -1,25 +1,44 @@
 #!/usr/bin/env python3
 """
-convert_mars_ctx.py — Compress CTX DEMs and DRGs in-place and delete junk files.
+convert_mars_ctx.py — Clean, convert, and (optionally) complete the CTX DEM dataset.
 
-Typical run:
-    python3 tools/convert_mars_ctx.py /Volumes/Hilbert/Data/Mars/mars_data
+Typical runs
+────────────
+  # Step 1 — free space immediately (safe to run while disk is full):
+  python3 tools/convert_mars_ctx.py /Volumes/Hilbert/Data/Mars/mars_data
 
-What it does per pair directory
-────────────────────────────────
-  CONVERT  *-DEM-geoid-adj.tif  →  Float32 → Int16, DEFLATE COG, Mars longlat
-  CONVERT  *-DRG.tif            →  JPEG COG, Mars longlat
-  DELETE   *-DEM.tif              (ellipsoid-relative, redundant)
-           *-DEM-geoid-hs.tif     (pre-baked hillshade)
-           *-DEM-geoid-hs.jpeg    (pre-baked hillshade, JPEG)
-           *-IntersectionErr.tif  (stereo QC metric)
-           *-FINAL_geodiff-diff.csv
-           provenance.txt
-           qa_metrics.txt
+  # Step 2 — after space is freed, download + convert what's missing:
+  python3 tools/convert_mars_ctx.py /Volumes/Hilbert/Data/Mars/mars_data --download
 
-Each conversion writes to a sibling .tmp.tif first, then atomically renames it,
-so an interrupted run never corrupts the original.  A hidden marker file
-(.dem_done / .drg_done) is written on success so re-runs skip finished pairs.
+  # Or do everything in one pass once you have headroom:
+  python3 tools/convert_mars_ctx.py /Volumes/Hilbert/Data/Mars/mars_data --download
+
+What it does per pair directory (in order)
+──────────────────────────────────────────
+  1. DELETE junk files first so space is freed before any temp files are written:
+       *-DEM.tif              (ellipsoid-relative, redundant)
+       *-DEM-geoid-hs.tif     (pre-baked hillshade)
+       *-DEM-geoid-hs.jpeg    (pre-baked hillshade, JPEG)
+       *-IntersectionErr.tif  (stereo QC metric)
+       *-FINAL_geodiff-diff.csv
+       provenance.txt
+       qa_metrics.txt
+
+  2. DOWNLOAD (--download only) from S3 if key files are missing:
+       s3://astrogeo-ard/mars/mro/ctx/controlled/usgs/{pair_name}/
+
+  3. CONVERT  *-DEM-geoid-adj.tif  →  Float32 → Int16, DEFLATE COG, Mars longlat
+     CONVERT  *-DRG.tif            →  JPEG COG, Mars longlat
+
+Each conversion writes to a .tmp.tif first, then atomically renames it,
+so an interrupted run never corrupts the original.  Hidden marker files
+(.dem_done / .drg_done) are written on success so re-runs skip finished pairs.
+
+Pair states
+───────────
+  EMPTY    — directory exists but no DEM present (interrupted download)
+  PARTIAL  — some files present but DEM not yet converted
+  DONE     — .dem_done marker exists; skipped
 
 Estimated results (based on 44,341 pairs at ~39 MB/pair total):
   Delete junk    → free ~16 MB/pair  → ~700 GB freed immediately
@@ -29,16 +48,16 @@ Estimated results (based on 44,341 pairs at ~39 MB/pair total):
 
 Options
 ───────
+  --download      Also download missing DEM/DRG files from S3 (requires aws CLI)
   --workers N     Parallel workers (default: 4; use 2 for a spinning HDD)
   --dem-only      Skip DRG conversion (if you only need elevation)
   --drg-only      Skip DEM conversion
-  --delete-only   Delete junk files without converting anything
+  --delete-only   Delete junk files without converting or downloading
   --dry-run       Print what would happen; change nothing
   --jpeg-quality  JPEG quality for DRGs (default: 88; range 60–95)
 """
 
 import argparse
-import os
 import shutil
 import subprocess
 import sys
@@ -46,6 +65,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+S3_BASE = "s3://astrogeo-ard/mars/mro/ctx/controlled/usgs/"
 MARS_LONGLAT_SRS = "+proj=longlat +R=3396190 +no_defs"
 DEM_NODATA = -32767
 
@@ -60,24 +80,72 @@ DELETE_SUFFIXES = [
 DELETE_NAMES = ["provenance.txt", "qa_metrics.txt"]
 
 
-# ── GDAL tool resolution ──────────────────────────────────────────────────────
+# ── Tool resolution ───────────────────────────────────────────────────────────
 
-def find_gdal_tool(name: str) -> str:
-    """Return the path to a GDAL command-line tool."""
-    search = [
+def find_tool(name: str) -> str:
+    """Return the path to a CLI tool, searching common install locations."""
+    for candidate in [
         name,
         f"/opt/homebrew/bin/{name}",   # macOS arm64 Homebrew
         f"/usr/local/bin/{name}",      # macOS x86 Homebrew / Linux
         f"/usr/bin/{name}",
-    ]
-    for candidate in search:
+    ]:
         if shutil.which(candidate):
             return candidate
-    # Fall back and let the OS raise a useful error if missing.
-    return name
+    return name  # let the OS raise a useful error if missing
 
 
-GDALWARP = find_gdal_tool("gdalwarp")
+GDALWARP = find_tool("gdalwarp")
+AWS = find_tool("aws")
+
+
+# ── S3 download ───────────────────────────────────────────────────────────────
+
+def sync_from_s3(
+    pair_dir: Path,
+    name: str,
+    need_dem: bool,
+    need_drg: bool,
+    dry_run: bool,
+) -> tuple[bool, str]:
+    """
+    Download only the missing key files for this pair from S3.
+    Returns (success, message).
+    """
+    includes: list[str] = []
+    if need_dem:
+        includes += ["--include", f"*-DEM-geoid-adj.tif"]
+    if need_drg:
+        includes += ["--include", f"*-DRG.tif"]
+    if not includes:
+        return True, ""
+
+    s3_prefix = f"{S3_BASE}{name}/"
+    cmd = [
+        AWS, "s3", "sync", "--no-sign-request",
+        "--exclude", "*",
+        *includes,
+        s3_prefix,
+        f"{pair_dir}/",
+    ]
+    if dry_run:
+        targets = []
+        if need_dem:
+            targets.append("DEM")
+        if need_drg:
+            targets.append("DRG")
+        return True, f"would download {'+'.join(targets)} from S3"
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=900)
+        if result.returncode == 0:
+            return True, "downloaded from S3"
+        stderr = result.stderr.decode(errors="replace").strip()
+        return False, f"S3 SYNC FAILED: {stderr[:120]}"
+    except subprocess.TimeoutExpired:
+        return False, "S3 SYNC FAILED: timeout"
+    except Exception as exc:
+        return False, f"S3 SYNC FAILED: {exc}"
 
 
 # ── Per-file conversion ───────────────────────────────────────────────────────
@@ -142,14 +210,21 @@ def process_pair(
     do_dem: bool,
     do_drg: bool,
     do_delete: bool,
+    do_download: bool,
     jpeg_quality: int,
     dry_run: bool,
 ) -> dict:
     name = pair_dir.name
-    msgs = []
+    msgs: list[str] = []
     bytes_freed = 0
+    downloaded = False
 
-    # ── Delete junk files first — free space before temp files are written ────
+    dem = pair_dir / f"{name}-DEM-geoid-adj.tif"
+    drg = pair_dir / f"{name}-DRG.tif"
+    dem_marker = pair_dir / ".dem_done"
+    drg_marker = pair_dir / ".drg_done"
+
+    # ── 1. Delete junk files first — free space before any temp writes ────────
     if do_delete:
         for suffix in DELETE_SUFFIXES:
             p = pair_dir / f"{name}{suffix}"
@@ -166,43 +241,51 @@ def process_pair(
                     p.unlink()
                 bytes_freed += sz
 
-    # ── DEM conversion ────────────────────────────────────────────────────────
-    if do_dem:
-        dem = pair_dir / f"{name}-DEM-geoid-adj.tif"
-        marker = pair_dir / ".dem_done"
-        if dem.exists() and not marker.exists():
-            before = dem.stat().st_size
-            if dry_run:
-                msgs.append(f"would convert DEM ({before/1e6:.1f} MB)")
+    # ── 2. Download missing key files from S3 ─────────────────────────────────
+    if do_download:
+        need_dem = do_dem and not dem.exists() and not dem_marker.exists()
+        need_drg = do_drg and not drg.exists() and not drg_marker.exists()
+        if need_dem or need_drg:
+            ok, msg = sync_from_s3(pair_dir, name, need_dem, need_drg, dry_run)
+            if msg:
+                msgs.append(msg)
+            if not ok:
+                # S3 failure — still try to convert anything that did arrive.
+                pass
             else:
-                ok = convert_dem(dem, jpeg_quality)
-                if ok:
-                    after = dem.stat().st_size
-                    marker.touch()
-                    msgs.append(f"DEM {before/1e6:.1f}→{after/1e6:.1f} MB")
-                    bytes_freed += before - after
-                else:
-                    msgs.append("DEM FAILED")
+                downloaded = True
 
-    # ── DRG conversion ────────────────────────────────────────────────────────
-    if do_drg:
-        drg = pair_dir / f"{name}-DRG.tif"
-        marker = pair_dir / ".drg_done"
-        if drg.exists() and not marker.exists():
-            before = drg.stat().st_size
-            if dry_run:
-                msgs.append(f"would convert DRG ({before/1e6:.1f} MB)")
+    # ── 3. Convert DEM ────────────────────────────────────────────────────────
+    if do_dem and dem.exists() and not dem_marker.exists():
+        before = dem.stat().st_size
+        if dry_run:
+            msgs.append(f"would convert DEM ({before/1e6:.1f} MB)")
+        else:
+            ok = convert_dem(dem, jpeg_quality)
+            if ok:
+                after = dem.stat().st_size
+                dem_marker.touch()
+                msgs.append(f"DEM {before/1e6:.1f}→{after/1e6:.1f} MB")
+                bytes_freed += before - after
             else:
-                ok = convert_drg(drg, jpeg_quality)
-                if ok:
-                    after = drg.stat().st_size
-                    marker.touch()
-                    msgs.append(f"DRG {before/1e6:.1f}→{after/1e6:.1f} MB")
-                    bytes_freed += before - after
-                else:
-                    msgs.append("DRG FAILED")
+                msgs.append("DEM FAILED")
 
-    return {"name": name, "msgs": msgs, "freed": bytes_freed}
+    # ── 4. Convert DRG ────────────────────────────────────────────────────────
+    if do_drg and drg.exists() and not drg_marker.exists():
+        before = drg.stat().st_size
+        if dry_run:
+            msgs.append(f"would convert DRG ({before/1e6:.1f} MB)")
+        else:
+            ok = convert_drg(drg, jpeg_quality)
+            if ok:
+                after = drg.stat().st_size
+                drg_marker.touch()
+                msgs.append(f"DRG {before/1e6:.1f}→{after/1e6:.1f} MB")
+                bytes_freed += before - after
+            else:
+                msgs.append("DRG FAILED")
+
+    return {"name": name, "msgs": msgs, "freed": bytes_freed, "downloaded": downloaded}
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -212,13 +295,14 @@ def main():
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p.add_argument("mars_data", type=Path, help="Path to the mars_data/ directory")
-    p.add_argument("--workers",      type=int,   default=4,  help="Parallel workers (default: 4)")
-    p.add_argument("--jpeg-quality", type=int,   default=88, help="JPEG quality for DRGs (default: 88)")
-    p.add_argument("--dem-only",     action="store_true", help="Convert DEMs only, skip DRGs")
-    p.add_argument("--drg-only",     action="store_true", help="Convert DRGs only, skip DEMs")
-    p.add_argument("--delete-only",  action="store_true", help="Delete junk files, skip conversion")
-    p.add_argument("--dry-run",      action="store_true", help="Print what would happen; change nothing")
+    p.add_argument("mars_data",       type=Path,  help="Path to the mars_data/ directory")
+    p.add_argument("--download",      action="store_true", help="Download missing DEM/DRG files from S3")
+    p.add_argument("--workers",       type=int,   default=4,  help="Parallel workers (default: 4)")
+    p.add_argument("--jpeg-quality",  type=int,   default=88, help="JPEG quality for DRGs (default: 88)")
+    p.add_argument("--dem-only",      action="store_true", help="Convert DEMs only, skip DRGs")
+    p.add_argument("--drg-only",      action="store_true", help="Convert DRGs only, skip DEMs")
+    p.add_argument("--delete-only",   action="store_true", help="Delete junk files, skip conversion")
+    p.add_argument("--dry-run",       action="store_true", help="Print what would happen; change nothing")
     args = p.parse_args()
 
     mars_data = args.mars_data.expanduser().resolve()
@@ -226,30 +310,49 @@ def main():
         print(f"Error: {mars_data} is not a directory", file=sys.stderr)
         sys.exit(1)
 
-    do_dem    = not args.drg_only  and not args.delete_only
-    do_drg    = not args.dem_only  and not args.delete_only
-    do_delete = not args.dem_only  and not args.drg_only
+    do_dem      = not args.drg_only  and not args.delete_only
+    do_drg      = not args.dem_only  and not args.delete_only
+    do_delete   = not args.dem_only  and not args.drg_only
+    do_download = args.download
 
     pair_dirs = sorted(d for d in mars_data.iterdir() if d.is_dir() and not d.name.startswith("."))
     total_pairs = len(pair_dirs)
 
+    # Quick inventory before we start.
+    n_done = sum(1 for d in pair_dirs if (d / ".dem_done").exists())
+    n_empty = sum(
+        1 for d in pair_dirs
+        if not (d / f"{d.name}-DEM-geoid-adj.tif").exists() and not (d / ".dem_done").exists()
+    )
+    n_ready = total_pairs - n_done - n_empty
+
     print(f"mars_data:  {mars_data}")
-    print(f"Pair dirs:  {total_pairs:,}")
+    print(f"Pair dirs:  {total_pairs:,}  ({n_done:,} done  {n_ready:,} ready to convert  {n_empty:,} missing DEM)")
     print(f"Workers:    {args.workers}")
-    print(f"Actions:    {'DEM ' if do_dem else ''}{'DRG ' if do_drg else ''}{'DELETE' if do_delete else ''}")
+    actions = []
+    if do_delete:   actions.append("DELETE junk")
+    if do_download: actions.append("DOWNLOAD missing")
+    if do_dem:      actions.append("convert DEM")
+    if do_drg:      actions.append("convert DRG")
+    print(f"Actions:    {' → '.join(actions)}")
+    if not do_download and n_empty > 0:
+        print(f"  (tip: add --download to fetch the {n_empty:,} pairs with missing DEMs from S3)")
     if args.dry_run:
         print("DRY RUN — no files will be modified or deleted")
     print()
 
     done = 0
-    failures = []
+    failures: list[str] = []
+    downloads = 0
     total_freed = 0
     t0 = time.monotonic()
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {
             pool.submit(
-                process_pair, d, do_dem, do_drg, do_delete, args.jpeg_quality, args.dry_run
+                process_pair,
+                d, do_dem, do_drg, do_delete, do_download,
+                args.jpeg_quality, args.dry_run,
             ): d
             for d in pair_dirs
         }
@@ -257,6 +360,8 @@ def main():
             result = future.result()
             done += 1
             total_freed += result["freed"]
+            if result["downloaded"]:
+                downloads += 1
 
             if "FAILED" in " ".join(result["msgs"]):
                 failures.append(result["name"])
@@ -266,14 +371,13 @@ def main():
                 rate = done / elapsed if elapsed > 0 else 0
                 eta = (total_pairs - done) / rate if rate > 0 else 0
                 freed_gb = total_freed / 1e9
+                dl_str = f"  {downloads} downloaded  |" if do_download else ""
                 print(
-                    f"[{done:>6}/{total_pairs}]  "
-                    f"{freed_gb:>6.1f} GB freed  |  "
-                    f"{rate:.1f} pairs/s  |  "
-                    f"ETA {eta/60:.0f} min"
+                    f"[{done:>6}/{total_pairs}] {freed_gb:>6.1f} GB freed  |{dl_str}"
+                    f"  {rate:.1f} pairs/s  |  ETA {eta/60:.0f} min"
                 )
 
-            # Always print failures immediately.
+            # Print failures immediately so they're not buried.
             for msg in result["msgs"]:
                 if "FAILED" in msg:
                     print(f"  FAIL  {result['name']}: {msg}", file=sys.stderr)
@@ -281,7 +385,9 @@ def main():
     elapsed = time.monotonic() - t0
     print()
     print(f"Done in {elapsed/60:.1f} min")
-    print(f"Space freed: {total_freed/1e9:.2f} GB")
+    print(f"Space freed:  {total_freed/1e9:.2f} GB")
+    if do_download:
+        print(f"Downloaded:   {downloads:,} pairs")
     if failures:
         print(f"Failures ({len(failures)}):", file=sys.stderr)
         for f in failures:
