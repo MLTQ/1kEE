@@ -234,9 +234,10 @@ pub fn load_srtm_region_for_view(
         missing
     }; // guard dropped here
 
-    // Phase 2: spawn detached threads for each newly-claimed tile; return
-    // immediately with whatever is currently cached rather than blocking.
-    for (key, asset) in missing {
+    let is_missing_empty = missing.is_empty();
+    
+    let missing_clone = missing.clone();
+    for (key, asset) in missing_clone {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let query_result = query_local_contours(
@@ -315,8 +316,15 @@ pub fn load_srtm_region_for_view(
     }
 
     if merged.is_empty() {
-        return None;
+        if is_missing_empty {
+            let empty = Arc::new(Vec::new());
+            guard.zoom_fallback = Some(empty.clone());
+            return Some(empty);
+        }
+        return guard.zoom_fallback.clone();
     }
+
+    guard.zoom_fallback = None;
 
     Some(Arc::new(merged))
 }
@@ -402,11 +410,13 @@ pub fn load_lunar_region_for_view(
         missing
     };
 
-    if !missing.is_empty() {
+    let is_missing_empty = missing.is_empty();
+    if !is_missing_empty {
+        let missing_clone = missing.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let loaded =
-                query_local_contours_batch(&missing[0].0.path, &missing, per_asset_budget).ok();
+                query_local_contours_batch(&missing_clone[0].0.path, &missing_clone, per_asset_budget).ok();
 
             if let Ok(mut g) = cache.lock() {
                 if let Some(loaded) = loaded {
@@ -416,7 +426,7 @@ pub fn load_lunar_region_for_view(
                             .or_insert_with(|| Arc::new(contours));
                     }
                 }
-                for (key, _) in &missing {
+                for (key, _) in &missing_clone {
                     g.in_flight.remove(key);
                 }
             }
@@ -468,6 +478,11 @@ pub fn load_lunar_region_for_view(
     }
 
     if merged.is_empty() {
+        if is_missing_empty {
+            let empty = Arc::new(Vec::new());
+            guard.zoom_fallback = Some(empty.clone());
+            return Some(empty);
+        }
         // No new-zoom tiles loaded yet — return the fallback from the previous
         // zoom level so the screen isn't blank while tiles are building.
         return guard.zoom_fallback.clone();
@@ -556,11 +571,13 @@ pub fn load_mars_region_for_view(
         missing
     };
 
-    if !missing.is_empty() {
+    let is_missing_empty = missing.is_empty();
+    if !is_missing_empty {
+        let missing_clone = missing.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let loaded =
-                query_local_contours_batch(&missing[0].0.path, &missing, per_asset_budget).ok();
+                query_local_contours_batch(&missing_clone[0].0.path, &missing_clone, per_asset_budget).ok();
 
             if let Ok(mut g) = cache.lock() {
                 if let Some(loaded) = loaded {
@@ -570,7 +587,7 @@ pub fn load_mars_region_for_view(
                             .or_insert_with(|| Arc::new(contours));
                     }
                 }
-                for (key, _) in &missing {
+                for (key, _) in &missing_clone {
                     g.in_flight.remove(key);
                 }
             }
@@ -614,6 +631,11 @@ pub fn load_mars_region_for_view(
     }
 
     if merged.is_empty() {
+        if is_missing_empty {
+            let empty = Arc::new(Vec::new());
+            guard.zoom_fallback = Some(empty.clone());
+            return Some(empty);
+        }
         return guard.zoom_fallback.clone();
     }
 
@@ -1294,13 +1316,12 @@ fn query_local_contours_batch(
             contours = contours
                 .into_iter()
                 .enumerate()
-                .filter_map(|(index, contour)| (index % keep_step == 0).then_some(contour))
+                .filter(|(index, _)| index % keep_step == 0)
+                .map(|(_, contour)| contour)
                 .collect();
         }
 
-        if !contours.is_empty() {
-            results.push((key.clone(), contours));
-        }
+        results.push((key.clone(), contours));
     }
 
     Ok(results)
