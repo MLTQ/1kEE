@@ -321,10 +321,10 @@ pub fn find_sldem_jp2(selected_root: Option<&Path>) -> Option<PathBuf> {
     None
 }
 
-/// Find all MOLA MEGDR topography tiles (`megt*.img`) under `Mars/MOLA/`.
-/// Returns a sorted list of paths; empty if the directory doesn't exist or
-/// contains no matching files.  The companion `.lbl` label files must sit
-/// alongside each `.img` for GDAL's PDS3 driver to read them correctly.
+/// Find all MOLA MEGDR topography tiles under `Mars/MOLA/`.
+/// Returns a sorted list of `.lbl` label-file paths (the correct GDAL entry
+/// point for PDS3 data — the driver reads the label and locates the `.img`).
+/// Empty if the directory doesn't exist or contains no matching files.
 pub fn find_mola_tiles(selected_root: Option<&Path>) -> Vec<PathBuf> {
     let Some(mars_root) = find_mars_data_root(selected_root) else {
         return Vec::new();
@@ -337,10 +337,13 @@ pub fn find_mola_tiles(selected_root: Option<&Path>) -> Vec<PathBuf> {
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| {
-            p.extension().and_then(|e| e.to_str()) == Some("img")
+            // Accept .lbl or .LBL (PDS3 label — the correct GDAL entry point).
+            p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("lbl"))
                 && p.file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("megt"))
+                    .is_some_and(|n| n.to_ascii_lowercase().starts_with("megt"))
         })
         .collect();
     tiles.sort();

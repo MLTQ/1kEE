@@ -135,10 +135,14 @@ fn find_mola_tiles(data_root: &Path) -> Vec<PathBuf> {
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| {
-            p.extension().and_then(|e| e.to_str()) == Some("img")
+            // Use .lbl / .LBL (PDS3 label) — the correct GDAL entry point.
+            // The PDS3 driver reads the label first, then locates the .img data.
+            p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("lbl"))
                 && p.file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("megt"))
+                    .is_some_and(|n| n.to_ascii_lowercase().starts_with("megt"))
         })
         .collect();
     tiles.sort();

@@ -982,9 +982,9 @@ pub fn build_lunar_contour_tile(
 }
 
 /// Build or reuse a VRT mosaicking all MOLA MEGDR topography tiles.
-/// Stored as `mola_megdr.vrt` alongside the source `.img` files so it only
-/// needs to be generated once.  Returns `None` if the tile list is empty or
-/// `gdalbuildvrt` fails.
+/// Stored as `mola_megdr.vrt` alongside the source files so it only needs to
+/// be generated once.  Inputs are `.lbl` label paths (the PDS3 entry point).
+/// Returns `None` if the tile list is empty or `gdalbuildvrt` fails.
 fn ensure_mola_vrt(mola_tiles: &[PathBuf]) -> Option<PathBuf> {
     let vrt_path = mola_tiles.first()?.parent()?.join("mola_megdr.vrt");
     if vrt_path.exists() {
