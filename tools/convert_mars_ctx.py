@@ -96,7 +96,21 @@ def find_tool(name: str) -> str:
 
 
 GDALWARP = find_tool("gdalwarp")
+GDALINFO = find_tool("gdalinfo")
 AWS = find_tool("aws")
+
+
+def is_readable_raster(path: Path) -> bool:
+    """Return True if GDAL can open and read the file's metadata."""
+    try:
+        result = subprocess.run(
+            [GDALINFO, str(path)],
+            capture_output=True,
+            timeout=30,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
 
 
 # ── S3 download ───────────────────────────────────────────────────────────────
@@ -150,10 +164,10 @@ def sync_from_s3(
 
 # ── Per-file conversion ───────────────────────────────────────────────────────
 
-def _warp_to_cog(src: Path, dst: Path, extra_args: list[str], timeout: int) -> bool:
+def _warp_to_cog(src: Path, dst: Path, extra_args: list[str], timeout: int) -> tuple[bool, str]:
     """
     Run gdalwarp on `src` → a .tmp file → atomically rename to `dst`.
-    Returns True on success.
+    Returns (success, error_message).
     """
     tmp = dst.with_suffix(".tmp.tif")
     try:
@@ -169,15 +183,19 @@ def _warp_to_cog(src: Path, dst: Path, extra_args: list[str], timeout: int) -> b
         result = subprocess.run(cmd, capture_output=True, timeout=timeout)
         if result.returncode != 0:
             tmp.unlink(missing_ok=True)
-            return False
+            err = result.stderr.decode(errors="replace").strip()
+            return False, err[:200] if err else f"gdalwarp exit {result.returncode}"
         tmp.replace(dst)   # atomic on POSIX/APFS
-        return True
-    except Exception:
+        return True, ""
+    except subprocess.TimeoutExpired:
         tmp.unlink(missing_ok=True)
-        return False
+        return False, "timeout"
+    except Exception as exc:
+        tmp.unlink(missing_ok=True)
+        return False, str(exc)
 
 
-def convert_dem(src: Path, jpeg_quality: int) -> bool:
+def convert_dem(src: Path, jpeg_quality: int) -> tuple[bool, str]:
     """Float32 orthographic → Int16 DEFLATE COG in Mars longlat."""
     return _warp_to_cog(
         src, src,
@@ -191,11 +209,12 @@ def convert_dem(src: Path, jpeg_quality: int) -> bool:
     )
 
 
-def convert_drg(src: Path, jpeg_quality: int) -> bool:
+def convert_drg(src: Path, jpeg_quality: int) -> tuple[bool, str]:
     """Orthographic grayscale orthoimage → JPEG COG in Mars longlat."""
     return _warp_to_cog(
         src, src,
         extra_args=[
+            "-ot", "Byte",          # normalise to uint8; JPEG requires <= 16-bit
             "-co", "COMPRESS=JPEG",
             "-co", f"JPEG_QUALITY={jpeg_quality}",
         ],
@@ -261,14 +280,19 @@ def process_pair(
         if dry_run:
             msgs.append(f"would convert DEM ({before/1e6:.1f} MB)")
         else:
-            ok = convert_dem(dem, jpeg_quality)
+            ok, err = convert_dem(dem, jpeg_quality)
             if ok:
                 after = dem.stat().st_size
                 dem_marker.touch()
                 msgs.append(f"DEM {before/1e6:.1f}→{after/1e6:.1f} MB")
                 bytes_freed += before - after
+            elif not is_readable_raster(dem):
+                # Truncated download — delete so --download can re-fetch it.
+                dem.unlink()
+                bytes_freed += before
+                msgs.append(f"DEM corrupt ({before/1e6:.1f} MB deleted — re-run with --download)")
             else:
-                msgs.append("DEM FAILED")
+                msgs.append(f"DEM FAILED: {err}")
 
     # ── 4. Convert DRG ────────────────────────────────────────────────────────
     if do_drg and drg.exists() and not drg_marker.exists():
@@ -276,14 +300,19 @@ def process_pair(
         if dry_run:
             msgs.append(f"would convert DRG ({before/1e6:.1f} MB)")
         else:
-            ok = convert_drg(drg, jpeg_quality)
+            ok, err = convert_drg(drg, jpeg_quality)
             if ok:
                 after = drg.stat().st_size
                 drg_marker.touch()
                 msgs.append(f"DRG {before/1e6:.1f}→{after/1e6:.1f} MB")
                 bytes_freed += before - after
+            elif not is_readable_raster(drg):
+                # Truncated download — delete so --download can re-fetch it.
+                drg.unlink()
+                bytes_freed += before
+                msgs.append(f"DRG corrupt ({before/1e6:.1f} MB deleted — re-run with --download)")
             else:
-                msgs.append("DRG FAILED")
+                msgs.append(f"DRG FAILED: {err}")
 
     return {"name": name, "msgs": msgs, "freed": bytes_freed, "downloaded": downloaded}
 
@@ -363,7 +392,8 @@ def main():
             if result["downloaded"]:
                 downloads += 1
 
-            if "FAILED" in " ".join(result["msgs"]):
+            joined = " ".join(result["msgs"])
+            if "FAILED:" in joined:
                 failures.append(result["name"])
 
             if done % 500 == 0 or done == total_pairs:
@@ -377,10 +407,12 @@ def main():
                     f"  {rate:.1f} pairs/s  |  ETA {eta/60:.0f} min"
                 )
 
-            # Print failures immediately so they're not buried.
+            # Print failures and corrupt files immediately so they're not buried.
             for msg in result["msgs"]:
-                if "FAILED" in msg:
-                    print(f"  FAIL  {result['name']}: {msg}", file=sys.stderr)
+                if "FAILED:" in msg:
+                    print(f"  FAIL    {result['name']}: {msg}", file=sys.stderr)
+                elif "corrupt" in msg:
+                    print(f"  CORRUPT {result['name']}: {msg}", file=sys.stderr)
 
     elapsed = time.monotonic() - t0
     print()
