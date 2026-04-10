@@ -772,7 +772,7 @@ pub fn build_focus_contours(
         return None;
     }
 
-    run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m).ok()?;
+    run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m, Some(-32768)).ok()?;
     import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path).ok()?;
 
     // Piggyback: extract 0m coastline from the same warped TIF while we have it.
@@ -852,7 +852,7 @@ pub fn build_lunar_contour_tile(
         return None;
     }
 
-    run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m).ok()?;
+    run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m, Some(-32768)).ok()?;
     import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path).ok()?;
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
     Some(())
@@ -913,7 +913,7 @@ pub fn build_mars_contour_tile(
         return None;
     }
 
-    run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m).ok()?;
+    run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m, Some(-32767)).ok()?;
     import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path).ok()?;
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
     Some(())
@@ -980,7 +980,7 @@ fn run_gdalwarp(
     run_command(command, "gdalwarp")
 }
 
-fn run_gdal_contour(input_path: &Path, output_path: &Path, interval_m: i32) -> std::io::Result<()> {
+fn run_gdal_contour(input_path: &Path, output_path: &Path, interval_m: i32, nodata: Option<i32>) -> std::io::Result<()> {
     let mut command = Command::new(gdal_tool_path("gdal_contour"));
     command.args([
         "-q",
@@ -990,8 +990,11 @@ fn run_gdal_contour(input_path: &Path, output_path: &Path, interval_m: i32) -> s
         "elevation_m",
         "-i",
         &interval_m.to_string(),
-        "-snodata",
-        "-32768",
+    ]);
+    if let Some(nd) = nodata {
+        command.args(["-snodata", &nd.to_string()]);
+    }
+    command.args([
         "-nln",
         "contour",
     ]);
