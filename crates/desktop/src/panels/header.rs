@@ -73,11 +73,10 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
                     if model.active_body != ActiveBody::Earth {
                         model.globe_view.local_mode = false;
                     }
-                    
                     let new_theme = match model.active_body {
                         ActiveBody::Earth => crate::theme::MapTheme::Topo,
                         ActiveBody::Moon => crate::theme::MapTheme::Lunar,
-                        ActiveBody::Mars => crate::theme::MapTheme::Topo, // Will hook into Mars Theme shortly.
+                        ActiveBody::Mars => crate::theme::MapTheme::MarsDark,
                     };
                     model.map_theme = new_theme;
                     crate::theme::set_theme(ui.ctx(), new_theme);

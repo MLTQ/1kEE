@@ -302,24 +302,47 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     }
     draw_legend(painter, rect, &layout, &model.globe_view, &lod);
 
-    // ── Lunar contour build progress ────────────────────────────────────────
-    if model.active_body != crate::model::ActiveBody::Earth {
-        let (lunar_ready, lunar_building, lunar_total) = srtm_focus_cache::lunar_tile_counts(
+    // ── Contour build progress (Moon/Mars) ────────────────────────────────────────
+    if model.active_body == crate::model::ActiveBody::Moon {
+        let (ready, building, total) = srtm_focus_cache::lunar_tile_counts(
             selected_root,
             model.globe_view.local_center,
-            1.5, // fixed globe tile zoom (mirrors GLOBE_TILE_ZOOM in contour_asset)
+            1.5, // fixed globe tile zoom
             2,   // radius
         );
-        if lunar_total > 0 && lunar_ready < lunar_total {
-            draw_lunar_build_overlay(
+        if total > 0 && ready < total {
+            draw_build_overlay(
                 painter,
                 rect,
                 &layout,
                 &model.globe_view,
-                lunar_ready,
-                lunar_building,
-                lunar_total,
+                ready,
+                building,
+                total,
                 time,
+                "SLDEM",
+                egui::Color32::from_rgb(155, 200, 248),
+            );
+        }
+    } else if model.active_body == crate::model::ActiveBody::Mars {
+        let (ready, building, total) = srtm_focus_cache::mars_tile_counts(
+            selected_root,
+            model.globe_view.local_center,
+            1.5, // fixed globe tile zoom
+            2,   // radius
+        );
+        if total > 0 && ready < total {
+            draw_build_overlay(
+                painter,
+                rect,
+                &layout,
+                &model.globe_view,
+                ready,
+                building,
+                total,
+                time,
+                "CTX",
+                theme::camera_color(),
             );
         }
     }
@@ -602,8 +625,8 @@ fn draw_graticule(painter: &egui::Painter, layout: &GlobeLayout, view: &GlobeVie
     super::graticule::draw_graticule(painter, layout, view);
 }
 
-/// Progress card + pulsing globe ring shown while lunar contour tiles are building.
-fn draw_lunar_build_overlay(
+/// Progress card + pulsing globe ring shown while contour tiles are building.
+fn draw_build_overlay(
     painter: &egui::Painter,
     rect: egui::Rect,
     layout: &GlobeLayout,
@@ -612,6 +635,8 @@ fn draw_lunar_build_overlay(
     building: usize,
     total: usize,
     time: f64,
+    label_prefix: &str,
+    accent: egui::Color32,
 ) {
     // ── Progress card (bottom-right) ──────────────────────────────────────
     const CARD_W: f32 = 220.0;
@@ -625,7 +650,6 @@ fn draw_lunar_build_overlay(
         egui::vec2(frame.width(), 6.0),
     );
     let progress = (ready as f32 / total as f32).clamp(0.0, 1.0);
-    let accent = egui::Color32::from_rgb(155, 200, 248); // lunar blue-white
 
     painter.rect_filled(frame, 6.0, theme::panel_fill(208));
     painter.rect_stroke(
@@ -637,7 +661,7 @@ fn draw_lunar_build_overlay(
     painter.text(
         frame.left_top() + egui::vec2(8.0, 6.0),
         egui::Align2::LEFT_TOP,
-        format!("SLDEM {ready} / {total}  ·  {building} BUILDING"),
+        format!("{label_prefix} {ready} / {total}  ·  {building} BUILDING"),
         egui::FontId::monospace(10.5),
         theme::text_muted(),
     );
