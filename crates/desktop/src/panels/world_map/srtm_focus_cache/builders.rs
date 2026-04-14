@@ -1,4 +1,4 @@
-use super::db::tile_exists;
+use super::db::{tile_contour_count, tile_exists};
 use super::gdal::{build_focus_contours, build_lunar_contour_tile, build_mars_contour_tile, shutdown_requested};
 use super::zoom::spec_for_zoom;
 use super::{FocusContourAsset, FocusContourSpec, GeoBounds, TileKey};
@@ -216,10 +216,14 @@ pub fn ensure_lunar_bucket_asset(
     None
 }
 
-/// Mars analogue of `ensure_bucket_asset` — sources from a single Mars CTX
-/// VRT instead of a directory of SRTM tiles.
+/// Mars analogue of `ensure_bucket_asset` — queries the spatial index for
+/// CTX DTM tiles covering this bucket and warps them to Mars longlat on demand.
+/// When `mola_tiles` is non-empty it is used as a global fallback for regions
+/// with no CTX coverage, and any previously cached 0-count (empty) tiles are
+/// rebuilt from MOLA on the next call.
 pub fn ensure_mars_bucket_asset(
-    vrt_path: &Path,
+    data_root: &Path,
+    mola_tiles: &[std::path::PathBuf],
     cache_root: &Path,
     cache_db_path: &Path,
     connection: &Connection,
@@ -243,14 +247,32 @@ pub fn ensure_mars_bucket_asset(
         lon_bucket,
     };
 
-    if tile_exists(connection, tile).unwrap_or(false) {
-        return Some(FocusContourAsset {
-            path: cache_db_path.to_path_buf(),
-            simplify_step: spec.simplify_step,
-            zoom_bucket: spec.zoom_bucket,
-            lat_bucket,
-            lon_bucket,
-        });
+    // Check the cache.  A tile with contour_count > 0 is fully built — serve it.
+    // A tile with contour_count = 0 was previously marked empty (no CTX coverage);
+    // if MOLA is now available we fall through and rebuild it.
+    match tile_contour_count(connection, tile).unwrap_or(None) {
+        Some(count) if count > 0 => {
+            return Some(FocusContourAsset {
+                path: cache_db_path.to_path_buf(),
+                simplify_step: spec.simplify_step,
+                zoom_bucket: spec.zoom_bucket,
+                lat_bucket,
+                lon_bucket,
+            });
+        }
+        Some(0) if mola_tiles.is_empty() => {
+            // Cached empty and no MOLA to upgrade it — serve the empty asset
+            // so the render loop doesn't retry this tile every frame.
+            return Some(FocusContourAsset {
+                path: cache_db_path.to_path_buf(),
+                simplify_step: spec.simplify_step,
+                zoom_bucket: spec.zoom_bucket,
+                lat_bucket,
+                lon_bucket,
+            });
+        }
+        // Some(0) with MOLA available, or None (not cached yet) — fall through to build.
+        _ => {}
     }
 
     let pending = mars_pending_set();
@@ -260,12 +282,12 @@ pub fn ensure_mars_bucket_asset(
             return None; // already in-flight
         }
         if guard.len() >= MAX_CONCURRENT_LUNAR_BUILDS {
-            return None; // MRO CTX VRT can have the same limits
+            return None; // same concurrency cap as lunar
         }
     }
 
     if !try_acquire_build_slot() {
-        return None; 
+        return None;
     }
 
     let mut guard = pending.lock().ok()?;
@@ -275,12 +297,14 @@ pub fn ensure_mars_bucket_asset(
     }
     drop(guard);
 
-    let vrt_path = vrt_path.to_path_buf();
+    let data_root = data_root.to_path_buf();
+    let mola_tiles = mola_tiles.to_vec();
     let cache_root = cache_root.to_path_buf();
     let cache_db_path = cache_db_path.to_path_buf();
     std::thread::spawn(move || {
-        let _ =
-            build_mars_contour_tile(&vrt_path, &cache_root, &cache_db_path, tile, bounds, spec);
+        let _ = build_mars_contour_tile(
+            &data_root, &mola_tiles, &cache_root, &cache_db_path, tile, bounds, spec,
+        );
         if let Ok(mut guard) = mars_pending_set().lock() {
             guard.remove(&tile);
         }
