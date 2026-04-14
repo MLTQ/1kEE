@@ -29,6 +29,7 @@ pub fn request_repaint() {
 pub struct DashboardApp {
     model: AppModel,
     last_theme: theme::MapTheme,
+    _puffin_server: puffin_http::Server,
 }
 
 impl DashboardApp {
@@ -47,10 +48,16 @@ impl DashboardApp {
         // Open the event history store (creates DB if not present).
         crate::event_store::open();
 
+        puffin::set_scopes_on(true);
+        let puffin_server =
+            puffin_http::Server::new("127.0.0.1:8585").expect("failed to start puffin server");
+        eprintln!("puffin profiler server on 127.0.0.1:8585 — connect with `puffin_viewer`");
+
         let model = AppModel::seed_demo();
         Self {
             last_theme: model.map_theme,
             model,
+            _puffin_server: puffin_server,
         }
     }
 }
@@ -65,6 +72,8 @@ impl Drop for DashboardApp {
 
 impl eframe::App for DashboardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        puffin::GlobalProfiler::lock().new_frame();
+
         factal_stream::tick(&mut self.model);
         factal_stream::history_tick(&mut self.model);
         camera_registry::tick(&mut self.model);

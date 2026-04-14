@@ -91,6 +91,7 @@ pub(super) fn draw_water(
     render_zoom: f32,
     show_water: bool,
 ) {
+    puffin::profile_function!();
     if !show_water {
         if let Ok(mut g) = water_cache().lock() {
             g.cache = None;

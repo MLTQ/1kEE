@@ -14,6 +14,7 @@ use super::globe_scene::{GlobeLayout, project_geo};
 /// meridian) use `hot_color()`; major 30° lines use brighter `wireframe_color()`;
 /// minor subdivisions use plain `wireframe_color()`.
 pub(super) fn draw_graticule(painter: &egui::Painter, layout: &GlobeLayout, view: &GlobeViewState) {
+    puffin::profile_function!();
     let step: f32 = if layout.radius >= 300.0 {
         10.0
     } else if layout.radius >= 120.0 {

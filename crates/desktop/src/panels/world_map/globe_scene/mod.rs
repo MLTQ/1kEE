@@ -43,6 +43,7 @@ pub struct ProjectedPoint {
 }
 
 pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: f64) -> GlobeScene {
+    puffin::profile_function!();
     painter.rect_filled(rect, 12.0, theme::canvas_background());
 
     let lod = camera::lod(&model.globe_view);

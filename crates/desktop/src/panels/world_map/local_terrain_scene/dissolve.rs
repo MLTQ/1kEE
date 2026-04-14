@@ -26,6 +26,7 @@ pub(super) fn draw_tile_pulse_grid(
     ready_buckets: &std::collections::HashSet<(i32, i32)>,
     half_extent_override: Option<f32>,
 ) {
+    puffin::profile_function!();
     const GRID: usize = 50; // 50×50 = 2 500 cells per tile
     const DISSOLVE_CYCLE: f64 = 7.0; // seconds for one full sweep
     const EDGE_BAND: f32 = 0.14; // fraction of cycle that counts as "burning"

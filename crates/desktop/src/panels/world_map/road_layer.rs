@@ -109,6 +109,7 @@ pub(super) fn draw_roads(
     show_major_roads: bool,
     show_minor_roads: bool,
 ) {
+    puffin::profile_function!();
     // Dynamically calculate the SQLite `road_tiles` zoom level to query based on render depth.
     // If we're fully zoomed out, this drops to 4, preventing 1,000,000-tile queries!
     let tile_zoom = super::local_terrain_scene::road_tile_zoom(render_zoom);

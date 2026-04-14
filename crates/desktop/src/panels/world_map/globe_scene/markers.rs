@@ -16,6 +16,7 @@ pub(super) fn draw_ships(
     tracks: &[MovingTrack],
     selected_mmsi: Option<u64>,
 ) {
+    puffin::profile_function!();
     // Cyan-teal — distinct from event (red/orange) and camera (blue) markers.
     let ship_color = egui::Color32::from_rgb(40, 210, 180);
     let selected_color = egui::Color32::from_rgb(255, 230, 80);
@@ -98,6 +99,7 @@ pub(super) fn draw_flights(
     flights: &[FlightTrack],
     selected_icao24: Option<&str>,
 ) {
+    puffin::profile_function!();
     for flight in flights {
         let Some(proj) = project_geo(layout, view, flight.location, 0.0) else {
             continue;

@@ -14,6 +14,7 @@ pub(super) fn draw_bathymetry_local(
     render_zoom: f32,
     selected_root: Option<&Path>,
 ) {
+    puffin::profile_function!();
     // Use GEBCO bathymetry — same zoom/LOD approach as global coastline.
     let bathy_zoom = view.local_zoom.clamp(1.0, 8.0);
     let Some(bathy) =
@@ -91,6 +92,7 @@ pub(super) fn draw_coastlines_local(
     _render_zoom: f32,
     selected_root: Option<&Path>,
 ) {
+    puffin::profile_function!();
     let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
     let km_per_deg_lat = 111.32f32;
     let km_per_deg_lon = km_per_deg_lat * focus.lat.to_radians().cos().abs().max(0.2);

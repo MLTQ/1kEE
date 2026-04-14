@@ -63,6 +63,7 @@ pub(super) struct ProjectedLocalPoint {
 }
 
 pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: f64) -> GlobeScene {
+    puffin::profile_function!();
     painter.rect_filled(rect, 12.0, theme::canvas_background());
     if !model.cinematic_mode {
         dissolve::draw_frame(painter, rect);
@@ -707,6 +708,7 @@ fn draw_local_beam(
     contours: Option<&[contour_asset::ContourPath]>,
     show: bool,
 ) -> f32 {
+    puffin::profile_function!();
     let cherry = egui::Color32::from_rgb(210, 18, 50);
 
     // Derive terrain elevation at the crosshair from the loaded contour data —
@@ -1101,6 +1103,7 @@ fn draw_elevation_fill(
     selected_root: Option<&std::path::Path>,
     active_body: crate::model::ActiveBody,
 ) {
+    puffin::profile_function!();
     // Load GEBCO bathymetry contours and extract midpoints within the viewport.
     // These provide ocean-floor elevation samples so IDW gives negative elevations
     // for ocean areas instead of extrapolating from land contours.
@@ -1217,6 +1220,7 @@ fn draw_contour_stack(
     alpha: f32,
     active_body: crate::model::ActiveBody,
 ) {
+    puffin::profile_function!();
     // 300_000 points prevents WGPU Validation Error index buffer overflow
     // when 1600+ cached terrain tiles accumulate.
     const MAX_CONTOUR_RENDER_POINTS: usize = 300_000;
@@ -1311,6 +1315,7 @@ fn draw_loading_boxes(
     view: &GlobeViewState,
     focus: GeoPoint,
 ) {
+    puffin::profile_function!();
     let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
     let km_per_deg_lat = 111.32f32;
     let km_per_deg_lon = km_per_deg_lat * focus.lat.to_radians().cos().abs().max(0.2);

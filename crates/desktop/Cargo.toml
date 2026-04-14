@@ -21,3 +21,5 @@ cell-format = { path = "../cell_format" }
 tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 crossbeam-channel = "0.5.15"
 rayon = "1.11.0"
+puffin = "0.19"
+puffin_http = "0.16"

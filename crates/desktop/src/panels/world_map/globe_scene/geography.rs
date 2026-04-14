@@ -32,6 +32,7 @@ pub(super) fn draw_global_coastlines(
     view: &GlobeViewState,
     selected_root: Option<&std::path::Path>,
 ) {
+    puffin::profile_function!();
     let Some(coastlines) =
         contour_asset::load_global_coastlines(selected_root, view.zoom, painter.ctx().clone())
     else {
@@ -60,6 +61,7 @@ pub(super) fn draw_global_bathymetry(
     view: &GlobeViewState,
     selected_root: Option<&std::path::Path>,
 ) {
+    puffin::profile_function!();
     // ── Layer 1: depth-fill texture mapped onto the sphere ───────────────────
     //
     // Strategy: upload a 1440×720 (0.25°/px) depth ColorImage as an egui
@@ -176,6 +178,7 @@ pub(super) fn draw_geojson_layers(
     view: &GlobeViewState,
     layers: &[GeoJsonLayer],
 ) {
+    puffin::profile_function!();
     for layer in layers {
         if !layer.visible {
             continue;
@@ -281,6 +284,7 @@ pub(super) fn draw_global_topo(
     view: &GlobeViewState,
     selected_root: Option<&std::path::Path>,
 ) {
+    puffin::profile_function!();
     // Crossfade: full opacity at zoom ≤ 3.0, fade to zero by zoom 5.0.
     // SRTM globe tiles fade in from 1.5→3.0, so there is overlap in the
     // 3–5× range where both layers contribute before SRTM dominates.
@@ -325,6 +329,7 @@ pub(super) fn draw_srtm_on_globe(
     _lod: &GlobeLod,
     selected_root: Option<&std::path::Path>,
 ) {
+    puffin::profile_function!();
     if view.zoom < 1.5 {
         return;
     }
@@ -373,6 +378,7 @@ pub(super) fn draw_lunar_topo(
     view: &GlobeViewState,
     selected_root: Option<&std::path::Path>,
 ) {
+    puffin::profile_function!();
     // ── Contour lines ─────────────────────────────────────────────────────────
     // Fade in from zoom 0.6 → 1.4 so they don't clutter the full-disc view.
     let contour_alpha = ((view.zoom - 0.6) / 0.8).clamp(0.0, 1.0);
@@ -448,6 +454,7 @@ pub(super) fn draw_mars_topo(
     view: &GlobeViewState,
     selected_root: Option<&std::path::Path>,
 ) {
+    puffin::profile_function!();
     // ── Contour lines ─────────────────────────────────────────────────────────
     // Fade in from zoom 0.6 → 1.4 so they don't clutter the full-disc view.
     let contour_alpha = ((view.zoom - 0.6) / 0.8).clamp(0.0, 1.0);

@@ -74,6 +74,7 @@ pub(super) fn draw_waterways(
     render_zoom: f32,
     show_waterways: bool,
 ) {
+    puffin::profile_function!();
     let _ = render_zoom; // zoom no longer drives cache invalidation
 
     if !show_waterways {
