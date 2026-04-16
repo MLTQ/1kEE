@@ -299,18 +299,7 @@ pub(super) fn draw_global_topo(
         return;
     };
 
-    // Cap by contour count rather than by point count so the selection is
-    // stable across frames.  Contours are already sorted by |elevation| in
-    // render_globe_tiles, so this naturally keeps the lowest (most visible)
-    // contours and drops the high-frequency minor ones when over budget.
-    const MAX_GLOBE_TOPO_CONTOURS: usize = 2_000;
-    let topo_slice = if topo.len() > MAX_GLOBE_TOPO_CONTOURS {
-        &topo[..MAX_GLOBE_TOPO_CONTOURS]
-    } else {
-        topo.as_slice()
-    };
-
-    for contour in topo_slice {
+    for contour in topo.iter() {
         let major = (contour.elevation_m.round() as i32).rem_euclid(2_000) == 0;
         let color = if major {
             theme::hot_color()
@@ -358,18 +347,7 @@ pub(super) fn draw_srtm_on_globe(
         return;
     };
 
-    // Cap by contour count, not by point count, so the budget is stable across
-    // frames.  render_globe_tiles sorts by |elevation|, so truncating here
-    // keeps the lowest-elevation (most prominent) contours and drops minor
-    // high-frequency ones — the right trade-off for globe-scale rendering.
-    const MAX_GLOBE_SRTM_CONTOURS: usize = 3_000;
-    let contour_slice = if contours.len() > MAX_GLOBE_SRTM_CONTOURS {
-        &contours[..MAX_GLOBE_SRTM_CONTOURS]
-    } else {
-        contours.as_slice()
-    };
-
-    for contour in contour_slice {
+    for contour in contours.iter() {
         let major = (contour.elevation_m.round() as i32).rem_euclid(50) == 0;
         let color = if major {
             theme::hot_color()
