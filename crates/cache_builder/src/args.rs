@@ -44,6 +44,17 @@ pub struct BboxCommand {
     pub build_buildings: bool,
     pub build_trees: bool,
     pub build_admin: bool,
+    // Infrastructure layers
+    pub build_power: bool,
+    pub build_rail: bool,
+    pub build_pipeline: bool,
+    pub build_aeroway: bool,
+    pub build_military: bool,
+    pub build_comm: bool,
+    pub build_industrial: bool,
+    pub build_port: bool,
+    pub build_government: bool,
+    pub build_surveillance: bool,
 }
 
 pub type RoadsBboxCommand = BboxCommand;
@@ -83,6 +94,16 @@ where
     let mut build_buildings = false;
     let mut build_trees = false;
     let mut build_admin = false;
+    let mut build_power = false;
+    let mut build_rail = false;
+    let mut build_pipeline = false;
+    let mut build_aeroway = false;
+    let mut build_military = false;
+    let mut build_comm = false;
+    let mut build_industrial = false;
+    let mut build_port = false;
+    let mut build_government = false;
+    let mut build_surveillance = false;
 
     let mut iter = args.into_iter();
     while let Some(flag) = iter.next() {
@@ -107,6 +128,33 @@ where
                         "buildings" => build_buildings = true,
                         "trees" => build_trees = true,
                         "admin" => build_admin = true,
+                        "power" => build_power = true,
+                        "rail" => build_rail = true,
+                        "pipeline" => build_pipeline = true,
+                        "aeroway" => build_aeroway = true,
+                        "military" => build_military = true,
+                        "comm" => build_comm = true,
+                        "industrial" => build_industrial = true,
+                        "port" => build_port = true,
+                        "government" => build_government = true,
+                        "surveillance" => build_surveillance = true,
+                        "all" => {
+                            build_roads = true;
+                            build_waterways = true;
+                            build_buildings = true;
+                            build_trees = true;
+                            build_admin = true;
+                            build_power = true;
+                            build_rail = true;
+                            build_pipeline = true;
+                            build_aeroway = true;
+                            build_military = true;
+                            build_comm = true;
+                            build_industrial = true;
+                            build_port = true;
+                            build_government = true;
+                            build_surveillance = true;
+                        }
                         other => return Err(format!("Unknown feature '{other}'.\n\n{}", usage())),
                     }
                 }
@@ -129,6 +177,16 @@ where
         build_buildings,
         build_trees,
         build_admin,
+        build_power,
+        build_rail,
+        build_pipeline,
+        build_aeroway,
+        build_military,
+        build_comm,
+        build_industrial,
+        build_port,
+        build_government,
+        build_surveillance,
     };
 
     if command.min_lat >= command.max_lat || command.min_lon >= command.max_lon {
@@ -223,8 +281,10 @@ fn usage() -> String {
   one-thousand-electric-eye-cache-builder roads-bbox \\
       --planet <planet.osm.pbf> --cache-dir <Derived/osm> \\
       --min-lat <f32> --max-lat <f32> --min-lon <f32> --max-lon <f32> \\
-      [--margin-deg <f32>] [--features roads,waterways,buildings,trees,admin] \\
-      [--srtm-root <dir>]
+      [--margin-deg <f32>] [--srtm-root <dir>] \\
+      [--features all | roads,waterways,buildings,trees,admin,
+                       power,rail,pipeline,aeroway,military,
+                       comm,industrial,port,government,surveillance]
   one-thousand-electric-eye-cache-builder contours-bbox \\
       --srtm-root <dir> --cache-db <Derived/terrain/srtm_focus_cache.sqlite> \\
       --min-lat <f32> --max-lat <f32> --min-lon <f32> --max-lon <f32> \\
