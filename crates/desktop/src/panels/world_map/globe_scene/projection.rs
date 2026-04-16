@@ -156,6 +156,36 @@ fn project_geo_flat(
     })
 }
 
+/// Project a geographic polyline to screen-space segments, splitting at the
+/// horizon, without touching the painter.  Returns a list of continuous
+/// visible segments (each ≥ 2 points).  Used by parallel projection paths.
+pub(super) fn project_path_segments(
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    path: &[GeoPoint],
+    altitude_scale: f32,
+) -> Vec<Vec<egui::Pos2>> {
+    let mut segments: Vec<Vec<egui::Pos2>> = Vec::new();
+    let mut current: Vec<egui::Pos2> = Vec::new();
+
+    for point in path {
+        match project_geo_flat(layout, view, *point, altitude_scale) {
+            Some(p) if p.front_facing => current.push(p.pos),
+            _ => {
+                if current.len() >= 2 {
+                    segments.push(std::mem::take(&mut current));
+                } else {
+                    current.clear();
+                }
+            }
+        }
+    }
+    if current.len() >= 2 {
+        segments.push(current);
+    }
+    segments
+}
+
 /// Draw a geographic polyline on the globe, clipping at the horizon.
 ///
 /// Uses a flat (constant-radius) projection — no terrain field — for

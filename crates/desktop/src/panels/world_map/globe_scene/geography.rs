@@ -2,7 +2,8 @@ use super::GlobeLayout;
 use super::camera::GlobeLod;
 use super::contour_asset;
 use super::gebco_depth_fill;
-use super::projection::{draw_geo_path, project_geo};
+use super::projection::{draw_geo_path, project_geo, project_path_segments};
+use rayon::prelude::*;
 use crate::model::{GeoJsonFeature, GeoJsonGeometry, GeoJsonLayer, GeoPoint, GlobeViewState};
 use crate::theme;
 
@@ -299,22 +300,24 @@ pub(super) fn draw_global_topo(
         return;
     };
 
-    for contour in topo.iter() {
-        let major = (contour.elevation_m.round() as i32).rem_euclid(2_000) == 0;
-        let color = if major {
-            theme::hot_color()
-        } else {
-            theme::contour_color()
-        };
-        draw_geo_path(
-            painter,
-            layout,
-            view,
-            &contour.points,
-            0.015,
-            color.gamma_multiply(alpha),
-            0.05 * alpha,
-        );
+    let major_color = theme::hot_color();
+    let minor_color = theme::contour_color();
+
+    let segments: Vec<(Vec<Vec<egui::Pos2>>, egui::Color32)> = topo
+        .par_iter()
+        .map(|contour| {
+            let major = (contour.elevation_m.round() as i32).rem_euclid(2_000) == 0;
+            let color = if major { major_color } else { minor_color };
+            let segs = project_path_segments(layout, view, &contour.points, 0.015);
+            (segs, color.gamma_multiply(alpha))
+        })
+        .collect();
+
+    for (segs, color) in segments {
+        let stroke = egui::Stroke::new(1.15, color.gamma_multiply(0.92));
+        for seg in segs {
+            painter.add(egui::Shape::line(seg, stroke));
+        }
     }
 }
 
@@ -347,26 +350,27 @@ pub(super) fn draw_srtm_on_globe(
         return;
     };
 
-    for contour in contours.iter() {
-        let major = (contour.elevation_m.round() as i32).rem_euclid(50) == 0;
-        let color = if major {
-            theme::hot_color()
-        } else {
-            theme::contour_color()
-        };
-        // Use the same altitude_scale as coastlines (0.022) so SRTM contours
-        // sit on the sphere surface and don't parallax against the coastline layer.
-        // lod.altitude_scale is designed for exaggerated local-terrain relief and
-        // would push these contours visibly above the globe radius.
-        draw_geo_path(
-            painter,
-            layout,
-            view,
-            &contour.points,
-            0.020,
-            color.gamma_multiply(alpha),
-            0.08,
-        );
+    let major_color = theme::hot_color();
+    let minor_color = theme::contour_color();
+
+    // Parallel projection — project_path_segments is pure, painter is serial.
+    let segments: Vec<(Vec<Vec<egui::Pos2>>, egui::Color32)> = contours
+        .par_iter()
+        .map(|contour| {
+            let major = (contour.elevation_m.round() as i32).rem_euclid(50) == 0;
+            let color = if major { major_color } else { minor_color };
+            // Use the same altitude_scale as coastlines (0.022) so SRTM contours
+            // sit on the sphere surface and don't parallax against the coastline layer.
+            let segs = project_path_segments(layout, view, &contour.points, 0.020);
+            (segs, color.gamma_multiply(alpha))
+        })
+        .collect();
+
+    for (segs, color) in segments {
+        let stroke = egui::Stroke::new(1.15, color.gamma_multiply(0.92));
+        for seg in segs {
+            painter.add(egui::Shape::line(seg, stroke));
+        }
     }
 }
 

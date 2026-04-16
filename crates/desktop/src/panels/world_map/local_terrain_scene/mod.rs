@@ -30,6 +30,7 @@ use crate::model::{AppModel, GeoPoint, GlobeViewState};
 use crate::osm_ingest::{self, GeoBounds as OsmGeoBounds};
 use crate::terrain_assets;
 use crate::theme;
+use rayon::prelude::*;
 use std::path::Path;
 
 use super::contour_asset;
@@ -1258,47 +1259,56 @@ fn draw_contour_stack(
         .collect();
     ordered.sort_by(|left, right| left.elevation_m.total_cmp(&right.elevation_m));
 
-    let mut remaining_points = MAX_CONTOUR_RENDER_POINTS;
+    // Pre-compute colors — theme functions may touch global state and must
+    // not be called from rayon worker threads.
+    let major_color = theme::hot_color();
+    let minor_color = theme::contour_color();
 
-    for contour in ordered {
+    // Parallel projection: each contour's points are fully independent.
+    // Build (Vec<Pos2>, Stroke) on rayon workers; submit to painter serially.
+    let projected: Vec<Option<(Vec<egui::Pos2>, egui::Stroke)>> = ordered
+        .par_iter()
+        .map(|contour| {
+            let points: Vec<egui::Pos2> = contour
+                .points
+                .iter()
+                .filter_map(|point| {
+                    projection::project_local(
+                        layout,
+                        view,
+                        focus,
+                        *point,
+                        contour.elevation_m,
+                        extent_x_km,
+                        extent_y_km,
+                    )
+                    .map(|p| p.pos)
+                })
+                .collect();
+
+            if points.len() < 2 {
+                return None;
+            }
+
+            let major = (contour.elevation_m.round() as i32).rem_euclid(major_rem) == 0;
+            let stroke = egui::Stroke::new(
+                if major { 1.35 } else { 0.7 } * (0.72 + alpha * 0.28),
+                if major { major_color } else { minor_color }
+                    .gamma_multiply((if major { 1.0 } else { 0.78 }) * alpha),
+            );
+
+            Some((points, stroke))
+        })
+        .collect();
+
+    // Serial submission — painter is not Send, so this stays on the main thread.
+    // The point budget is a safety cap against pathological tile accumulations.
+    let mut remaining_points = MAX_CONTOUR_RENDER_POINTS;
+    for (points, stroke) in projected.into_iter().flatten() {
         if remaining_points < 2 {
             break;
         }
-
-        let points: Vec<_> = contour
-            .points
-            .iter()
-            .filter_map(|point| {
-                projection::project_local(
-                    layout,
-                    view,
-                    focus,
-                    *point,
-                    contour.elevation_m,
-                    extent_x_km,
-                    extent_y_km,
-                )
-                .map(|projected| projected.pos)
-            })
-            .take(remaining_points)
-            .collect();
-
-        if points.len() < 2 {
-            continue;
-        }
         remaining_points = remaining_points.saturating_sub(points.len());
-
-        let major = (contour.elevation_m.round() as i32).rem_euclid(major_rem) == 0;
-        let stroke = egui::Stroke::new(
-            if major { 1.35 } else { 0.7 } * (0.72 + alpha * 0.28),
-            if major {
-                theme::hot_color()
-            } else {
-                theme::contour_color()
-            }
-            .gamma_multiply((if major { 1.0 } else { 0.78 }) * alpha),
-        );
-
         painter.add(egui::Shape::line(points, stroke));
     }
 }
