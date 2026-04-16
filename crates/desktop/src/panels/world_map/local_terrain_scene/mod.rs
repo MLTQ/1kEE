@@ -1237,7 +1237,25 @@ fn draw_contour_stack(
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
 
-    let mut ordered: Vec<_> = contours.iter().collect();
+    // AABB cull: skip contours with no points inside the viewport (+ generous
+    // margin so lines that cross the edge aren't clipped prematurely).
+    let margin_deg = half_extent_deg * 1.5;
+    let min_lat = focus.lat - margin_deg;
+    let max_lat = focus.lat + margin_deg;
+    let min_lon = focus.lon - margin_deg;
+    let max_lon = focus.lon + margin_deg;
+
+    let mut ordered: Vec<_> = contours
+        .iter()
+        .filter(|c| {
+            c.points.iter().any(|p| {
+                p.lat >= min_lat
+                    && p.lat <= max_lat
+                    && p.lon >= min_lon
+                    && p.lon <= max_lon
+            })
+        })
+        .collect();
     ordered.sort_by(|left, right| left.elevation_m.total_cmp(&right.elevation_m));
 
     let mut remaining_points = MAX_CONTOUR_RENDER_POINTS;
