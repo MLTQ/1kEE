@@ -691,3 +691,115 @@ pub fn admin_stroke_width(level: u8) -> f32 {
         _ => 0.5,
     }
 }
+
+// ── Infrastructure layer colors ───────────────────────────────────────────────
+
+/// High-voltage power line (≥300 kV).
+pub fn power_ultra_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(255, 220, 50, 220)
+}
+
+/// High-voltage power line (100–299 kV).
+pub fn power_high_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(240, 180, 40, 190)
+}
+
+/// Medium-voltage power line (50–99 kV).
+pub fn power_med_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(200, 140, 40, 160)
+}
+
+/// Low/distribution power line (<50 kV).
+pub fn power_low_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(160, 110, 40, 120)
+}
+
+/// Minor/service power line.
+pub fn power_minor_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(120, 90, 40, 90)
+}
+
+/// Power substation or plant area.
+pub fn power_area_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(240, 200, 60, 80)
+}
+
+/// Railway line.
+pub fn rail_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(180, 180, 200, 200)
+}
+
+/// Subway / metro line.
+pub fn rail_metro_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(100, 180, 240, 200)
+}
+
+/// Tram / light rail line.
+pub fn rail_tram_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(120, 200, 160, 180)
+}
+
+/// Disused / abandoned railway.
+pub fn rail_disused_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(120, 120, 120, 100)
+}
+
+/// Gas pipeline.
+pub fn pipeline_gas_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(255, 140, 50, 180)
+}
+
+/// Oil pipeline.
+pub fn pipeline_oil_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(200, 80, 40, 180)
+}
+
+/// Water/sewer pipeline.
+pub fn pipeline_water_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(60, 160, 220, 160)
+}
+
+/// Other/unknown pipeline.
+pub fn pipeline_other_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(160, 140, 120, 140)
+}
+
+/// Airport / aerodrome area.
+pub fn aeroway_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(80, 160, 200, 160)
+}
+
+/// Runway line.
+pub fn runway_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(120, 190, 220, 200)
+}
+
+/// Military base / danger area.
+pub fn military_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(200, 50, 50, 120)
+}
+
+/// Communication tower / antenna.
+pub fn comm_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(140, 220, 180, 180)
+}
+
+/// Industrial area.
+pub fn industrial_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(160, 120, 80, 120)
+}
+
+/// Port / harbour area.
+pub fn port_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(60, 180, 200, 160)
+}
+
+/// Government facility.
+pub fn government_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(200, 160, 220, 140)
+}
+
+/// Surveillance camera / station.
+pub fn surveillance_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(220, 80, 140, 180)
+}

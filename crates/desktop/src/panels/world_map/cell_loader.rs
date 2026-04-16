@@ -1,7 +1,8 @@
 use crate::model::GeoPoint;
 use crate::osm_ingest::GeoBounds;
 use cell_format::{
-    TAG_BLDG, TAG_TREE, TAG_WATR, cell_filename, decode_class, read::read_single_chunk,
+    TAG_AERO, TAG_BLDG, TAG_COMM, TAG_GOVT, TAG_INDS, TAG_MILT, TAG_PIPE, TAG_PORT, TAG_POWR,
+    TAG_RAIL, TAG_SURV, TAG_TREE, TAG_WATR, cell_filename, decode_class, read::read_single_chunk,
 };
 use serde_json::Value;
 use std::fs;
@@ -138,6 +139,16 @@ fn prefix_to_tag(prefix: &str) -> [u8; 4] {
         "waterway" => TAG_WATR,
         "building" => TAG_BLDG,
         "tree" => TAG_TREE,
+        "power" => TAG_POWR,
+        "railway" => TAG_RAIL,
+        "pipeline" => TAG_PIPE,
+        "aeroway" => TAG_AERO,
+        "military" => TAG_MILT,
+        "comm" => TAG_COMM,
+        "industrial" => TAG_INDS,
+        "port" => TAG_PORT,
+        "government" => TAG_GOVT,
+        "surveillance" => TAG_SURV,
         _ => TAG_BLDG,
     }
 }

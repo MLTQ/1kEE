@@ -2,6 +2,8 @@ mod admin_layer;
 mod building_layer;
 mod camera;
 mod cell_loader;
+mod infra_layer;
+mod power_layer;
 pub(crate) mod contour_asset;
 pub(crate) mod gebco_depth_fill;
 pub(crate) mod globe_pass;
@@ -326,6 +328,18 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                     ui.checkbox(&mut model.show_trees, "Trees");
                     ui.checkbox(&mut model.show_buildings, "Buildings");
                     ui.checkbox(&mut model.show_admin, "Admin Boundaries");
+                    ui.separator();
+                    ui.label("Infrastructure");
+                    ui.checkbox(&mut model.show_power, "Power lines");
+                    ui.checkbox(&mut model.show_rail, "Railways");
+                    ui.checkbox(&mut model.show_pipeline, "Pipelines");
+                    ui.checkbox(&mut model.show_aeroway, "Airports");
+                    ui.checkbox(&mut model.show_military, "Military");
+                    ui.checkbox(&mut model.show_comm, "Comms towers");
+                    ui.checkbox(&mut model.show_industrial, "Industrial");
+                    ui.checkbox(&mut model.show_port, "Ports");
+                    ui.checkbox(&mut model.show_government, "Government");
+                    ui.checkbox(&mut model.show_surveillance, "Surveillance");
                 }
 
                 if major_changed || minor_changed {
