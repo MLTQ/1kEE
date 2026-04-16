@@ -299,15 +299,18 @@ pub(super) fn draw_global_topo(
         return;
     };
 
-    const MAX_GLOBE_TOPO_POINTS: usize = 150_000;
-    let total_points: usize = topo.iter().map(|c| c.points.len()).sum();
-    let stride = if total_points > MAX_GLOBE_TOPO_POINTS {
-        (total_points as f32 / MAX_GLOBE_TOPO_POINTS as f32).ceil() as usize
+    // Cap by contour count rather than by point count so the selection is
+    // stable across frames.  Contours are already sorted by |elevation| in
+    // render_globe_tiles, so this naturally keeps the lowest (most visible)
+    // contours and drops the high-frequency minor ones when over budget.
+    const MAX_GLOBE_TOPO_CONTOURS: usize = 2_000;
+    let topo_slice = if topo.len() > MAX_GLOBE_TOPO_CONTOURS {
+        &topo[..MAX_GLOBE_TOPO_CONTOURS]
     } else {
-        1
+        topo.as_slice()
     };
 
-    for contour in topo.iter().step_by(stride) {
+    for contour in topo_slice {
         let major = (contour.elevation_m.round() as i32).rem_euclid(2_000) == 0;
         let color = if major {
             theme::hot_color()
@@ -355,19 +358,18 @@ pub(super) fn draw_srtm_on_globe(
         return;
     };
 
-    // Budget: cap total points sent through draw_geo_path to keep frame time
-    // bounded regardless of how many tiles are cached.  Stride-skip contours
-    // evenly when over budget; order within the Arc is already sorted by
-    // elevation so stride-skipping preserves a representative cross-section.
-    const MAX_GLOBE_SRTM_POINTS: usize = 200_000;
-    let total_points: usize = contours.iter().map(|c| c.points.len()).sum();
-    let stride = if total_points > MAX_GLOBE_SRTM_POINTS {
-        (total_points as f32 / MAX_GLOBE_SRTM_POINTS as f32).ceil() as usize
+    // Cap by contour count, not by point count, so the budget is stable across
+    // frames.  render_globe_tiles sorts by |elevation|, so truncating here
+    // keeps the lowest-elevation (most prominent) contours and drops minor
+    // high-frequency ones — the right trade-off for globe-scale rendering.
+    const MAX_GLOBE_SRTM_CONTOURS: usize = 3_000;
+    let contour_slice = if contours.len() > MAX_GLOBE_SRTM_CONTOURS {
+        &contours[..MAX_GLOBE_SRTM_CONTOURS]
     } else {
-        1
+        contours.as_slice()
     };
 
-    for contour in contours.iter().step_by(stride) {
+    for contour in contour_slice {
         let major = (contour.elevation_m.round() as i32).rem_euclid(50) == 0;
         let color = if major {
             theme::hot_color()

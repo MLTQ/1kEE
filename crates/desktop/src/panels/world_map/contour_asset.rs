@@ -781,6 +781,17 @@ fn render_globe_tiles(guard: &mut GlobeRegionCache) -> Option<Arc<Vec<ContourPat
         // contours so the globe doesn't flash blank during the transition.
         guard.zoom_fallback.clone()
     } else {
+        // Sort by absolute elevation so output order is deterministic regardless
+        // of HashMap iteration order.  Without this, any budget-based subsetting
+        // in the draw path would pick different contours each frame as tiles
+        // load/unload, causing visible jitter.
+        let mut merged = merged;
+        merged.sort_unstable_by(|a, b| {
+            a.elevation_m
+                .abs()
+                .partial_cmp(&b.elevation_m.abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         // Real tiles are ready; drop the fallback to free memory.
         guard.zoom_fallback = None;
         Some(Arc::new(merged))
