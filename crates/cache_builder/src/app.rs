@@ -1,4 +1,4 @@
-use crate::args::{BboxCommand, ContoursBboxCommand};
+use crate::args::{BboxCommand, ContoursBboxCommand, PlanetAllCommand};
 use crate::job::{BuildEvent, BuildJob, JobHandle, spawn_job};
 use crate::lunar::{LunarBuildCommand, all_lunar_specs};
 use crate::mars::MarsBuildCommand;
@@ -16,6 +16,12 @@ enum ActiveTab {
     OsmContours,
     Lunar,
     Mars,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum OsmMode {
+    Bbox,
+    Planet,
 }
 
 #[derive(Clone)]
@@ -114,6 +120,7 @@ pub struct BuilderApp {
     inspector: CacheInspector,
     active_job: Option<JobHandle>,
     drag_start: Option<egui::Pos2>,
+    osm_mode: OsmMode,
     /// Tiles already in the cache (from Scan Cache): (zoom_bucket, min_lat, max_lat, min_lon, max_lon)
     cached_tiles: Vec<(i32, f32, f32, f32, f32)>,
     /// Tiles completed in the current build run: (min_lat, max_lat, min_lon, max_lon)
@@ -147,6 +154,8 @@ struct BuilderForm {
     min_lon: String,
     max_lon: String,
     margin_deg: String,
+    // Planet-all specific
+    planet_tmp_dir: String, // empty = use cache_dir/.planet_build
     // Contour-specific fields
     contour_db: String,   // path to srtm_focus_cache.sqlite
     gdal_bin_dir: String, // empty = use $PATH
@@ -219,6 +228,7 @@ impl BuilderApp {
                 min_lon: "-122.60".to_owned(),
                 max_lon: "-122.20".to_owned(),
                 margin_deg: "0.08".to_owned(),
+                planet_tmp_dir: String::new(),
             },
             assets: AssetSelection {
                 roads: true,
@@ -244,6 +254,7 @@ impl BuilderApp {
             inspector: CacheInspector::default(),
             active_job: None,
             drag_start: None,
+            osm_mode: OsmMode::Bbox,
             cached_tiles: Vec::new(),
             live_tiles: Vec::new(),
             active_tab: ActiveTab::OsmContours,
@@ -467,6 +478,72 @@ impl BuilderApp {
             return Err("Invalid bbox: minimums must be less than maximums.".to_owned());
         }
         Ok(command)
+    }
+
+    fn planet_command(&self) -> Result<PlanetAllCommand, String> {
+        let planet_path = PathBuf::from(self.form.planet_path.trim());
+        if self.form.planet_path.trim().is_empty() {
+            return Err("Planet PBF path is required.".to_owned());
+        }
+        let out_dir = PathBuf::from(self.form.cache_dir.trim());
+        if self.form.cache_dir.trim().is_empty() {
+            return Err("Cache / output directory is required.".to_owned());
+        }
+        let tmp_dir = {
+            let t = self.form.planet_tmp_dir.trim();
+            if t.is_empty() {
+                out_dir.join(".planet_build")
+            } else {
+                PathBuf::from(t)
+            }
+        };
+        let srtm_root = {
+            let t = self.form.srtm_root.trim();
+            if t.is_empty() { None } else { Some(PathBuf::from(t)) }
+        };
+        Ok(PlanetAllCommand {
+            planet_path,
+            out_dir,
+            tmp_dir,
+            srtm_root,
+            build_roads: self.assets.roads,
+            build_waterways: self.assets.water,
+            build_buildings: self.assets.buildings,
+            build_trees: self.assets.trees,
+            build_admin: self.assets.admin,
+            build_power: self.assets.power,
+            build_rail: self.assets.rail,
+            build_pipeline: self.assets.pipeline,
+            build_aeroway: self.assets.aeroway,
+            build_military: self.assets.military,
+            build_comm: self.assets.comm,
+            build_industrial: self.assets.industrial,
+            build_port: self.assets.port,
+            build_government: self.assets.government,
+            build_surveillance: self.assets.surveillance,
+        })
+    }
+
+    fn start_planet_build(&mut self) {
+        if self.active_job.is_some() {
+            return;
+        }
+        let command = match self.planet_command() {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                self.push_log(e);
+                return;
+            }
+        };
+        self.status = "Building (Planet)".to_owned();
+        self.progress = 0.0;
+        self.progress_detail = "Starting planet-all export…".to_owned();
+        self.active_job_tab = Some(ActiveTab::OsmContours);
+        self.push_log(format!(
+            "Starting planet-all build from {}",
+            command.planet_path.display()
+        ));
+        self.active_job = Some(spawn_job(BuildJob::PlanetAll(command)));
     }
 
     fn poll_job(&mut self) {
@@ -1365,9 +1442,11 @@ impl eframe::App for BuilderApp {
                 }
 
                 ui.heading("Export");
-                ui.label(
-                    "Select the source planet file, output cache, bbox, and assets to generate.",
-                );
+                ui.horizontal(|ui| {
+                    ui.label("Mode:");
+                    ui.selectable_value(&mut self.osm_mode, OsmMode::Bbox, "Bounding Box");
+                    ui.selectable_value(&mut self.osm_mode, OsmMode::Planet, "Full Planet");
+                });
                 ui.separator();
 
                 ui.label("Planet PBF");
@@ -1404,6 +1483,35 @@ impl eframe::App for BuilderApp {
                     }
                 });
 
+                if self.osm_mode == OsmMode::Planet {
+                    ui.separator();
+                    ui.label("Tmp Dir (optional — for node sort chunks and checkpoint)");
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut self.form.planet_tmp_dir);
+                        if ui.small_button("…").clicked() {
+                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                                self.form.planet_tmp_dir = path.display().to_string();
+                            }
+                        }
+                        if !self.form.planet_tmp_dir.is_empty()
+                            && ui.small_button("✕").clicked()
+                        {
+                            self.form.planet_tmp_dir.clear();
+                        }
+                    });
+                    if self.form.planet_tmp_dir.is_empty() {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Default: {}/.planet_build",
+                                self.form.cache_dir.trim()
+                            ))
+                            .small()
+                            .color(Color32::from_gray(120)),
+                        );
+                    }
+                }
+
+                if self.osm_mode == OsmMode::Bbox {
                 ui.separator();
                 ui.label("Bounding Box");
                 ui.horizontal(|ui| {
@@ -1422,8 +1530,10 @@ impl eframe::App for BuilderApp {
                     ui.label("Margin");
                     ui.text_edit_singleline(&mut self.form.margin_deg);
                 });
+                } // end Bbox-only section
 
-                // ── World bbox map ────────────────────────────────────────────
+                // ── World bbox map (Bbox mode only) ──────────────────────────
+                if self.osm_mode == OsmMode::Bbox {
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("Bounding Box Map");
@@ -1587,6 +1697,7 @@ impl eframe::App for BuilderApp {
                     }
                     self.drag_start = None;
                 }
+                } // end Bbox map section
 
                 // ── Assets ────────────────────────────────────────────────────
                 ui.separator();
@@ -1610,7 +1721,8 @@ impl eframe::App for BuilderApp {
                 ui.checkbox(&mut self.assets.government, "Government facilities");
                 ui.checkbox(&mut self.assets.surveillance, "Surveillance");
 
-                // ── Terrain / Contours ────────────────────────────────────────
+                // ── Terrain / Contours (Bbox mode only) ──────────────────────
+                if self.osm_mode == OsmMode::Bbox {
                 ui.separator();
                 ui.heading("Terrain / Contours");
                 ui.label("Contour DB folder (contains srtm_focus_cache.sqlite)");
@@ -1649,6 +1761,8 @@ impl eframe::App for BuilderApp {
                     });
                 }
 
+                } // end Terrain/Contours bbox-only section
+
                 ui.separator();
                 ui.add(
                     egui::ProgressBar::new(self.progress)
@@ -1659,17 +1773,26 @@ impl eframe::App for BuilderApp {
 
                 ui.horizontal(|ui| {
                     let building = self.active_job.is_some();
-                    if ui
-                        .add_enabled(!building, egui::Button::new("Build OSM Cache"))
-                        .clicked()
-                    {
-                        self.start_build();
-                    }
-                    if ui
-                        .add_enabled(!building, egui::Button::new("Build Contours"))
-                        .clicked()
-                    {
-                        self.start_contour_build();
+                    if self.osm_mode == OsmMode::Bbox {
+                        if ui
+                            .add_enabled(!building, egui::Button::new("Build OSM Cache"))
+                            .clicked()
+                        {
+                            self.start_build();
+                        }
+                        if ui
+                            .add_enabled(!building, egui::Button::new("Build Contours"))
+                            .clicked()
+                        {
+                            self.start_contour_build();
+                        }
+                    } else {
+                        if ui
+                            .add_enabled(!building, egui::Button::new("Build Planet Cache"))
+                            .clicked()
+                        {
+                            self.start_planet_build();
+                        }
                     }
                     if ui.button("Refresh Inspector").clicked() {
                         self.refresh_inspector();

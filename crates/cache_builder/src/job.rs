@@ -1,7 +1,8 @@
-use crate::args::{BboxCommand, ContoursBboxCommand};
+use crate::args::{BboxCommand, ContoursBboxCommand, PlanetAllCommand};
 use crate::contours::{ContourBuildProgress, GeoBounds, build_contour_tiles};
 use crate::lunar::LunarBuildCommand;
 use crate::mars::MarsBuildCommand;
+use crate::planet_all::build_planet_cache_with_progress;
 use crate::roads::{RoadBuildProgress, build_bbox_cache_with_progress};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
@@ -11,6 +12,7 @@ pub enum BuildJob {
     ContoursBbox(ContoursBboxCommand),
     LunarContours(LunarBuildCommand),
     MarsContours(MarsBuildCommand),
+    PlanetAll(PlanetAllCommand),
 }
 
 pub struct JobHandle {
@@ -123,6 +125,13 @@ pub fn spawn_job(job: BuildJob) -> JobHandle {
                 }));
             };
             let result = crate::mars::build_mars_contour_tiles(command, &mut reporter);
+            let _ = tx.send(BuildEvent::Finished(result));
+        }
+        BuildJob::PlanetAll(command) => {
+            let mut reporter = |progress: RoadBuildProgress| {
+                let _ = tx.send(BuildEvent::Progress(progress));
+            };
+            let result = build_planet_cache_with_progress(command, &mut reporter);
             let _ = tx.send(BuildEvent::Finished(result));
         }
     });
