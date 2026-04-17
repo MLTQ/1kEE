@@ -432,6 +432,17 @@ impl BuilderApp {
             build_buildings: self.assets.buildings,
             build_trees: self.assets.trees,
             build_admin: self.assets.admin,
+            // Infrastructure layers — not yet exposed in the GUI form; default off
+            build_power: false,
+            build_rail: false,
+            build_pipeline: false,
+            build_aeroway: false,
+            build_military: false,
+            build_comm: false,
+            build_industrial: false,
+            build_port: false,
+            build_government: false,
+            build_surveillance: false,
         };
         if command.min_lat >= command.max_lat || command.min_lon >= command.max_lon {
             return Err("Invalid bbox: minimums must be less than maximums.".to_owned());

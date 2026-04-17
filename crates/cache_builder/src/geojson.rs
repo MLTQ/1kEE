@@ -241,7 +241,6 @@ pub fn load_all_features_from_cell(path: &Path, tag: [u8; 4]) -> Option<Vec<WayF
 fn load_features_from_binary(path: &Path, tag: [u8; 4]) -> Option<Vec<WayFeature>> {
     let data = fs::read(path).ok()?;
     let features = read_single_chunk(&data, tag)?;
-    let prefix = tag_to_prefix(tag);
     Some(
         features
             .into_iter()
