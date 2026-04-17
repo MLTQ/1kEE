@@ -5,6 +5,30 @@ pub enum Command {
     Gui,
     RoadsBbox(BboxCommand),
     ContoursBbox(ContoursBboxCommand),
+    PlanetAll(PlanetAllCommand),
+}
+
+#[derive(Debug, Clone)]
+pub struct PlanetAllCommand {
+    pub planet_path: PathBuf,
+    pub out_dir: PathBuf,
+    pub tmp_dir: PathBuf,          // node sort chunks + checkpoint file
+    pub srtm_root: Option<PathBuf>,
+    pub build_roads: bool,
+    pub build_waterways: bool,
+    pub build_buildings: bool,
+    pub build_trees: bool,
+    pub build_admin: bool,
+    pub build_power: bool,
+    pub build_rail: bool,
+    pub build_pipeline: bool,
+    pub build_aeroway: bool,
+    pub build_military: bool,
+    pub build_comm: bool,
+    pub build_industrial: bool,
+    pub build_port: bool,
+    pub build_government: bool,
+    pub build_surveillance: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -72,6 +96,7 @@ where
         "gui" => Ok(Command::Gui),
         "roads-bbox" => parse_roads_bbox(args).map(Command::RoadsBbox),
         "contours-bbox" => parse_contours_bbox(args).map(Command::ContoursBbox),
+        "planet-all" => parse_planet_all(args).map(Command::PlanetAll),
         "--help" | "-h" | "help" => Err(usage()),
         other => Err(format!("Unknown command '{other}'.\n\n{}", usage())),
     }
@@ -196,6 +221,112 @@ where
     Ok(command)
 }
 
+fn parse_planet_all<I>(args: I) -> Result<PlanetAllCommand, String>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut planet_path = None;
+    let mut out_dir = None;
+    let mut tmp_dir = None;
+    let mut srtm_root = None;
+    let mut build_roads = true;
+    let mut build_waterways = false;
+    let mut build_buildings = false;
+    let mut build_trees = false;
+    let mut build_admin = false;
+    let mut build_power = false;
+    let mut build_rail = false;
+    let mut build_pipeline = false;
+    let mut build_aeroway = false;
+    let mut build_military = false;
+    let mut build_comm = false;
+    let mut build_industrial = false;
+    let mut build_port = false;
+    let mut build_government = false;
+    let mut build_surveillance = false;
+
+    let mut iter = args.into_iter();
+    while let Some(flag) = iter.next() {
+        let value = iter
+            .next()
+            .ok_or_else(|| format!("Missing value for '{flag}'.\n\n{}", usage()))?;
+        match flag.as_str() {
+            "--planet" => planet_path = Some(PathBuf::from(value)),
+            "--out-dir" => out_dir = Some(PathBuf::from(value)),
+            "--tmp-dir" => tmp_dir = Some(PathBuf::from(value)),
+            "--srtm-root" => srtm_root = Some(PathBuf::from(value)),
+            "--features" => {
+                build_roads = false;
+                for feature in value.split(',') {
+                    match feature.trim() {
+                        "roads" => build_roads = true,
+                        "waterways" => build_waterways = true,
+                        "buildings" => build_buildings = true,
+                        "trees" => build_trees = true,
+                        "admin" => build_admin = true,
+                        "power" => build_power = true,
+                        "rail" => build_rail = true,
+                        "pipeline" => build_pipeline = true,
+                        "aeroway" => build_aeroway = true,
+                        "military" => build_military = true,
+                        "comm" => build_comm = true,
+                        "industrial" => build_industrial = true,
+                        "port" => build_port = true,
+                        "government" => build_government = true,
+                        "surveillance" => build_surveillance = true,
+                        "all" => {
+                            build_roads = true;
+                            build_waterways = true;
+                            build_buildings = true;
+                            build_trees = true;
+                            build_admin = true;
+                            build_power = true;
+                            build_rail = true;
+                            build_pipeline = true;
+                            build_aeroway = true;
+                            build_military = true;
+                            build_comm = true;
+                            build_industrial = true;
+                            build_port = true;
+                            build_government = true;
+                            build_surveillance = true;
+                        }
+                        other => return Err(format!("Unknown feature '{other}'.\n\n{}", usage())),
+                    }
+                }
+            }
+            other => return Err(format!("Unknown flag '{other}'.\n\n{}", usage())),
+        }
+    }
+
+    let resolved_out =
+        out_dir.ok_or_else(|| format!("Missing --out-dir.\n\n{}", usage()))?;
+    let resolved_tmp = tmp_dir.unwrap_or_else(|| resolved_out.join(".planet_build"));
+
+    Ok(PlanetAllCommand {
+        planet_path: planet_path
+            .ok_or_else(|| format!("Missing --planet.\n\n{}", usage()))?,
+        out_dir: resolved_out,
+        tmp_dir: resolved_tmp,
+        srtm_root,
+        build_roads,
+        build_waterways,
+        build_buildings,
+        build_trees,
+        build_admin,
+        build_power,
+        build_rail,
+        build_pipeline,
+        build_aeroway,
+        build_military,
+        build_comm,
+        build_industrial,
+        build_port,
+        build_government,
+        build_surveillance,
+    })
+}
+
 fn parse_contours_bbox<I>(args: I) -> Result<ContoursBboxCommand, String>
 where
     I: IntoIterator<Item = String>,
@@ -288,6 +419,12 @@ fn usage() -> String {
   one-thousand-electric-eye-cache-builder contours-bbox \\
       --srtm-root <dir> --cache-db <Derived/terrain/srtm_focus_cache.sqlite> \\
       --min-lat <f32> --max-lat <f32> --min-lon <f32> --max-lon <f32> \\
-      [--zoom-buckets 0,1,2,3,4,5,6] [--gdal-bin <dir>] [--tmp-dir <dir>]"
+      [--zoom-buckets 0,1,2,3,4,5,6] [--gdal-bin <dir>] [--tmp-dir <dir>]
+  one-thousand-electric-eye-cache-builder planet-all \\
+      --planet <planet.osm.pbf> --out-dir <Derived/osm> \\
+      [--tmp-dir <dir>] [--srtm-root <dir>] \\
+      [--features all | roads,waterways,buildings,trees,admin,
+                       power,rail,pipeline,aeroway,military,
+                       comm,industrial,port,government,surveillance]"
         .to_owned()
 }
