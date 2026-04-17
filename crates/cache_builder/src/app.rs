@@ -160,6 +160,16 @@ struct AssetSelection {
     buildings: bool,
     trees: bool,
     admin: bool,
+    power: bool,
+    rail: bool,
+    pipeline: bool,
+    aeroway: bool,
+    military: bool,
+    comm: bool,
+    industrial: bool,
+    port: bool,
+    government: bool,
+    surveillance: bool,
 }
 
 #[derive(Default)]
@@ -216,6 +226,16 @@ impl BuilderApp {
                 buildings: false,
                 trees: false,
                 admin: false,
+                power: false,
+                rail: false,
+                pipeline: false,
+                aeroway: false,
+                military: false,
+                comm: false,
+                industrial: false,
+                port: false,
+                government: false,
+                surveillance: false,
             },
             log_lines: vec!["Ready.".to_owned()],
             status: "Idle".to_owned(),
@@ -432,17 +452,16 @@ impl BuilderApp {
             build_buildings: self.assets.buildings,
             build_trees: self.assets.trees,
             build_admin: self.assets.admin,
-            // Infrastructure layers — not yet exposed in the GUI form; default off
-            build_power: false,
-            build_rail: false,
-            build_pipeline: false,
-            build_aeroway: false,
-            build_military: false,
-            build_comm: false,
-            build_industrial: false,
-            build_port: false,
-            build_government: false,
-            build_surveillance: false,
+            build_power: self.assets.power,
+            build_rail: self.assets.rail,
+            build_pipeline: self.assets.pipeline,
+            build_aeroway: self.assets.aeroway,
+            build_military: self.assets.military,
+            build_comm: self.assets.comm,
+            build_industrial: self.assets.industrial,
+            build_port: self.assets.port,
+            build_government: self.assets.government,
+            build_surveillance: self.assets.surveillance,
         };
         if command.min_lat >= command.max_lat || command.min_lon >= command.max_lon {
             return Err("Invalid bbox: minimums must be less than maximums.".to_owned());
@@ -1572,11 +1591,24 @@ impl eframe::App for BuilderApp {
                 // ── Assets ────────────────────────────────────────────────────
                 ui.separator();
                 ui.heading("Assets");
+                ui.label("Base layers");
                 ui.checkbox(&mut self.assets.roads, "Roads");
                 ui.checkbox(&mut self.assets.water, "Waterways");
                 ui.checkbox(&mut self.assets.buildings, "Buildings");
                 ui.checkbox(&mut self.assets.trees, "Trees / Forest");
                 ui.checkbox(&mut self.assets.admin, "Admin Boundaries");
+                ui.add_space(4.0);
+                ui.label("Infrastructure");
+                ui.checkbox(&mut self.assets.power, "Power lines");
+                ui.checkbox(&mut self.assets.rail, "Railways");
+                ui.checkbox(&mut self.assets.pipeline, "Pipelines");
+                ui.checkbox(&mut self.assets.aeroway, "Airports / Aeroways");
+                ui.checkbox(&mut self.assets.military, "Military");
+                ui.checkbox(&mut self.assets.comm, "Comms towers");
+                ui.checkbox(&mut self.assets.industrial, "Industrial areas");
+                ui.checkbox(&mut self.assets.port, "Ports / Harbours");
+                ui.checkbox(&mut self.assets.government, "Government facilities");
+                ui.checkbox(&mut self.assets.surveillance, "Surveillance");
 
                 // ── Terrain / Contours ────────────────────────────────────────
                 ui.separator();
