@@ -1,5 +1,6 @@
 use crate::model::GeoPoint;
 use crate::osm_ingest::GeoBounds;
+use crate::terrain_assets;
 use cell_format::{
     TAG_AERO, TAG_BLDG, TAG_COMM, TAG_GOVT, TAG_INDS, TAG_MILT, TAG_PIPE, TAG_PORT, TAG_POWR,
     TAG_RAIL, TAG_SURV, TAG_TREE, TAG_WATR, cell_filename, decode_class, read::read_single_chunk,
@@ -17,15 +18,28 @@ pub struct LoadedPolyline {
     pub is_polygon: bool,
 }
 
+/// Resolve the OSM cell cache directory from `selected_root`.
+///
+/// Cell files live under `{derived_root}/osm/{prefix}_cells/`.  If
+/// `find_derived_root` can't locate a `Derived/` folder we fall back to
+/// treating `root` itself as the cache directory (handles the case where the
+/// user points the asset root directly at the cache directory).
+fn osm_cache_dir(root: &Path) -> std::path::PathBuf {
+    terrain_assets::find_derived_root(Some(root))
+        .map(|d| d.join("osm"))
+        .unwrap_or_else(|| root.to_path_buf())
+}
+
 /// Load all features for `bounds` from per-cell binary files stored under
-/// `root/{prefix}_cells/{prefix}_cell_{lat}_{lon}.1kc`, falling back to
-/// legacy `.geojson` files for cells that have not yet been rebuilt.
+/// `{derived_root}/osm/{prefix}_cells/{prefix}_cell_{lat}_{lon}.1kc`,
+/// falling back to legacy `.geojson` files for cells that have not yet been
+/// rebuilt.
 pub fn load_features_from_cells(
     root: &Path,
     prefix: &str,
     bounds: GeoBounds,
 ) -> Vec<LoadedPolyline> {
-    let cell_dir = root.join(format!("{prefix}_cells"));
+    let cell_dir = osm_cache_dir(root).join(format!("{prefix}_cells"));
     if !cell_dir.exists() {
         return Vec::new();
     }
