@@ -144,23 +144,17 @@ pub(super) fn draw_power(
     let should_log = !LOGGED.load(std::sync::atomic::Ordering::Relaxed);
 
     for feat in &cache.features {
-        // Voltage LOD: skip tiers that are below the current zoom level
-        let visible = match feat.class.as_str() {
-            "line_ultra" | "substation" | "power_plant" => true,
-            "line_high" => zoom >= ZOOM_SHOW_HIGH,
-            "line_med" => zoom >= ZOOM_SHOW_MED,
-            "line_low" => zoom >= ZOOM_SHOW_LOW,
-            "minor_line" | "tower" => zoom >= ZOOM_SHOW_MINOR,
-            _ => true,
-        };
-
         if should_log {
-            eprintln!(
-                "[power draw] class={} zoom={zoom:.1} visible={visible} raw_pts={}",
-                feat.class, feat.points.len()
-            );
+            if let Some(p) = feat.points.first() {
+                eprintln!(
+                    "[power draw] class={} first_pt=({:.5},{:.5}) viewport_center=({:.5},{:.5}) zoom={zoom:.1}",
+                    feat.class, p.lat, p.lon, viewport_center.lat, viewport_center.lon
+                );
+            }
             LOGGED.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+
+        // Voltage LOD: skip tiers that are below the current zoom level
 
         if !visible {
             continue;
