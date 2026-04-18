@@ -140,20 +140,7 @@ pub(super) fn draw_power(
     };
     let Some(cache) = &store.cache else { return };
 
-    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    let should_log = !LOGGED.load(std::sync::atomic::Ordering::Relaxed);
-
     for feat in &cache.features {
-        if should_log {
-            if let Some(p) = feat.points.first() {
-                eprintln!(
-                    "[power draw] class={} first_pt=({:.5},{:.5}) viewport_center=({:.5},{:.5}) zoom={zoom:.1}",
-                    feat.class, p.lat, p.lon, viewport_center.lat, viewport_center.lon
-                );
-            }
-            LOGGED.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-
         // Voltage LOD: skip tiers that are below the current zoom level
         let visible = match feat.class.as_str() {
             "line_ultra" | "substation" | "power_plant" => true,
@@ -177,7 +164,6 @@ pub(super) fn draw_power(
             .collect();
 
         if pts.len() < 2 {
-            eprintln!("[power draw] class={} projected pts too few: {}/{}", feat.class, pts.len(), feat.points.len());
             continue;
         }
 

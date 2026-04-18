@@ -49,24 +49,11 @@ pub fn load_features_from_cells(
     prefix: &str,
     bounds: GeoBounds,
 ) -> Vec<LoadedPolyline> {
-    let candidates: Vec<_> = osm_cache_dir_candidates(root)
+    let cell_dir = osm_cache_dir_candidates(root)
         .into_iter()
         .map(|base| base.join(format!("{prefix}_cells")))
-        .collect();
-
-    let cell_dir = candidates
-        .iter()
         .find(|dir| dir.exists())
-        .cloned()
         .unwrap_or_else(|| root.join(format!("{prefix}_cells")));
-
-    eprintln!(
-        "[cell_loader] {prefix}: root={} candidates={} chosen={}  exists={}",
-        root.display(),
-        candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "),
-        cell_dir.display(),
-        cell_dir.exists(),
-    );
 
     if !cell_dir.exists() {
         return Vec::new();
@@ -88,7 +75,6 @@ pub fn load_features_from_cells(
             if binary_path.exists() {
                 if let Ok(data) = fs::read(&binary_path) {
                     if let Some(features) = read_single_chunk(&data, tag) {
-                        eprintln!("[cell_loader] {prefix} cell ({lat},{lon}): {} features", features.len());
                         for f in features {
                             if f.points.len() < 2 {
                                 continue;
@@ -109,8 +95,6 @@ pub fn load_features_from_cells(
                             });
                         }
                         continue; // binary cell loaded — skip GeoJSON fallback
-                    } else {
-                        eprintln!("[cell_loader] {prefix} cell ({lat},{lon}): binary parse failed (tag mismatch or corrupt)");
                     }
                 }
             }
@@ -175,12 +159,6 @@ pub fn load_features_from_cells(
             }
         }
     }
-
-    let total_cells = (max_lat_c - min_lat_c + 1) * (max_lon_c - min_lon_c + 1);
-    eprintln!(
-        "[cell_loader] {prefix}: {} features total across {total_cells} cells checked",
-        results.len(),
-    );
 
     results
 }
