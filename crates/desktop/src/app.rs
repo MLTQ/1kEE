@@ -29,7 +29,7 @@ pub fn request_repaint() {
 pub struct DashboardApp {
     model: AppModel,
     last_theme: theme::MapTheme,
-    _puffin_server: puffin_http::Server,
+    _puffin_server: Option<puffin_http::Server>,
 }
 
 impl DashboardApp {
@@ -49,9 +49,12 @@ impl DashboardApp {
         crate::event_store::open();
 
         puffin::set_scopes_on(true);
-        let puffin_server =
-            puffin_http::Server::new("127.0.0.1:8585").expect("failed to start puffin server");
-        eprintln!("puffin profiler server on 127.0.0.1:8585 — connect with `puffin_viewer`");
+        let puffin_server = puffin_http::Server::new("127.0.0.1:8585")
+            .inspect_err(|e| eprintln!("puffin server unavailable (port in use?): {e}"))
+            .ok();
+        if puffin_server.is_some() {
+            eprintln!("puffin profiler server on 127.0.0.1:8585 — connect with `puffin_viewer`");
+        }
 
         let model = AppModel::seed_demo();
         Self {
