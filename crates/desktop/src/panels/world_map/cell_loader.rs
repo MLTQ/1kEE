@@ -176,6 +176,12 @@ pub fn load_features_from_cells(
         }
     }
 
+    let total_cells = (max_lat_c - min_lat_c + 1) * (max_lon_c - min_lon_c + 1);
+    eprintln!(
+        "[cell_loader] {prefix}: {} features total across {total_cells} cells checked",
+        results.len(),
+    );
+
     results
 }
 
