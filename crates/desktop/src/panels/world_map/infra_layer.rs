@@ -170,7 +170,11 @@ fn draw_infra(
     };
     let Some(cache) = &store.cache else { return };
 
+    static DRAW_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let should_log = !DRAW_LOGGED.load(std::sync::atomic::Ordering::Relaxed);
+
     for feat in &cache.features {
+        let raw_pts = feat.points.len();
         let pts: Vec<egui::Pos2> = feat
             .points
             .iter()
@@ -179,6 +183,13 @@ fn draw_infra(
                     .map(|p| p.pos)
             })
             .collect();
+
+        if should_log {
+            eprintln!(
+                "[infra draw] prefix={prefix} class={} raw_pts={raw_pts} projected={} poly={}",
+                feat.class, pts.len(), feat.is_polygon
+            );
+        }
 
         if pts.len() < 2 {
             continue;
@@ -193,6 +204,9 @@ fn draw_infra(
             }
         }
         painter.add(egui::Shape::line(pts, stroke));
+    }
+    if should_log && !cache.features.is_empty() {
+        DRAW_LOGGED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 

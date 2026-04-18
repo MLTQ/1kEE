@@ -140,6 +140,9 @@ pub(super) fn draw_power(
     };
     let Some(cache) = &store.cache else { return };
 
+    static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let should_log = !LOGGED.load(std::sync::atomic::Ordering::Relaxed);
+
     for feat in &cache.features {
         // Voltage LOD: skip tiers that are below the current zoom level
         let visible = match feat.class.as_str() {
@@ -150,6 +153,15 @@ pub(super) fn draw_power(
             "minor_line" | "tower" => zoom >= ZOOM_SHOW_MINOR,
             _ => true,
         };
+
+        if should_log {
+            eprintln!(
+                "[power draw] class={} zoom={zoom:.1} visible={visible} raw_pts={}",
+                feat.class, feat.points.len()
+            );
+            LOGGED.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
         if !visible {
             continue;
         }
@@ -164,6 +176,7 @@ pub(super) fn draw_power(
             .collect();
 
         if pts.len() < 2 {
+            eprintln!("[power draw] class={} projected pts too few: {}/{}", feat.class, pts.len(), feat.points.len());
             continue;
         }
 
