@@ -155,7 +155,14 @@ pub(super) fn draw_power(
         }
 
         // Voltage LOD: skip tiers that are below the current zoom level
-
+        let visible = match feat.class.as_str() {
+            "line_ultra" | "substation" | "power_plant" => true,
+            "line_high" => zoom >= ZOOM_SHOW_HIGH,
+            "line_med" => zoom >= ZOOM_SHOW_MED,
+            "line_low" => zoom >= ZOOM_SHOW_LOW,
+            "minor_line" | "tower" => zoom >= ZOOM_SHOW_MINOR,
+            _ => true,
+        };
         if !visible {
             continue;
         }
