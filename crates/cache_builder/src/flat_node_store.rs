@@ -281,7 +281,7 @@ impl NodeLookup {
             return None;
         }
 
-        // Narrow to the block that must contain target_id (if present).
+        // Narrow to the index block that must contain target_id (if present).
         let idx_pos = self.index.partition_point(|(id, _)| *id <= target_id);
         let block_start = if idx_pos == 0 {
             0
@@ -294,23 +294,39 @@ impl NodeLookup {
             self.record_count
         };
 
-        // Linear scan within the block (≤ INDEX_STRIDE = 4 096 records).
-        let mut buf = [0u8; 16];
-        for rec in block_start..block_end {
-            self.file
-                .read_at(&mut buf, rec * RECORD_BYTES)
-                .ok()?;
-            let id = i64::from_le_bytes(buf[..8].try_into().unwrap());
+        if block_start >= block_end {
+            return None;
+        }
+
+        // Read the entire block in ONE pread64 call instead of one per record.
+        // This turns up to INDEX_STRIDE disk seeks into a single sequential read,
+        // which is critical when the 100+ GB node file doesn't fit in RAM.
+        let block_len = (block_end - block_start) as usize;
+        let mut buf = vec![0u8; block_len * RECORD_BYTES as usize];
+        self.file
+            .read_at(&mut buf, block_start * RECORD_BYTES)
+            .ok()?;
+
+        // Binary search within the block (records are sorted by node_id).
+        let mut lo = 0usize;
+        let mut hi = block_len;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let base = mid * RECORD_BYTES as usize;
+            let id = i64::from_le_bytes(buf[base..base + 8].try_into().unwrap());
             match id.cmp(&target_id) {
                 Ordering::Equal => {
-                    let lat = f32::from_le_bytes(buf[8..12].try_into().unwrap());
-                    let lon = f32::from_le_bytes(buf[12..16].try_into().unwrap());
+                    let lat =
+                        f32::from_le_bytes(buf[base + 8..base + 12].try_into().unwrap());
+                    let lon =
+                        f32::from_le_bytes(buf[base + 12..base + 16].try_into().unwrap());
                     return Some((lat, lon));
                 }
-                Ordering::Greater => break, // sorted — target absent
-                Ordering::Less => {}
+                Ordering::Less => lo = mid + 1,
+                Ordering::Greater => hi = mid,
             }
         }
+
         None
     }
 }
