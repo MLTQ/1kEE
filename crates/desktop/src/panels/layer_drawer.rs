@@ -8,7 +8,7 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
         return;
     }
 
-    egui::SidePanel::left("layer_drawer")
+    egui::SidePanel::right("layer_drawer")
         .resizable(false)
         .exact_width(230.0)
         .frame(egui::Frame::new().fill(theme::section_background()))
@@ -26,22 +26,14 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
             ui.separator();
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-                let local = model.globe_view.local_mode;
-
                 // ── BASE ─────────────────────────────────────────────────────
                 section_label(ui, "BASE");
                 ui.checkbox(&mut model.show_event_markers, "Events");
                 ui.checkbox(&mut model.show_coastlines, "Coastline");
                 ui.checkbox(&mut model.show_bathymetry, "Bathymetry");
                 ui.checkbox(&mut model.show_graticule, "Graticule");
-                if local {
-                    ui.checkbox(&mut model.fill_elevation, "Terrain fill");
-                }
-                if !local {
-                    ui.checkbox(&mut model.show_reticle, "Reticle");
-                }
-
-                // Ships (requires AISStream key)
+                ui.checkbox(&mut model.show_reticle, "Reticle");
+                ui.checkbox(&mut model.fill_elevation, "Terrain fill");
                 {
                     let ships_enabled = !model.aisstream_api_key.is_empty();
                     ui.add_enabled(
@@ -51,36 +43,29 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                     .on_disabled_hover_text("Configure AISStream key in Settings");
                 }
                 ui.checkbox(&mut model.show_flights, "Flights");
-
-                if !local {
-                    let changed = ui
-                        .checkbox(&mut model.show_stellar_correspondence, "Stars")
-                        .changed();
-                    if changed && model.show_stellar_correspondence {
-                        // Observatory can be opened from the toolbar
-                    }
+                ui.checkbox(&mut model.show_stellar_correspondence, "Stars");
+                if model.show_stellar_correspondence && !model.globe_view.local_mode {
+                    let obs_active = model.stellar_observatory_open;
+                    let fill = if obs_active { theme::chrome_active_fill() } else { egui::Color32::TRANSPARENT };
+                    let col  = if obs_active { theme::chrome_active_text() } else { theme::text_muted() };
+                    ui.indent("obs_indent", |ui| {
+                        if ui.add(egui::Button::new(egui::RichText::new("Observatory").small().color(col)).fill(fill).corner_radius(4.0)).clicked() {
+                            model.stellar_observatory_open = !model.stellar_observatory_open;
+                        }
+                    });
                 }
-
-                ui.add_space(4.0);
+                ui.add_space(6.0);
 
                 // ── TRANSPORT ────────────────────────────────────────────────
                 section_label(ui, "TRANSPORT");
-                let major_changed = ui
-                    .checkbox(&mut model.show_major_roads, "Major roads")
-                    .changed();
-                let minor_changed = ui
-                    .checkbox(&mut model.show_minor_roads, "Minor roads")
-                    .changed();
-                if major_changed || minor_changed {
-                    if !model.show_major_roads && !model.show_minor_roads {
-                        world_map::invalidate_road_cache_pub();
-                    }
+                let major_changed = ui.checkbox(&mut model.show_major_roads, "Major roads").changed();
+                let minor_changed = ui.checkbox(&mut model.show_minor_roads, "Minor roads").changed();
+                if (major_changed || minor_changed) && !model.show_major_roads && !model.show_minor_roads {
+                    world_map::invalidate_road_cache_pub();
                 }
-                if local {
-                    ui.checkbox(&mut model.show_rail, "Railways");
-                    ui.checkbox(&mut model.show_aeroway, "Airports");
-                }
-                ui.add_space(4.0);
+                ui.checkbox(&mut model.show_rail, "Railways");
+                ui.checkbox(&mut model.show_aeroway, "Airports");
+                ui.add_space(6.0);
 
                 // ── NATURAL ──────────────────────────────────────────────────
                 section_label(ui, "NATURAL");
@@ -88,35 +73,27 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                 if water_changed && !model.show_water {
                     world_map::invalidate_water_cache_pub();
                 }
-                if local {
-                    ui.checkbox(&mut model.show_contours, "Contours");
-                    ui.checkbox(&mut model.show_trees, "Trees");
-                }
-                ui.add_space(4.0);
+                ui.checkbox(&mut model.show_contours, "Contours");
+                ui.checkbox(&mut model.show_trees, "Trees");
+                ui.add_space(6.0);
 
                 // ── URBAN ────────────────────────────────────────────────────
                 section_label(ui, "URBAN");
-                if local {
-                    ui.checkbox(&mut model.show_buildings, "Buildings");
-                    ui.checkbox(&mut model.show_admin, "Admin Boundaries");
-                    ui.checkbox(&mut model.show_military, "Military");
-                    ui.checkbox(&mut model.show_industrial, "Industrial");
-                    ui.checkbox(&mut model.show_port, "Ports");
-                    ui.checkbox(&mut model.show_government, "Government");
-                } else {
-                    ui.checkbox(&mut model.show_admin, "Admin Boundaries");
-                }
-                ui.add_space(4.0);
+                ui.checkbox(&mut model.show_buildings, "Buildings");
+                ui.checkbox(&mut model.show_admin, "Admin Boundaries");
+                ui.checkbox(&mut model.show_military, "Military");
+                ui.checkbox(&mut model.show_industrial, "Industrial");
+                ui.checkbox(&mut model.show_port, "Ports");
+                ui.checkbox(&mut model.show_government, "Government");
+                ui.add_space(6.0);
 
                 // ── INFRASTRUCTURE ───────────────────────────────────────────
-                if local {
-                    section_label(ui, "INFRASTRUCTURE");
-                    ui.checkbox(&mut model.show_power, "Power lines");
-                    ui.checkbox(&mut model.show_pipeline, "Pipelines");
-                    ui.checkbox(&mut model.show_comm, "Comms towers");
-                    ui.checkbox(&mut model.show_surveillance, "Surveillance");
-                    ui.add_space(4.0);
-                }
+                section_label(ui, "INFRASTRUCTURE");
+                ui.checkbox(&mut model.show_power, "Power lines");
+                ui.checkbox(&mut model.show_pipeline, "Pipelines");
+                ui.checkbox(&mut model.show_comm, "Comms towers");
+                ui.checkbox(&mut model.show_surveillance, "Surveillance");
+                ui.add_space(6.0);
 
                 // ── IMPORTED LAYERS ──────────────────────────────────────────
                 if !model.geojson_layers.is_empty() {
@@ -140,14 +117,13 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                     if let Some(idx) = remove_idx {
                         model.geojson_layers.remove(idx);
                     }
-                    ui.add_space(4.0);
+                    ui.add_space(6.0);
                 }
 
                 // ── ARCGIS SOURCES ───────────────────────────────────────────
                 section_label(ui, "ARCGIS SOURCES");
                 let url_id = ui.id().with("arcgis_url_input");
-                let mut url_buf: String =
-                    ui.data(|d| d.get_temp(url_id).unwrap_or_default());
+                let mut url_buf: String = ui.data(|d| d.get_temp(url_id).unwrap_or_default());
                 ui.horizontal(|ui| {
                     let te = ui.add(
                         egui::TextEdit::singleline(&mut url_buf)
@@ -155,23 +131,13 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                             .desired_width(ui.available_width() - 52.0),
                     );
                     let add = ui.small_button("Add").clicked();
-                    if (add
-                        || (te.lost_focus()
-                            && ui.input(|i| i.key_pressed(egui::Key::Enter))))
+                    if (add || (te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))))
                         && !url_buf.trim().is_empty()
                     {
                         let canonical = arcgis_source::normalize_url(&url_buf);
-                        if !model
-                            .arcgis_sources
-                            .iter()
-                            .any(|s| arcgis_source::normalize_url(&s.url) == canonical)
-                        {
+                        if !model.arcgis_sources.iter().any(|s| arcgis_source::normalize_url(&s.url) == canonical) {
                             let color_offset = model.arcgis_sources.len() * 2;
-                            arcgis_source::add_source(
-                                canonical.clone(),
-                                color_offset,
-                                ui.ctx().clone(),
-                            );
+                            arcgis_source::add_source(canonical.clone(), color_offset, ui.ctx().clone());
                             model.arcgis_sources.push(crate::model::ArcGisSourceRef {
                                 url: canonical,
                                 enabled_layer_ids: std::collections::HashSet::new(),
@@ -190,55 +156,30 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                     let title = snap.as_ref().map_or_else(
                         || src_ref.url.clone(),
                         |s| {
-                            if s.discovering {
-                                "Discovering…".into()
-                            } else if let Some(ref e) = s.discover_error {
-                                format!("Error: {e}")
-                            } else {
-                                s.display_name.clone()
-                            }
+                            if s.discovering { "Discovering…".into() }
+                            else if let Some(ref e) = s.discover_error { format!("Error: {e}") }
+                            else { s.display_name.clone() }
                         },
                     );
                     ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(&title)
-                                .small()
-                                .color(theme::text_muted()),
-                        );
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                if ui.small_button("×").clicked() {
-                                    to_remove = Some(si);
-                                }
-                            },
-                        );
+                        ui.label(egui::RichText::new(&title).small().color(theme::text_muted()));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("×").clicked() {
+                                to_remove = Some(si);
+                            }
+                        });
                     });
                     if let Some(ref s) = snap {
                         if let Some(ref layers) = s.layers {
                             for layer in layers {
-                                let mut enabled =
-                                    src_ref.enabled_layer_ids.contains(&layer.id);
+                                let mut enabled = src_ref.enabled_layer_ids.contains(&layer.id);
                                 ui.horizontal(|ui| {
                                     ui.add_space(8.0);
-                                    let (rect, _) = ui.allocate_exact_size(
-                                        egui::vec2(6.0, 6.0),
-                                        egui::Sense::hover(),
-                                    );
-                                    ui.painter().circle_filled(
-                                        rect.center(),
-                                        3.0,
-                                        layer.color,
-                                    );
-                                    if ui
-                                        .checkbox(&mut enabled, &layer.name)
-                                        .changed()
-                                    {
-                                        if enabled {
-                                            src_ref.enabled_layer_ids.insert(layer.id);
-                                        } else {
-                                            src_ref.enabled_layer_ids.remove(&layer.id);
-                                        }
+                                    let (rect, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
+                                    ui.painter().circle_filled(rect.center(), 3.0, layer.color);
+                                    if ui.checkbox(&mut enabled, &layer.name).changed() {
+                                        if enabled { src_ref.enabled_layer_ids.insert(layer.id); }
+                                        else { src_ref.enabled_layer_ids.remove(&layer.id); }
                                     }
                                 });
                             }
