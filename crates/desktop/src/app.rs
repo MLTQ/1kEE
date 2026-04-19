@@ -118,9 +118,12 @@ impl eframe::App for DashboardApp {
             panels::render_factal_settings(ctx, &mut self.model);
             panels::render_terrain_library(ctx, &mut self.model);
             panels::render_stellar_observatory(ctx, &mut self.model);
-            panels::render_status_log(ctx, &mut self.model);
+        }
+
+        // These panels are toggled independently of cinematic mode.
+        panels::render_layer_drawer(ctx, &mut self.model);
+        if self.model.show_event_list {
             panels::render_event_list(ctx, &mut self.model);
-            panels::render_camera_list(ctx, &mut self.model);
         }
 
         egui::CentralPanel::default()
