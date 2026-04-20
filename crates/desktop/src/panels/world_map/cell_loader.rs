@@ -1,7 +1,9 @@
 use crate::model::GeoPoint;
 use crate::osm_ingest::GeoBounds;
+use crate::terrain_assets;
 use cell_format::{
-    TAG_BLDG, TAG_TREE, TAG_WATR, cell_filename, decode_class, read::read_single_chunk,
+    TAG_AERO, TAG_BLDG, TAG_COMM, TAG_GOVT, TAG_INDS, TAG_MILT, TAG_PIPE, TAG_PORT, TAG_POWR,
+    TAG_RAIL, TAG_SURV, TAG_TREE, TAG_WATR, cell_filename, decode_class, read::read_single_chunk,
 };
 use serde_json::Value;
 use std::fs;
@@ -16,15 +18,43 @@ pub struct LoadedPolyline {
     pub is_polygon: bool,
 }
 
+/// Return candidate OSM cache root directories, in priority order.
+///
+/// The cache builder writes cell files to `{cache_dir}/{prefix}_cells/`.
+/// By default `cache_dir` is `{derived_root}/osm`, but users may have set it
+/// to `{derived_root}` directly (omitting the `osm/` level) or even to an
+/// entirely custom path.  We try the most specific candidates first.
+fn osm_cache_dir_candidates(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Some(derived) = terrain_assets::find_derived_root(Some(root)) {
+        candidates.push(derived.join("osm")); // canonical: Derived/osm/
+        candidates.push(derived.clone());     // fallback: Derived/
+    }
+
+    // Also try root itself and root/osm in case the user pointed at the
+    // cache dir directly.
+    candidates.push(root.join("osm"));
+    candidates.push(root.to_path_buf());
+
+    candidates
+}
+
 /// Load all features for `bounds` from per-cell binary files stored under
-/// `root/{prefix}_cells/{prefix}_cell_{lat}_{lon}.1kc`, falling back to
-/// legacy `.geojson` files for cells that have not yet been rebuilt.
+/// `{derived_root}/osm/{prefix}_cells/{prefix}_cell_{lat}_{lon}.1kc`,
+/// falling back to legacy `.geojson` files for cells that have not yet been
+/// rebuilt.
 pub fn load_features_from_cells(
     root: &Path,
     prefix: &str,
     bounds: GeoBounds,
 ) -> Vec<LoadedPolyline> {
-    let cell_dir = root.join(format!("{prefix}_cells"));
+    let cell_dir = osm_cache_dir_candidates(root)
+        .into_iter()
+        .map(|base| base.join(format!("{prefix}_cells")))
+        .find(|dir| dir.exists())
+        .unwrap_or_else(|| root.join(format!("{prefix}_cells")));
+
     if !cell_dir.exists() {
         return Vec::new();
     }
@@ -138,6 +168,16 @@ fn prefix_to_tag(prefix: &str) -> [u8; 4] {
         "waterway" => TAG_WATR,
         "building" => TAG_BLDG,
         "tree" => TAG_TREE,
+        "power" => TAG_POWR,
+        "railway" => TAG_RAIL,
+        "pipeline" => TAG_PIPE,
+        "aeroway" => TAG_AERO,
+        "military" => TAG_MILT,
+        "comm" => TAG_COMM,
+        "industrial" => TAG_INDS,
+        "port" => TAG_PORT,
+        "government" => TAG_GOVT,
+        "surveillance" => TAG_SURV,
         _ => TAG_BLDG,
     }
 }

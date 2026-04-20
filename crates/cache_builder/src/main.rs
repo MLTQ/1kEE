@@ -2,12 +2,14 @@ mod admin;
 mod app;
 mod args;
 mod contours;
+mod flat_node_store;
 mod geojson;
 mod job;
 mod lunar;
 mod marching_squares;
 mod mars;
 mod node_store;
+mod planet_all;
 mod roads;
 mod srtm;
 mod util;
@@ -23,6 +25,7 @@ fn run() -> Result<(), String> {
     match args::parse(std::env::args().skip(1))? {
         args::Command::Gui => launch_gui(),
         args::Command::RoadsBbox(command) => roads::build_bbox_cache(command),
+        args::Command::PlanetAll(command) => planet_all::build_planet_cache(command),
         args::Command::ContoursBbox(command) => {
             let bounds = contours::GeoBounds {
                 min_lat: command.min_lat,

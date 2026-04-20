@@ -1,9 +1,12 @@
 use crate::srtm::SrtmSampler;
 use crate::util::{GeoPoint, RoadPolyline, WayFeature, bounds_intersect, focus_cell_bounds};
 use cell_format::{
-    CellFeature, CellPoint, TAG_ADMN, TAG_BLDG, TAG_ROAD, TAG_TREE, TAG_WATR, admin_filename,
-    cell_filename, encode_road_class, encode_watr_class, read::read_single_chunk,
-    write::write_cell,
+    CellFeature, CellPoint, TAG_ADMN, TAG_AERO, TAG_BLDG, TAG_COMM, TAG_GOVT, TAG_INDS, TAG_MILT,
+    TAG_PIPE, TAG_PORT, TAG_POWR, TAG_RAIL, TAG_ROAD, TAG_SURV, TAG_TREE, TAG_WATR,
+    admin_filename, cell_filename, encode_aero_class, encode_comm_class, encode_govt_class,
+    encode_inds_class, encode_milt_class, encode_pipe_class, encode_port_class,
+    encode_powr_class_from_name, encode_rail_class, encode_road_class, encode_surv_class,
+    encode_watr_class, read::read_single_chunk, write::write_cell,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -238,21 +241,12 @@ pub fn load_all_features_from_cell(path: &Path, tag: [u8; 4]) -> Option<Vec<WayF
 fn load_features_from_binary(path: &Path, tag: [u8; 4]) -> Option<Vec<WayFeature>> {
     let data = fs::read(path).ok()?;
     let features = read_single_chunk(&data, tag)?;
-    let prefix = tag_to_prefix(tag);
     Some(
         features
             .into_iter()
             .filter(|f| f.points.len() >= 2)
             .map(|f| {
-                let feature_class = if tag == TAG_WATR {
-                    cell_format::decode_watr_class(f.class).to_owned()
-                } else if tag == TAG_BLDG {
-                    "building".to_owned()
-                } else if tag == TAG_TREE {
-                    "forest".to_owned()
-                } else {
-                    prefix.to_owned()
-                };
+                let feature_class = cell_format::decode_class(&tag, f.class).to_owned();
                 WayFeature {
                     way_id: f.way_id,
                     feature_class,
@@ -299,6 +293,16 @@ fn way_feature_to_cell_feature_with_elev(
 ) -> CellFeature {
     let class = match prefix {
         "waterway" => encode_watr_class(&f.feature_class),
+        "power" => encode_powr_class_from_name(&f.feature_class),
+        "railway" => encode_rail_class(&f.feature_class),
+        "pipeline" => encode_pipe_class(&f.feature_class),
+        "aeroway" => encode_aero_class(&f.feature_class),
+        "military" => encode_milt_class(&f.feature_class),
+        "comm" => encode_comm_class(&f.feature_class),
+        "industrial" => encode_inds_class(&f.feature_class),
+        "port" => encode_port_class(&f.feature_class),
+        "government" => encode_govt_class(&f.feature_class),
+        "surveillance" => encode_surv_class(&f.feature_class),
         _ => 0, // building=0, forest=0, etc.
     };
     CellFeature {
@@ -327,6 +331,16 @@ fn prefix_to_tag(prefix: &str) -> [u8; 4] {
         "waterway" => TAG_WATR,
         "building" => TAG_BLDG,
         "tree" => TAG_TREE,
+        "power" => TAG_POWR,
+        "railway" => TAG_RAIL,
+        "pipeline" => TAG_PIPE,
+        "aeroway" => TAG_AERO,
+        "military" => TAG_MILT,
+        "comm" => TAG_COMM,
+        "industrial" => TAG_INDS,
+        "port" => TAG_PORT,
+        "government" => TAG_GOVT,
+        "surveillance" => TAG_SURV,
         _ => TAG_BLDG,
     }
 }
@@ -336,6 +350,16 @@ fn tag_to_prefix(tag: [u8; 4]) -> &'static str {
         b"WATR" => "waterway",
         b"BLDG" => "building",
         b"TREE" => "tree",
+        b"POWR" => "power",
+        b"RAIL" => "railway",
+        b"PIPE" => "pipeline",
+        b"AERO" => "aeroway",
+        b"MILT" => "military",
+        b"COMM" => "comm",
+        b"INDS" => "industrial",
+        b"PORT" => "port",
+        b"GOVT" => "government",
+        b"SURV" => "surveillance",
         _ => "unknown",
     }
 }

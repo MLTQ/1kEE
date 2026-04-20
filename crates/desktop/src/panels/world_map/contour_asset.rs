@@ -116,6 +116,9 @@ struct GlobeRegionCache {
     in_flight: HashSet<(i32, i32)>,
     /// Insertion order for deterministic eviction among equal-distance ties
     order: Vec<(i32, i32)>,
+    /// Contours from the previous zoom bucket, shown while new-resolution
+    /// tiles are loading so the globe doesn't flash blank on zoom-level change.
+    zoom_fallback: Option<Arc<Vec<ContourPath>>>,
 }
 
 impl Default for GlobeRegionCache {
@@ -126,6 +129,7 @@ impl Default for GlobeRegionCache {
             tiles: HashMap::new(),
             in_flight: HashSet::new(),
             order: Vec::new(),
+            zoom_fallback: None,
         }
     }
 }
@@ -632,29 +636,34 @@ pub fn load_mars_region_for_view(
 pub fn load_srtm_for_globe(
     selected_root: Option<&Path>,
     center: GeoPoint,
-    _zoom: f32,
+    zoom: f32,
     ctx: egui::Context,
 ) -> Option<Arc<Vec<ContourPath>>> {
     const MAX_TILES: usize = 1600;
-    // Use a fixed coarse zoom spec for globe-scale tiles (zoom_bucket=1,
-    // half_extent=2.2°, ~244 km per side).  This keeps tile geographic size
-    // constant as the actual view zoom changes — tiles don't shrink as the
-    // globe grows.  radius=2 gives a 5×5 grid covering ~8.4° across.
-    const GLOBE_TILE_ZOOM: f32 = 1.5;
+    // Map the actual globe view zoom to a coarse tile spec.  Globe mode caps
+    // at bucket 1 (2.2°, 25 m) — finer tiles aren't visible on a globe and
+    // cost far too much geometry.  radius=2 gives a 5×5 grid pre-fetched.
+    let tile_zoom = globe_zoom_to_tile_zoom(zoom);
 
     let assets =
-        srtm_focus_cache::ensure_focus_contour_region(selected_root, center, GLOBE_TILE_ZOOM, 2);
+        srtm_focus_cache::ensure_focus_contour_region(selected_root, center, tile_zoom, 2);
 
     let cache: &'static Mutex<GlobeRegionCache> =
         GLOBE_CONTOUR_CACHE.get_or_init(|| Mutex::new(GlobeRegionCache::default()));
     let mut guard = cache.lock().ok()?;
 
-    let zoom_bucket = srtm_focus_cache::zoom_bucket_for_zoom(GLOBE_TILE_ZOOM);
+    let zoom_bucket = srtm_focus_cache::zoom_bucket_for_zoom(tile_zoom);
     let root = selected_root.map(Path::to_path_buf);
 
-    // Invalidate only on root change — zoom is now fixed so zoom_bucket never
-    // changes, and position changes should accumulate rather than clear.
+    // On zoom-bucket or root change: snapshot current tiles as fallback so the
+    // globe doesn't flash blank while new-resolution tiles are loading.
     if guard.zoom_bucket != zoom_bucket || guard.root != root {
+        let old: Vec<ContourPath> = guard
+            .tiles
+            .values()
+            .flat_map(|v| v.iter().cloned())
+            .collect();
+        guard.zoom_fallback = if old.is_empty() { None } else { Some(Arc::new(old)) };
         guard.zoom_bucket = zoom_bucket;
         guard.root = root;
         guard.tiles.clear();
@@ -664,10 +673,10 @@ pub fn load_srtm_for_globe(
 
     if assets.is_empty() {
         // No SRTM root found; return whatever we already have.
-        return render_globe_tiles(&guard);
+        return render_globe_tiles(&mut guard);
     }
 
-    let feature_budget = srtm_focus_cache::feature_budget_for_zoom(GLOBE_TILE_ZOOM);
+    let feature_budget = srtm_focus_cache::feature_budget_for_zoom(tile_zoom);
     let per_asset_budget = (feature_budget / assets.len().max(1)).max(120);
 
     // Collect missing keys, then drop the lock before doing DB reads.
@@ -730,7 +739,7 @@ pub fn load_srtm_for_globe(
 
     // Evict tiles furthest from centre when over the cap.
     if guard.tiles.len() > MAX_TILES {
-        let half_extent = srtm_focus_cache::half_extent_for_zoom(GLOBE_TILE_ZOOM);
+        let half_extent = srtm_focus_cache::half_extent_for_zoom(tile_zoom);
         let bucket_step = half_extent * 0.45;
         let clat = (center.lat / bucket_step).round() as i32;
         let clon = (center.lon / bucket_step).round() as i32;
@@ -746,18 +755,45 @@ pub fn load_srtm_for_globe(
         guard.order.retain(|k| keep.contains(k));
     }
 
-    render_globe_tiles(&guard)
+    render_globe_tiles(&mut guard)
 }
 
-fn render_globe_tiles(guard: &GlobeRegionCache) -> Option<Arc<Vec<ContourPath>>> {
+/// Map globe view zoom to tile spec zoom for the contour cache.
+///
+/// Globe mode uses two tiers only:
+/// - globe zoom < 2.5 → bucket 0 (3.6° tiles, 50 m interval) for wide/full-globe views
+/// - globe zoom ≥ 2.5 → bucket 1 (2.2° tiles, 25 m interval) for hemisphere/continent
+///
+/// Capped at bucket 1 — finer tiles offer no visible benefit on a globe and
+/// dramatically increase per-frame geometry.
+fn globe_zoom_to_tile_zoom(globe_zoom: f32) -> f32 {
+    if globe_zoom < 2.5 { 0.5 } else { 1.5 }
+}
+
+fn render_globe_tiles(guard: &mut GlobeRegionCache) -> Option<Arc<Vec<ContourPath>>> {
     let merged: Vec<ContourPath> = guard
         .tiles
         .values()
         .flat_map(|v| v.iter().cloned())
         .collect();
     if merged.is_empty() {
-        None
+        // No new-resolution tiles yet — return the previous zoom level's
+        // contours so the globe doesn't flash blank during the transition.
+        guard.zoom_fallback.clone()
     } else {
+        // Sort by absolute elevation so output order is deterministic regardless
+        // of HashMap iteration order.  Without this, any budget-based subsetting
+        // in the draw path would pick different contours each frame as tiles
+        // load/unload, causing visible jitter.
+        let mut merged = merged;
+        merged.sort_unstable_by(|a, b| {
+            a.elevation_m
+                .abs()
+                .partial_cmp(&b.elevation_m.abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        // Real tiles are ready; drop the fallback to free memory.
+        guard.zoom_fallback = None;
         Some(Arc::new(merged))
     }
 }
@@ -768,24 +804,29 @@ fn render_globe_tiles(guard: &GlobeRegionCache) -> Option<Arc<Vec<ContourPath>>>
 pub fn load_lunar_for_globe(
     selected_root: Option<&Path>,
     center: crate::model::GeoPoint,
-    _zoom: f32,
+    zoom: f32,
     ctx: egui::Context,
 ) -> Option<Arc<Vec<ContourPath>>> {
     const MAX_TILES: usize = 800;
-    // Fixed zoom so tile footprint stays constant while orbiting.
-    const GLOBE_TILE_ZOOM: f32 = 1.5;
+    let tile_zoom = globe_zoom_to_tile_zoom(zoom);
 
     let assets =
-        srtm_focus_cache::ensure_lunar_contour_region(selected_root, center, GLOBE_TILE_ZOOM);
+        srtm_focus_cache::ensure_lunar_contour_region(selected_root, center, tile_zoom);
 
     let cache: &'static Mutex<GlobeRegionCache> =
         LUNAR_GLOBE_CONTOUR_CACHE.get_or_init(|| Mutex::new(GlobeRegionCache::default()));
     let mut guard = cache.lock().ok()?;
 
-    let zoom_bucket = srtm_focus_cache::zoom_bucket_for_zoom(GLOBE_TILE_ZOOM);
+    let zoom_bucket = srtm_focus_cache::zoom_bucket_for_zoom(tile_zoom);
     let root = selected_root.map(Path::to_path_buf);
 
     if guard.zoom_bucket != zoom_bucket || guard.root != root {
+        let old: Vec<ContourPath> = guard
+            .tiles
+            .values()
+            .flat_map(|v| v.iter().cloned())
+            .collect();
+        guard.zoom_fallback = if old.is_empty() { None } else { Some(Arc::new(old)) };
         guard.zoom_bucket = zoom_bucket;
         guard.root = root;
         guard.tiles.clear();
@@ -794,7 +835,7 @@ pub fn load_lunar_for_globe(
     }
 
     if assets.is_empty() {
-        return render_globe_tiles(&guard);
+        return render_globe_tiles(&mut guard);
     }
 
     let per_asset_budget = (360 / assets.len().max(1)).max(120);
@@ -854,7 +895,7 @@ pub fn load_lunar_for_globe(
     let mut guard = cache.lock().ok()?;
 
     if guard.tiles.len() > MAX_TILES {
-        let half_extent = srtm_focus_cache::half_extent_for_zoom(GLOBE_TILE_ZOOM);
+        let half_extent = srtm_focus_cache::half_extent_for_zoom(tile_zoom);
         let bucket_step = half_extent * 0.45;
         let clat = (center.lat / bucket_step).round() as i32;
         let clon = (center.lon / bucket_step).round() as i32;
@@ -867,7 +908,7 @@ pub fn load_lunar_for_globe(
         guard.order.retain(|k| keep.contains(k));
     }
 
-    render_globe_tiles(&guard)
+    render_globe_tiles(&mut guard)
 }
 
 /// Mars equivalent of `load_lunar_for_globe`. Triggers on-demand tile builds
@@ -876,24 +917,29 @@ pub fn load_lunar_for_globe(
 pub fn load_mars_for_globe(
     selected_root: Option<&Path>,
     center: crate::model::GeoPoint,
-    _zoom: f32,
+    zoom: f32,
     ctx: egui::Context,
 ) -> Option<Arc<Vec<ContourPath>>> {
     const MAX_TILES: usize = 800;
-    // Fixed zoom so tile footprint stays constant while orbiting.
-    const GLOBE_TILE_ZOOM: f32 = 1.5;
+    let tile_zoom = globe_zoom_to_tile_zoom(zoom);
 
     let assets =
-        srtm_focus_cache::ensure_mars_contour_region(selected_root, center, GLOBE_TILE_ZOOM);
+        srtm_focus_cache::ensure_mars_contour_region(selected_root, center, tile_zoom);
 
     let cache: &'static Mutex<GlobeRegionCache> =
         MARS_GLOBE_CONTOUR_CACHE.get_or_init(|| Mutex::new(GlobeRegionCache::default()));
     let mut guard = cache.lock().ok()?;
 
-    let zoom_bucket = srtm_focus_cache::zoom_bucket_for_zoom(GLOBE_TILE_ZOOM);
+    let zoom_bucket = srtm_focus_cache::zoom_bucket_for_zoom(tile_zoom);
     let root = selected_root.map(Path::to_path_buf);
 
     if guard.zoom_bucket != zoom_bucket || guard.root != root {
+        let old: Vec<ContourPath> = guard
+            .tiles
+            .values()
+            .flat_map(|v| v.iter().cloned())
+            .collect();
+        guard.zoom_fallback = if old.is_empty() { None } else { Some(Arc::new(old)) };
         guard.zoom_bucket = zoom_bucket;
         guard.root = root;
         guard.tiles.clear();
@@ -902,7 +948,7 @@ pub fn load_mars_for_globe(
     }
 
     if assets.is_empty() {
-        return render_globe_tiles(&guard);
+        return render_globe_tiles(&mut guard);
     }
 
     let per_asset_budget = (360 / assets.len().max(1)).max(120);
@@ -962,7 +1008,7 @@ pub fn load_mars_for_globe(
     let mut guard = cache.lock().ok()?;
 
     if guard.tiles.len() > MAX_TILES {
-        let half_extent = srtm_focus_cache::half_extent_for_zoom(GLOBE_TILE_ZOOM);
+        let half_extent = srtm_focus_cache::half_extent_for_zoom(tile_zoom);
         let bucket_step = half_extent * 0.45;
         let clat = (center.lat / bucket_step).round() as i32;
         let clon = (center.lon / bucket_step).round() as i32;
@@ -975,7 +1021,7 @@ pub fn load_mars_for_globe(
         guard.order.retain(|k| keep.contains(k));
     }
 
-    render_globe_tiles(&guard)
+    render_globe_tiles(&mut guard)
 }
 
 pub fn load_global_coastlines(

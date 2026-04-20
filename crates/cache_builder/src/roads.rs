@@ -3,9 +3,12 @@ use crate::geojson::{ensure_cache_dir, merge_write_cells, merge_write_feature_ce
 use crate::node_store::NodeStore;
 use crate::srtm::SrtmSampler;
 use crate::util::{
-    GeoBounds, GeoPoint, RoadPolyline, WayFeature, bounds_intersect, canonical_building_class,
-    canonical_road_class, canonical_tree_class, canonical_waterway_class, expand_bounds,
-    focus_cells_for_bounds, point_in_bounds, polyline_bounds,
+    GeoBounds, GeoPoint, RoadPolyline, WayFeature, bounds_intersect, canonical_aeroway_class,
+    canonical_building_class, canonical_comm_class, canonical_govt_class,
+    canonical_industrial_class, canonical_military_class, canonical_pipeline_class,
+    canonical_port_class, canonical_power_class, canonical_railway_class, canonical_road_class,
+    canonical_surv_class, canonical_tree_class, canonical_waterway_class, expand_bounds,
+    focus_cells_for_bounds, parse_voltage_kv, point_in_bounds, polyline_bounds,
 };
 use osmpbf::{BlobDecode, BlobReader};
 use std::collections::{HashMap, HashSet};
@@ -337,11 +340,31 @@ fn collect_all_features_by_cell(
     let mut seen_waterway_ids: HashSet<i64> = HashSet::new();
     let mut seen_building_ids: HashSet<i64> = HashSet::new();
     let mut seen_tree_ids: HashSet<i64> = HashSet::new();
+    let mut seen_power_ids: HashSet<i64> = HashSet::new();
+    let mut seen_rail_ids: HashSet<i64> = HashSet::new();
+    let mut seen_pipeline_ids: HashSet<i64> = HashSet::new();
+    let mut seen_aeroway_ids: HashSet<i64> = HashSet::new();
+    let mut seen_military_ids: HashSet<i64> = HashSet::new();
+    let mut seen_comm_ids: HashSet<i64> = HashSet::new();
+    let mut seen_industrial_ids: HashSet<i64> = HashSet::new();
+    let mut seen_port_ids: HashSet<i64> = HashSet::new();
+    let mut seen_govt_ids: HashSet<i64> = HashSet::new();
+    let mut seen_surv_ids: HashSet<i64> = HashSet::new();
 
     let mut roads_by_cell: HashMap<(i32, i32), Vec<RoadPolyline>> = HashMap::new();
     let mut waterways_by_cell: HashMap<(i32, i32), Vec<WayFeature>> = HashMap::new();
     let mut buildings_by_cell: HashMap<(i32, i32), Vec<WayFeature>> = HashMap::new();
     let mut trees_by_cell: HashMap<(i32, i32), Vec<WayFeature>> = HashMap::new();
+    let mut power_by_cell: HashMap<(i32, i32), Vec<WayFeature>> = HashMap::new();
+    let mut rail_by_cell: HashMap<(i32, i32), Vec<WayFeature>> = HashMap::new();
+    let mut pipeline_by_cell: HashMap<(i32, i32), Vec<WayFeature>> = HashMap::new();
+    let mut aeroway_by_cell: HashMap<(i32, i32), Vec<WayFeature>> = HashMap::new();
+    let mut military_by_cell: HashMap<(i32, i32), Vec<WayFeature>> = HashMap::new();
+    let mut comm_by_cell: HashMap<(i32, i32), Vec<WayFeature>> = HashMap::new();
+    let mut industrial_by_cell: HashMap<(i32, i32), Vec<WayFeature>> = HashMap::new();
+    let mut port_by_cell: HashMap<(i32, i32), Vec<WayFeature>> = HashMap::new();
+    let mut govt_by_cell: HashMap<(i32, i32), Vec<WayFeature>> = HashMap::new();
+    let mut surv_by_cell: HashMap<(i32, i32), Vec<WayFeature>> = HashMap::new();
 
     let mut scanned_ways = 0usize;
     let mut feature_count = 0usize;
@@ -365,27 +388,131 @@ fn collect_all_features_by_cell(
             let mut waterway_class: Option<&'static str> = None;
             let mut building_class: Option<&'static str> = None;
             let mut tree_class: Option<&'static str> = None;
+            let mut military_class: Option<&'static str> = None;
+            let mut industrial_class: Option<&'static str> = None;
+            let mut port_class: Option<&'static str> = None;
+            let mut govt_class: Option<&'static str> = None;
+            let mut surv_class: Option<&'static str> = None;
             let mut name: Option<String> = None;
 
+            // Multi-tag raw values for features that need correlation
+            let mut raw_power: Option<String> = None;
+            let mut raw_voltage: Option<String> = None;
+            let mut raw_railway: Option<&'static str> = None;
+            let mut raw_pipeline = false; // man_made=pipeline found
+            let mut raw_substance: Option<String> = None;
+            let mut raw_aeroway: Option<String> = None;
+            let mut raw_aerodrome_intl = false;
+            let mut raw_man_made: Option<String> = None;
+            let mut raw_tower_type: Option<String> = None;
+
             for (key, value) in way.tags() {
-                if key == "highway" {
-                    road_class = canonical_road_class(value);
-                } else if key == "waterway" {
-                    waterway_class = canonical_waterway_class(value);
-                } else if key == "building" {
-                    building_class = canonical_building_class(value);
-                } else if key == "natural" || key == "landuse" {
-                    tree_class = canonical_tree_class(key, value);
-                } else if key == "name" && name.is_none() {
-                    name = Some(value.to_owned());
+                match key {
+                    "highway" => road_class = canonical_road_class(value),
+                    "waterway" => waterway_class = canonical_waterway_class(value),
+                    "building" => building_class = canonical_building_class(value),
+                    "natural" | "landuse" => {
+                        if tree_class.is_none() {
+                            tree_class = canonical_tree_class(key, value);
+                        }
+                        if industrial_class.is_none() {
+                            industrial_class = canonical_industrial_class(key, value);
+                        }
+                    }
+                    "military" => military_class = canonical_military_class(key, value),
+                    "power" => raw_power = Some(value.to_owned()),
+                    "voltage" => raw_voltage = Some(value.to_owned()),
+                    "railway" => raw_railway = canonical_railway_class(value),
+                    "man_made" => {
+                        if value == "pipeline" {
+                            raw_pipeline = true;
+                        } else {
+                            if industrial_class.is_none() {
+                                industrial_class = canonical_industrial_class(key, value);
+                            }
+                            // collect for later correlation with tower:type
+                            raw_man_made = Some(value.to_owned());
+                            if port_class.is_none() {
+                                port_class = canonical_port_class(key, value);
+                            }
+                            if surv_class.is_none() {
+                                surv_class = canonical_surv_class(key, value);
+                            }
+                        }
+                    }
+                    "substance" => raw_substance = Some(value.to_owned()),
+                    "aeroway" => raw_aeroway = Some(value.to_owned()),
+                    "aerodrome:type" => {
+                        if value == "international" {
+                            raw_aerodrome_intl = true;
+                        }
+                    }
+                    "tower:type" => raw_tower_type = Some(value.to_owned()),
+                    "amenity" => {
+                        if govt_class.is_none() {
+                            govt_class = canonical_govt_class(key, value);
+                        }
+                        if port_class.is_none() {
+                            port_class = canonical_port_class(key, value);
+                        }
+                    }
+                    "office" | "government" => {
+                        if govt_class.is_none() {
+                            govt_class = canonical_govt_class(key, value);
+                        }
+                    }
+                    "harbour" | "leisure" => {
+                        if port_class.is_none() {
+                            port_class = canonical_port_class(key, value);
+                        }
+                    }
+                    "surveillance" => {
+                        if surv_class.is_none() {
+                            surv_class = canonical_surv_class(key, value);
+                        }
+                    }
+                    "name" if name.is_none() => name = Some(value.to_owned()),
+                    _ => {}
                 }
             }
 
-            // Skip entirely if nothing matched
+            // Resolve multi-tag classes after the loop
+            let voltage_kv = raw_voltage.as_deref().and_then(parse_voltage_kv);
+            let power_class = raw_power
+                .as_deref()
+                .and_then(|pt| canonical_power_class(pt, voltage_kv));
+
+            let pipeline_class: Option<&'static str> = if raw_pipeline {
+                Some(canonical_pipeline_class(
+                    raw_substance.as_deref().unwrap_or(""),
+                ))
+            } else {
+                None
+            };
+
+            let aeroway_class = raw_aeroway
+                .as_deref()
+                .and_then(|a| canonical_aeroway_class(a, raw_aerodrome_intl));
+
+            let comm_class = raw_man_made
+                .as_deref()
+                .and_then(|m| canonical_comm_class(m, raw_tower_type.as_deref()));
+
+            // Skip entirely if nothing matched any enabled layer
             let any_match = (command.build_roads && road_class.is_some())
                 || (command.build_waterways && waterway_class.is_some())
                 || (command.build_buildings && building_class.is_some())
-                || (command.build_trees && tree_class.is_some());
+                || (command.build_trees && tree_class.is_some())
+                || (command.build_power && power_class.is_some())
+                || (command.build_rail && raw_railway.is_some())
+                || (command.build_pipeline && pipeline_class.is_some())
+                || (command.build_aeroway && aeroway_class.is_some())
+                || (command.build_military && military_class.is_some())
+                || (command.build_comm && comm_class.is_some())
+                || (command.build_industrial && industrial_class.is_some())
+                || (command.build_port && port_class.is_some())
+                || (command.build_government && govt_class.is_some())
+                || (command.build_surveillance && surv_class.is_some());
             if !any_match {
                 continue;
             }
@@ -507,6 +634,256 @@ fn collect_all_features_by_cell(
                 }
             }
 
+            // Power lines and infrastructure
+            if command.build_power {
+                if let Some(cls) = power_class {
+                    if seen_power_ids.insert(way.id()) {
+                        let is_poly = cls == "substation" || cls == "power_plant";
+                        let feature = WayFeature {
+                            way_id: way.id(),
+                            feature_class: cls.to_owned(),
+                            name: name.clone(),
+                            points: points.clone(),
+                            is_polygon: is_poly,
+                        };
+                        let mut assigned = HashSet::new();
+                        for cell in focus_cells_for_bounds(way_bounds) {
+                            if assigned.insert(cell) {
+                                touched_cells.insert(cell);
+                                power_by_cell.entry(cell).or_default().push(feature.clone());
+                            }
+                        }
+                        feature_count += 1;
+                        buffered += 1;
+                    }
+                }
+            }
+
+            // Railways
+            if command.build_rail {
+                if let Some(cls) = raw_railway {
+                    if seen_rail_ids.insert(way.id()) {
+                        let feature = WayFeature {
+                            way_id: way.id(),
+                            feature_class: cls.to_owned(),
+                            name: name.clone(),
+                            points: points.clone(),
+                            is_polygon: false,
+                        };
+                        let mut assigned = HashSet::new();
+                        for cell in focus_cells_for_bounds(way_bounds) {
+                            if assigned.insert(cell) {
+                                touched_cells.insert(cell);
+                                rail_by_cell.entry(cell).or_default().push(feature.clone());
+                            }
+                        }
+                        feature_count += 1;
+                        buffered += 1;
+                    }
+                }
+            }
+
+            // Pipelines
+            if command.build_pipeline {
+                if let Some(cls) = pipeline_class {
+                    if seen_pipeline_ids.insert(way.id()) {
+                        let feature = WayFeature {
+                            way_id: way.id(),
+                            feature_class: cls.to_owned(),
+                            name: name.clone(),
+                            points: points.clone(),
+                            is_polygon: false,
+                        };
+                        let mut assigned = HashSet::new();
+                        for cell in focus_cells_for_bounds(way_bounds) {
+                            if assigned.insert(cell) {
+                                touched_cells.insert(cell);
+                                pipeline_by_cell.entry(cell).or_default().push(feature.clone());
+                            }
+                        }
+                        feature_count += 1;
+                        buffered += 1;
+                    }
+                }
+            }
+
+            // Aeroways (airports, runways, helipads)
+            if command.build_aeroway {
+                if let Some(cls) = aeroway_class {
+                    if seen_aeroway_ids.insert(way.id()) {
+                        let is_poly = matches!(
+                            cls,
+                            "intl_airport" | "dom_airport" | "airfield" | "airstrip" | "terminal"
+                        );
+                        let feature = WayFeature {
+                            way_id: way.id(),
+                            feature_class: cls.to_owned(),
+                            name: name.clone(),
+                            points: points.clone(),
+                            is_polygon: is_poly,
+                        };
+                        let mut assigned = HashSet::new();
+                        for cell in focus_cells_for_bounds(way_bounds) {
+                            if assigned.insert(cell) {
+                                touched_cells.insert(cell);
+                                aeroway_by_cell.entry(cell).or_default().push(feature.clone());
+                            }
+                        }
+                        feature_count += 1;
+                        buffered += 1;
+                    }
+                }
+            }
+
+            // Military areas
+            if command.build_military {
+                if let Some(cls) = military_class {
+                    if seen_military_ids.insert(way.id()) {
+                        let feature = WayFeature {
+                            way_id: way.id(),
+                            feature_class: cls.to_owned(),
+                            name: name.clone(),
+                            points: points.clone(),
+                            is_polygon: true,
+                        };
+                        let mut assigned = HashSet::new();
+                        for cell in focus_cells_for_bounds(way_bounds) {
+                            if assigned.insert(cell) {
+                                touched_cells.insert(cell);
+                                military_by_cell.entry(cell).or_default().push(feature.clone());
+                            }
+                        }
+                        feature_count += 1;
+                        buffered += 1;
+                    }
+                }
+            }
+
+            // Communications infrastructure
+            if command.build_comm {
+                if let Some(cls) = comm_class {
+                    if seen_comm_ids.insert(way.id()) {
+                        let feature = WayFeature {
+                            way_id: way.id(),
+                            feature_class: cls.to_owned(),
+                            name: name.clone(),
+                            points: points.clone(),
+                            is_polygon: false,
+                        };
+                        let mut assigned = HashSet::new();
+                        for cell in focus_cells_for_bounds(way_bounds) {
+                            if assigned.insert(cell) {
+                                touched_cells.insert(cell);
+                                comm_by_cell.entry(cell).or_default().push(feature.clone());
+                            }
+                        }
+                        feature_count += 1;
+                        buffered += 1;
+                    }
+                }
+            }
+
+            // Industrial areas
+            if command.build_industrial {
+                if let Some(cls) = industrial_class {
+                    if seen_industrial_ids.insert(way.id()) {
+                        let is_poly = cls == "industrial" || cls == "mine";
+                        let feature = WayFeature {
+                            way_id: way.id(),
+                            feature_class: cls.to_owned(),
+                            name: name.clone(),
+                            points: points.clone(),
+                            is_polygon: is_poly,
+                        };
+                        let mut assigned = HashSet::new();
+                        for cell in focus_cells_for_bounds(way_bounds) {
+                            if assigned.insert(cell) {
+                                touched_cells.insert(cell);
+                                industrial_by_cell
+                                    .entry(cell)
+                                    .or_default()
+                                    .push(feature.clone());
+                            }
+                        }
+                        feature_count += 1;
+                        buffered += 1;
+                    }
+                }
+            }
+
+            // Maritime / port features
+            if command.build_port {
+                if let Some(cls) = port_class {
+                    if seen_port_ids.insert(way.id()) {
+                        let is_poly = cls == "harbour" || cls == "marina" || cls == "shipyard";
+                        let feature = WayFeature {
+                            way_id: way.id(),
+                            feature_class: cls.to_owned(),
+                            name: name.clone(),
+                            points: points.clone(),
+                            is_polygon: is_poly,
+                        };
+                        let mut assigned = HashSet::new();
+                        for cell in focus_cells_for_bounds(way_bounds) {
+                            if assigned.insert(cell) {
+                                touched_cells.insert(cell);
+                                port_by_cell.entry(cell).or_default().push(feature.clone());
+                            }
+                        }
+                        feature_count += 1;
+                        buffered += 1;
+                    }
+                }
+            }
+
+            // Government facilities
+            if command.build_government {
+                if let Some(cls) = govt_class {
+                    if seen_govt_ids.insert(way.id()) {
+                        let feature = WayFeature {
+                            way_id: way.id(),
+                            feature_class: cls.to_owned(),
+                            name: name.clone(),
+                            points: points.clone(),
+                            is_polygon: true,
+                        };
+                        let mut assigned = HashSet::new();
+                        for cell in focus_cells_for_bounds(way_bounds) {
+                            if assigned.insert(cell) {
+                                touched_cells.insert(cell);
+                                govt_by_cell.entry(cell).or_default().push(feature.clone());
+                            }
+                        }
+                        feature_count += 1;
+                        buffered += 1;
+                    }
+                }
+            }
+
+            // Surveillance infrastructure
+            if command.build_surveillance {
+                if let Some(cls) = surv_class {
+                    if seen_surv_ids.insert(way.id()) {
+                        let feature = WayFeature {
+                            way_id: way.id(),
+                            feature_class: cls.to_owned(),
+                            name: name.clone(),
+                            points: points.clone(),
+                            is_polygon: false,
+                        };
+                        let mut assigned = HashSet::new();
+                        for cell in focus_cells_for_bounds(way_bounds) {
+                            if assigned.insert(cell) {
+                                touched_cells.insert(cell);
+                                surv_by_cell.entry(cell).or_default().push(feature.clone());
+                            }
+                        }
+                        feature_count += 1;
+                        buffered += 1;
+                    }
+                }
+            }
+
             if buffered >= ROAD_FLUSH_THRESHOLD {
                 written_cells += flush_all_chunks(
                     &command.cache_dir,
@@ -514,6 +891,16 @@ fn collect_all_features_by_cell(
                     &mut waterways_by_cell,
                     &mut buildings_by_cell,
                     &mut trees_by_cell,
+                    &mut power_by_cell,
+                    &mut rail_by_cell,
+                    &mut pipeline_by_cell,
+                    &mut aeroway_by_cell,
+                    &mut military_by_cell,
+                    &mut comm_by_cell,
+                    &mut industrial_by_cell,
+                    &mut port_by_cell,
+                    &mut govt_by_cell,
+                    &mut surv_by_cell,
                     srtm.as_mut().map(|s| &mut **s),
                 )?;
                 buffered = 0;
@@ -553,6 +940,16 @@ fn collect_all_features_by_cell(
         &mut waterways_by_cell,
         &mut buildings_by_cell,
         &mut trees_by_cell,
+        &mut power_by_cell,
+        &mut rail_by_cell,
+        &mut pipeline_by_cell,
+        &mut aeroway_by_cell,
+        &mut military_by_cell,
+        &mut comm_by_cell,
+        &mut industrial_by_cell,
+        &mut port_by_cell,
+        &mut govt_by_cell,
+        &mut surv_by_cell,
         srtm.as_mut().map(|s| &mut **s),
     )?;
 
@@ -572,36 +969,52 @@ fn flush_all_chunks(
     waterways_by_cell: &mut HashMap<(i32, i32), Vec<WayFeature>>,
     buildings_by_cell: &mut HashMap<(i32, i32), Vec<WayFeature>>,
     trees_by_cell: &mut HashMap<(i32, i32), Vec<WayFeature>>,
+    power_by_cell: &mut HashMap<(i32, i32), Vec<WayFeature>>,
+    rail_by_cell: &mut HashMap<(i32, i32), Vec<WayFeature>>,
+    pipeline_by_cell: &mut HashMap<(i32, i32), Vec<WayFeature>>,
+    aeroway_by_cell: &mut HashMap<(i32, i32), Vec<WayFeature>>,
+    military_by_cell: &mut HashMap<(i32, i32), Vec<WayFeature>>,
+    comm_by_cell: &mut HashMap<(i32, i32), Vec<WayFeature>>,
+    industrial_by_cell: &mut HashMap<(i32, i32), Vec<WayFeature>>,
+    port_by_cell: &mut HashMap<(i32, i32), Vec<WayFeature>>,
+    govt_by_cell: &mut HashMap<(i32, i32), Vec<WayFeature>>,
+    surv_by_cell: &mut HashMap<(i32, i32), Vec<WayFeature>>,
     mut srtm: Option<&mut SrtmSampler>,
 ) -> Result<usize, String> {
     let mut total = 0usize;
+
+    macro_rules! flush_feature {
+        ($map:expr, $prefix:expr) => {
+            if !$map.is_empty() {
+                let batch = std::mem::take($map);
+                total += merge_write_feature_cells(
+                    cache_dir,
+                    $prefix,
+                    &batch,
+                    srtm.as_mut().map(|s| &mut **s),
+                )?;
+            }
+        };
+    }
+
     if !roads_by_cell.is_empty() {
         let batch = std::mem::take(roads_by_cell);
         total += merge_write_cells(cache_dir, &batch, srtm.as_mut().map(|s| &mut **s))?;
     }
-    if !waterways_by_cell.is_empty() {
-        let batch = std::mem::take(waterways_by_cell);
-        total += merge_write_feature_cells(
-            cache_dir,
-            "waterway",
-            &batch,
-            srtm.as_mut().map(|s| &mut **s),
-        )?;
-    }
-    if !buildings_by_cell.is_empty() {
-        let batch = std::mem::take(buildings_by_cell);
-        total += merge_write_feature_cells(
-            cache_dir,
-            "building",
-            &batch,
-            srtm.as_mut().map(|s| &mut **s),
-        )?;
-    }
-    if !trees_by_cell.is_empty() {
-        let batch = std::mem::take(trees_by_cell);
-        total +=
-            merge_write_feature_cells(cache_dir, "tree", &batch, srtm.as_mut().map(|s| &mut **s))?;
-    }
+    flush_feature!(waterways_by_cell, "waterway");
+    flush_feature!(buildings_by_cell, "building");
+    flush_feature!(trees_by_cell, "tree");
+    flush_feature!(power_by_cell, "power");
+    flush_feature!(rail_by_cell, "railway");
+    flush_feature!(pipeline_by_cell, "pipeline");
+    flush_feature!(aeroway_by_cell, "aeroway");
+    flush_feature!(military_by_cell, "military");
+    flush_feature!(comm_by_cell, "comm");
+    flush_feature!(industrial_by_cell, "industrial");
+    flush_feature!(port_by_cell, "port");
+    flush_feature!(govt_by_cell, "government");
+    flush_feature!(surv_by_cell, "surveillance");
+
     Ok(total)
 }
 

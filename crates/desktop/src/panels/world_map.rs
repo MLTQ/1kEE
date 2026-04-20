@@ -2,6 +2,8 @@ mod admin_layer;
 mod building_layer;
 mod camera;
 mod cell_loader;
+mod infra_layer;
+mod power_layer;
 pub(crate) mod contour_asset;
 pub(crate) mod gebco_depth_fill;
 pub(crate) mod globe_pass;
@@ -29,6 +31,13 @@ use crate::model::AppModel;
 use crate::moving_tracks;
 use crate::osm_ingest;
 use crate::theme;
+
+pub(crate) fn invalidate_road_cache_pub() {
+    local_terrain_scene::invalidate_road_cache();
+}
+pub(crate) fn invalidate_water_cache_pub() {
+    local_terrain_scene::invalidate_water_cache();
+}
 
 pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
     let panel_frame = egui::Frame::new()
@@ -121,9 +130,6 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
             globe_scene::paint(&painter, rect, model, ui.ctx().input(|input| input.time))
         };
 
-        if model.terrain_focus_location().is_some() && !model.cinematic_mode {
-            draw_focus_card(ui, model, local_terrain_mode);
-        }
         if local_terrain_mode {
             ui.add_space(10.0);
             draw_local_footer(ui, model, scene.beam_elevation_m);
@@ -203,170 +209,70 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
         .fill(theme::panel_fill(216))
         .stroke(egui::Stroke::new(1.0, theme::panel_stroke()))
         .corner_radius(10.0)
-        .inner_margin(egui::Margin::symmetric(12, 10))
+        .inner_margin(egui::Margin::symmetric(12, 8))
         .show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.separator();
-
-                // GLOBE / LOCAL mode toggle
+            ui.horizontal(|ui| {
+                // ── GLOBE / LOCAL toggle ──────────────────────────────────
                 let active_fill = theme::chrome_active_fill();
-                let inactive_fill = egui::Color32::TRANSPARENT;
                 let active_text = theme::chrome_active_text();
                 let inactive_text = theme::text_muted();
 
-                let globe_fill = if !model.globe_view.local_mode {
-                    active_fill
-                } else {
-                    inactive_fill
-                };
-                let local_fill = if model.globe_view.local_mode {
-                    active_fill
-                } else {
-                    inactive_fill
-                };
-                let globe_text = if !model.globe_view.local_mode {
-                    active_text
-                } else {
-                    inactive_text
-                };
-                let local_text = if model.globe_view.local_mode {
-                    active_text
-                } else {
-                    inactive_text
-                };
+                let globe_fill = if !model.globe_view.local_mode { active_fill } else { egui::Color32::TRANSPARENT };
+                let local_fill  = if  model.globe_view.local_mode { active_fill } else { egui::Color32::TRANSPARENT };
+                let globe_text  = if !model.globe_view.local_mode { active_text } else { inactive_text };
+                let local_text  = if  model.globe_view.local_mode { active_text } else { inactive_text };
 
-                let globe_btn =
-                    egui::Button::new(egui::RichText::new("GLOBE").color(globe_text).small())
-                        .fill(globe_fill)
-                        .corner_radius(4.0);
-                let local_btn =
-                    egui::Button::new(egui::RichText::new("LOCAL").color(local_text).small())
-                        .fill(local_fill)
-                        .corner_radius(4.0);
-
-                if ui.add(globe_btn).clicked() && model.globe_view.local_mode {
+                if ui.add(egui::Button::new(egui::RichText::new("GLOBE").color(globe_text).small()).fill(globe_fill).corner_radius(4.0)).clicked()
+                    && model.globe_view.local_mode
+                {
                     model.globe_view.local_mode = false;
                 }
+
                 let local_disabled = match model.active_body {
                     crate::model::ActiveBody::Moon => crate::terrain_assets::find_sldem_jp2(model.selected_root.as_deref()).is_none(),
                     crate::model::ActiveBody::Mars => crate::terrain_assets::find_mars_data_root(model.selected_root.as_deref()).is_none(),
                     crate::model::ActiveBody::Earth => false,
                 };
-                if ui
-                    .add_enabled(!local_disabled, local_btn)
+                if ui.add_enabled(!local_disabled, egui::Button::new(egui::RichText::new("LOCAL").color(local_text).small()).fill(local_fill).corner_radius(4.0))
                     .on_disabled_hover_text("LOCAL lunar terrain requires SLDEM2015 JP2 data")
                     .clicked()
                     && !model.globe_view.local_mode
                 {
-                    // Snap local_center to whatever the globe is centered on.
                     model.globe_view.local_center = model.globe_view.globe_center_latlon();
                     model.globe_view.local_mode = true;
                 }
 
                 ui.separator();
-                ui.colored_label(theme::text_muted(), "Layers");
 
-                ui.checkbox(&mut model.show_event_markers, "Events");
-                ui.checkbox(&mut model.show_coastlines, "Coastline");
-                ui.checkbox(&mut model.show_bathymetry, "Bathymetry");
-                ui.checkbox(&mut model.show_graticule, "Graticule");
+                // ── LAYERS drawer toggle ──────────────────────────────────
+                let layers_active = model.show_layer_drawer;
+                let layers_fill = if layers_active { active_fill } else { egui::Color32::TRANSPARENT };
+                let layers_text = if layers_active { active_text } else { inactive_text };
+                // Dot indicator when imported layers or ArcGIS sources are loaded.
+                let has_custom = !model.geojson_layers.is_empty() || !model.arcgis_sources.is_empty();
+                let layers_label = if has_custom { "Layers •" } else { "Layers" };
+                if ui.add(egui::Button::new(egui::RichText::new(layers_label).color(layers_text).small()).fill(layers_fill).corner_radius(4.0))
+                    .on_hover_text("Toggle layer controls")
+                    .clicked()
                 {
-                    let ships_enabled = !model.aisstream_api_key.is_empty();
-                    let hint = if ships_enabled {
-                        moving_tracks::status()
-                    } else {
-                        "Configure AISStream key in Settings".into()
-                    };
-                    ui.add_enabled(
-                        ships_enabled,
-                        egui::Checkbox::new(&mut model.show_ships, "Ships"),
-                    )
-                    .on_hover_text(hint)
-                    .on_disabled_hover_text("Configure AISStream key in Settings");
-                }
-                ui.checkbox(&mut model.show_flights, "Flights")
-                    .on_hover_text(flight_tracks::status());
-                if !model.globe_view.local_mode {
-                    ui.checkbox(&mut model.show_stellar_correspondence, "Stars")
-                        .on_hover_text(
-                            "Stellar correspondence: each star projected from the celestial sphere \
-                             onto its matching Earth coordinate (Dec → lat, RA − GMST → lon).",
-                        );
-                    if model.show_stellar_correspondence {
-                        let obs_active = model.stellar_observatory_open;
-                        let obs_fill = if obs_active { theme::chrome_active_fill() } else { egui::Color32::TRANSPARENT };
-                        let obs_col  = if obs_active { theme::chrome_active_text() } else { theme::text_muted() };
-                        let obs_btn  = egui::Button::new(
-                            egui::RichText::new("Observatory").small().color(obs_col)
-                        )
-                        .fill(obs_fill)
-                        .corner_radius(4.0);
-                        if ui.add(obs_btn)
-                            .on_hover_text("Open time controls, historical presets, animation, and layer options")
-                            .clicked()
-                        {
-                            model.stellar_observatory_open = !model.stellar_observatory_open;
-                        }
-                    }
-                    ui.checkbox(&mut model.show_reticle, "Reticle");
-                }
-                if model.globe_view.local_mode {
-                    ui.checkbox(&mut model.fill_elevation, "Terrain fill");
-                }
-                let major_changed = ui
-                    .checkbox(&mut model.show_major_roads, "Major roads")
-                    .changed();
-                let minor_changed = ui
-                    .checkbox(&mut model.show_minor_roads, "Minor roads")
-                    .changed();
-
-                let water_changed = ui.checkbox(&mut model.show_water, "Water").changed();
-                if model.globe_view.local_mode {
-                    ui.checkbox(&mut model.show_contours, "Contours");
-                    ui.checkbox(&mut model.show_trees, "Trees");
-                    ui.checkbox(&mut model.show_buildings, "Buildings");
-                    ui.checkbox(&mut model.show_admin, "Admin Boundaries");
+                    model.show_layer_drawer = !model.show_layer_drawer;
                 }
 
-                if major_changed || minor_changed {
-                    // Keep the loaded road cache when toggles change; the
-                    // renderer now loads both classes together and uses the
-                    // checkboxes only as draw filters. Only clear when all
-                    // road layers have been turned off.
-                    if !model.show_major_roads && !model.show_minor_roads {
-                        local_terrain_scene::invalidate_road_cache();
-                    }
-                    if model.show_major_roads || model.show_minor_roads {
-                        let half_deg = local_terrain_scene::visual_half_extent_for_zoom(
-                            model.globe_view.local_zoom,
-                        );
-                        let r = (half_deg * 69.0 * 1.25).clamp(10.0, 150.0);
-                        layer_import::queue_road_focus_import(
-                            model,
-                            model.globe_view.local_center,
-                            r,
-                            "active map viewport",
-                        );
-                    }
-                }
-                if water_changed {
-                    local_terrain_scene::invalidate_water_cache();
-                    if model.show_water {
-                        let half_deg = local_terrain_scene::visual_half_extent_for_zoom(
-                            model.globe_view.local_zoom,
-                        );
-                        let r = (half_deg * 69.0 * 1.25).clamp(10.0, 150.0);
-                        layer_import::queue_water_focus_import(
-                            model,
-                            model.globe_view.local_center,
-                            r,
-                            "active map viewport",
-                        );
+                // ── EVENTS badge ──────────────────────────────────────────
+                let ev_count = model.events.len();
+                if ev_count > 0 {
+                    let ev_active = model.show_event_list;
+                    let ev_fill = if ev_active { active_fill } else { egui::Color32::TRANSPARENT };
+                    let ev_text = if ev_active { active_text } else { inactive_text };
+                    if ui.add(egui::Button::new(egui::RichText::new(format!("Events  {ev_count}")).color(ev_text).small()).fill(ev_fill).corner_radius(4.0))
+                        .on_hover_text("Show / hide event queue")
+                        .clicked()
+                    {
+                        model.show_event_list = !model.show_event_list;
                     }
                 }
 
-                // Show a brief note while an import is running; the full
-                // progress bar lives in the map canvas (bottom-right overlay).
+                // Active import spinner
                 if let Some(note) = osm_ingest::active_job_note() {
                     ui.colored_label(
                         egui::Color32::from_rgb(180, 160, 80),
@@ -374,134 +280,73 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                     );
                 }
 
-                if model.selected_event_has_factal_brief() {
-                    ui.separator();
-                    if ui.button("Brief").clicked() {
-                        model.factal_brief_open = true;
-                    }
-                }
-
-                // ── REPLAY toggle ─────────────────────────────────────────
-                if model.has_factal_api_key() {
-                    ui.separator();
-                    let (r_fill, r_text) = if model.replay_mode {
-                        (
-                            egui::Color32::from_rgb(20, 80, 140),
-                            egui::Color32::from_rgb(100, 195, 255),
-                        )
-                    } else {
-                        (egui::Color32::TRANSPARENT, theme::text_muted())
-                    };
-                    let r_btn =
-                        egui::Button::new(egui::RichText::new("REPLAY").color(r_text).small())
-                            .fill(r_fill)
-                            .corner_radius(4.0);
-                    if ui
-                        .add(r_btn)
-                        .on_hover_text("Replay historical Factal events as animated flares")
-                        .clicked()
-                    {
-                        model.toggle_replay();
-                    }
-                }
-
-                // ── Imported layer toggles ────────────────────────────────
-                if !model.geojson_layers.is_empty() {
-                    ui.separator();
-                    ui.colored_label(theme::text_muted(), "Layers");
-                    let mut remove_idx: Option<usize> = None;
-                    for (idx, layer) in model.geojson_layers.iter_mut().enumerate() {
-                        let [r, g, b, _] = layer.color;
-                        let dot_color = egui::Color32::from_rgb(r, g, b);
-                        egui::Frame::new()
-                            .corner_radius(3.0)
-                            .inner_margin(egui::Margin::symmetric(4, 2))
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    // Colour swatch
-                                    let (rect, _) = ui.allocate_exact_size(
-                                        egui::vec2(8.0, 8.0),
-                                        egui::Sense::hover(),
-                                    );
-                                    ui.painter().circle_filled(rect.center(), 4.0, dot_color);
-                                    ui.checkbox(&mut layer.visible, &layer.name);
-                                    if ui.small_button("×").on_hover_text("Remove layer").clicked()
-                                    {
-                                        remove_idx = Some(idx);
-                                    }
-                                });
-                            });
-                    }
-                    if let Some(idx) = remove_idx {
-                        model.geojson_layers.remove(idx);
-                    }
-                }
-
-                ui.separator();
-                ui.small(model.terrain_focus_location_name());
-
-                // Cinematic / meander controls — flush right.
-                // Layout is right-to-left so items are added in reverse visual order:
-                //   [speed slider] [MEANDER] [CINEMATIC]  →  right edge
+                // ── Right-aligned controls ────────────────────────────────
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // ── CINEMATIC toggle ──────────────────────────────────────
+                    // CINEMATIC
                     let (cin_fill, cin_text) = if model.cinematic_mode {
-                        (
-                            egui::Color32::from_rgb(160, 100, 20),
-                            egui::Color32::from_rgb(255, 210, 80),
-                        )
+                        (egui::Color32::from_rgb(160, 100, 20), egui::Color32::from_rgb(255, 210, 80))
                     } else {
-                        (egui::Color32::TRANSPARENT, theme::text_muted())
+                        (egui::Color32::TRANSPARENT, inactive_text)
                     };
-                    let cin_btn =
-                        egui::Button::new(egui::RichText::new("CINEMATIC").color(cin_text).small())
-                            .fill(cin_fill)
-                            .corner_radius(4.0);
-                    if ui.add(cin_btn).clicked() {
+                    if ui.add(egui::Button::new(egui::RichText::new("CINEMATIC").color(cin_text).small()).fill(cin_fill).corner_radius(4.0)).clicked() {
                         model.cinematic_mode = !model.cinematic_mode;
-                        // Turning off cinematic also stops the meander.
                         if !model.cinematic_mode {
                             model.globe_view.meander_mode = false;
                         }
                     }
 
-                    // ── Meander controls (while cinematic is active) ──────────
+                    // MEANDER (only while cinematic is on)
                     if model.cinematic_mode {
                         let view = &mut model.globe_view;
-
                         let (mn_fill, mn_text) = if view.meander_mode {
-                            (
-                                egui::Color32::from_rgb(20, 80, 140),
-                                egui::Color32::from_rgb(100, 195, 255),
-                            )
+                            (egui::Color32::from_rgb(20, 80, 140), egui::Color32::from_rgb(100, 195, 255))
                         } else {
-                            (egui::Color32::TRANSPARENT, theme::text_muted())
+                            (egui::Color32::TRANSPARENT, inactive_text)
                         };
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new("MEANDER").color(mn_text).small(),
-                                )
-                                .fill(mn_fill)
-                                .corner_radius(4.0),
-                            )
+                        if ui.add(egui::Button::new(egui::RichText::new("MEANDER").color(mn_text).small()).fill(mn_fill).corner_radius(4.0))
                             .on_hover_text("Smooth random-walk camera drift")
                             .clicked()
                         {
                             view.meander_mode = !view.meander_mode;
                         }
-
                         if view.meander_mode {
-                            // Speed slider: compact, no numeric label, tooltip shows %.
                             ui.spacing_mut().slider_width = 72.0;
-                            ui.add(
-                                egui::Slider::new(&mut view.meander_speed, 0.05_f32..=1.0)
-                                    .show_value(false),
-                            )
-                            .on_hover_text(format!(
-                                "Meander speed  {:.0}%",
-                                view.meander_speed * 100.0
-                            ));
+                            ui.add(egui::Slider::new(&mut view.meander_speed, 0.05_f32..=1.0).show_value(false))
+                                .on_hover_text(format!("Meander speed  {:.0}%", view.meander_speed * 100.0));
+                        }
+                    }
+
+                    // REPLAY
+                    if model.has_factal_api_key() {
+                        let (r_fill, r_text) = if model.replay_mode {
+                            (egui::Color32::from_rgb(20, 80, 140), egui::Color32::from_rgb(100, 195, 255))
+                        } else {
+                            (egui::Color32::TRANSPARENT, inactive_text)
+                        };
+                        if ui.add(egui::Button::new(egui::RichText::new("REPLAY").color(r_text).small()).fill(r_fill).corner_radius(4.0))
+                            .on_hover_text("Replay historical Factal events as animated flares")
+                            .clicked()
+                        {
+                            model.toggle_replay();
+                        }
+                    }
+
+                    // BRIEF
+                    if model.selected_event_has_factal_brief() {
+                        if ui.add(egui::Button::new(egui::RichText::new("BRIEF").color(inactive_text).small()).fill(egui::Color32::TRANSPARENT).corner_radius(4.0)).clicked() {
+                            model.factal_brief_open = true;
+                        }
+                    }
+
+                    // Observatory shortcut (when stars are on in globe mode)
+                    if !model.globe_view.local_mode && model.show_stellar_correspondence {
+                        let obs_fill = if model.stellar_observatory_open { active_fill } else { egui::Color32::TRANSPARENT };
+                        let obs_col  = if model.stellar_observatory_open { active_text } else { inactive_text };
+                        if ui.add(egui::Button::new(egui::RichText::new("Observatory").small().color(obs_col)).fill(obs_fill).corner_radius(4.0))
+                            .on_hover_text("Time controls and stellar options")
+                            .clicked()
+                        {
+                            model.stellar_observatory_open = !model.stellar_observatory_open;
                         }
                     }
                 });
@@ -509,41 +354,6 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
         });
 }
 
-fn draw_focus_card(ui: &mut egui::Ui, model: &AppModel, local_terrain_mode: bool) {
-    egui::Area::new("focus_card".into())
-        .fixed_pos(ui.min_rect().left_top() + egui::vec2(22.0, 72.0))
-        .interactable(false)
-        .show(ui.ctx(), |ui| {
-            egui::Frame::new()
-                .fill(theme::panel_fill(230))
-                .stroke(egui::Stroke::new(1.0, theme::panel_stroke()))
-                .corner_radius(10.0)
-                .inner_margin(egui::Margin::same(10))
-                .show(ui, |ui| {
-                    ui.colored_label(
-                        theme::hot_color(),
-                        if local_terrain_mode {
-                            "LOCAL / 3D CONTOUR STACK"
-                        } else {
-                            "3D / DARK TOPO / WIREFRAME"
-                        },
-                    );
-                    if let Some(severity) = model.terrain_focus_severity() {
-                        ui.colored_label(severity.color(), severity.label());
-                    } else {
-                        ui.colored_label(theme::topo_color(), "City");
-                    }
-                    ui.strong(model.terrain_focus_title());
-                    ui.label(model.terrain_focus_location_name());
-                    ui.small(format!("Source: {}", model.terrain_focus_source()));
-                    ui.small(if local_terrain_mode {
-                        "Drag to pan | Ctrl/Shift-drag to rotate | scroll to zoom"
-                    } else {
-                        "Drag to orbit | scroll to zoom"
-                    });
-                });
-        });
-}
 
 /// True while SRTM focus tiles for the globe viewport are still being built.
 /// Drives repaint so the sphere updates as soon as the background build finishes.
