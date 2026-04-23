@@ -567,7 +567,7 @@ fn run_pass2(
         });
     }
 
-    let (reader, pos) = open_planet_at(&cmd.planet_path, resume)?;
+    let (mut reader, pos) = open_planet_at(&cmd.planet_path, resume)?;
 
     let mut roads_by_cell: HashMap<(i32, i32), Vec<RoadPolyline>> = HashMap::new();
     let mut waterways_by_cell: HashMap<(i32, i32), Vec<WayFeature>> = HashMap::new();
