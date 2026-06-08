@@ -146,6 +146,51 @@ struct LocalRegionCache {
     /// while tiles at the new zoom level are building / loading.  Cleared as
     /// soon as the new zoom has at least one tile in `entries`.
     zoom_fallback: Option<Arc<Vec<ContourPath>>>,
+    /// Memoized flattened merge of every tile in `entries`, plus the signature
+    /// of the entry set it was built from.  Rebuilt only when the set of tiles
+    /// (or their contents) changes, so the per-frame call returns a cheap `Arc`
+    /// clone instead of deep-cloning ~24k contour paths every frame.
+    merged: Option<Arc<Vec<ContourPath>>>,
+    merged_sig: u64,
+}
+
+/// Cheap order-insensitive signature of a tile-entry set: combines each key with
+/// the identity (pointer) of its `Arc` value, so both adding/removing a tile and
+/// replacing a tile's contents invalidate the memo.
+fn local_entries_signature(entries: &HashMap<CacheKey, Arc<Vec<ContourPath>>>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut acc: u64 = 0;
+    for (k, v) in entries {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        k.hash(&mut h);
+        (Arc::as_ptr(v) as usize as u64).hash(&mut h);
+        acc ^= h.finish();
+    }
+    acc
+}
+
+/// Return the flattened merge of all tiles in `cache`, rebuilding it only when
+/// the entry set changed since the last call.  Returns `None` when empty.
+fn merged_local_contours(cache: &mut LocalRegionCache) -> Option<Arc<Vec<ContourPath>>> {
+    let sig = local_entries_signature(&cache.entries);
+    if cache.merged_sig == sig {
+        if let Some(m) = &cache.merged {
+            return Some(Arc::clone(m));
+        }
+    }
+    if cache.entries.is_empty() {
+        cache.merged = None;
+        cache.merged_sig = sig;
+        return None;
+    }
+    let mut merged = Vec::new();
+    for contours in cache.entries.values() {
+        merged.extend(contours.iter().cloned());
+    }
+    let arc = Arc::new(merged);
+    cache.merged = Some(Arc::clone(&arc));
+    cache.merged_sig = sig;
+    Some(arc)
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -181,6 +226,8 @@ pub fn load_srtm_region_for_view(
             entries: HashMap::new(),
             in_flight: HashSet::new(),
             zoom_fallback: None,
+            merged: None,
+            merged_sig: 0,
         })
     });
     let feature_budget = srtm_focus_cache::feature_budget_for_zoom(zoom);
@@ -313,16 +360,8 @@ pub fn load_srtm_region_for_view(
     }
 
     // Render ALL accumulated tiles, not just the current viewport grid.
-    let mut merged = Vec::new();
-    for contours in guard.entries.values() {
-        merged.extend(contours.iter().cloned());
-    }
-
-    if merged.is_empty() {
-        return None;
-    }
-
-    Some(Arc::new(merged))
+    // Memoized: only rebuilds the flattened merge when the tile set changes.
+    merged_local_contours(&mut guard)
 }
 
 /// Lunar analogue of `load_srtm_region_for_view` — sources from SLDEM2015 tiles
@@ -349,6 +388,8 @@ pub fn load_lunar_region_for_view(
             entries: HashMap::new(),
             in_flight: HashSet::new(),
             zoom_fallback: None,
+            merged: None,
+            merged_sig: 0,
         })
     });
 
@@ -506,6 +547,8 @@ pub fn load_mars_region_for_view(
             entries: HashMap::new(),
             in_flight: HashSet::new(),
             zoom_fallback: None,
+            merged: None,
+            merged_sig: 0,
         })
     });
 

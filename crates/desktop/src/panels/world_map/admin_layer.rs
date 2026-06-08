@@ -8,7 +8,7 @@ use cell_format::{TAG_ADMN, admin_filename, read::read_single_chunk};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 // ── Public types ───────────────────────────────────────────────────────────────
 
@@ -23,38 +23,31 @@ pub struct LoadedAdminBoundary {
 
 struct AdminCache {
     loaded_root: Option<PathBuf>,
-    boundaries: Vec<LoadedAdminBoundary>,
+    boundaries: Arc<Vec<LoadedAdminBoundary>>,
 }
 
 static ADMIN_CACHE: OnceLock<Mutex<AdminCache>> = OnceLock::new();
 
 /// Return all admin boundaries for `levels`, loading from disk only when the
-/// cache root changes (or on first call).  Clones out of the mutex so callers
-/// hold no lock during rendering.
-pub fn get_or_load_admin_boundaries(cache_root: &Path, levels: &[u8]) -> Vec<LoadedAdminBoundary> {
+/// cache root changes (or on first call).  Returns a shared `Arc` so the
+/// per-frame render call is a cheap refcount bump rather than a deep clone of
+/// every whole-world boundary and its point list.
+pub fn get_or_load_admin_boundaries(
+    cache_root: &Path,
+    levels: &[u8],
+) -> Arc<Vec<LoadedAdminBoundary>> {
     let cache = ADMIN_CACHE.get_or_init(|| {
         Mutex::new(AdminCache {
             loaded_root: None,
-            boundaries: Vec::new(),
+            boundaries: Arc::new(Vec::new()),
         })
     });
     let mut guard = cache.lock().unwrap();
     if guard.loaded_root.as_deref() != Some(cache_root) {
-        guard.boundaries = load_admin_boundaries(cache_root, levels);
+        guard.boundaries = Arc::new(load_admin_boundaries(cache_root, levels));
         guard.loaded_root = Some(cache_root.to_owned());
     }
-    // Clone each boundary individually (Vec<GeoPoint> is cheaply clonable at
-    // the scale of whole-world admin boundaries which are loaded once).
-    guard
-        .boundaries
-        .iter()
-        .map(|b| LoadedAdminBoundary {
-            relation_id: b.relation_id,
-            admin_level: b.admin_level,
-            name: b.name.clone(),
-            points: b.points.clone(),
-        })
-        .collect()
+    Arc::clone(&guard.boundaries)
 }
 
 // ── Loading ────────────────────────────────────────────────────────────────────
