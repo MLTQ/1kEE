@@ -24,6 +24,7 @@ use crate::stellar_time;
 use crate::terrain_assets::{self, TerrainInventory};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActiveBody {
@@ -42,9 +43,9 @@ pub struct AppModel {
     pub events: Vec<EventRecord>,
     pub cameras: Vec<CameraFeed>,
     /// Live AIS vessel positions; refreshed periodically by `moving_tracks`.
-    pub tracks: Vec<MovingTrack>,
+    pub tracks: Arc<Vec<MovingTrack>>,
     /// Live ADS-B flight positions; refreshed periodically by `flight_tracks`.
-    pub flights: Vec<FlightTrack>,
+    pub flights: Arc<Vec<FlightTrack>>,
     pub selected_event_id: Option<String>,
     pub selected_camera_id: Option<String>,
     /// MMSI string of the currently-selected vessel (for detail panel).
@@ -108,7 +109,7 @@ pub struct AppModel {
     /// ArcGIS FeatureServer sources added by the user.
     pub arcgis_sources: Vec<ArcGisSourceRef>,
     /// Merged features from all enabled source/layer combos (refreshed each frame).
-    pub arcgis_features: Vec<ArcGisFeature>,
+    pub arcgis_features: Arc<Vec<ArcGisFeature>>,
     /// Selected feature for the detail panel: (source_url, object_id).
     pub selected_arcgis_feature: Option<(String, i64)>,
     pub selected_root: Option<PathBuf>,
@@ -294,8 +295,8 @@ impl AppModel {
         let mut model = Self {
             events,
             cameras,
-            tracks: Vec::new(),
-            flights: Vec::new(),
+            tracks: Arc::new(Vec::new()),
+            flights: Arc::new(Vec::new()),
             selected_event_id: Some("evt-sf".into()),
             selected_camera_id: None,
             selected_track_mmsi: None,
@@ -352,7 +353,7 @@ impl AppModel {
             planet_trail_years: 0.0,
             geojson_layers: Vec::new(),
             arcgis_sources: Vec::new(),
-            arcgis_features: Vec::new(),
+            arcgis_features: Arc::new(Vec::new()),
             selected_arcgis_feature: None,
             selected_root,
             factal_settings_open: false,

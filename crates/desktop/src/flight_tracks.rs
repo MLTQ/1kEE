@@ -29,7 +29,7 @@
 use crate::model::{FlightTrack, GeoPoint};
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 // ── persistent HTTP client ─────────────────────────────────────────────────────
@@ -91,7 +91,7 @@ const MAX_FLIGHTS: usize = 2_000;
 // ── static poll cache ─────────────────────────────────────────────────────────
 
 struct PollState {
-    flights: Vec<FlightTrack>,
+    flights: Arc<Vec<FlightTrack>>,
     last_poll: Option<Instant>,
     last_center: Option<GeoPoint>,
     /// Set after a 429 to prevent retry storms.
@@ -104,7 +104,7 @@ fn cache() -> &'static Mutex<PollState> {
     static CACHE: OnceLock<Mutex<PollState>> = OnceLock::new();
     CACHE.get_or_init(|| {
         Mutex::new(PollState {
-            flights: Vec::new(),
+            flights: Arc::new(Vec::new()),
             last_poll: None,
             last_center: None,
             backoff_until: None,
@@ -117,7 +117,7 @@ fn cache() -> &'static Mutex<PollState> {
 // ── public API ────────────────────────────────────────────────────────────────
 
 /// Returns the current cached flight list immediately.
-pub fn poll(center: GeoPoint, ctx: egui::Context) -> Vec<FlightTrack> {
+pub fn poll(center: GeoPoint, ctx: egui::Context) -> Arc<Vec<FlightTrack>> {
     let should_spawn = cache()
         .lock()
         .map(|g| {
@@ -155,7 +155,7 @@ pub fn poll(center: GeoPoint, ctx: egui::Context) -> Vec<FlightTrack> {
             match fetch_flights(center) {
                 FlightFetchResult::Ok { flights, status } => {
                     if let Ok(mut g) = cache().lock() {
-                        g.flights = flights;
+                        g.flights = Arc::new(flights);
                         g.status = status;
                         g.last_poll = Some(Instant::now());
                         g.last_center = Some(center);
