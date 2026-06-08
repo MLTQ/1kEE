@@ -69,8 +69,12 @@ pub fn apply_interaction(
                 view.vel_local_pitch *= 0.3;
             }
         } else {
-            let iv_yaw = -delta.x * 0.0055 / dt;
-            let iv_pitch = delta.y * 0.004 / dt;
+            // Scale rotation speed down as we zoom in so a drag moves the surface
+            // by a consistent screen distance (the sphere grows up to ~9× on
+            // screen, which otherwise makes zoomed-in drag feel hyper-sensitive).
+            let zoom_scale = super::globe_scene::drag_sensitivity_scale(view);
+            let iv_yaw = -delta.x * 0.0055 * zoom_scale / dt;
+            let iv_pitch = delta.y * 0.004 * zoom_scale / dt;
             view.vel_yaw = lerp(view.vel_yaw, iv_yaw, 0.88);
             view.vel_pitch = lerp(view.vel_pitch, iv_pitch, 0.88);
         }

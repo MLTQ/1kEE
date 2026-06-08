@@ -454,6 +454,26 @@ pub fn globe_layout(rect: egui::Rect, view: &GlobeViewState) -> GlobeLayout {
     }
 }
 
+/// Factor in (0, 1.0] by which to scale mouse-drag rotation speed so a pixel of
+/// drag moves the globe surface by a roughly constant *screen* distance as you
+/// zoom in.  Without this, drag feels far too sensitive when zoomed in because
+/// the on-screen sphere is up to ~9× larger and perspective magnifies it further.
+///
+/// It cancels the centre-of-globe angular→screen gain `radius · focal / depth`
+/// (using the same constants as `globe_layout` so the two stay in sync),
+/// normalized to the default zoom so baseline drag feel is unchanged, and capped
+/// at 1.0 so it only ever *reduces* sensitivity (never speeds drag up when zoomed
+/// out past the default).
+pub fn drag_sensitivity_scale(view: &GlobeViewState) -> f32 {
+    let zoom_t = |z: f32| ((z.ln() - 0.6f32.ln()) / (50.0f32.ln() - 0.6f32.ln())).clamp(0.0, 1.0);
+    // Normalized screen gain at the front of the sphere (z≈1, so depth≈cam_dist−1),
+    // dropping the base_radius constant which cancels in the ratio below.
+    let gain = |t: f32| (1.0 + t * 8.0) * (2.05 + t) / (2.15 - 1.15 * t);
+    // Anchor at the default zoom (1.0) so the baseline feel is preserved.
+    const DEFAULT_ZOOM: f32 = 1.0;
+    (gain(zoom_t(DEFAULT_ZOOM)) / gain(zoom_t(view.zoom))).min(1.0)
+}
+
 /// Convert a screen-space position to geographic coordinates (lat/lon degrees)
 /// by intersecting a perspective ray with the unit sphere.
 /// Returns `None` if the cursor is not over the globe (ray misses the sphere).
