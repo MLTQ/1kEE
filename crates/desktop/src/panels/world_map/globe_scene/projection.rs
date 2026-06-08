@@ -3,6 +3,102 @@ use crate::model::{GeoPoint, GlobeViewState};
 use super::terrain_field;
 use super::{GlobeLayout, ProjectedPoint};
 
+/// Frame-invariant inputs to the globe rotation+perspective transform. The
+/// `sin/cos` of yaw and pitch are identical for every point of a frame, so we
+/// derive them once per key instead of once per projected point.
+#[derive(Clone, Copy, PartialEq)]
+struct XformKey {
+    yaw: f32,
+    pitch: f32,
+    camera_distance: f32,
+    radius: f32,
+    focal_length: f32,
+    center_x: f32,
+    center_y: f32,
+}
+
+struct GlobeXform {
+    key: XformKey,
+    yaw_cos: f32,
+    yaw_sin: f32,
+    pitch_cos: f32,
+    pitch_sin: f32,
+    camera_distance: f32,
+    radius_focal: f32,
+    center: egui::Pos2,
+}
+
+impl GlobeXform {
+    fn new(key: XformKey) -> Self {
+        GlobeXform {
+            key,
+            yaw_cos: key.yaw.cos(),
+            yaw_sin: key.yaw.sin(),
+            pitch_cos: key.pitch.cos(),
+            pitch_sin: key.pitch.sin(),
+            camera_distance: key.camera_distance,
+            radius_focal: key.radius * key.focal_length,
+            center: egui::pos2(key.center_x, key.center_y),
+        }
+    }
+
+    /// Apply yaw/pitch rotation and perspective projection to a pre-rotation
+    /// sphere-space point `(x, y, z)`.
+    #[inline]
+    fn apply(&self, x: f32, y: f32, z: f32) -> Option<ProjectedPoint> {
+        let x_yaw = x * self.yaw_cos + z * self.yaw_sin;
+        let z_yaw = -x * self.yaw_sin + z * self.yaw_cos;
+        let x = x_yaw;
+        let z = z_yaw;
+
+        let y_pitch = y * self.pitch_cos - z * self.pitch_sin;
+        let z_pitch = y * self.pitch_sin + z * self.pitch_cos;
+        let y = y_pitch;
+        let z = z_pitch;
+
+        let depth = self.camera_distance - z;
+        if depth <= 0.05 {
+            return None;
+        }
+
+        let perspective = self.radius_focal / depth;
+        let pos = egui::pos2(
+            self.center.x - x * perspective,
+            self.center.y - y * perspective,
+        );
+        Some(ProjectedPoint {
+            pos,
+            depth: ((z + 1.0) * 0.5).clamp(0.0, 1.0),
+            front_facing: z >= 0.0,
+        })
+    }
+}
+
+/// Per-thread cache of the rotation transform so the per-point projection
+/// functions below don't each recompute four transcendentals per point. Used
+/// from rayon workers too, so it's thread-local rather than a shared lock.
+fn with_xform<R>(layout: &GlobeLayout, view: &GlobeViewState, f: impl FnOnce(&GlobeXform) -> R) -> R {
+    let key = XformKey {
+        yaw: view.yaw,
+        pitch: view.pitch,
+        camera_distance: layout.camera_distance,
+        radius: layout.radius,
+        focal_length: layout.focal_length,
+        center_x: layout.center.x,
+        center_y: layout.center.y,
+    };
+    thread_local! {
+        static CACHE: std::cell::RefCell<Option<GlobeXform>> = const { std::cell::RefCell::new(None) };
+    }
+    CACHE.with(|c| {
+        let mut slot = c.borrow_mut();
+        if slot.as_ref().map(|x| x.key) != Some(key) {
+            *slot = Some(GlobeXform::new(key));
+        }
+        f(slot.as_ref().unwrap())
+    })
+}
+
 /// Like `project_geo` but adds `extra_radius` (in globe-unit fractions) on
 /// top of the terrain-based elevation.  Used to project a beam-tip point
 /// directly above a geographic location so that the resulting screen-space
@@ -22,40 +118,12 @@ pub(super) fn project_geo_elevated(
     let elevation = signed_elevation * altitude_scale;
     let radius = (1.0 + elevation + extra_radius).max(0.82);
 
-    let mut x = radius * lat.cos() * lon.cos();
-    let mut y = radius * lat.sin();
-    let mut z = radius * lat.cos() * lon.sin();
+    let lat_cos = lat.cos();
+    let x = radius * lat_cos * lon.cos();
+    let y = radius * lat.sin();
+    let z = radius * lat_cos * lon.sin();
 
-    let yaw_cos = view.yaw.cos();
-    let yaw_sin = view.yaw.sin();
-    let x_yaw = x * yaw_cos + z * yaw_sin;
-    let z_yaw = -x * yaw_sin + z * yaw_cos;
-    x = x_yaw;
-    z = z_yaw;
-
-    let pitch_cos = view.pitch.cos();
-    let pitch_sin = view.pitch.sin();
-    let y_pitch = y * pitch_cos - z * pitch_sin;
-    let z_pitch = y * pitch_sin + z * pitch_cos;
-    y = y_pitch;
-    z = z_pitch;
-
-    let depth = layout.camera_distance - z;
-    if depth <= 0.05 {
-        return None;
-    }
-
-    let perspective = (layout.radius * layout.focal_length) / depth;
-    let pos = egui::pos2(
-        layout.center.x - x * perspective,
-        layout.center.y - y * perspective,
-    );
-
-    Some(ProjectedPoint {
-        pos,
-        depth: ((z + 1.0) * 0.5).clamp(0.0, 1.0),
-        front_facing: z >= 0.0,
-    })
+    with_xform(layout, view, |xf| xf.apply(x, y, z))
 }
 
 pub fn project_geo(
@@ -71,40 +139,12 @@ pub fn project_geo(
     let elevation = signed_elevation * altitude_scale;
     let radius = (1.0 + elevation).max(0.82);
 
-    let mut x = radius * lat.cos() * lon.cos();
-    let mut y = radius * lat.sin();
-    let mut z = radius * lat.cos() * lon.sin();
+    let lat_cos = lat.cos();
+    let x = radius * lat_cos * lon.cos();
+    let y = radius * lat.sin();
+    let z = radius * lat_cos * lon.sin();
 
-    let yaw_cos = view.yaw.cos();
-    let yaw_sin = view.yaw.sin();
-    let x_yaw = x * yaw_cos + z * yaw_sin;
-    let z_yaw = -x * yaw_sin + z * yaw_cos;
-    x = x_yaw;
-    z = z_yaw;
-
-    let pitch_cos = view.pitch.cos();
-    let pitch_sin = view.pitch.sin();
-    let y_pitch = y * pitch_cos - z * pitch_sin;
-    let z_pitch = y * pitch_sin + z * pitch_cos;
-    y = y_pitch;
-    z = z_pitch;
-
-    let depth = layout.camera_distance - z;
-    if depth <= 0.05 {
-        return None;
-    }
-
-    let perspective = (layout.radius * layout.focal_length) / depth;
-    let pos = egui::pos2(
-        layout.center.x - x * perspective,
-        layout.center.y - y * perspective,
-    );
-
-    Some(ProjectedPoint {
-        pos,
-        depth: ((z + 1.0) * 0.5).clamp(0.0, 1.0),
-        front_facing: z >= 0.0,
-    })
+    with_xform(layout, view, |xf| xf.apply(x, y, z))
 }
 
 /// Like `project_geo` but skips `terrain_field::elevation` — uses a constant
@@ -120,40 +160,12 @@ fn project_geo_flat(
     let lon = point.lon.to_radians();
     let radius = 1.0_f32 + radius_offset;
 
-    let mut x = radius * lat.cos() * lon.cos();
-    let mut y = radius * lat.sin();
-    let mut z = radius * lat.cos() * lon.sin();
+    let lat_cos = lat.cos();
+    let x = radius * lat_cos * lon.cos();
+    let y = radius * lat.sin();
+    let z = radius * lat_cos * lon.sin();
 
-    let yaw_cos = view.yaw.cos();
-    let yaw_sin = view.yaw.sin();
-    let x_yaw = x * yaw_cos + z * yaw_sin;
-    let z_yaw = -x * yaw_sin + z * yaw_cos;
-    x = x_yaw;
-    z = z_yaw;
-
-    let pitch_cos = view.pitch.cos();
-    let pitch_sin = view.pitch.sin();
-    let y_pitch = y * pitch_cos - z * pitch_sin;
-    let z_pitch = y * pitch_sin + z * pitch_cos;
-    y = y_pitch;
-    z = z_pitch;
-
-    let depth = layout.camera_distance - z;
-    if depth <= 0.05 {
-        return None;
-    }
-
-    let perspective = (layout.radius * layout.focal_length) / depth;
-    let pos = egui::pos2(
-        layout.center.x - x * perspective,
-        layout.center.y - y * perspective,
-    );
-
-    Some(ProjectedPoint {
-        pos,
-        depth: ((z + 1.0) * 0.5).clamp(0.0, 1.0),
-        front_facing: z >= 0.0,
-    })
+    with_xform(layout, view, |xf| xf.apply(x, y, z))
 }
 
 /// Project a geographic polyline to screen-space segments, splitting at the
