@@ -30,6 +30,9 @@ pub struct DashboardApp {
     model: AppModel,
     last_theme: theme::MapTheme,
     _puffin_server: Option<puffin_http::Server>,
+    /// Gruve mesh bridge: serves the companion web view + announces to the local
+    /// agent. `None` when no port was free; the app runs identically without it.
+    gruve: Option<crate::gruve::GruveBridge>,
 }
 
 impl DashboardApp {
@@ -57,10 +60,12 @@ impl DashboardApp {
         }
 
         let model = AppModel::seed_demo();
+        let gruve = crate::gruve::GruveBridge::start(&model);
         Self {
             last_theme: model.map_theme,
             model,
             _puffin_server: puffin_server,
+            gruve,
         }
     }
 }
@@ -76,6 +81,12 @@ impl Drop for DashboardApp {
 impl eframe::App for DashboardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         puffin::GlobalProfiler::lock().new_frame();
+
+        // Apply any commands web viewers sent (steer globe / select event) before
+        // the panels read the model this frame.
+        if let Some(bridge) = &self.gruve {
+            bridge.drain_commands(&mut self.model);
+        }
 
         factal_stream::tick(&mut self.model);
         factal_stream::history_tick(&mut self.model);
@@ -131,5 +142,11 @@ impl eframe::App for DashboardApp {
             .show(ctx, |ui| {
                 panels::render_world_map(ui, &mut self.model);
             });
+
+        // Refresh the snapshot the companion web view polls, now that this frame's
+        // interaction has been folded into the model.
+        if let Some(bridge) = &self.gruve {
+            bridge.publish(&self.model);
+        }
     }
 }

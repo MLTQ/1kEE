@@ -29,6 +29,23 @@ real, live data sources and ships a custom GPU geo-rendering engine:
 > **Scope note:** camera-source ingestion stays limited to openly published metadata and
 > feeds, subject to source terms and legal review. See [`docs/architecture.md`](docs/architecture.md).
 
+## Multiplayer over Gruve
+
+The app puts itself on a [Gruve](gruve-kit/README.md) mesh via a **companion web view**
+(`crates/desktop/src/gruve/`). Because 1kEE is a native egui/wgpu app it can't be served
+over the mesh directly, so instead the running app embeds a small HTTP server that:
+
+- **announces** itself to the local Gruve agent (a `1kEE` tile appears in the lobby),
+- serves a thin web globe that **mirrors the analyst's live view** — host camera centre,
+  events, vessels, flights, cameras, and the active theme, polled from the app, and
+- lets a viewer **steer the host** ("look here" / select an event) and drop a **shared
+  pin** that every viewer of the tile sees (Gruve session state).
+
+It degrades silently: with no agent running, no free port, or no viewers, the desktop app
+behaves exactly as before. The feed-connection step stays on the host — camera *positions
+and reachability* go to the mesh, not feed URLs. Run `gruve-kit/gruve doctor
+crates/desktop/src/gruve/web` to lint the web view against the contract.
+
 ## Workspace
 
 Three crates (`cargo` workspace, edition 2024):

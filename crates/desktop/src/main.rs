@@ -7,6 +7,7 @@ mod city_catalog;
 mod event_store;
 mod factal_stream;
 mod flight_tracks;
+mod gruve;
 mod model;
 mod moving_tracks;
 mod osm_ingest;

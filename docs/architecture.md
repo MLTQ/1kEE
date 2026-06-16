@@ -42,6 +42,10 @@ onto the same canvas, with a replay timeline over the event history.
   building, power, infra, admin, tree, contour, stellar, graticule) draw on top.
 - `osm_ingest/` — OSM import (osmium / Overpass / streaming, SQLite stores, job
   dispatch).
+- `gruve/` — Gruve mesh integration (companion web view + shared state). An embedded
+  HTTP server publishes a per-frame `Snapshot` of `AppModel` and serves a web globe
+  that mirrors the host view; viewers can steer the host or drop shared pins. Owned by
+  `GruveBridge`, driven from the frame loop. See `gruve/mod.md`.
 - Data-source / service modules at the crate root: `factal_stream`, `moving_tracks`
   (AIS), `flight_tracks` (ADS-B), `arcgis_source`, `camera_registry`,
   `camera_*_catalog`, `city_catalog`, `stellar_catalog`, `planet_ephemeris`,
@@ -79,6 +83,17 @@ table above the struct is the source of truth for both sides.
 - Custom GPU globe (ray-traced sphere, terrain shading, graticules) for Earth/Moon/Mars,
   plus a local high-resolution terrain scene and OSM-derived feature cells.
 - Constraint: keep event/camera hit-testing deterministic and simple for analysts.
+
+### Gruve mesh integration
+- Input: the live `AppModel` (read-only snapshot per frame) and validated commands
+  from web viewers (Focus / SelectEvent).
+- Output: a discoverable lobby tile (announce, L1), an `api` upstream serving the
+  live picture as JSON (L2), and a shared session for pins/cursors (L3). Conformance
+  is checked by `gruve doctor` against `crates/desktop/src/gruve/web`.
+- Constraint: never block or panic into the host; publish camera *positions and
+  reachability*, not feed URLs; remote commands drive the store, never replay input.
+- Open work: publish host view into the session for richer late-joiner replay; serve
+  a coastline layer in the companion globe; optional `service: true` data feed.
 
 ## Safety / scope notes
 
