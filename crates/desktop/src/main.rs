@@ -19,6 +19,7 @@ mod stellar_time;
 mod terrain_assets;
 mod terrain_precompute;
 mod theme;
+mod usgs_stream;
 
 use app::DashboardApp;
 

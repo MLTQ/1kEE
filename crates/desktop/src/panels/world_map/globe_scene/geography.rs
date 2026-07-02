@@ -2,10 +2,41 @@ use super::GlobeLayout;
 use super::camera::GlobeLod;
 use super::contour_asset;
 use super::gebco_depth_fill;
-use super::projection::{draw_geo_path, project_geo, project_path_segments};
-use rayon::prelude::*;
+use super::projection::{draw_geo_path, project_geo};
 use crate::model::{GeoJsonFeature, GeoJsonGeometry, GeoJsonLayer, GeoPoint, GlobeViewState};
+use crate::panels::world_map::contour_pass::{self, ContourLayer, SegmentInstance};
 use crate::theme;
+use std::sync::Arc;
+
+/// Submit one GPU contour layer for this frame. `(version, instances)` comes
+/// from `contour_pass::instances_for`; `alpha` folds the layer's zoom fade
+/// together with the 0.92 stroke dimming the old CPU path applied.
+fn paint_contour_layer(
+    painter: &egui::Painter,
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    layer: ContourLayer,
+    (version, instances): (u64, Arc<Vec<SegmentInstance>>),
+    radius_offset: f32,
+    alpha: f32,
+) {
+    if instances.is_empty() {
+        return;
+    }
+    painter.add(
+        contour_pass::ContourCallback::new(
+            layer,
+            version,
+            instances,
+            layout,
+            view,
+            radius_offset,
+            alpha,
+            painter.ctx().pixels_per_point(),
+        )
+        .into_paint_callback(painter.clip_rect()),
+    );
+}
 
 // ── Lunar feature labels ──────────────────────────────────────────────────────
 // Major maria and craters with lat/lon in degrees (IAU selenographic coordinates).
@@ -43,17 +74,17 @@ pub(super) fn draw_global_coastlines(
     // Thin white line — same weight as topo contours but white to distinguish
     // land/sea boundary.
     let coast_color = egui::Color32::from_rgba_premultiplied(210, 220, 255, 90);
-    for coastline in coastlines.iter() {
-        draw_geo_path(
-            painter,
-            layout,
-            view,
-            &coastline.points,
-            0.015,
-            coast_color,
-            0.04,
-        );
-    }
+    let batch =
+        contour_pass::instances_for(ContourLayer::Coastlines, &coastlines, 0, |_| coast_color);
+    paint_contour_layer(
+        painter,
+        layout,
+        view,
+        ContourLayer::Coastlines,
+        batch,
+        0.015,
+        0.92,
+    );
 }
 
 pub(super) fn draw_global_bathymetry(
@@ -73,70 +104,34 @@ pub(super) fn draw_global_bathymetry(
     // artefacts, and land shows as the dark globe background because those
     // pixels are transparent in the texture.
     if let Some(tex_id) = gebco_depth_fill::ensure_texture(painter.ctx(), selected_root) {
-        // 2° mesh: 180×90 = 16 200 cells, ~8 100 front-facing.  Coarse mesh
-        // is fine because the texture provides sub-pixel depth detail.
-        const STEP: f32 = 2.0;
-        const HALF: f32 = STEP / 2.0;
-
-        let mut mesh = egui::epaint::Mesh::default();
-        mesh.texture_id = tex_id;
-
-        let mut lat = -90.0_f32 + STEP;
-        while lat <= 90.0 {
-            let mut lon = -180.0_f32 + STEP;
-            while lon <= 180.0 {
-                // Four corners of this 2°×2° cell, ordered CCW on the sphere.
-                let corners: [(f32, f32); 4] = [
-                    (lat + HALF, lon - HALF), // NW
-                    (lat + HALF, lon + HALF), // NE
-                    (lat - HALF, lon + HALF), // SE
-                    (lat - HALF, lon - HALF), // SW
-                ];
-
-                // UV: equirectangular — u=0 at 180°W, v=0 at 90°N.
-                let uvs: [(f32, f32); 4] =
-                    corners.map(|(clat, clon)| ((clon + 180.0) / 360.0, (90.0 - clat) / 180.0));
-
-                // Project all four corners; skip if any is back-facing.
-                let mut positions = [egui::Pos2::ZERO; 4];
-                let mut ok = true;
-                for (k, &(clat, clon)) in corners.iter().enumerate() {
-                    match project_geo(
-                        layout,
-                        view,
-                        GeoPoint {
-                            lat: clat,
-                            lon: clon,
-                        },
-                        0.0,
-                    ) {
-                        Some(p) if p.front_facing => positions[k] = p.pos,
-                        _ => {
-                            ok = false;
-                            break;
-                        }
-                    }
-                }
-                if !ok {
-                    lon += STEP;
-                    continue;
-                }
-
-                let i = mesh.vertices.len() as u32;
-                for k in 0..4 {
-                    mesh.vertices.push(egui::epaint::Vertex {
-                        pos: positions[k],
-                        uv: egui::pos2(uvs[k].0, uvs[k].1),
-                        color: egui::Color32::WHITE, // texture carries the colour
-                    });
-                }
-                mesh.indices
-                    .extend_from_slice(&[i, i + 1, i + 2, i, i + 2, i + 3]);
-                lon += STEP;
-            }
-            lat += STEP;
+        // The projected mesh depends only on the camera transform and the
+        // texture, so it is cached across frames and only rebuilt when the
+        // view actually moves — free whenever the camera is still.
+        let key = BathyMeshKey {
+            tex_id,
+            yaw: view.yaw.to_bits(),
+            pitch: view.pitch.to_bits(),
+            radius: layout.radius.to_bits(),
+            focal_length: layout.focal_length.to_bits(),
+            camera_distance: layout.camera_distance.to_bits(),
+            center_x: layout.center.x.to_bits(),
+            center_y: layout.center.y.to_bits(),
+        };
+        thread_local! {
+            static BATHY_MESH: std::cell::RefCell<Option<(BathyMeshKey, Arc<egui::epaint::Mesh>)>> =
+                const { std::cell::RefCell::new(None) };
         }
-
+        let mesh = BATHY_MESH.with(|cache| {
+            let mut slot = cache.borrow_mut();
+            match slot.as_ref() {
+                Some((k, mesh)) if *k == key => mesh.clone(),
+                _ => {
+                    let mesh = Arc::new(build_bathy_mesh(layout, view, tex_id));
+                    *slot = Some((key, mesh.clone()));
+                    mesh
+                }
+            }
+        });
         if !mesh.vertices.is_empty() {
             painter.add(egui::Shape::mesh(mesh));
         }
@@ -149,7 +144,7 @@ pub(super) fn draw_global_bathymetry(
         return;
     };
 
-    for contour in bathy.iter() {
+    let batch = contour_pass::instances_for(ContourLayer::Bathymetry, &bathy, 0, |contour| {
         let depth_norm = (-contour.elevation_m / 11_000.0_f32).clamp(0.0, 1.0);
         let major = ((-contour.elevation_m.round() as i32) % 1_000) < 50;
         let base_a = if major { 0.38_f32 } else { 0.16_f32 };
@@ -157,15 +152,105 @@ pub(super) fn draw_global_bathymetry(
         let r = (25.0 * (1.0 - depth_norm * 0.8)) as u8;
         let g = (70.0 * (1.0 - depth_norm * 0.6)) as u8;
         let b = (175 + (40.0 * depth_norm) as u8).min(255);
-        let color = egui::Color32::from_rgba_premultiplied(r, g, b, a);
-        draw_geo_path(painter, layout, view, &contour.points, 0.01, color, 0.03);
-    }
+        egui::Color32::from_rgba_premultiplied(r, g, b, a)
+    });
+    paint_contour_layer(
+        painter,
+        layout,
+        view,
+        ContourLayer::Bathymetry,
+        batch,
+        0.01,
+        0.92,
+    );
 }
 
-#[allow(dead_code)]
-#[inline]
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    a + (b - a) * t
+/// Everything the projected bathymetry mesh depends on, as raw bit patterns so
+/// the key is `Eq` despite the f32 inputs.
+#[derive(Clone, Copy, PartialEq)]
+struct BathyMeshKey {
+    tex_id: egui::TextureId,
+    yaw: u32,
+    pitch: u32,
+    radius: u32,
+    focal_length: u32,
+    camera_distance: u32,
+    center_x: u32,
+    center_y: u32,
+}
+
+/// Build the UV-mapped sphere mesh for the GEBCO depth-fill texture.
+/// 2° mesh: 180×90 = 16 200 cells, ~8 100 front-facing. Coarse mesh is fine
+/// because the texture provides sub-pixel depth detail (GPU bilinear blends
+/// between the 0.25° texels).
+fn build_bathy_mesh(
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    tex_id: egui::TextureId,
+) -> egui::epaint::Mesh {
+    puffin::profile_function!();
+    const STEP: f32 = 2.0;
+    const HALF: f32 = STEP / 2.0;
+
+    let mut mesh = egui::epaint::Mesh::default();
+    mesh.texture_id = tex_id;
+
+    let mut lat = -90.0_f32 + STEP;
+    while lat <= 90.0 {
+        let mut lon = -180.0_f32 + STEP;
+        while lon <= 180.0 {
+            // Four corners of this 2°×2° cell, ordered CCW on the sphere.
+            let corners: [(f32, f32); 4] = [
+                (lat + HALF, lon - HALF), // NW
+                (lat + HALF, lon + HALF), // NE
+                (lat - HALF, lon + HALF), // SE
+                (lat - HALF, lon - HALF), // SW
+            ];
+
+            // UV: equirectangular — u=0 at 180°W, v=0 at 90°N.
+            let uvs: [(f32, f32); 4] =
+                corners.map(|(clat, clon)| ((clon + 180.0) / 360.0, (90.0 - clat) / 180.0));
+
+            // Project all four corners; skip if any is back-facing.
+            let mut positions = [egui::Pos2::ZERO; 4];
+            let mut ok = true;
+            for (k, &(clat, clon)) in corners.iter().enumerate() {
+                match project_geo(
+                    layout,
+                    view,
+                    GeoPoint {
+                        lat: clat,
+                        lon: clon,
+                    },
+                    0.0,
+                ) {
+                    Some(p) if p.front_facing => positions[k] = p.pos,
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if !ok {
+                lon += STEP;
+                continue;
+            }
+
+            let i = mesh.vertices.len() as u32;
+            for k in 0..4 {
+                mesh.vertices.push(egui::epaint::Vertex {
+                    pos: positions[k],
+                    uv: egui::pos2(uvs[k].0, uvs[k].1),
+                    color: egui::Color32::WHITE, // texture carries the colour
+                });
+            }
+            mesh.indices
+                .extend_from_slice(&[i, i + 1, i + 2, i, i + 2, i + 3]);
+            lon += STEP;
+        }
+        lat += STEP;
+    }
+    mesh
 }
 
 // ── GeoJSON overlay ───────────────────────────────────────────────────────────
@@ -303,22 +388,24 @@ pub(super) fn draw_global_topo(
     let major_color = theme::hot_color();
     let minor_color = theme::contour_color();
 
-    let segments: Vec<(Vec<Vec<egui::Pos2>>, egui::Color32)> = topo
-        .par_iter()
-        .map(|contour| {
+    let batch = contour_pass::instances_for(
+        ContourLayer::GlobalTopo,
+        &topo,
+        contour_pass::palette_key(major_color, minor_color),
+        |contour| {
             let major = (contour.elevation_m.round() as i32).rem_euclid(2_000) == 0;
-            let color = if major { major_color } else { minor_color };
-            let segs = project_path_segments(layout, view, &contour.points, 0.015);
-            (segs, color.gamma_multiply(alpha))
-        })
-        .collect();
-
-    for (segs, color) in segments {
-        let stroke = egui::Stroke::new(1.15, color.gamma_multiply(0.92));
-        for seg in segs {
-            painter.add(egui::Shape::line(seg, stroke));
-        }
-    }
+            if major { major_color } else { minor_color }
+        },
+    );
+    paint_contour_layer(
+        painter,
+        layout,
+        view,
+        ContourLayer::GlobalTopo,
+        batch,
+        0.015,
+        alpha * 0.92,
+    );
 }
 
 /// Draw SRTM focus-tile contours directly on the sphere surface.
@@ -353,25 +440,26 @@ pub(super) fn draw_srtm_on_globe(
     let major_color = theme::hot_color();
     let minor_color = theme::contour_color();
 
-    // Parallel projection — project_path_segments is pure, painter is serial.
-    let segments: Vec<(Vec<Vec<egui::Pos2>>, egui::Color32)> = contours
-        .par_iter()
-        .map(|contour| {
+    // Same altitude offset as coastlines so SRTM contours sit on the sphere
+    // surface and don't parallax against the coastline layer.
+    let batch = contour_pass::instances_for(
+        ContourLayer::SrtmGlobe,
+        &contours,
+        contour_pass::palette_key(major_color, minor_color),
+        |contour| {
             let major = (contour.elevation_m.round() as i32).rem_euclid(50) == 0;
-            let color = if major { major_color } else { minor_color };
-            // Use the same altitude_scale as coastlines (0.022) so SRTM contours
-            // sit on the sphere surface and don't parallax against the coastline layer.
-            let segs = project_path_segments(layout, view, &contour.points, 0.020);
-            (segs, color.gamma_multiply(alpha))
-        })
-        .collect();
-
-    for (segs, color) in segments {
-        let stroke = egui::Stroke::new(1.15, color.gamma_multiply(0.92));
-        for seg in segs {
-            painter.add(egui::Shape::line(seg, stroke));
-        }
-    }
+            if major { major_color } else { minor_color }
+        },
+    );
+    paint_contour_layer(
+        painter,
+        layout,
+        view,
+        ContourLayer::SrtmGlobe,
+        batch,
+        0.020,
+        alpha * 0.92,
+    );
 }
 
 /// Draw lunar contour lines and feature labels on the globe when Moon Mode is active.
@@ -393,36 +481,35 @@ pub(super) fn draw_lunar_topo(
             view.zoom,
             painter.ctx().clone(),
         ) {
-            for contour in contours.iter() {
-                // Major contours at multiples of 2× the minor interval.
-                // At 500 m interval: every 1000 m is major.
-                let major = (contour.elevation_m.round() as i32).rem_euclid(1_000) == 0;
-                // Highland (positive) → warm grey; mare/basin (negative) → cool dark.
-                let color = if contour.elevation_m >= 0.0 {
-                    if major {
-                        theme::hot_color()
+            let major_color = theme::hot_color();
+            let minor_color = theme::contour_color();
+            let batch = contour_pass::instances_for(
+                ContourLayer::LunarTopo,
+                &contours,
+                contour_pass::palette_key(major_color, minor_color),
+                |contour| {
+                    // Major contours at multiples of 2× the minor interval.
+                    // At 500 m interval: every 1000 m is major.
+                    let major = (contour.elevation_m.round() as i32).rem_euclid(1_000) == 0;
+                    // Highland (positive) → warm grey; mare/basin (negative) → cool dark.
+                    if contour.elevation_m >= 0.0 {
+                        if major { major_color } else { minor_color }
                     } else {
-                        theme::contour_color()
+                        // Below datum — bluish-grey to hint at the dark maria floors.
+                        let base = egui::Color32::from_rgb(90, 100, 130);
+                        if major { base } else { base.gamma_multiply(0.55) }
                     }
-                } else {
-                    // Below datum — bluish-grey to hint at the dark maria floors.
-                    let base = egui::Color32::from_rgb(90, 100, 130);
-                    if major {
-                        base
-                    } else {
-                        base.gamma_multiply(0.55)
-                    }
-                };
-                draw_geo_path(
-                    painter,
-                    layout,
-                    view,
-                    &contour.points,
-                    0.015,
-                    color.gamma_multiply(contour_alpha),
-                    0.05 * contour_alpha,
-                );
-            }
+                },
+            );
+            paint_contour_layer(
+                painter,
+                layout,
+                view,
+                ContourLayer::LunarTopo,
+                batch,
+                0.015,
+                contour_alpha * 0.92,
+            );
         }
     }
 
@@ -469,33 +556,32 @@ pub(super) fn draw_mars_topo(
             view.zoom,
             painter.ctx().clone(),
         ) {
-            for contour in contours.iter() {
-                let major = (contour.elevation_m.round() as i32).rem_euclid(1_000) == 0;
-                let color = if contour.elevation_m >= 0.0 {
-                    if major {
-                        theme::hot_color()
+            let major_color = theme::hot_color();
+            let minor_color = theme::contour_color();
+            let batch = contour_pass::instances_for(
+                ContourLayer::MarsTopo,
+                &contours,
+                contour_pass::palette_key(major_color, minor_color),
+                |contour| {
+                    let major = (contour.elevation_m.round() as i32).rem_euclid(1_000) == 0;
+                    if contour.elevation_m >= 0.0 {
+                        if major { major_color } else { minor_color }
                     } else {
-                        theme::contour_color()
+                        // Below datum — rusty red to hint at the deep basins.
+                        let base = egui::Color32::from_rgb(180, 80, 50);
+                        if major { base } else { base.gamma_multiply(0.55) }
                     }
-                } else {
-                    // Below datum — rusty red to hint at the deep basins.
-                    let base = egui::Color32::from_rgb(180, 80, 50);
-                    if major {
-                        base
-                    } else {
-                        base.gamma_multiply(0.55)
-                    }
-                };
-                draw_geo_path(
-                    painter,
-                    layout,
-                    view,
-                    &contour.points,
-                    0.015,
-                    color.gamma_multiply(contour_alpha),
-                    0.05 * contour_alpha,
-                );
-            }
+                },
+            );
+            paint_contour_layer(
+                painter,
+                layout,
+                view,
+                ContourLayer::MarsTopo,
+                batch,
+                0.015,
+                contour_alpha * 0.92,
+            );
         }
     }
 

@@ -72,7 +72,10 @@ fn handle(mut stream: TcpStream, shared: &ServerShared) -> std::io::Result<()> {
     stream.set_nonblocking(false)?;
 
     let (method, path, headers, leftover) = read_request_head(&mut stream)?;
-    let route = path.split('?').next().unwrap_or("/");
+    let (route, query) = match path.split_once('?') {
+        Some((r, q)) => (r, q),
+        None => (path.as_str(), ""),
+    };
 
     if method == "OPTIONS" {
         return write_response(&mut stream, 204, "text/plain", b"");
@@ -105,23 +108,56 @@ fn handle(mut stream: TcpStream, shared: &ServerShared) -> std::io::Result<()> {
         _ => {}
     }
 
-    // JSON API. Snapshot is cloned under a short lock; serialization runs unlocked.
-    let json = {
+    // JSON API. Each route's slice carries a generation counter (bumped by
+    // `publish` only when the slice changes). A poller sends its last-seen value
+    // as `?gen=<u64>`; when it matches we answer `304 Not Modified` with no body —
+    // skipping serialization entirely. No `gen` param → always a full 200 body, so
+    // older clients keep working unchanged.
+    let client_gen = query_u64(query, "gen");
+    let api = {
         let snap = shared.snapshot.lock().unwrap_or_else(|p| p.into_inner());
-        match route {
-            "/state" => Some(snap.state_json()),
-            "/events" => Some(snap.events_json()),
-            "/cameras" => Some(snap.cameras_json()),
-            "/tracks" => Some(snap.tracks_json()),
-            "/flights" => Some(snap.flights_json()),
+        let slice_gen = match route {
+            "/state" => Some(snap.gens.state),
+            "/events" => Some(snap.gens.events),
+            "/cameras" => Some(snap.gens.cameras),
+            "/tracks" => Some(snap.gens.tracks),
+            "/flights" => Some(snap.gens.flights),
             _ => None,
-        }
+        };
+        slice_gen.map(|g| {
+            if client_gen == Some(g) {
+                (g, None) // poller is current — no body needed
+            } else {
+                let body = match route {
+                    "/state" => snap.state_json(),
+                    "/events" => snap.events_json(),
+                    "/cameras" => snap.cameras_json(),
+                    "/tracks" => snap.tracks_json(),
+                    _ => snap.flights_json(),
+                };
+                (g, Some(body))
+            }
+        })
     };
 
-    match json {
-        Some(body) => write_response(&mut stream, 200, "application/json", body.as_bytes()),
+    match api {
+        Some((g, Some(body))) => write_api_response(&mut stream, 200, g, body.as_bytes()),
+        Some((g, None)) => write_api_response(&mut stream, 304, g, b""),
         None => write_response(&mut stream, 404, "text/plain", b"not found"),
     }
+}
+
+/// Pull a `u64` value out of a query string (`a=1&b=2`). No percent-decoding —
+/// the only consumer is the numeric `gen` param.
+fn query_u64(query: &str, name: &str) -> Option<u64> {
+    query.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        if k == name {
+            v.parse().ok()
+        } else {
+            None
+        }
+    })
 }
 
 /// Parse a `{ "type": ... }` command from a web viewer and forward it to the UI
@@ -234,9 +270,32 @@ fn write_response(
     content_type: &str,
     body: &[u8],
 ) -> std::io::Result<()> {
+    write_response_with(stream, status, content_type, "", body)
+}
+
+/// JSON API responses carry the slice's generation counter in `X-Gen` (exposed
+/// through CORS) so pollers can send it back as `?gen=` and get 304s.
+fn write_api_response(
+    stream: &mut TcpStream,
+    status: u16,
+    slice_gen: u64,
+    body: &[u8],
+) -> std::io::Result<()> {
+    let extra = format!("X-Gen: {slice_gen}\r\nAccess-Control-Expose-Headers: X-Gen\r\n");
+    write_response_with(stream, status, "application/json", &extra, body)
+}
+
+fn write_response_with(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    extra_headers: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
     let reason = match status {
         200 => "OK",
         204 => "No Content",
+        304 => "Not Modified",
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
@@ -246,6 +305,7 @@ fn write_response(
         "HTTP/1.1 {status} {reason}\r\n\
          Content-Type: {content_type}\r\n\
          Content-Length: {}\r\n\
+         {extra_headers}\
          Access-Control-Allow-Origin: *\r\n\
          Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
          Access-Control-Allow-Headers: content-type\r\n\

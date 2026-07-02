@@ -133,6 +133,7 @@ pub struct AppModel {
     pub activity_log: Vec<String>,
     pub log_collapsed: bool,
     pub factal_stream_status: String,
+    pub usgs_stream_status: String,
     pub camera_registry_status: String,
     // ── Replay mode ──────────────────────────────────────────────────────────
     pub replay_mode: bool,
@@ -415,6 +416,9 @@ impl AppModel {
             } else {
                 "configured".into()
             },
+            // The USGS quake feed is public and keyless; polling starts
+            // immediately.
+            usgs_stream_status: "syncing".into(),
             camera_registry_status: if windy_webcams_api_key.is_empty() && ny511_api_key.is_empty()
             {
                 "demo".into()
@@ -651,6 +655,30 @@ impl AppModel {
     }
 
     pub fn replace_factal_events(&mut self, events: Vec<EventRecord>) {
+        // USGS quake events arrive on an independent poll and must survive a
+        // Factal refresh; everything else is replaced wholesale.
+        let mut merged = events;
+        merged.extend(
+            self.events
+                .drain(..)
+                .filter(|event| event.id.starts_with(USGS_EVENT_PREFIX)),
+        );
+        self.replace_events(merged);
+    }
+
+    pub fn replace_usgs_events(&mut self, events: Vec<EventRecord>) {
+        // Replace only the USGS-prefixed events (quakes get magnitude
+        // revisions under the same id); Factal/demo events stay in front.
+        let mut merged: Vec<EventRecord> = self
+            .events
+            .drain(..)
+            .filter(|event| !event.id.starts_with(USGS_EVENT_PREFIX))
+            .collect();
+        merged.extend(events);
+        self.replace_events(merged);
+    }
+
+    fn replace_events(&mut self, events: Vec<EventRecord>) {
         let previous_selected = self.selected_event_id.clone();
         self.events = events;
 

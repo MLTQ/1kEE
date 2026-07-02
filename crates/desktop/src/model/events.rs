@@ -1,5 +1,9 @@
 use super::geo::GeoPoint;
 
+/// Id prefix shared by all USGS earthquake events. `AppModel` uses it to keep
+/// quake events separate from Factal events when either source refreshes.
+pub const USGS_EVENT_PREFIX: &str = "usgs-";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventSeverity {
     Critical,

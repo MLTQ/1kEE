@@ -210,6 +210,18 @@ pub fn unix_to_date_str(unix: i64) -> String {
     format!("{year:04}-{month:02}-{:02}", remaining + 1)
 }
 
+/// Format a unix timestamp as `YYYY-MM-DD HH:MM:SS` (UTC).
+pub fn unix_to_datetime_str(unix: i64) -> String {
+    let date = unix_to_date_str(unix);
+    let secs = unix.rem_euclid(86_400);
+    format!(
+        "{date} {:02}:{:02}:{:02}",
+        secs / 3_600,
+        (secs % 3_600) / 60,
+        secs % 60
+    )
+}
+
 /// Parse an ISO-8601 timestamp string to unix seconds.
 pub fn parse_iso_to_unix(s: &str) -> Option<i64> {
     let s = s.trim();

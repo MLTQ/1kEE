@@ -256,9 +256,19 @@ function applyTheme() {
 }
 
 // ── Polling the host's api upstream ─────────────────────────────────────────
+// Conditional polling: the host stamps every API response with the slice's
+// generation counter (X-Gen). We remember it per path and send it back as
+// `?gen=`; when nothing changed the host answers 304 with no body, and we
+// return null so the caller keeps its state — no JSON parse, no re-render.
+const gens = {};
 async function getJSON(path) {
-  const r = await fetch(`${API}/${path}`, { cache: "no-store" });
+  const seen = gens[path];
+  const url = `${API}/${path}` + (seen !== undefined ? `?gen=${seen}` : "");
+  const r = await fetch(url, { cache: "no-store" });
+  if (r.status === 304) return null; // unchanged since last poll
   if (!r.ok) throw new Error(`${path} ${r.status}`);
+  const gen = r.headers.get("x-gen");
+  if (gen !== null) gens[path] = gen;
   return r.json();
 }
 
@@ -271,12 +281,16 @@ function setLink(ok) {
 async function pollState() {
   try {
     const s = await getJSON("state");
-    const themeChanged = s.view.theme !== state.view.theme;
-    state.view = s.view;
-    state.show = s.show;
-    state.selected = s.selected;
-    if (themeChanged) applyTheme();
-    renderHostCard(s.counts);
+    if (s) {
+      const themeChanged = s.view.theme !== state.view.theme;
+      const selChanged = s.selected.event !== state.selected.event;
+      state.view = s.view;
+      state.show = s.show;
+      state.selected = s.selected;
+      if (themeChanged) applyTheme();
+      if (selChanged) renderEventList(); // highlight follows host selection
+      renderHostCard(s.counts);
+    }
     setLink(true);
   } catch {
     setLink(false);
@@ -284,19 +298,29 @@ async function pollState() {
 }
 
 async function pollLists() {
+  // Each slice comes back null when the host says 304 — keep what we have and
+  // only re-render the lists whose data actually changed.
   try {
     const [ev, cam, trk, flt] = await Promise.all([
       getJSON("events"), getJSON("cameras"), getJSON("tracks"), getJSON("flights"),
     ]);
-    state.events = ev;
-    state.cameras = cam;
-    state.tracks = trk.items || [];
-    state.flights = flt.items || [];
-    renderEventList();
-    setCount("c-tracks", trk.total ?? state.tracks.length);
-    setCount("c-flights", flt.total ?? state.flights.length);
-    setCount("c-events", state.events.length);
-    setCount("c-cameras", state.cameras.length);
+    if (ev) {
+      state.events = ev;
+      renderEventList();
+      setCount("c-events", state.events.length);
+    }
+    if (cam) {
+      state.cameras = cam;
+      setCount("c-cameras", state.cameras.length);
+    }
+    if (trk) {
+      state.tracks = trk.items || [];
+      setCount("c-tracks", trk.total ?? state.tracks.length);
+    }
+    if (flt) {
+      state.flights = flt.items || [];
+      setCount("c-flights", flt.total ?? state.flights.length);
+    }
   } catch { /* host briefly unreachable — keep last picture */ }
 }
 

@@ -85,8 +85,11 @@ impl GruveBridge {
 
     /// Refresh the snapshot the web view polls. Cheap; call once per frame.
     pub fn publish(&self, model: &AppModel) {
-        let next = Snapshot::from_model(model);
+        let mut next = Snapshot::from_model(model);
         if let Ok(mut slot) = self.shared.snapshot.lock() {
+            // Bump each slice's generation counter only if that slice changed, so
+            // pollers holding the current generation get 304s instead of bodies.
+            next.carry_generations(&slot);
             *slot = next;
         }
     }

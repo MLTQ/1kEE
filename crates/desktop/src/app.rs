@@ -2,8 +2,9 @@ use crate::camera_registry;
 use crate::factal_stream;
 use crate::model::AppModel;
 use crate::panels;
-use crate::panels::world_map::globe_pass;
+use crate::panels::world_map::{contour_pass, globe_pass};
 use crate::theme;
+use crate::usgs_stream;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -44,8 +45,13 @@ impl DashboardApp {
         if let Some(wgpu_state) = cc.wgpu_render_state.as_ref() {
             let globe_res =
                 globe_pass::GlobePassResources::new(&wgpu_state.device, wgpu_state.target_format);
+            let contour_res = contour_pass::ContourPassResources::new(
+                &wgpu_state.device,
+                wgpu_state.target_format,
+            );
             let mut renderer = wgpu_state.renderer.write();
             renderer.callback_resources.insert(globe_res);
+            renderer.callback_resources.insert(contour_res);
         }
 
         // Open the event history store (creates DB if not present).
@@ -73,6 +79,7 @@ impl DashboardApp {
 impl Drop for DashboardApp {
     fn drop(&mut self) {
         factal_stream::shutdown();
+        usgs_stream::shutdown();
         camera_registry::shutdown();
         panels::world_map::srtm_focus_cache::terminate_active_gdal_jobs();
     }
@@ -90,6 +97,7 @@ impl eframe::App for DashboardApp {
 
         factal_stream::tick(&mut self.model);
         factal_stream::history_tick(&mut self.model);
+        usgs_stream::tick(&mut self.model);
         camera_registry::tick(&mut self.model);
 
         // Advance stellar time.
@@ -119,9 +127,9 @@ impl eframe::App for DashboardApp {
             theme::set_theme(ctx, self.model.map_theme);
             self.last_theme = self.model.map_theme;
         }
-        if self.model.has_factal_api_key() || self.model.has_camera_source_keys() {
-            ctx.request_repaint_after(Duration::from_secs(1));
-        }
+        // The USGS quake feed polls with no key configured, so the frame loop
+        // must keep ticking even when no API keys are present.
+        ctx.request_repaint_after(Duration::from_secs(1));
 
         if !self.model.cinematic_mode {
             panels::render_header(ctx, &mut self.model);

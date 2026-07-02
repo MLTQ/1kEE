@@ -21,7 +21,7 @@ use crate::model::{
 /// web view never silently implies it is showing everything.
 const MAX_MOVERS: usize = 1000;
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Serialize)]
 pub struct ViewDto {
     /// Latitude of the host's current globe centre.
     pub lat: f32,
@@ -32,14 +32,14 @@ pub struct ViewDto {
     pub local_mode: bool,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Serialize)]
 pub struct ShowFlags {
     pub events: bool,
     pub ships: bool,
     pub flights: bool,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Serialize)]
 pub struct SelectedDto {
     pub event: Option<String>,
     pub camera: Option<String>,
@@ -47,7 +47,7 @@ pub struct SelectedDto {
     pub flight: Option<String>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Serialize)]
 pub struct EventDto {
     pub id: String,
     pub title: String,
@@ -60,7 +60,7 @@ pub struct EventDto {
     pub occurred_at: String,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Serialize)]
 pub struct CameraDto {
     pub id: String,
     pub label: String,
@@ -105,6 +105,38 @@ struct ListResponse<T: Serialize> {
     items: Vec<T>,
 }
 
+/// Monotonic per-slice change counters. Each GET route publishes its slice's
+/// generation in an `X-Gen` header and answers `304 Not Modified` when a poller's
+/// `?gen=` already matches — so unchanged JSON is never re-serialized or re-sent,
+/// and the web view skips the re-parse/re-render for that slice.
+#[derive(Clone, Copy)]
+pub struct Generations {
+    pub state: u64,
+    pub events: u64,
+    pub cameras: u64,
+    pub tracks: u64,
+    pub flights: u64,
+}
+
+impl Generations {
+    /// Seed every counter from wall-clock millis so a restarted host never hands
+    /// out a generation an old still-open client already holds — a slice that
+    /// rarely changes (cameras, say) would otherwise 304 stale data forever.
+    fn fresh() -> Self {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(1);
+        Generations {
+            state: seed,
+            events: seed,
+            cameras: seed,
+            tracks: seed,
+            flights: seed,
+        }
+    }
+}
+
 /// The full snapshot stored behind the bridge mutex. Cloned cheaply each frame.
 #[derive(Clone)]
 pub struct Snapshot {
@@ -116,6 +148,8 @@ pub struct Snapshot {
     // Already `Arc<Vec<…>>` in the model — clone is a refcount bump, not the data.
     pub tracks: Arc<Vec<MovingTrack>>,
     pub flights: Arc<Vec<FlightTrack>>,
+    /// Per-slice change counters; not serialized — the server sends them as headers.
+    pub gens: Generations,
 }
 
 impl Snapshot {
@@ -145,7 +179,42 @@ impl Snapshot {
             cameras: model.cameras.iter().map(camera_dto).collect(),
             tracks: model.tracks.clone(),
             flights: model.flights.clone(),
+            gens: Generations::fresh(),
         }
+    }
+
+    /// Carry `prev`'s generation counters forward, bumping a slice's counter only
+    /// when that slice actually changed. Runs once per frame in `publish`, so the
+    /// comparisons stay cheap: pointer equality for the big Arc'd vecs, plain
+    /// equality for the small DTO vecs and the scalar view state.
+    pub fn carry_generations(&mut self, prev: &Snapshot) {
+        let mut g = prev.gens;
+        // `/state` serializes view + show + selected + the four slice counts.
+        let counts_changed = self.events.len() != prev.events.len()
+            || self.cameras.len() != prev.cameras.len()
+            || self.tracks.len() != prev.tracks.len()
+            || self.flights.len() != prev.flights.len();
+        if counts_changed
+            || self.view != prev.view
+            || self.show != prev.show
+            || self.selected != prev.selected
+        {
+            g.state += 1;
+        }
+        if self.events != prev.events {
+            g.events += 1;
+        }
+        if self.cameras != prev.cameras {
+            g.cameras += 1;
+        }
+        // Refreshed wholesale when a provider poll completes — pointer compare only.
+        if !Arc::ptr_eq(&self.tracks, &prev.tracks) {
+            g.tracks += 1;
+        }
+        if !Arc::ptr_eq(&self.flights, &prev.flights) {
+            g.flights += 1;
+        }
+        self.gens = g;
     }
 
     /// `/state` — small, polled often: view + selection + layer flags + counts.

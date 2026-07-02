@@ -25,7 +25,11 @@ Conformance: Gruve adapter protocol **L1 (announce) + L2 (dispatch) + L3 (sessio
 ### `snapshot.rs`
 - **Does**: Defines `Snapshot`, a serializable projection of `AppModel` built once
   per frame on the UI thread, plus the per-endpoint JSON serializers and the
-  `Command` enum (Focus / SelectEvent) that web viewers send back.
+  `Command` enum (Focus / SelectEvent) that web viewers send back. Also carries
+  `Generations` — per-slice change counters (state/events/cameras/tracks/flights)
+  that `publish` bumps only when a slice actually changed (`Arc::ptr_eq` for the
+  big track/flight vecs, equality for the small DTO vecs and view scalars), seeded
+  from wall-clock millis so a host restart can't alias a previous run's counters.
 - **Interacts with**: `AppModel` (read-only) to build DTOs; `server` reads the
   snapshot under a short mutex and serializes on demand.
 - **Rationale**: `AppModel` is not `Send`; rather than share it we copy a cheap
@@ -37,7 +41,10 @@ Conformance: Gruve adapter protocol **L1 (announce) + L2 (dispatch) + L3 (sessio
 ### `server.rs`
 - **Does**: A std-only HTTP/1.1 server. Serves the UI (`/`, `/app.js`, `/app.css`,
   `/gruve-sdk.js`) and the `api` upstream (`/state`, `/events`, `/cameras`,
-  `/tracks`, `/flights`, `POST /command`) on one port.
+  `/tracks`, `/flights`, `POST /command`) on one port. GET API routes stamp the
+  slice's generation in an `X-Gen` header and honour `?gen=<last-seen>`: a match
+  answers `304 Not Modified` with no body (serialization skipped); no `gen` param
+  always returns a full 200, so older clients keep working.
 - **Interacts with**: `ServerShared` (snapshot mutex + command sender + stop flag);
   the Gruve agent, which strips the `/apps/1kee/` and `/__gruve/api/` prefixes before
   proxying, so routes look identical standalone and over the mesh.
@@ -49,7 +56,8 @@ Conformance: Gruve adapter protocol **L1 (announce) + L2 (dispatch) + L3 (sessio
 - **Does**: The companion frontend. `app.js` draws an orthographic globe centred on
   the host's view, plots events/cameras/vessels/flights, polls the `api` upstream,
   POSTs steer/select commands, and shares a pin over the L3 session. Recolours to
-  match the host's active theme.
+  match the host's active theme. Polls conditionally: remembers each path's `X-Gen`
+  and sends `?gen=`; on 304 it keeps existing state and skips the parse/re-render.
 - **Interacts with**: `gruve-sdk.js` (vendored JS SDK) for `apiBase` / `joinSession`
   / `isServedByGruve`. All asset paths are relative so the app works under
   `/apps/1kee/` on a friend's machine.
