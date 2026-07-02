@@ -160,46 +160,79 @@ pub fn palette_key(major: egui::Color32, minor: egui::Color32) -> u64 {
         | u32::from_le_bytes(minor.to_array()) as u64
 }
 
-/// Return the cached segment instances for `contours`, rebuilding (in
-/// parallel) only when the tile `Arc` or palette changed. `color_fn` bakes the
-/// per-contour colour — zoom-dependent fades must go through the uniform
-/// `alpha` instead, or every zoom step would force a rebuild.
+#[derive(Default)]
+struct LayerInstances {
+    /// Last fully-built instance set, served to callers even while stale.
+    current: Option<(u64, Arc<Vec<SegmentInstance>>)>,
+    /// Version a background build is currently producing, if any.
+    building: Option<u64>,
+}
+
+/// Return the cached segment instances for `contours`. A tile-`Arc` or
+/// palette change kicks off a **background** rebuild (a full rebuild is up to
+/// ~1M segments — far too slow for the frame); meanwhile the previous
+/// instance set keeps rendering, so tile loads never hitch the UI. Returns
+/// `None` only before the very first build of a layer completes.
+///
+/// `color_fn` bakes the per-contour colour — zoom-dependent fades must go
+/// through the uniform `alpha` instead, or every zoom step would force a
+/// rebuild.
 pub fn instances_for(
     layer: ContourLayer,
     contours: &Arc<Vec<ContourPath>>,
     palette: u64,
-    color_fn: impl Fn(&ContourPath) -> egui::Color32 + Sync,
-) -> (u64, Arc<Vec<SegmentInstance>>) {
+    ctx: &egui::Context,
+    color_fn: impl Fn(&ContourPath) -> egui::Color32 + Send + Sync + 'static,
+) -> Option<(u64, Arc<Vec<SegmentInstance>>)> {
     let version = version_key(contours, palette);
 
-    static CACHE: OnceLock<Mutex<HashMap<ContourLayer, (u64, Arc<Vec<SegmentInstance>>)>>> =
-        OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    static CACHE: OnceLock<Mutex<HashMap<ContourLayer, LayerInstances>>> = OnceLock::new();
+    let cache: &'static Mutex<HashMap<ContourLayer, LayerInstances>> =
+        CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
-    if let Some((v, instances)) = cache.lock().unwrap().get(&layer) {
+    let mut guard = cache.lock().unwrap();
+    let entry = guard.entry(layer).or_default();
+
+    if let Some((v, instances)) = &entry.current {
         if *v == version {
-            return (version, instances.clone());
+            return Some((*v, instances.clone()));
         }
     }
 
-    puffin::profile_scope!("contour_instances_rebuild");
-    let built: Vec<SegmentInstance> = contours
-        .par_iter()
-        .flat_map_iter(|contour| {
-            let color = linear_u8(color_fn(contour));
-            contour.points.windows(2).map(move |pair| SegmentInstance {
-                a: unit_vec(pair[0]),
-                b: unit_vec(pair[1]),
-                color,
-            })
-        })
-        .collect();
-    let built = Arc::new(built);
-    cache
-        .lock()
-        .unwrap()
-        .insert(layer, (version, built.clone()));
-    (version, built)
+    if entry.building != Some(version) {
+        // A newer request supersedes any in-flight build: its commit check
+        // below fails against the updated `building` marker and its result
+        // is dropped.
+        entry.building = Some(version);
+        let contours = contours.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            puffin::profile_scope!("contour_instances_rebuild");
+            let built: Vec<SegmentInstance> = contours
+                .par_iter()
+                .flat_map_iter(|contour| {
+                    let color = linear_u8(color_fn(contour));
+                    contour.points.windows(2).map(move |pair| SegmentInstance {
+                        a: unit_vec(pair[0]),
+                        b: unit_vec(pair[1]),
+                        color,
+                    })
+                })
+                .collect();
+            let mut guard = cache.lock().unwrap();
+            let entry = guard.entry(layer).or_default();
+            if entry.building == Some(version) {
+                entry.current = Some((version, Arc::new(built)));
+                entry.building = None;
+                drop(guard);
+                // Wake the UI so the freshly-built set replaces the stale one.
+                ctx.request_repaint();
+            }
+        });
+    }
+
+    // Serve the previous (stale) set while the rebuild runs in the background.
+    entry.current.clone()
 }
 
 // ── Persistent GPU resources ──────────────────────────────────────────────────

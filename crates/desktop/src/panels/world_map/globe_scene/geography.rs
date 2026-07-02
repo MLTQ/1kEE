@@ -8,18 +8,22 @@ use crate::panels::world_map::contour_pass::{self, ContourLayer, SegmentInstance
 use crate::theme;
 use std::sync::Arc;
 
-/// Submit one GPU contour layer for this frame. `(version, instances)` comes
-/// from `contour_pass::instances_for`; `alpha` folds the layer's zoom fade
-/// together with the 0.92 stroke dimming the old CPU path applied.
+/// Submit one GPU contour layer for this frame. `batch` comes from
+/// `contour_pass::instances_for` (`None` until the first background build of
+/// the layer finishes); `alpha` folds the layer's zoom fade together with the
+/// 0.92 stroke dimming the old CPU path applied.
 fn paint_contour_layer(
     painter: &egui::Painter,
     layout: &GlobeLayout,
     view: &GlobeViewState,
     layer: ContourLayer,
-    (version, instances): (u64, Arc<Vec<SegmentInstance>>),
+    batch: Option<(u64, Arc<Vec<SegmentInstance>>)>,
     radius_offset: f32,
     alpha: f32,
 ) {
+    let Some((version, instances)) = batch else {
+        return;
+    };
     if instances.is_empty() {
         return;
     }
@@ -74,8 +78,13 @@ pub(super) fn draw_global_coastlines(
     // Thin white line — same weight as topo contours but white to distinguish
     // land/sea boundary.
     let coast_color = egui::Color32::from_rgba_premultiplied(210, 220, 255, 90);
-    let batch =
-        contour_pass::instances_for(ContourLayer::Coastlines, &coastlines, 0, |_| coast_color);
+    let batch = contour_pass::instances_for(
+        ContourLayer::Coastlines,
+        &coastlines,
+        0,
+        painter.ctx(),
+        move |_| coast_color,
+    );
     paint_contour_layer(
         painter,
         layout,
@@ -144,16 +153,22 @@ pub(super) fn draw_global_bathymetry(
         return;
     };
 
-    let batch = contour_pass::instances_for(ContourLayer::Bathymetry, &bathy, 0, |contour| {
-        let depth_norm = (-contour.elevation_m / 11_000.0_f32).clamp(0.0, 1.0);
-        let major = ((-contour.elevation_m.round() as i32) % 1_000) < 50;
-        let base_a = if major { 0.38_f32 } else { 0.16_f32 };
-        let a = (base_a * (0.5 + depth_norm * 0.5) * 255.0) as u8;
-        let r = (25.0 * (1.0 - depth_norm * 0.8)) as u8;
-        let g = (70.0 * (1.0 - depth_norm * 0.6)) as u8;
-        let b = (175 + (40.0 * depth_norm) as u8).min(255);
-        egui::Color32::from_rgba_premultiplied(r, g, b, a)
-    });
+    let batch = contour_pass::instances_for(
+        ContourLayer::Bathymetry,
+        &bathy,
+        0,
+        painter.ctx(),
+        |contour| {
+            let depth_norm = (-contour.elevation_m / 11_000.0_f32).clamp(0.0, 1.0);
+            let major = ((-contour.elevation_m.round() as i32) % 1_000) < 50;
+            let base_a = if major { 0.38_f32 } else { 0.16_f32 };
+            let a = (base_a * (0.5 + depth_norm * 0.5) * 255.0) as u8;
+            let r = (25.0 * (1.0 - depth_norm * 0.8)) as u8;
+            let g = (70.0 * (1.0 - depth_norm * 0.6)) as u8;
+            let b = (175 + (40.0 * depth_norm) as u8).min(255);
+            egui::Color32::from_rgba_premultiplied(r, g, b, a)
+        },
+    );
     paint_contour_layer(
         painter,
         layout,
@@ -392,7 +407,8 @@ pub(super) fn draw_global_topo(
         ContourLayer::GlobalTopo,
         &topo,
         contour_pass::palette_key(major_color, minor_color),
-        |contour| {
+        painter.ctx(),
+        move |contour| {
             let major = (contour.elevation_m.round() as i32).rem_euclid(2_000) == 0;
             if major { major_color } else { minor_color }
         },
@@ -446,7 +462,8 @@ pub(super) fn draw_srtm_on_globe(
         ContourLayer::SrtmGlobe,
         &contours,
         contour_pass::palette_key(major_color, minor_color),
-        |contour| {
+        painter.ctx(),
+        move |contour| {
             let major = (contour.elevation_m.round() as i32).rem_euclid(50) == 0;
             if major { major_color } else { minor_color }
         },
@@ -487,7 +504,8 @@ pub(super) fn draw_lunar_topo(
                 ContourLayer::LunarTopo,
                 &contours,
                 contour_pass::palette_key(major_color, minor_color),
-                |contour| {
+                painter.ctx(),
+                move |contour| {
                     // Major contours at multiples of 2× the minor interval.
                     // At 500 m interval: every 1000 m is major.
                     let major = (contour.elevation_m.round() as i32).rem_euclid(1_000) == 0;
@@ -562,7 +580,8 @@ pub(super) fn draw_mars_topo(
                 ContourLayer::MarsTopo,
                 &contours,
                 contour_pass::palette_key(major_color, minor_color),
-                |contour| {
+                painter.ctx(),
+                move |contour| {
                     let major = (contour.elevation_m.round() as i32).rem_euclid(1_000) == 0;
                     if contour.elevation_m >= 0.0 {
                         if major { major_color } else { minor_color }
