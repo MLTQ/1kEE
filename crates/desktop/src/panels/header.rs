@@ -22,6 +22,7 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
                 ui.separator();
 
                 metric_chip(ui, "Factal stream", &model.factal_stream_status);
+                metric_chip(ui, "USGS quakes", &model.usgs_stream_status);
                 metric_chip(ui, "Camera registry", &model.camera_registry_status);
                 metric_chip(ui, "Terrain", model.terrain_inventory.status_label());
                 metric_chip(ui, "OSM", model.osm_inventory.status_label());

@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -41,7 +43,44 @@ pub struct PublicCameraSource {
     pub enabled: bool,
 }
 
+/// How long a parsed catalog is reused before re-reading from disk. The catalog
+/// is a config file edited by hand, so a couple seconds of staleness is fine and
+/// it spares us a disk read + JSON parse on every UI frame (this is called
+/// several times per frame from `camera_registry::tick`).
+const CATALOG_TTL: Duration = Duration::from_secs(2);
+
+struct Cached {
+    root_key: Option<PathBuf>,
+    loaded_at: Instant,
+    sources: Vec<PublicCameraSource>,
+}
+
+fn cache() -> &'static Mutex<Option<Cached>> {
+    static C: OnceLock<Mutex<Option<Cached>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(None))
+}
+
 pub fn load_public_sources(selected_root: Option<&Path>) -> Vec<PublicCameraSource> {
+    let root_key = selected_root.map(|p| p.to_path_buf());
+    {
+        let guard = cache().lock().unwrap();
+        if let Some(c) = guard.as_ref() {
+            if c.root_key == root_key && c.loaded_at.elapsed() < CATALOG_TTL {
+                return c.sources.clone();
+            }
+        }
+    }
+    let sources = load_public_sources_uncached(selected_root);
+    let mut guard = cache().lock().unwrap();
+    *guard = Some(Cached {
+        root_key,
+        loaded_at: Instant::now(),
+        sources: sources.clone(),
+    });
+    sources
+}
+
+fn load_public_sources_uncached(selected_root: Option<&Path>) -> Vec<PublicCameraSource> {
     source_catalog_paths(selected_root)
         .into_iter()
         .find_map(|path| {

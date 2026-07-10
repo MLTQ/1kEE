@@ -18,3 +18,10 @@ data/
 .DS_Store
 
 .1kee_factal_api_key
+
+# Gruve integration kit — tooling (agent binary, zip). The Rust SDK is vendored
+# into crates/gruve_sdk and the JS SDK into the desktop crate's web assets, so the
+# build does not depend on this folder staying around.
+/gruve-kit/
+/gruve-kit.zip
+

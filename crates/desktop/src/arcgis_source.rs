@@ -8,7 +8,9 @@
 
 use crate::model::{ArcGisFeature, ArcGisLayerDef, GeoPoint};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, OnceLock};
+use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(300);
@@ -51,6 +53,44 @@ struct SourceCache {
 fn cache() -> &'static Mutex<HashMap<String, SourceCache>> {
     static C: OnceLock<Mutex<HashMap<String, SourceCache>>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Bumped whenever any layer's feature set changes (i.e. a fetch completes).
+/// `poll` uses it together with a signature of the requested source/layer set to
+/// skip rebuilding the aggregated feature Vec when nothing has changed.
+static FEATURE_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// Memoized aggregate returned by `poll`, so the per-frame call is a cheap `Arc`
+/// clone instead of deep-cloning every feature of every enabled layer each frame.
+struct AggregateMemo {
+    data_gen: u64,
+    sig: u64,
+    result: Arc<Vec<ArcGisFeature>>,
+}
+
+fn aggregate_memo() -> &'static Mutex<Option<AggregateMemo>> {
+    static M: OnceLock<Mutex<Option<AggregateMemo>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(None))
+}
+
+/// Cheap order-insensitive signature of the requested (url, enabled-layer-ids) set.
+fn source_refs_signature(source_refs: &[(String, HashSet<u32>)]) -> u64 {
+    let mut acc: u64 = 0;
+    for (url, enabled) in source_refs {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        url.hash(&mut h);
+        // XOR the layer ids so ordering within the set doesn't matter.
+        let mut layer_bits: u64 = 0;
+        for &lid in enabled {
+            let mut lh = std::collections::hash_map::DefaultHasher::new();
+            lid.hash(&mut lh);
+            layer_bits ^= lh.finish();
+        }
+        layer_bits.hash(&mut h);
+        // XOR per-source hashes so source ordering doesn't matter either.
+        acc ^= h.finish();
+    }
+    acc
 }
 
 fn http_client() -> &'static reqwest::blocking::Client {
@@ -214,7 +254,7 @@ fn apply_layer_colors(layers: &mut Vec<ArcGisLayerDef>, color_offset: usize) {
 pub fn poll(
     source_refs: &[(String, HashSet<u32>)], // (canonical_url, enabled_layer_ids)
     ctx: egui::Context,
-) -> Vec<ArcGisFeature> {
+) -> Arc<Vec<ArcGisFeature>> {
     for (url, enabled) in source_refs {
         // Apply colors if layers just became available
         {
@@ -292,6 +332,7 @@ pub fn poll(
                             entry.loading = false;
                             entry.last_poll = Some(Instant::now());
                             entry.status = status;
+                            FEATURE_GEN.fetch_add(1, Ordering::Relaxed);
                         }
                     }
                     ctx2.request_repaint();
@@ -300,27 +341,53 @@ pub fn poll(
         }
     }
 
+    // Return the memoized aggregate when neither the data (FEATURE_GEN) nor the
+    // requested source/layer set (sig) has changed since we last built it. This
+    // turns the common per-frame call into a cheap Arc clone instead of a deep
+    // clone of every feature of every enabled layer.
+    let data_gen = FEATURE_GEN.load(Ordering::Relaxed);
+    let sig = source_refs_signature(source_refs);
+    {
+        let memo = aggregate_memo().lock().unwrap();
+        if let Some(m) = memo.as_ref() {
+            if m.data_gen == data_gen && m.sig == sig {
+                return Arc::clone(&m.result);
+            }
+        }
+    }
+
     // Collect all cached features for enabled layers
-    let Ok(c) = cache().lock() else {
-        return Vec::new();
+    let aggregate: Vec<ArcGisFeature> = {
+        let Ok(c) = cache().lock() else {
+            return Arc::new(Vec::new());
+        };
+        source_refs
+            .iter()
+            .flat_map(|(url, enabled)| {
+                let src = c.get(url.as_str())?;
+                let features: Vec<ArcGisFeature> = enabled
+                    .iter()
+                    .flat_map(|lid| {
+                        src.layer_entries
+                            .get(lid)
+                            .map(|e| e.features.clone())
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                Some(features)
+            })
+            .flatten()
+            .collect()
     };
-    source_refs
-        .iter()
-        .flat_map(|(url, enabled)| {
-            let src = c.get(url.as_str())?;
-            let features: Vec<ArcGisFeature> = enabled
-                .iter()
-                .flat_map(|lid| {
-                    src.layer_entries
-                        .get(lid)
-                        .map(|e| e.features.clone())
-                        .unwrap_or_default()
-                })
-                .collect();
-            Some(features)
-        })
-        .flatten()
-        .collect()
+
+    let result = Arc::new(aggregate);
+    let mut memo = aggregate_memo().lock().unwrap();
+    *memo = Some(AggregateMemo {
+        data_gen,
+        sig,
+        result: Arc::clone(&result),
+    });
+    result
 }
 
 fn fetch_layer(url: &str, layer_id: u32) -> (Vec<ArcGisFeature>, String) {

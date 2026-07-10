@@ -5,6 +5,7 @@ mod cell_loader;
 mod infra_layer;
 mod power_layer;
 pub(crate) mod contour_asset;
+pub(crate) mod contour_pass;
 pub(crate) mod gebco_depth_fill;
 pub(crate) mod globe_pass;
 #[path = "world_map/globe_scene/mod.rs"]

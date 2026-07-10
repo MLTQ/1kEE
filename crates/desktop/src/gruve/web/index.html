@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>1kEE — mesh companion</title>
+    <!-- All paths relative (no leading "/") so the app works under /apps/1kee/ on a
+         friend's machine as well as standalone. -->
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <div id="app">
+      <main id="stage">
+        <canvas id="globe"></canvas>
+        <div id="stage-overlay">
+          <div id="follow-badge">FOLLOWING HOST</div>
+          <div id="readout"></div>
+        </div>
+      </main>
+
+      <aside id="panel">
+        <header id="brand">
+          <div class="brand-mark">◎</div>
+          <div class="brand-text">
+            <div class="brand-title">1kEE</div>
+            <div class="brand-sub">mesh companion</div>
+          </div>
+          <div id="link-state" class="pill" title="link to host">offline</div>
+        </header>
+
+        <section class="card" id="host-card">
+          <div class="card-head">HOST VIEW</div>
+          <div class="kv"><span>centre</span><b id="host-center">—</b></div>
+          <div class="kv"><span>body</span><b id="host-body">—</b></div>
+          <div class="kv"><span>theme</span><b id="host-theme">—</b></div>
+          <div class="kv"><span>viewers</span><b id="peer-count">1</b></div>
+        </section>
+
+        <section class="card" id="target-card">
+          <div class="card-head">TARGET</div>
+          <div class="kv"><span>picked</span><b id="target-coord">click the globe</b></div>
+          <div class="btn-row">
+            <button id="btn-steer" disabled>⌖ Steer host here</button>
+            <button id="btn-pin" disabled>📍 Share pin</button>
+          </div>
+          <div class="hint">Steering moves the analyst's globe on the host.
+            A shared pin is visible to every viewer of this tile.</div>
+        </section>
+
+        <section class="card" id="layers-card">
+          <div class="card-head">LAYERS</div>
+          <label class="tog"><input type="checkbox" id="lyr-events" checked /> Events <span id="c-events" class="count">0</span></label>
+          <label class="tog"><input type="checkbox" id="lyr-cameras" checked /> Cameras <span id="c-cameras" class="count">0</span></label>
+          <label class="tog"><input type="checkbox" id="lyr-tracks" checked /> Vessels <span id="c-tracks" class="count">0</span></label>
+          <label class="tog"><input type="checkbox" id="lyr-flights" checked /> Flights <span id="c-flights" class="count">0</span></label>
+        </section>
+
+        <section class="card grow" id="events-card">
+          <div class="card-head">EVENTS</div>
+          <div id="event-list"></div>
+        </section>
+
+        <footer id="foot">
+          <span id="standalone-note"></span>
+        </footer>
+      </aside>
+    </div>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

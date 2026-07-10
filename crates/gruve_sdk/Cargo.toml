@@ -1,0 +1,9 @@
+[package]
+name = "gruve-sdk"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Make a Rust app discoverable on a Gruve mesh: announce + dispatch (adapter protocol L1+L2). Zero dependencies. Vendored from gruve-kit/sdk-rs."
+
+[dependencies]
+# none — the agent speaks localhost HTTP; std::net is plenty (see PROTOCOL.md)

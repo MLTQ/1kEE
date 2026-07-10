@@ -7,6 +7,7 @@ mod city_catalog;
 mod event_store;
 mod factal_stream;
 mod flight_tracks;
+mod gruve;
 mod model;
 mod moving_tracks;
 mod osm_ingest;
@@ -18,6 +19,7 @@ mod stellar_time;
 mod terrain_assets;
 mod terrain_precompute;
 mod theme;
+mod usgs_stream;
 
 use app::DashboardApp;
 

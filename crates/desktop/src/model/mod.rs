@@ -24,6 +24,7 @@ use crate::stellar_time;
 use crate::terrain_assets::{self, TerrainInventory};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActiveBody {
@@ -42,9 +43,9 @@ pub struct AppModel {
     pub events: Vec<EventRecord>,
     pub cameras: Vec<CameraFeed>,
     /// Live AIS vessel positions; refreshed periodically by `moving_tracks`.
-    pub tracks: Vec<MovingTrack>,
+    pub tracks: Arc<Vec<MovingTrack>>,
     /// Live ADS-B flight positions; refreshed periodically by `flight_tracks`.
-    pub flights: Vec<FlightTrack>,
+    pub flights: Arc<Vec<FlightTrack>>,
     pub selected_event_id: Option<String>,
     pub selected_camera_id: Option<String>,
     /// MMSI string of the currently-selected vessel (for detail panel).
@@ -108,7 +109,7 @@ pub struct AppModel {
     /// ArcGIS FeatureServer sources added by the user.
     pub arcgis_sources: Vec<ArcGisSourceRef>,
     /// Merged features from all enabled source/layer combos (refreshed each frame).
-    pub arcgis_features: Vec<ArcGisFeature>,
+    pub arcgis_features: Arc<Vec<ArcGisFeature>>,
     /// Selected feature for the detail panel: (source_url, object_id).
     pub selected_arcgis_feature: Option<(String, i64)>,
     pub selected_root: Option<PathBuf>,
@@ -132,6 +133,7 @@ pub struct AppModel {
     pub activity_log: Vec<String>,
     pub log_collapsed: bool,
     pub factal_stream_status: String,
+    pub usgs_stream_status: String,
     pub camera_registry_status: String,
     // ── Replay mode ──────────────────────────────────────────────────────────
     pub replay_mode: bool,
@@ -294,8 +296,8 @@ impl AppModel {
         let mut model = Self {
             events,
             cameras,
-            tracks: Vec::new(),
-            flights: Vec::new(),
+            tracks: Arc::new(Vec::new()),
+            flights: Arc::new(Vec::new()),
             selected_event_id: Some("evt-sf".into()),
             selected_camera_id: None,
             selected_track_mmsi: None,
@@ -352,7 +354,7 @@ impl AppModel {
             planet_trail_years: 0.0,
             geojson_layers: Vec::new(),
             arcgis_sources: Vec::new(),
-            arcgis_features: Vec::new(),
+            arcgis_features: Arc::new(Vec::new()),
             selected_arcgis_feature: None,
             selected_root,
             factal_settings_open: false,
@@ -414,6 +416,9 @@ impl AppModel {
             } else {
                 "configured".into()
             },
+            // The USGS quake feed is public and keyless; polling starts
+            // immediately.
+            usgs_stream_status: "syncing".into(),
             camera_registry_status: if windy_webcams_api_key.is_empty() && ny511_api_key.is_empty()
             {
                 "demo".into()
@@ -650,6 +655,30 @@ impl AppModel {
     }
 
     pub fn replace_factal_events(&mut self, events: Vec<EventRecord>) {
+        // USGS quake events arrive on an independent poll and must survive a
+        // Factal refresh; everything else is replaced wholesale.
+        let mut merged = events;
+        merged.extend(
+            self.events
+                .drain(..)
+                .filter(|event| event.id.starts_with(USGS_EVENT_PREFIX)),
+        );
+        self.replace_events(merged);
+    }
+
+    pub fn replace_usgs_events(&mut self, events: Vec<EventRecord>) {
+        // Replace only the USGS-prefixed events (quakes get magnitude
+        // revisions under the same id); Factal/demo events stay in front.
+        let mut merged: Vec<EventRecord> = self
+            .events
+            .drain(..)
+            .filter(|event| !event.id.starts_with(USGS_EVENT_PREFIX))
+            .collect();
+        merged.extend(events);
+        self.replace_events(merged);
+    }
+
+    fn replace_events(&mut self, events: Vec<EventRecord>) {
         let previous_selected = self.selected_event_id.clone();
         self.events = events;
 

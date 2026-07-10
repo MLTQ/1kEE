@@ -23,7 +23,7 @@
 use crate::model::{GeoPoint, MovingTrack};
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 // ── timing ────────────────────────────────────────────────────────────────────
@@ -94,7 +94,7 @@ const RECENTER_THRESHOLD_DEG: f32 = BOX_HALF_DEG * 0.5;
 // ── static cache ──────────────────────────────────────────────────────────────
 
 struct PollState {
-    vessels: Vec<MovingTrack>,
+    vessels: Arc<Vec<MovingTrack>>,
     last_poll: Option<Instant>,
     /// Globe center used for the last successful poll bounding box.
     last_center: Option<GeoPoint>,
@@ -106,7 +106,7 @@ fn cache() -> &'static Mutex<PollState> {
     static CACHE: OnceLock<Mutex<PollState>> = OnceLock::new();
     CACHE.get_or_init(|| {
         Mutex::new(PollState {
-            vessels: Vec::new(),
+            vessels: Arc::new(Vec::new()),
             last_poll: None,
             last_center: None,
             loading: false,
@@ -123,9 +123,9 @@ fn cache() -> &'static Mutex<PollState> {
 /// the globe center has drifted more than `RECENTER_THRESHOLD_DEG` outside the
 /// previous bounding box — so panning to a new area of the globe triggers a
 /// fresh fetch automatically.
-pub fn poll(api_key: &str, center: GeoPoint, ctx: egui::Context) -> Vec<MovingTrack> {
+pub fn poll(api_key: &str, center: GeoPoint, ctx: egui::Context) -> Arc<Vec<MovingTrack>> {
     if api_key.is_empty() {
-        return Vec::new();
+        return Arc::new(Vec::new());
     }
 
     let should_spawn = cache()
@@ -164,7 +164,7 @@ pub fn poll(api_key: &str, center: GeoPoint, ctx: egui::Context) -> Vec<MovingTr
         std::thread::spawn(move || {
             let (vessels, status) = fetch_vessels(&key, center);
             if let Ok(mut g) = cache().lock() {
-                g.vessels = vessels;
+                g.vessels = Arc::new(vessels);
                 g.loading = false;
                 g.last_poll = Some(Instant::now());
                 g.last_center = Some(center);

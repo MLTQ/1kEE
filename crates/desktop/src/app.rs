@@ -2,8 +2,9 @@ use crate::camera_registry;
 use crate::factal_stream;
 use crate::model::AppModel;
 use crate::panels;
-use crate::panels::world_map::globe_pass;
+use crate::panels::world_map::{contour_pass, globe_pass};
 use crate::theme;
+use crate::usgs_stream;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -30,6 +31,9 @@ pub struct DashboardApp {
     model: AppModel,
     last_theme: theme::MapTheme,
     _puffin_server: Option<puffin_http::Server>,
+    /// Gruve mesh bridge: serves the companion web view + announces to the local
+    /// agent. `None` when no port was free; the app runs identically without it.
+    gruve: Option<crate::gruve::GruveBridge>,
 }
 
 impl DashboardApp {
@@ -41,8 +45,13 @@ impl DashboardApp {
         if let Some(wgpu_state) = cc.wgpu_render_state.as_ref() {
             let globe_res =
                 globe_pass::GlobePassResources::new(&wgpu_state.device, wgpu_state.target_format);
+            let contour_res = contour_pass::ContourPassResources::new(
+                &wgpu_state.device,
+                wgpu_state.target_format,
+            );
             let mut renderer = wgpu_state.renderer.write();
             renderer.callback_resources.insert(globe_res);
+            renderer.callback_resources.insert(contour_res);
         }
 
         // Open the event history store (creates DB if not present).
@@ -57,10 +66,12 @@ impl DashboardApp {
         }
 
         let model = AppModel::seed_demo();
+        let gruve = crate::gruve::GruveBridge::start(&model);
         Self {
             last_theme: model.map_theme,
             model,
             _puffin_server: puffin_server,
+            gruve,
         }
     }
 }
@@ -68,6 +79,7 @@ impl DashboardApp {
 impl Drop for DashboardApp {
     fn drop(&mut self) {
         factal_stream::shutdown();
+        usgs_stream::shutdown();
         camera_registry::shutdown();
         panels::world_map::srtm_focus_cache::terminate_active_gdal_jobs();
     }
@@ -77,8 +89,15 @@ impl eframe::App for DashboardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         puffin::GlobalProfiler::lock().new_frame();
 
+        // Apply any commands web viewers sent (steer globe / select event) before
+        // the panels read the model this frame.
+        if let Some(bridge) = &self.gruve {
+            bridge.drain_commands(&mut self.model);
+        }
+
         factal_stream::tick(&mut self.model);
         factal_stream::history_tick(&mut self.model);
+        usgs_stream::tick(&mut self.model);
         camera_registry::tick(&mut self.model);
 
         // Advance stellar time.
@@ -108,9 +127,9 @@ impl eframe::App for DashboardApp {
             theme::set_theme(ctx, self.model.map_theme);
             self.last_theme = self.model.map_theme;
         }
-        if self.model.has_factal_api_key() || self.model.has_camera_source_keys() {
-            ctx.request_repaint_after(Duration::from_secs(1));
-        }
+        // The USGS quake feed polls with no key configured, so the frame loop
+        // must keep ticking even when no API keys are present.
+        ctx.request_repaint_after(Duration::from_secs(1));
 
         if !self.model.cinematic_mode {
             panels::render_header(ctx, &mut self.model);
@@ -131,5 +150,11 @@ impl eframe::App for DashboardApp {
             .show(ctx, |ui| {
                 panels::render_world_map(ui, &mut self.model);
             });
+
+        // Refresh the snapshot the companion web view polls, now that this frame's
+        // interaction has been folded into the model.
+        if let Some(bridge) = &self.gruve {
+            bridge.publish(&self.model);
+        }
     }
 }
