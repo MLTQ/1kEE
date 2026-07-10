@@ -175,6 +175,24 @@ struct LayerInstances {
     building: Option<u64>,
 }
 
+/// Complete a single-flight build. A failed build deliberately retains the
+/// previous instance set, but always releases the marker so a later repaint
+/// can retry the current contour version.
+fn complete_instance_build(
+    entry: &mut LayerInstances,
+    version: u64,
+    built: Option<Vec<SegmentInstance>>,
+) -> bool {
+    if entry.building != Some(version) {
+        return false;
+    }
+    entry.building = None;
+    if let Some(built) = built {
+        entry.current = Some((version, Arc::new(built)));
+    }
+    true
+}
+
 /// Return the cached segment instances for `contours`. A tile-`Arc` or
 /// palette change kicks off a **background** rebuild (a full rebuild is up to
 /// ~1M segments — far too slow for the frame); meanwhile the previous
@@ -206,36 +224,51 @@ pub fn instances_for(
         }
     }
 
-    if entry.building != Some(version) {
-        // A newer request supersedes any in-flight build: its commit check
-        // below fails against the updated `building` marker and its result
-        // is dropped.
+    if entry.building.is_none() {
+        // Keep one full instance rebuild in flight per layer. Globe tile loads
+        // can arrive while an earlier build runs; starting another full Rayon
+        // flatten for every intermediate version causes a thread/work storm.
+        // The next repaint after this build commits observes the latest version
+        // and schedules it if needed.
         entry.building = Some(version);
         let contours = contours.clone();
         let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            puffin::profile_scope!("contour_instances_rebuild");
-            let built: Vec<SegmentInstance> = contours
-                .par_iter()
-                .flat_map_iter(|contour| {
-                    let color = linear_u8(color_fn(contour));
-                    contour.points.windows(2).map(move |pair| SegmentInstance {
-                        a: unit_vec(pair[0]),
-                        b: unit_vec(pair[1]),
-                        color,
-                    })
-                })
-                .collect();
-            let mut guard = cache.lock().unwrap();
-            let entry = guard.entry(layer).or_default();
-            if entry.building == Some(version) {
-                entry.current = Some((version, Arc::new(built)));
-                entry.building = None;
-                drop(guard);
-                // Wake the UI so the freshly-built set replaces the stale one.
-                ctx.request_repaint();
-            }
-        });
+        if let Err(error) = std::thread::Builder::new()
+            .name("contour-instance-build".into())
+            .spawn(move || {
+                let built = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    puffin::profile_scope!("contour_instances_rebuild");
+                    contours
+                        .par_iter()
+                        .flat_map_iter(|contour| {
+                            let color = linear_u8(color_fn(contour));
+                            contour.points.windows(2).map(move |pair| SegmentInstance {
+                                a: unit_vec(pair[0]),
+                                b: unit_vec(pair[1]),
+                                color,
+                            })
+                        })
+                        .collect()
+                })) {
+                    Ok(built) => Some(built),
+                    Err(_) => {
+                        eprintln!("[1kEE] contour instance worker panicked; retrying");
+                        None
+                    }
+                };
+                let mut guard = cache.lock().unwrap();
+                let entry = guard.entry(layer).or_default();
+                if complete_instance_build(entry, version, built) {
+                    drop(guard);
+                    // Wake the UI so a fresh result, or a recovered failure,
+                    // is observed on the next frame.
+                    ctx.request_repaint();
+                }
+            })
+        {
+            entry.building = None;
+            eprintln!("[1kEE] failed to spawn contour instance worker: {error}");
+        }
     }
 
     // Serve the previous (stale) set while the rebuild runs in the background.
@@ -520,5 +553,18 @@ mod tests {
             contour_stroke_half_px(1.0, pixels_per_point),
             legacy_half_width
         );
+    }
+
+    #[test]
+    fn failed_instance_build_releases_the_single_flight_gate() {
+        let mut entry = LayerInstances {
+            current: Some((3, Arc::new(Vec::new()))),
+            building: Some(7),
+        };
+
+        assert!(complete_instance_build(&mut entry, 7, None));
+        assert_eq!(entry.building, None);
+        assert_eq!(entry.current.as_ref().map(|(version, _)| *version), Some(3));
+        assert!(!complete_instance_build(&mut entry, 7, Some(Vec::new())));
     }
 }

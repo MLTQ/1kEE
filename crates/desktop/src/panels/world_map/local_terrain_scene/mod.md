@@ -32,6 +32,15 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
   weight relationships.
 - **Interacts with**: `AppModel::contour_stroke_scale` and `geography.rs`.
 
+### Elevation-fill worker scheduling
+
+- **Does**: Retains one mesh build while the camera moves, then builds the
+  newest key after that worker completes instead of cloning contours and
+  spawning a replacement worker every frame. Disconnected/panicked workers
+  clear their marker so the next frame retries.
+- **Interacts with**: `draw_elevation_fill`, `build_elev_fill_mesh`, and the
+  local repaint loop.
+
 ## Contracts
 
 | Dependent | Expects | Breaking changes |
@@ -40,6 +49,7 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 | Overlay renderers | Imported user layers, roads, water, and contours share the same local projection space | Changing coordinate transforms without updating overlay helpers |
 | Scene tests | The local contour loader stays reachable through `contour_asset::load_srtm_region_for_view` for end-to-end validation | Renaming/removing that loader without updating the tests |
 | Globe scene | A shared `1×` contour scale produces the same default local stroke widths as before | Applying a different scale or bypassing it in transition rendering |
+| Cinematic movement | At most one elevation-fill mesh worker is active while camera-derived keys change | Replacing the receiver and spawning a worker per frame |
 
 ## Notes
 - The scene-level tests are intentionally tolerant of missing local cache data: they return early when the shared focus cache is unavailable instead of making the suite depend on large fixture assets.
@@ -48,3 +58,8 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 - The local geography helpers receive the same scale for coastline and
   bathymetry linework, while unrelated roads, boundaries, and marker strokes
   deliberately retain their independent visual contracts.
+- Elevation-fill workers are named to make any future background failure
+  diagnosable from the native crash report.
+- If a mesh worker exits without sending a result, the stale mesh stays visible
+  and the single-flight gate is released rather than leaving elevation fill
+  permanently blocked.

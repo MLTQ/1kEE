@@ -1321,6 +1321,11 @@ fn build_elev_fill_mesh(
     mesh
 }
 
+#[inline]
+fn should_start_elevation_fill_build(need_build: bool, build_in_flight: bool) -> bool {
+    need_build && !build_in_flight
+}
+
 fn draw_elevation_fill(
     painter: &egui::Painter,
     layout: &LocalLayout,
@@ -1401,28 +1406,35 @@ fn draw_elevation_fill(
     });
     let mut state = state_mutex.lock().unwrap();
 
-    // Poll for a completed background build (non-blocking).
-    let got_result = if let Some(rx) = &state.result_rx {
-        match rx.try_recv() {
-            Ok((built_key, mesh)) => Some((built_key, mesh)),
-            Err(_) => None,
+    // Poll for a completed background build (non-blocking). A disconnected
+    // channel means the worker failed before publishing its mesh; clear the
+    // single-flight marker so the next frame can retry instead of freezing
+    // elevation fill permanently.
+    match state.result_rx.as_ref().map(|rx| rx.try_recv()) {
+        Some(Ok((built_key, mesh))) => {
+            state.ready = Some(ElevFillEntry {
+                key: built_key,
+                mesh,
+            });
+            state.building_key = None;
+            state.result_rx = None;
+            painter.ctx().request_repaint();
         }
-    } else {
-        None
-    };
-    if let Some((built_key, mesh)) = got_result {
-        state.ready = Some(ElevFillEntry {
-            key: built_key,
-            mesh,
-        });
-        state.building_key = None;
-        state.result_rx = None;
-        painter.ctx().request_repaint();
+        Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+            state.building_key = None;
+            state.result_rx = None;
+            eprintln!("[1kEE] elevation-fill worker ended without a mesh; retrying");
+            painter.ctx().request_repaint();
+        }
+        Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => {}
     }
 
-    // Kick off a background build when the key has changed and no build is in-flight.
+    // Keep one expensive elevation-fill build in flight. During cinematic
+    // movement the camera key can change every frame; replacing the receiver
+    // and cloning the full contour set each frame would create an unbounded
+    // worker storm.
     let need_build = state.ready.as_ref().map(|e| e.key != key).unwrap_or(true);
-    if need_build && state.building_key != Some(key) {
+    if should_start_elevation_fill_build(need_build, state.building_key.is_some()) {
         let layout_c = *layout;
         let view_c = *view;
         let contours_c: Vec<_> = contours.to_vec();
@@ -1431,18 +1443,32 @@ fn draw_elevation_fill(
         let (tx, rx) = std::sync::mpsc::channel();
         state.building_key = Some(key);
         state.result_rx = Some(rx);
-        std::thread::spawn(move || {
-            let mesh = build_elev_fill_mesh(
-                &layout_c,
-                &view_c,
-                focus,
-                &contours_c,
-                &gebco_c,
-                active_body,
-            );
-            let _ = tx.send((key, mesh));
-            ctx.request_repaint();
-        });
+        if let Err(error) = std::thread::Builder::new()
+            .name("elevation-fill-build".into())
+            .spawn(move || {
+                let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    build_elev_fill_mesh(
+                        &layout_c,
+                        &view_c,
+                        focus,
+                        &contours_c,
+                        &gebco_c,
+                        active_body,
+                    )
+                }));
+                match built {
+                    Ok(mesh) => {
+                        let _ = tx.send((key, mesh));
+                    }
+                    Err(_) => eprintln!("[1kEE] elevation-fill worker panicked; retrying"),
+                }
+                ctx.request_repaint();
+            })
+        {
+            state.building_key = None;
+            state.result_rx = None;
+            eprintln!("[1kEE] failed to spawn elevation-fill worker: {error}");
+        }
     }
 
     // Render the last ready mesh (stale is fine while a new one is building).
@@ -1926,5 +1952,12 @@ mod tests {
     fn default_contour_stroke_scale_preserves_local_line_widths() {
         assert_eq!(local_contour_stroke_width(1.35, 1.0, 1.0), 1.35);
         assert_eq!(local_contour_stroke_width(0.7, 1.0, 1.0), 0.7);
+    }
+
+    #[test]
+    fn elevation_fill_waits_for_the_in_flight_worker_during_camera_motion() {
+        assert!(should_start_elevation_fill_build(true, false));
+        assert!(!should_start_elevation_fill_build(true, true));
+        assert!(!should_start_elevation_fill_build(false, false));
     }
 }

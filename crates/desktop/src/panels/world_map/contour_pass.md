@@ -15,6 +15,14 @@ rebuilt only when source contours or their palette changes.
 - **Interacts with**: `globe_scene/geography.rs`, `contour_lines.wgsl`, and
   `ContourPassResources`.
 
+### `instances_for`
+
+- **Does**: Keeps at most one full background instance rebuild active per
+  contour layer, then schedules the latest tile-set version on a later repaint.
+  A caught worker panic releases the gate while retaining the last good
+  instance set for display.
+- **Interacts with**: `contour_asset.rs` merged `Arc` identities and Rayon.
+
 ### `contour_stroke_half_px`
 
 - **Does**: Converts the shared multiplier into a physical-pixel half-width.
@@ -26,9 +34,14 @@ rebuilt only when source contours or their palette changes.
 | Dependent | Expects | Breaking changes |
 |---|---|---|
 | Globe geography | Changing thickness updates only uniforms, never contour instance caches | Moving scale into the instance version or baked geometry |
+| Globe contour cache | A stable unchanged contour Arc is a cache hit; changing tiles does not fan out simultaneous full rebuilds | Starting a rebuild for every intermediate version while one is active |
 | WGSL shader | `stroke_half_px` remains a physical-pixel half-width in the unchanged uniform layout | Reordering or resizing `ContourUniforms` without matching WGSL |
 
 ## Notes
 
 - Scale is validated by `AppModel` before reaching this module.
 - The GPU default-width test protects visual parity with the pre-slider path.
+- Instance worker threads are named so a future native failure identifies the
+  relevant work category instead of reporting only an unknown thread.
+- A failed instance build is recoverable: it leaves stale geometry visible,
+  clears the in-flight marker, and asks the next repaint to retry.

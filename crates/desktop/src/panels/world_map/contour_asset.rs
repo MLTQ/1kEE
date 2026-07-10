@@ -4,6 +4,7 @@ use rusqlite::{Connection, params};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use super::gebco_depth_fill;
 use super::srtm_focus_cache;
@@ -20,6 +21,8 @@ static GLOBAL_COASTLINE_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = O
 static GLOBAL_TOPO_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();
 static GLOBAL_BATHYMETRY_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();
 
+const CONTOUR_READ_RETRY_DELAY: Duration = Duration::from_millis(250);
+
 /// Instantly drop every in-memory tile cache.
 ///
 /// Forces a full reload on the next frame — both the global globe view and the
@@ -28,41 +31,32 @@ static GLOBAL_BATHYMETRY_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = 
 pub fn blast_tile_caches() {
     if let Some(c) = LOCAL_CONTOUR_CACHE.get() {
         if let Ok(mut g) = c.lock() {
-            g.scene_key = None;
-            g.entries.clear();
-            g.in_flight.clear();
-            g.zoom_fallback = None;
+            g.reset_all();
         }
     }
     if let Some(c) = LUNAR_LOCAL_CONTOUR_CACHE.get() {
         if let Ok(mut g) = c.lock() {
-            g.scene_key = None;
-            g.entries.clear();
-            g.in_flight.clear();
-            g.zoom_fallback = None;
+            g.reset_all();
         }
     }
     if let Some(c) = MARS_LOCAL_CONTOUR_CACHE.get() {
         if let Ok(mut g) = c.lock() {
-            g.scene_key = None;
-            g.entries.clear();
-            g.in_flight.clear();
-            g.zoom_fallback = None;
+            g.reset_all();
         }
     }
     if let Some(c) = GLOBE_CONTOUR_CACHE.get() {
         if let Ok(mut g) = c.lock() {
-            *g = GlobeRegionCache::default();
+            g.reset_all();
         }
     }
     if let Some(c) = LUNAR_GLOBE_CONTOUR_CACHE.get() {
         if let Ok(mut g) = c.lock() {
-            *g = GlobeRegionCache::default();
+            g.reset_all();
         }
     }
     if let Some(c) = MARS_GLOBE_CONTOUR_CACHE.get() {
         if let Ok(mut g) = c.lock() {
-            *g = GlobeRegionCache::default();
+            g.reset_all();
         }
     }
     if let Some(c) = GLOBAL_COASTLINE_CACHE.get() {
@@ -119,6 +113,24 @@ struct GlobeRegionCache {
     /// Contours from the previous zoom bucket, shown while new-resolution
     /// tiles are loading so the globe doesn't flash blank on zoom-level change.
     zoom_fallback: Option<Arc<Vec<ContourPath>>>,
+    /// Memoized flattened globe merge. Keeping its `Arc` stable while the tile
+    /// set is unchanged is critical: the GPU instance cache keys on this Arc's
+    /// identity and must not rebuild on every repaint.
+    merged: Option<Arc<Vec<ContourPath>>>,
+    /// Monotonic tile-set revision used to memoize `merged` exactly, without a
+    /// collision-prone per-frame hash over every cached tile.
+    tiles_revision: u64,
+    merged_revision: Option<u64>,
+    /// Generation of tile-reader requests. A scene/cache reset advances this
+    /// so a late worker cannot repopulate a newer cache state.
+    load_epoch: u64,
+    /// At most one SQLite/WKB reader runs for this cache at a time. It remains
+    /// set across a reset until the old reader exits, preventing overlapping
+    /// stale and current read workers.
+    load_in_flight: Option<u64>,
+    /// Temporary retry deadline after a reader cannot open/prepare the cache.
+    /// It avoids repeatedly creating short-lived workers against a locked DB.
+    read_retry_at: Option<Instant>,
 }
 
 impl Default for GlobeRegionCache {
@@ -130,7 +142,39 @@ impl Default for GlobeRegionCache {
             in_flight: HashSet::new(),
             order: Vec::new(),
             zoom_fallback: None,
+            merged: None,
+            tiles_revision: 0,
+            merged_revision: None,
+            load_epoch: 0,
+            load_in_flight: None,
+            read_retry_at: None,
         }
+    }
+}
+
+impl GlobeRegionCache {
+    fn mark_tiles_changed(&mut self) {
+        self.tiles_revision = self.tiles_revision.wrapping_add(1);
+        self.merged = None;
+        self.merged_revision = None;
+    }
+
+    /// Drop tiles for a new scene while preserving any old reader's ownership
+    /// marker. That worker will discard its result once it notices the epoch.
+    fn clear_tiles_for_new_scene(&mut self) {
+        self.tiles.clear();
+        self.in_flight.clear();
+        self.order.clear();
+        self.mark_tiles_changed();
+        self.load_epoch = self.load_epoch.wrapping_add(1);
+        self.read_retry_at = None;
+    }
+
+    fn reset_all(&mut self) {
+        self.zoom_bucket = -1;
+        self.root = None;
+        self.zoom_fallback = None;
+        self.clear_tiles_for_new_scene();
     }
 }
 
@@ -151,36 +195,64 @@ struct LocalRegionCache {
     /// (or their contents) changes, so the per-frame call returns a cheap `Arc`
     /// clone instead of deep-cloning ~24k contour paths every frame.
     merged: Option<Arc<Vec<ContourPath>>>,
-    merged_sig: u64,
+    entries_revision: u64,
+    /// `None` is the ordinary all-tile merge; `Some(bits)` is a lunar/Mars
+    /// overlap-partitioned merge at that exact bucket-step value.
+    merged_key: Option<(u64, Option<u32>)>,
+    load_epoch: u64,
+    load_in_flight: Option<u64>,
+    read_retry_at: Option<Instant>,
 }
 
-/// Cheap order-insensitive signature of a tile-entry set: combines each key with
-/// the identity (pointer) of its `Arc` value, so both adding/removing a tile and
-/// replacing a tile's contents invalidate the memo.
-fn local_entries_signature(entries: &HashMap<CacheKey, Arc<Vec<ContourPath>>>) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut acc: u64 = 0;
-    for (k, v) in entries {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        k.hash(&mut h);
-        (Arc::as_ptr(v) as usize as u64).hash(&mut h);
-        acc ^= h.finish();
+impl Default for LocalRegionCache {
+    fn default() -> Self {
+        Self {
+            scene_key: None,
+            entries: HashMap::new(),
+            in_flight: HashSet::new(),
+            zoom_fallback: None,
+            merged: None,
+            entries_revision: 0,
+            merged_key: None,
+            load_epoch: 0,
+            load_in_flight: None,
+            read_retry_at: None,
+        }
     }
-    acc
+}
+
+impl LocalRegionCache {
+    fn mark_entries_changed(&mut self) {
+        self.entries_revision = self.entries_revision.wrapping_add(1);
+        self.merged = None;
+        self.merged_key = None;
+    }
+
+    fn clear_entries_for_new_scene(&mut self) {
+        self.entries.clear();
+        self.in_flight.clear();
+        self.mark_entries_changed();
+        self.load_epoch = self.load_epoch.wrapping_add(1);
+        self.read_retry_at = None;
+    }
+
+    fn reset_all(&mut self) {
+        self.scene_key = None;
+        self.zoom_fallback = None;
+        self.clear_entries_for_new_scene();
+    }
 }
 
 /// Return the flattened merge of all tiles in `cache`, rebuilding it only when
 /// the entry set changed since the last call.  Returns `None` when empty.
 fn merged_local_contours(cache: &mut LocalRegionCache) -> Option<Arc<Vec<ContourPath>>> {
-    let sig = local_entries_signature(&cache.entries);
-    if cache.merged_sig == sig {
-        if let Some(m) = &cache.merged {
-            return Some(Arc::clone(m));
-        }
+    let merge_key = (cache.entries_revision, None);
+    if cache.merged_key == Some(merge_key) {
+        return cache.merged.clone();
     }
     if cache.entries.is_empty() {
         cache.merged = None;
-        cache.merged_sig = sig;
+        cache.merged_key = Some(merge_key);
         return None;
     }
     let mut merged = Vec::new();
@@ -189,8 +261,59 @@ fn merged_local_contours(cache: &mut LocalRegionCache) -> Option<Arc<Vec<Contour
     }
     let arc = Arc::new(merged);
     cache.merged = Some(Arc::clone(&arc));
-    cache.merged_sig = sig;
+    cache.merged_key = Some(merge_key);
     Some(arc)
+}
+
+/// Merge overlapping lunar/Mars tile sets without redrawing the same contour
+/// from neighbouring tiles. Like the ordinary local merge, this retains a
+/// stable `Arc` while the cache entries are unchanged.
+fn merged_partitioned_local_contours(
+    cache: &mut LocalRegionCache,
+    bucket_step: f32,
+) -> Option<Arc<Vec<ContourPath>>> {
+    let merge_key = (cache.entries_revision, Some(bucket_step.to_bits()));
+    if cache.entries.is_empty() {
+        cache.merged = None;
+        cache.merged_key = Some(merge_key);
+        return cache.zoom_fallback.clone();
+    }
+
+    if cache.merged_key == Some(merge_key) {
+        if let Some(merged) = &cache.merged {
+            return if merged.is_empty() {
+                cache.zoom_fallback.clone()
+            } else {
+                Some(Arc::clone(merged))
+            };
+        }
+    }
+
+    let mut merged = Vec::new();
+    for (key, contours) in &cache.entries {
+        let tile_lat = key.lat_bucket as f32 * bucket_step;
+        let tile_lon = key.lon_bucket as f32 * bucket_step;
+        let half_step = bucket_step * 0.5;
+        for contour in contours.iter() {
+            if contour.points.is_empty() {
+                continue;
+            }
+            let mid = &contour.points[contour.points.len() / 2];
+            if (mid.lat - tile_lat).abs() <= half_step && (mid.lon - tile_lon).abs() <= half_step {
+                merged.push(contour.clone());
+            }
+        }
+    }
+
+    let merged = Arc::new(merged);
+    cache.merged = Some(Arc::clone(&merged));
+    cache.merged_key = Some(merge_key);
+    if merged.is_empty() {
+        cache.zoom_fallback.clone()
+    } else {
+        cache.zoom_fallback = None;
+        Some(merged)
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -199,6 +322,244 @@ struct SceneKey {
     anchor_lat_bucket: i32,
     anchor_lon_bucket: i32,
     zoom_bucket: i32,
+}
+
+type ContourReadRequest = (CacheKey, srtm_focus_cache::FocusContourAsset);
+
+/// Claim one coalesced SQLite/WKB read for a local cache. New camera frames
+/// leave their tiles unclaimed while a worker runs; its repaint then lets the
+/// latest viewport submit the next batch.
+fn begin_local_read(
+    cache: &mut LocalRegionCache,
+    assets: &[srtm_focus_cache::FocusContourAsset],
+) -> Option<(u64, Vec<ContourReadRequest>)> {
+    if cache.load_in_flight.is_some() {
+        return None;
+    }
+    if cache
+        .read_retry_at
+        .is_some_and(|retry_at| retry_at > Instant::now())
+    {
+        return None;
+    }
+    cache.read_retry_at = None;
+
+    let requests: Vec<_> = assets
+        .iter()
+        .filter_map(|asset| {
+            let key = CacheKey {
+                path: asset.path.clone(),
+                lat_bucket: asset.lat_bucket,
+                lon_bucket: asset.lon_bucket,
+                zoom_bucket: asset.zoom_bucket,
+            };
+            (!cache.entries.contains_key(&key) && !cache.in_flight.contains(&key))
+                .then(|| (key, asset.clone()))
+        })
+        .collect();
+    if requests.is_empty() {
+        return None;
+    }
+
+    for (key, _) in &requests {
+        cache.in_flight.insert(key.clone());
+    }
+    let epoch = cache.load_epoch;
+    cache.load_in_flight = Some(epoch);
+    Some((epoch, requests))
+}
+
+/// Claim one coalesced SQLite/WKB read for a globe cache.
+fn begin_globe_read(
+    cache: &mut GlobeRegionCache,
+    assets: &[srtm_focus_cache::FocusContourAsset],
+) -> Option<(u64, Vec<ContourReadRequest>)> {
+    if cache.load_in_flight.is_some() {
+        return None;
+    }
+    if cache
+        .read_retry_at
+        .is_some_and(|retry_at| retry_at > Instant::now())
+    {
+        return None;
+    }
+    cache.read_retry_at = None;
+
+    let requests: Vec<_> = assets
+        .iter()
+        .filter_map(|asset| {
+            let tile_key = (asset.lat_bucket, asset.lon_bucket);
+            (!cache.tiles.contains_key(&tile_key) && !cache.in_flight.contains(&tile_key)).then(
+                || {
+                    (
+                        CacheKey {
+                            path: asset.path.clone(),
+                            lat_bucket: asset.lat_bucket,
+                            lon_bucket: asset.lon_bucket,
+                            zoom_bucket: asset.zoom_bucket,
+                        },
+                        asset.clone(),
+                    )
+                },
+            )
+        })
+        .collect();
+    if requests.is_empty() {
+        return None;
+    }
+
+    for (key, _) in &requests {
+        cache.in_flight.insert((key.lat_bucket, key.lon_bucket));
+    }
+    let epoch = cache.load_epoch;
+    cache.load_in_flight = Some(epoch);
+    Some((epoch, requests))
+}
+
+fn finish_local_read(
+    cache: &Mutex<LocalRegionCache>,
+    epoch: u64,
+    requests: &[ContourReadRequest],
+    loaded: Option<Vec<(CacheKey, Vec<ContourPath>)>>,
+) {
+    let Ok(mut cache) = cache.lock() else {
+        return;
+    };
+    if cache.load_in_flight != Some(epoch) {
+        return;
+    }
+
+    if cache.load_epoch == epoch {
+        let read_failed = loaded.is_none();
+        let mut changed = false;
+        if let Some(loaded) = loaded {
+            for (key, contours) in loaded {
+                if !cache.entries.contains_key(&key) {
+                    cache.entries.insert(key, Arc::new(contours));
+                    changed = true;
+                }
+            }
+        }
+        for (key, _) in requests {
+            cache.in_flight.remove(key);
+        }
+        if changed {
+            cache.mark_entries_changed();
+        }
+        cache.read_retry_at = read_failed.then(|| Instant::now() + CONTOUR_READ_RETRY_DELAY);
+    }
+    cache.load_in_flight = None;
+}
+
+fn finish_globe_read(
+    cache: &Mutex<GlobeRegionCache>,
+    epoch: u64,
+    requests: &[ContourReadRequest],
+    loaded: Option<Vec<(CacheKey, Vec<ContourPath>)>>,
+) {
+    let Ok(mut cache) = cache.lock() else {
+        return;
+    };
+    if cache.load_in_flight != Some(epoch) {
+        return;
+    }
+
+    if cache.load_epoch == epoch {
+        let read_failed = loaded.is_none();
+        let mut changed = false;
+        if let Some(loaded) = loaded {
+            for (key, contours) in loaded {
+                let tile_key = (key.lat_bucket, key.lon_bucket);
+                if !cache.tiles.contains_key(&tile_key) {
+                    cache.tiles.insert(tile_key, Arc::new(contours));
+                    cache.order.push(tile_key);
+                    changed = true;
+                }
+            }
+        }
+        for (key, _) in requests {
+            cache.in_flight.remove(&(key.lat_bucket, key.lon_bucket));
+        }
+        if changed {
+            cache.mark_tiles_changed();
+        }
+        cache.read_retry_at = read_failed.then(|| Instant::now() + CONTOUR_READ_RETRY_DELAY);
+    }
+    cache.load_in_flight = None;
+}
+
+fn spawn_local_read(
+    cache: &'static Mutex<LocalRegionCache>,
+    epoch: u64,
+    requests: Vec<ContourReadRequest>,
+    feature_budget: usize,
+    ctx: egui::Context,
+    worker_name: &'static str,
+) {
+    let cleanup_requests = requests.clone();
+    let cleanup_ctx = ctx.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name(worker_name.into())
+        .spawn(move || {
+            let loaded = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                query_local_contours_batch(&requests[0].0.path, &requests, feature_budget).ok()
+            })) {
+                Ok(loaded) => loaded,
+                Err(_) => {
+                    eprintln!("[1kEE] {worker_name} panicked while reading contour tiles");
+                    None
+                }
+            };
+            let read_failed = loaded.is_none();
+            finish_local_read(cache, epoch, &requests, loaded);
+            if read_failed {
+                ctx.request_repaint_after(CONTOUR_READ_RETRY_DELAY);
+            } else {
+                ctx.request_repaint();
+            }
+        })
+    {
+        finish_local_read(cache, epoch, &cleanup_requests, None);
+        eprintln!("[1kEE] failed to spawn {worker_name}: {error}");
+        cleanup_ctx.request_repaint_after(CONTOUR_READ_RETRY_DELAY);
+    }
+}
+
+fn spawn_globe_read(
+    cache: &'static Mutex<GlobeRegionCache>,
+    epoch: u64,
+    requests: Vec<ContourReadRequest>,
+    feature_budget: usize,
+    ctx: egui::Context,
+    worker_name: &'static str,
+) {
+    let cleanup_requests = requests.clone();
+    let cleanup_ctx = ctx.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name(worker_name.into())
+        .spawn(move || {
+            let loaded = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                query_local_contours_batch(&requests[0].0.path, &requests, feature_budget).ok()
+            })) {
+                Ok(loaded) => loaded,
+                Err(_) => {
+                    eprintln!("[1kEE] {worker_name} panicked while reading contour tiles");
+                    None
+                }
+            };
+            let read_failed = loaded.is_none();
+            finish_globe_read(cache, epoch, &requests, loaded);
+            if read_failed {
+                ctx.request_repaint_after(CONTOUR_READ_RETRY_DELAY);
+            } else {
+                ctx.request_repaint();
+            }
+        })
+    {
+        finish_globe_read(cache, epoch, &cleanup_requests, None);
+        eprintln!("[1kEE] failed to spawn {worker_name}: {error}");
+        cleanup_ctx.request_repaint_after(CONTOUR_READ_RETRY_DELAY);
+    }
 }
 
 pub fn load_srtm_region_for_view(
@@ -220,16 +581,8 @@ pub fn load_srtm_region_for_view(
     // — well within real-time render budget.
     const MAX_LOCAL_TILES: usize = 200;
 
-    let cache: &'static Mutex<LocalRegionCache> = LOCAL_CONTOUR_CACHE.get_or_init(|| {
-        Mutex::new(LocalRegionCache {
-            scene_key: None,
-            entries: HashMap::new(),
-            in_flight: HashSet::new(),
-            zoom_fallback: None,
-            merged: None,
-            merged_sig: 0,
-        })
-    });
+    let cache: &'static Mutex<LocalRegionCache> =
+        LOCAL_CONTOUR_CACHE.get_or_init(|| Mutex::new(LocalRegionCache::default()));
     let feature_budget = srtm_focus_cache::feature_budget_for_zoom(zoom);
     let per_asset_budget = (feature_budget / assets.len().max(1)).max(120);
     let scene_key = SceneKey {
@@ -242,10 +595,9 @@ pub fn load_srtm_region_for_view(
             .unwrap_or_default(),
     };
 
-    // Phase 1: lock, check for scene change, collect tiles that need loading,
-    // and atomically mark them as in-flight — all under a single lock
-    // acquisition so no other frame can race and spawn duplicate threads.
-    let missing: Vec<(CacheKey, srtm_focus_cache::FocusContourAsset)> = {
+    // Phase 1: lock, reset stale scene state, and claim at most one batch
+    // reader. While it runs, camera motion is coalesced into the next repaint.
+    let read = {
         let mut guard = cache.lock().ok()?;
         if guard.scene_key.as_ref() != Some(&scene_key) {
             eprintln!(
@@ -254,87 +606,20 @@ pub fn load_srtm_region_for_view(
                 assets.first().map(|a| a.zoom_bucket).unwrap_or(-1)
             );
             guard.scene_key = Some(scene_key);
-            guard.entries.clear();
-            guard.in_flight.clear();
+            guard.clear_entries_for_new_scene();
         }
-        let missing: Vec<_> = assets
-            .iter()
-            .filter_map(|asset| {
-                let key = CacheKey {
-                    path: asset.path.clone(),
-                    lat_bucket: asset.lat_bucket,
-                    lon_bucket: asset.lon_bucket,
-                    zoom_bucket: asset.zoom_bucket,
-                };
-                // Skip tiles already loaded or already being loaded by another thread.
-                // Without this check, every repaint (including those triggered by
-                // finishing threads) would spawn a fresh batch of N threads for the
-                // still-loading tiles — an O(N²) explosion that looks like a strobe.
-                if guard.entries.contains_key(&key) || guard.in_flight.contains(&key) {
-                    None
-                } else {
-                    Some((key, asset.clone()))
-                }
-            })
-            .collect();
-        // Mark new tiles as in-flight before dropping the lock so the next
-        // frame's Phase 1 won't double-spawn them.
-        for (key, _) in &missing {
-            guard.in_flight.insert(key.clone());
-        }
-        missing
-    }; // guard dropped here
+        begin_local_read(&mut guard, &assets)
+    };
 
-    // Phase 2: spawn detached threads for each newly-claimed tile; return
-    // immediately with whatever is currently cached rather than blocking.
-    for (key, asset) in missing {
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let query_result = query_local_contours(
-                &key.path,
-                key.zoom_bucket,
-                key.lat_bucket,
-                key.lon_bucket,
-                asset.simplify_step,
-                per_asset_budget,
-            );
-            // Debug: log result so it's visible in Console.app / Terminal stderr.
-            match &query_result {
-                Ok(contours) if contours.is_empty() => {
-                    eprintln!(
-                        "[1kEE] contour tile z{} ({},{}) → 0 lines (empty tile or nodata)",
-                        key.zoom_bucket, key.lat_bucket, key.lon_bucket
-                    );
-                }
-                Ok(contours) => {
-                    eprintln!(
-                        "[1kEE] contour tile z{} ({},{}) → {} lines OK",
-                        key.zoom_bucket,
-                        key.lat_bucket,
-                        key.lon_bucket,
-                        contours.len()
-                    );
-                }
-                Err(e) => {
-                    eprintln!(
-                        "[1kEE] contour tile z{} ({},{}) → ERROR: {e}",
-                        key.zoom_bucket, key.lat_bucket, key.lon_bucket
-                    );
-                }
-            }
-            let result = query_result.ok().filter(|c| !c.is_empty());
-
-            if let Ok(mut g) = cache.lock() {
-                if let Some(contours) = result {
-                    g.entries
-                        .entry(key.clone())
-                        .or_insert_with(|| Arc::new(contours));
-                }
-                // Always clear in-flight so a failed tile can be retried next frame.
-                g.in_flight.remove(&key);
-            }
-            ctx.request_repaint();
-        });
+    if let Some((epoch, requests)) = read {
+        spawn_local_read(
+            cache,
+            epoch,
+            requests,
+            per_asset_budget,
+            ctx.clone(),
+            "earth-local-contour-read",
+        );
     }
 
     // Re-acquire lock to render whatever is currently cached.
@@ -357,6 +642,7 @@ pub fn load_srtm_region_for_view(
         for k in keys.into_iter().take(excess) {
             guard.entries.remove(&k);
         }
+        guard.mark_entries_changed();
     }
 
     // Render ALL accumulated tiles, not just the current viewport grid.
@@ -376,28 +662,15 @@ pub fn load_lunar_region_for_view(
 ) -> Option<Arc<Vec<ContourPath>>> {
     let assets =
         srtm_focus_cache::ensure_lunar_contour_region(selected_root, viewport_center, zoom);
-    if assets.is_empty() {
-        return None;
-    }
 
     const MAX_LOCAL_TILES: usize = 200;
 
-    let cache: &'static Mutex<LocalRegionCache> = LUNAR_LOCAL_CONTOUR_CACHE.get_or_init(|| {
-        Mutex::new(LocalRegionCache {
-            scene_key: None,
-            entries: HashMap::new(),
-            in_flight: HashSet::new(),
-            zoom_fallback: None,
-            merged: None,
-            merged_sig: 0,
-        })
-    });
+    let cache: &'static Mutex<LocalRegionCache> =
+        LUNAR_LOCAL_CONTOUR_CACHE.get_or_init(|| Mutex::new(LocalRegionCache::default()));
 
-    let current_zoom_bucket = assets
-        .first()
-        .map(|asset| asset.zoom_bucket)
-        .unwrap_or_default();
+    let current_zoom_bucket = srtm_focus_cache::zoom::lunar_spec_for_zoom(zoom).zoom_bucket;
     let per_asset_budget = (360usize / assets.len().max(1)).max(120);
+    let bucket_step = srtm_focus_cache::lunar_half_extent_for_zoom(zoom) * 0.45;
     let scene_key = SceneKey {
         root: selected_root.map(Path::to_path_buf),
         anchor_lat_bucket: (scene_anchor.lat * 20.0).round() as i32,
@@ -405,7 +678,7 @@ pub fn load_lunar_region_for_view(
         zoom_bucket: current_zoom_bucket,
     };
 
-    let missing: Vec<(CacheKey, srtm_focus_cache::FocusContourAsset)> = {
+    let read = {
         let mut guard = cache.lock().ok()?;
         if guard.scene_key.as_ref() != Some(&scene_key) {
             // Scene changed (usually a zoom level change).  Build a fallback
@@ -422,58 +695,29 @@ pub fn load_lunar_region_for_view(
                 Some(Arc::new(old_merged))
             };
             guard.scene_key = Some(scene_key);
-            guard.entries.clear();
-            guard.in_flight.clear();
+            guard.clear_entries_for_new_scene();
         }
-        let missing: Vec<_> = assets
-            .iter()
-            .filter_map(|asset| {
-                let key = CacheKey {
-                    path: asset.path.clone(),
-                    lat_bucket: asset.lat_bucket,
-                    lon_bucket: asset.lon_bucket,
-                    zoom_bucket: asset.zoom_bucket,
-                };
-                if guard.entries.contains_key(&key) || guard.in_flight.contains(&key) {
-                    None
-                } else {
-                    Some((key, asset.clone()))
-                }
-            })
-            .collect();
-        for (key, _) in &missing {
-            guard.in_flight.insert(key.clone());
+        if assets.is_empty() {
+            return merged_partitioned_local_contours(&mut guard, bucket_step);
         }
-        missing
+        begin_local_read(&mut guard, &assets)
     };
 
-    if !missing.is_empty() {
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let loaded =
-                query_local_contours_batch(&missing[0].0.path, &missing, per_asset_budget).ok();
-
-            if let Ok(mut g) = cache.lock() {
-                if let Some(loaded) = loaded {
-                    for (key, contours) in loaded {
-                        g.entries
-                            .entry(key.clone())
-                            .or_insert_with(|| Arc::new(contours));
-                    }
-                }
-                for (key, _) in &missing {
-                    g.in_flight.remove(key);
-                }
-            }
-            ctx.request_repaint();
-        });
+    if let Some((epoch, requests)) = read {
+        spawn_local_read(
+            cache,
+            epoch,
+            requests,
+            per_asset_budget,
+            ctx.clone(),
+            "lunar-local-contour-read",
+        );
     }
 
     let mut guard = cache.lock().ok()?;
 
     if guard.entries.len() > MAX_LOCAL_TILES {
         // Evict the tiles farthest from the current viewport.
-        let bucket_step = srtm_focus_cache::lunar_half_extent_for_zoom(zoom) * 0.45;
         let clat = (viewport_center.lat / bucket_step).round() as i32;
         let clon = (viewport_center.lon / bucket_step).round() as i32;
         let mut keys: Vec<CacheKey> = guard.entries.keys().cloned().collect();
@@ -486,41 +730,10 @@ pub fn load_lunar_region_for_view(
         for k in keys.into_iter().take(excess) {
             guard.entries.remove(&k);
         }
+        guard.mark_entries_changed();
     }
 
-    // Lunar tiles overlap significantly (~55% of tile width) because
-    // bucket_step = half_extent * 0.45.  On flat mare terrain this means the
-    // same iso-contour appears in 4+ tiles and is drawn multiple times.
-    // Fix: only include a contour line in the tile whose centre is CLOSEST to
-    // that line's midpoint (exclusive-region partition).  Each iso-line then
-    // appears exactly once in the merged set.
-    let bucket_step = srtm_focus_cache::lunar_half_extent_for_zoom(zoom) * 0.45;
-    let mut merged = Vec::new();
-    for (key, contours) in guard.entries.iter() {
-        let tile_lat = key.lat_bucket as f32 * bucket_step;
-        let tile_lon = key.lon_bucket as f32 * bucket_step;
-        let half_step = bucket_step * 0.5;
-        for contour in contours.iter() {
-            if contour.points.is_empty() {
-                continue;
-            }
-            let mid = &contour.points[contour.points.len() / 2];
-            // Only keep this line if its midpoint is within the tile's exclusive region.
-            if (mid.lat - tile_lat).abs() <= half_step && (mid.lon - tile_lon).abs() <= half_step {
-                merged.push(contour.clone());
-            }
-        }
-    }
-
-    if merged.is_empty() {
-        // No new-zoom tiles loaded yet — return the fallback from the previous
-        // zoom level so the screen isn't blank while tiles are building.
-        return guard.zoom_fallback.clone();
-    }
-
-    // We have live tiles — discard the fallback to save memory.
-    guard.zoom_fallback = None;
-    Some(Arc::new(merged))
+    merged_partitioned_local_contours(&mut guard, bucket_step)
 }
 
 /// Mars analogue of `load_srtm_region_for_view` — sources from MRO CTX tiles
@@ -533,30 +746,16 @@ pub fn load_mars_region_for_view(
     _radius: i32,
     ctx: egui::Context,
 ) -> Option<Arc<Vec<ContourPath>>> {
-    let assets =
-        srtm_focus_cache::ensure_mars_contour_region(selected_root, viewport_center, zoom);
-    if assets.is_empty() {
-        return None;
-    }
+    let assets = srtm_focus_cache::ensure_mars_contour_region(selected_root, viewport_center, zoom);
 
     const MAX_LOCAL_TILES: usize = 200;
 
-    let cache: &'static Mutex<LocalRegionCache> = MARS_LOCAL_CONTOUR_CACHE.get_or_init(|| {
-        Mutex::new(LocalRegionCache {
-            scene_key: None,
-            entries: HashMap::new(),
-            in_flight: HashSet::new(),
-            zoom_fallback: None,
-            merged: None,
-            merged_sig: 0,
-        })
-    });
+    let cache: &'static Mutex<LocalRegionCache> =
+        MARS_LOCAL_CONTOUR_CACHE.get_or_init(|| Mutex::new(LocalRegionCache::default()));
 
-    let current_zoom_bucket = assets
-        .first()
-        .map(|asset| asset.zoom_bucket)
-        .unwrap_or_default();
+    let current_zoom_bucket = srtm_focus_cache::zoom::mars_spec_for_zoom(zoom).zoom_bucket;
     let per_asset_budget = (360usize / assets.len().max(1)).max(120);
+    let bucket_step = srtm_focus_cache::mars_half_extent_for_zoom(zoom) * 0.45;
     let scene_key = SceneKey {
         root: selected_root.map(Path::to_path_buf),
         anchor_lat_bucket: (scene_anchor.lat * 20.0).round() as i32,
@@ -564,7 +763,7 @@ pub fn load_mars_region_for_view(
         zoom_bucket: current_zoom_bucket,
     };
 
-    let missing: Vec<(CacheKey, srtm_focus_cache::FocusContourAsset)> = {
+    let read = {
         let mut guard = cache.lock().ok()?;
         if guard.scene_key.as_ref() != Some(&scene_key) {
             let old_merged: Vec<ContourPath> = guard
@@ -578,57 +777,28 @@ pub fn load_mars_region_for_view(
                 Some(Arc::new(old_merged))
             };
             guard.scene_key = Some(scene_key);
-            guard.entries.clear();
-            guard.in_flight.clear();
+            guard.clear_entries_for_new_scene();
         }
-        let missing: Vec<_> = assets
-            .iter()
-            .filter_map(|asset| {
-                let key = CacheKey {
-                    path: asset.path.clone(),
-                    lat_bucket: asset.lat_bucket,
-                    lon_bucket: asset.lon_bucket,
-                    zoom_bucket: asset.zoom_bucket,
-                };
-                if guard.entries.contains_key(&key) || guard.in_flight.contains(&key) {
-                    None
-                } else {
-                    Some((key, asset.clone()))
-                }
-            })
-            .collect();
-        for (key, _) in &missing {
-            guard.in_flight.insert(key.clone());
+        if assets.is_empty() {
+            return merged_partitioned_local_contours(&mut guard, bucket_step);
         }
-        missing
+        begin_local_read(&mut guard, &assets)
     };
 
-    if !missing.is_empty() {
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let loaded =
-                query_local_contours_batch(&missing[0].0.path, &missing, per_asset_budget).ok();
-
-            if let Ok(mut g) = cache.lock() {
-                if let Some(loaded) = loaded {
-                    for (key, contours) in loaded {
-                        g.entries
-                            .entry(key.clone())
-                            .or_insert_with(|| Arc::new(contours));
-                    }
-                }
-                for (key, _) in &missing {
-                    g.in_flight.remove(key);
-                }
-            }
-            ctx.request_repaint();
-        });
+    if let Some((epoch, requests)) = read {
+        spawn_local_read(
+            cache,
+            epoch,
+            requests,
+            per_asset_budget,
+            ctx.clone(),
+            "mars-local-contour-read",
+        );
     }
 
     let mut guard = cache.lock().ok()?;
 
     if guard.entries.len() > MAX_LOCAL_TILES {
-        let bucket_step = srtm_focus_cache::mars_half_extent_for_zoom(zoom) * 0.45;
         let clat = (viewport_center.lat / bucket_step).round() as i32;
         let clon = (viewport_center.lon / bucket_step).round() as i32;
         let mut keys: Vec<CacheKey> = guard.entries.keys().cloned().collect();
@@ -641,31 +811,10 @@ pub fn load_mars_region_for_view(
         for k in keys.into_iter().take(excess) {
             guard.entries.remove(&k);
         }
+        guard.mark_entries_changed();
     }
 
-    let bucket_step = srtm_focus_cache::mars_half_extent_for_zoom(zoom) * 0.45;
-    let mut merged = Vec::new();
-    for (key, contours) in guard.entries.iter() {
-        let tile_lat = key.lat_bucket as f32 * bucket_step;
-        let tile_lon = key.lon_bucket as f32 * bucket_step;
-        let half_step = bucket_step * 0.5;
-        for contour in contours.iter() {
-            if contour.points.is_empty() {
-                continue;
-            }
-            let mid = &contour.points[contour.points.len() / 2];
-            if (mid.lat - tile_lat).abs() <= half_step && (mid.lon - tile_lon).abs() <= half_step {
-                merged.push(contour.clone());
-            }
-        }
-    }
-
-    if merged.is_empty() {
-        return guard.zoom_fallback.clone();
-    }
-
-    guard.zoom_fallback = None;
-    Some(Arc::new(merged))
+    merged_partitioned_local_contours(&mut guard, bucket_step)
 }
 
 /// Load SRTM focus-tile contours for globe-mode rendering.
@@ -688,8 +837,7 @@ pub fn load_srtm_for_globe(
     // cost far too much geometry.  radius=2 gives a 5×5 grid pre-fetched.
     let tile_zoom = globe_zoom_to_tile_zoom(zoom);
 
-    let assets =
-        srtm_focus_cache::ensure_focus_contour_region(selected_root, center, tile_zoom, 2);
+    let assets = srtm_focus_cache::ensure_focus_contour_region(selected_root, center, tile_zoom, 2);
 
     let cache: &'static Mutex<GlobeRegionCache> =
         GLOBE_CONTOUR_CACHE.get_or_init(|| Mutex::new(GlobeRegionCache::default()));
@@ -706,12 +854,14 @@ pub fn load_srtm_for_globe(
             .values()
             .flat_map(|v| v.iter().cloned())
             .collect();
-        guard.zoom_fallback = if old.is_empty() { None } else { Some(Arc::new(old)) };
+        guard.zoom_fallback = if old.is_empty() {
+            None
+        } else {
+            Some(Arc::new(old))
+        };
         guard.zoom_bucket = zoom_bucket;
         guard.root = root;
-        guard.tiles.clear();
-        guard.in_flight.clear();
-        guard.order.clear();
+        guard.clear_tiles_for_new_scene();
     }
 
     if assets.is_empty() {
@@ -722,59 +872,18 @@ pub fn load_srtm_for_globe(
     let feature_budget = srtm_focus_cache::feature_budget_for_zoom(tile_zoom);
     let per_asset_budget = (feature_budget / assets.len().max(1)).max(120);
 
-    // Collect missing keys, then drop the lock before doing DB reads.
-    let missing: Vec<srtm_focus_cache::FocusContourAsset> = assets
-        .iter()
-        .filter(|a| {
-            let key = (a.lat_bucket, a.lon_bucket);
-            !guard.tiles.contains_key(&key) && !guard.in_flight.contains(&key)
-        })
-        .cloned()
-        .collect();
-    for asset in &missing {
-        guard.in_flight.insert((asset.lat_bucket, asset.lon_bucket));
-    }
+    let read = begin_globe_read(&mut guard, &assets);
     drop(guard);
 
-    // Load all missing tiles over one SQLite connection to avoid a thundering
-    // herd of per-tile reader threads.
-    if !missing.is_empty() {
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let requests: Vec<_> = missing
-                .iter()
-                .cloned()
-                .map(|asset| {
-                    (
-                        CacheKey {
-                            path: asset.path.clone(),
-                            lat_bucket: asset.lat_bucket,
-                            lon_bucket: asset.lon_bucket,
-                            zoom_bucket: asset.zoom_bucket,
-                        },
-                        asset,
-                    )
-                })
-                .collect();
-            let loaded =
-                query_local_contours_batch(&requests[0].0.path, &requests, per_asset_budget).ok();
-
-            if let Ok(mut g) = cache.lock() {
-                if let Some(loaded) = loaded {
-                    for (key, contours) in loaded {
-                        let tile_key = (key.lat_bucket, key.lon_bucket);
-                        if !g.tiles.contains_key(&tile_key) {
-                            g.tiles.insert(tile_key, Arc::new(contours));
-                            g.order.push(tile_key);
-                        }
-                    }
-                }
-                for asset in &missing {
-                    g.in_flight.remove(&(asset.lat_bucket, asset.lon_bucket));
-                }
-            }
-            ctx.request_repaint();
-        });
+    if let Some((epoch, requests)) = read {
+        spawn_globe_read(
+            cache,
+            epoch,
+            requests,
+            per_asset_budget,
+            ctx.clone(),
+            "earth-globe-contour-read",
+        );
     }
 
     // Re-acquire lock to render and evict from whatever is currently cached.
@@ -793,9 +902,13 @@ pub fn load_srtm_for_globe(
             .sort_by_key(|&(lat, lon)| (lat - clat).pow(2) + (lon - clon).pow(2));
         let keep: std::collections::HashSet<(i32, i32)> =
             guard.order[..MAX_TILES].iter().copied().collect();
+        let previous_len = guard.tiles.len();
         guard.tiles.retain(|k, _| keep.contains(k));
         guard.in_flight.retain(|k| keep.contains(k));
         guard.order.retain(|k| keep.contains(k));
+        if guard.tiles.len() != previous_len {
+            guard.mark_tiles_changed();
+        }
     }
 
     render_globe_tiles(&mut guard)
@@ -814,31 +927,53 @@ fn globe_zoom_to_tile_zoom(globe_zoom: f32) -> f32 {
 }
 
 fn render_globe_tiles(guard: &mut GlobeRegionCache) -> Option<Arc<Vec<ContourPath>>> {
-    let merged: Vec<ContourPath> = guard
+    if guard.tiles.is_empty() {
+        // No new-resolution tiles yet — return the previous zoom level's
+        // contours so the globe doesn't flash blank during the transition.
+        return guard.zoom_fallback.clone();
+    }
+
+    if guard.merged_revision == Some(guard.tiles_revision) {
+        if let Some(merged) = &guard.merged {
+            return if merged.is_empty() {
+                guard.zoom_fallback.clone()
+            } else {
+                Some(Arc::clone(merged))
+            };
+        }
+    }
+
+    // Sort by absolute elevation so output order is deterministic regardless
+    // of HashMap iteration order. Without this, any budget-based subsetting in
+    // the draw path would pick different contours each frame as tiles load or
+    // unload, causing visible jitter.
+    let mut merged: Vec<ContourPath> = guard
         .tiles
         .values()
         .flat_map(|v| v.iter().cloned())
         .collect();
     if merged.is_empty() {
-        // No new-resolution tiles yet — return the previous zoom level's
-        // contours so the globe doesn't flash blank during the transition.
-        guard.zoom_fallback.clone()
-    } else {
-        // Sort by absolute elevation so output order is deterministic regardless
-        // of HashMap iteration order.  Without this, any budget-based subsetting
-        // in the draw path would pick different contours each frame as tiles
-        // load/unload, causing visible jitter.
-        let mut merged = merged;
-        merged.sort_unstable_by(|a, b| {
-            a.elevation_m
-                .abs()
-                .partial_cmp(&b.elevation_m.abs())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        // Real tiles are ready; drop the fallback to free memory.
-        guard.zoom_fallback = None;
-        Some(Arc::new(merged))
+        // A ready tile can legitimately contain no contours. Preserve the
+        // previous zoom's geometry in that case just as the old un-memoized
+        // path did, rather than flashing an empty globe.
+        guard.merged = Some(Arc::new(merged));
+        guard.merged_revision = Some(guard.tiles_revision);
+        return guard.zoom_fallback.clone();
     }
+    merged.sort_unstable_by(|a, b| {
+        a.elevation_m
+            .abs()
+            .partial_cmp(&b.elevation_m.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Real tiles are ready; drop the fallback to free memory and retain this
+    // Arc until the tile set actually changes.
+    guard.zoom_fallback = None;
+    let merged = Arc::new(merged);
+    guard.merged = Some(Arc::clone(&merged));
+    guard.merged_revision = Some(guard.tiles_revision);
+    Some(merged)
 }
 
 /// Lunar equivalent of `load_srtm_for_globe`.  Triggers on-demand tile builds
@@ -853,8 +988,7 @@ pub fn load_lunar_for_globe(
     const MAX_TILES: usize = 800;
     let tile_zoom = globe_zoom_to_tile_zoom(zoom);
 
-    let assets =
-        srtm_focus_cache::ensure_lunar_contour_region(selected_root, center, tile_zoom);
+    let assets = srtm_focus_cache::ensure_lunar_contour_region(selected_root, center, tile_zoom);
 
     let cache: &'static Mutex<GlobeRegionCache> =
         LUNAR_GLOBE_CONTOUR_CACHE.get_or_init(|| Mutex::new(GlobeRegionCache::default()));
@@ -869,12 +1003,14 @@ pub fn load_lunar_for_globe(
             .values()
             .flat_map(|v| v.iter().cloned())
             .collect();
-        guard.zoom_fallback = if old.is_empty() { None } else { Some(Arc::new(old)) };
+        guard.zoom_fallback = if old.is_empty() {
+            None
+        } else {
+            Some(Arc::new(old))
+        };
         guard.zoom_bucket = zoom_bucket;
         guard.root = root;
-        guard.tiles.clear();
-        guard.in_flight.clear();
-        guard.order.clear();
+        guard.clear_tiles_for_new_scene();
     }
 
     if assets.is_empty() {
@@ -883,56 +1019,18 @@ pub fn load_lunar_for_globe(
 
     let per_asset_budget = (360 / assets.len().max(1)).max(120);
 
-    let missing: Vec<srtm_focus_cache::FocusContourAsset> = assets
-        .iter()
-        .filter(|a| {
-            let key = (a.lat_bucket, a.lon_bucket);
-            !guard.tiles.contains_key(&key) && !guard.in_flight.contains(&key)
-        })
-        .cloned()
-        .collect();
-    for asset in &missing {
-        guard.in_flight.insert((asset.lat_bucket, asset.lon_bucket));
-    }
+    let read = begin_globe_read(&mut guard, &assets);
     drop(guard);
 
-    if !missing.is_empty() {
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let requests: Vec<_> = missing
-                .iter()
-                .cloned()
-                .map(|asset| {
-                    (
-                        CacheKey {
-                            path: asset.path.clone(),
-                            lat_bucket: asset.lat_bucket,
-                            lon_bucket: asset.lon_bucket,
-                            zoom_bucket: asset.zoom_bucket,
-                        },
-                        asset,
-                    )
-                })
-                .collect();
-            let loaded =
-                query_local_contours_batch(&requests[0].0.path, &requests, per_asset_budget).ok();
-
-            if let Ok(mut g) = cache.lock() {
-                if let Some(loaded) = loaded {
-                    for (key, contours) in loaded {
-                        let tile_key = (key.lat_bucket, key.lon_bucket);
-                        if !g.tiles.contains_key(&tile_key) {
-                            g.tiles.insert(tile_key, Arc::new(contours));
-                            g.order.push(tile_key);
-                        }
-                    }
-                }
-                for asset in &missing {
-                    g.in_flight.remove(&(asset.lat_bucket, asset.lon_bucket));
-                }
-            }
-            ctx.request_repaint();
-        });
+    if let Some((epoch, requests)) = read {
+        spawn_globe_read(
+            cache,
+            epoch,
+            requests,
+            per_asset_budget,
+            ctx.clone(),
+            "lunar-globe-contour-read",
+        );
     }
 
     let mut guard = cache.lock().ok()?;
@@ -946,9 +1044,13 @@ pub fn load_lunar_for_globe(
             .order
             .sort_by_key(|&(lat, lon)| (lat - clat).pow(2) + (lon - clon).pow(2));
         let keep: HashSet<(i32, i32)> = guard.order[..MAX_TILES].iter().copied().collect();
+        let previous_len = guard.tiles.len();
         guard.tiles.retain(|k, _| keep.contains(k));
         guard.in_flight.retain(|k| keep.contains(k));
         guard.order.retain(|k| keep.contains(k));
+        if guard.tiles.len() != previous_len {
+            guard.mark_tiles_changed();
+        }
     }
 
     render_globe_tiles(&mut guard)
@@ -966,8 +1068,7 @@ pub fn load_mars_for_globe(
     const MAX_TILES: usize = 800;
     let tile_zoom = globe_zoom_to_tile_zoom(zoom);
 
-    let assets =
-        srtm_focus_cache::ensure_mars_contour_region(selected_root, center, tile_zoom);
+    let assets = srtm_focus_cache::ensure_mars_contour_region(selected_root, center, tile_zoom);
 
     let cache: &'static Mutex<GlobeRegionCache> =
         MARS_GLOBE_CONTOUR_CACHE.get_or_init(|| Mutex::new(GlobeRegionCache::default()));
@@ -982,12 +1083,14 @@ pub fn load_mars_for_globe(
             .values()
             .flat_map(|v| v.iter().cloned())
             .collect();
-        guard.zoom_fallback = if old.is_empty() { None } else { Some(Arc::new(old)) };
+        guard.zoom_fallback = if old.is_empty() {
+            None
+        } else {
+            Some(Arc::new(old))
+        };
         guard.zoom_bucket = zoom_bucket;
         guard.root = root;
-        guard.tiles.clear();
-        guard.in_flight.clear();
-        guard.order.clear();
+        guard.clear_tiles_for_new_scene();
     }
 
     if assets.is_empty() {
@@ -996,56 +1099,18 @@ pub fn load_mars_for_globe(
 
     let per_asset_budget = (360 / assets.len().max(1)).max(120);
 
-    let missing: Vec<srtm_focus_cache::FocusContourAsset> = assets
-        .iter()
-        .filter(|a| {
-            let key = (a.lat_bucket, a.lon_bucket);
-            !guard.tiles.contains_key(&key) && !guard.in_flight.contains(&key)
-        })
-        .cloned()
-        .collect();
-    for asset in &missing {
-        guard.in_flight.insert((asset.lat_bucket, asset.lon_bucket));
-    }
+    let read = begin_globe_read(&mut guard, &assets);
     drop(guard);
 
-    if !missing.is_empty() {
-        let ctx = ctx.clone();
-        std::thread::spawn(move || {
-            let requests: Vec<_> = missing
-                .iter()
-                .cloned()
-                .map(|asset| {
-                    (
-                        CacheKey {
-                            path: asset.path.clone(),
-                            lat_bucket: asset.lat_bucket,
-                            lon_bucket: asset.lon_bucket,
-                            zoom_bucket: asset.zoom_bucket,
-                        },
-                        asset,
-                    )
-                })
-                .collect();
-            let loaded =
-                query_local_contours_batch(&requests[0].0.path, &requests, per_asset_budget).ok();
-
-            if let Ok(mut g) = cache.lock() {
-                if let Some(loaded) = loaded {
-                    for (key, contours) in loaded {
-                        let tile_key = (key.lat_bucket, key.lon_bucket);
-                        if !g.tiles.contains_key(&tile_key) {
-                            g.tiles.insert(tile_key, Arc::new(contours));
-                            g.order.push(tile_key);
-                        }
-                    }
-                }
-                for asset in &missing {
-                    g.in_flight.remove(&(asset.lat_bucket, asset.lon_bucket));
-                }
-            }
-            ctx.request_repaint();
-        });
+    if let Some((epoch, requests)) = read {
+        spawn_globe_read(
+            cache,
+            epoch,
+            requests,
+            per_asset_budget,
+            ctx.clone(),
+            "mars-globe-contour-read",
+        );
     }
 
     let mut guard = cache.lock().ok()?;
@@ -1059,9 +1124,13 @@ pub fn load_mars_for_globe(
             .order
             .sort_by_key(|&(lat, lon)| (lat - clat).pow(2) + (lon - clon).pow(2));
         let keep: HashSet<(i32, i32)> = guard.order[..MAX_TILES].iter().copied().collect();
+        let previous_len = guard.tiles.len();
         guard.tiles.retain(|k, _| keep.contains(k));
         guard.in_flight.retain(|k| keep.contains(k));
         guard.order.retain(|k| keep.contains(k));
+        if guard.tiles.len() != previous_len {
+            guard.mark_tiles_changed();
+        }
     }
 
     render_globe_tiles(&mut guard)
@@ -1401,53 +1470,6 @@ fn query_global_coastlines(
     Ok(contours)
 }
 
-fn query_local_contours(
-    path: &Path,
-    zoom_bucket: i32,
-    lat_bucket: i32,
-    lon_bucket: i32,
-    simplify_step: usize,
-    feature_budget: usize,
-) -> rusqlite::Result<Vec<ContourPath>> {
-    let connection = Connection::open(path)?;
-    let mut statement = connection.prepare(
-        "SELECT geom, elevation_m
-         FROM contour_tiles
-         WHERE zoom_bucket = ?1 AND lat_bucket = ?2 AND lon_bucket = ?3
-         ORDER BY ABS(elevation_m), fid",
-    )?;
-    let rows = statement.query_map(params![zoom_bucket, lat_bucket, lon_bucket], |row| {
-        let geometry: Vec<u8> = row.get(0)?;
-        let elevation_m: f32 = row.get(1)?;
-        Ok((geometry, elevation_m))
-    })?;
-
-    let mut contours = Vec::new();
-    for row in rows {
-        let (geometry, elevation_m) = row?;
-        for line in parse_gpkg_lines(&geometry) {
-            if line.len() < 2 {
-                continue;
-            }
-            contours.push(ContourPath {
-                elevation_m,
-                points: simplify_line(line, simplify_step),
-            });
-        }
-    }
-
-    if contours.len() > feature_budget {
-        let keep_step = contours.len().div_ceil(feature_budget.max(1));
-        contours = contours
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, contour)| (index % keep_step == 0).then_some(contour))
-            .collect();
-    }
-
-    Ok(contours)
-}
-
 fn query_local_contours_batch(
     path: &Path,
     requests: &[(CacheKey, srtm_focus_cache::FocusContourAsset)],
@@ -1462,19 +1484,46 @@ fn query_local_contours_batch(
     )?;
 
     let mut results = Vec::with_capacity(requests.len());
+    let mut first_error = None;
     for (key, asset) in requests {
-        let rows = statement.query_map(
+        let rows = match statement.query_map(
             params![key.zoom_bucket, key.lat_bucket, key.lon_bucket],
             |row| {
                 let geometry: Vec<u8> = row.get(0)?;
                 let elevation_m: f32 = row.get(1)?;
                 Ok((geometry, elevation_m))
             },
-        )?;
+        ) {
+            Ok(rows) => rows,
+            Err(error) => {
+                eprintln!(
+                    "[1kEE] contour tile z{} ({},{}) query failed: {error}",
+                    key.zoom_bucket, key.lat_bucket, key.lon_bucket
+                );
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                continue;
+            }
+        };
 
         let mut contours = Vec::new();
+        let mut tile_failed = false;
         for row in rows {
-            let (geometry, elevation_m) = row?;
+            let (geometry, elevation_m) = match row {
+                Ok(row) => row,
+                Err(error) => {
+                    eprintln!(
+                        "[1kEE] contour tile z{} ({},{}) row failed: {error}",
+                        key.zoom_bucket, key.lat_bucket, key.lon_bucket
+                    );
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    tile_failed = true;
+                    break;
+                }
+            };
             for line in parse_gpkg_lines(&geometry) {
                 if line.len() < 2 {
                     continue;
@@ -1484,6 +1533,9 @@ fn query_local_contours_batch(
                     points: simplify_line(line, asset.simplify_step),
                 });
             }
+        }
+        if tile_failed {
+            continue;
         }
 
         if contours.len() > feature_budget {
@@ -1495,11 +1547,20 @@ fn query_local_contours_batch(
                 .collect();
         }
 
-        if !contours.is_empty() {
-            results.push((key.clone(), contours));
-        }
+        // Cache empty ready tiles too. Otherwise the render loop mistakes
+        // nodata/flat tiles for misses and schedules the same SQLite/WKB read
+        // again after every completed batch.
+        results.push((key.clone(), contours));
     }
 
+    // Preserve any successfully decoded tiles in a mixed batch. If every
+    // request failed, surface the error so the single-flight scheduler applies
+    // a short retry backoff instead of spinning one reader per repaint.
+    if results.is_empty() {
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+    }
     Ok(results)
 }
 
@@ -1554,12 +1615,16 @@ fn parse_wkb_geometry(wkb: &[u8]) -> Option<Vec<Vec<GeoPoint>>> {
         2 => Some(vec![parse_linestring(wkb, &mut cursor, little)?]),
         5 => {
             let count = read_u32(wkb, &mut cursor, little)? as usize;
+            // Every direct child has at least one byte of endian marker, four
+            // bytes of geometry type, and four bytes of point count. Validate
+            // that minimum before reserving so a corrupt count cannot trigger
+            // an enormous allocation.
+            if count > wkb.len().checked_sub(cursor)? / 9 {
+                return None;
+            }
             let mut lines = Vec::with_capacity(count);
             for _ in 0..count {
-                let sub_geometry = parse_wkb_geometry(&wkb[cursor..])?;
-                let consumed = consumed_geometry_bytes(&wkb[cursor..])?;
-                cursor += consumed;
-                lines.extend(sub_geometry);
+                lines.push(parse_wkb_linestring(wkb, &mut cursor)?);
             }
             Some(lines)
         }
@@ -1567,34 +1632,28 @@ fn parse_wkb_geometry(wkb: &[u8]) -> Option<Vec<Vec<GeoPoint>>> {
     }
 }
 
-fn consumed_geometry_bytes(wkb: &[u8]) -> Option<usize> {
-    let mut cursor = 0usize;
-    let endian = *wkb.get(cursor)?;
-    cursor += 1;
+/// Parse a child of a WKB `MultiLineString`. WKB requires every child to be a
+/// direct `LineString`, so deliberately rejecting nested collections keeps an
+/// untrusted/corrupt cache blob from recursing an unnamed loader thread into a
+/// stack overflow.
+fn parse_wkb_linestring(wkb: &[u8], cursor: &mut usize) -> Option<Vec<GeoPoint>> {
+    let endian = *wkb.get(*cursor)?;
+    *cursor += 1;
     let little = endian == 1;
-    let geom_type = read_u32(wkb, &mut cursor, little)?;
-    let base_type = geom_type % 1000;
-
-    match base_type {
-        2 => {
-            let count = read_u32(wkb, &mut cursor, little)? as usize;
-            cursor += count * 16;
-            Some(cursor)
-        }
-        5 => {
-            let count = read_u32(wkb, &mut cursor, little)? as usize;
-            for _ in 0..count {
-                let consumed = consumed_geometry_bytes(&wkb[cursor..])?;
-                cursor += consumed;
-            }
-            Some(cursor)
-        }
-        _ => None,
+    let geom_type = read_u32(wkb, cursor, little)?;
+    if geom_type % 1000 != 2 {
+        return None;
     }
+    parse_linestring(wkb, cursor, little)
 }
 
 fn parse_linestring(wkb: &[u8], cursor: &mut usize, little: bool) -> Option<Vec<GeoPoint>> {
     let count = read_u32(wkb, cursor, little)? as usize;
+    // Each XY point occupies two f64 values. Check before reserving to reject
+    // malformed count fields without a large allocation attempt.
+    if count > wkb.len().checked_sub(*cursor)? / 16 {
+        return None;
+    }
     let mut points = Vec::with_capacity(count);
     for _ in 0..count {
         let lon = read_f64(wkb, cursor, little)? as f32;
@@ -1605,8 +1664,9 @@ fn parse_linestring(wkb: &[u8], cursor: &mut usize, little: bool) -> Option<Vec<
 }
 
 fn read_u32(bytes: &[u8], cursor: &mut usize, little: bool) -> Option<u32> {
-    let slice = bytes.get(*cursor..(*cursor + 4))?;
-    *cursor += 4;
+    let end = (*cursor).checked_add(4)?;
+    let slice = bytes.get(*cursor..end)?;
+    *cursor = end;
     Some(if little {
         u32::from_le_bytes(slice.try_into().ok()?)
     } else {
@@ -1615,8 +1675,9 @@ fn read_u32(bytes: &[u8], cursor: &mut usize, little: bool) -> Option<u32> {
 }
 
 fn read_f64(bytes: &[u8], cursor: &mut usize, little: bool) -> Option<f64> {
-    let slice = bytes.get(*cursor..(*cursor + 8))?;
-    *cursor += 8;
+    let end = (*cursor).checked_add(8)?;
+    let slice = bytes.get(*cursor..end)?;
+    *cursor = end;
     Some(if little {
         f64::from_le_bytes(slice.try_into().ok()?)
     } else {
@@ -1628,6 +1689,240 @@ fn read_f64(bytes: &[u8], cursor: &mut usize, little: bool) -> Option<f64> {
 mod tests {
     use super::*;
     use rusqlite::OptionalExtension;
+
+    fn test_contour(elevation_m: f32) -> ContourPath {
+        ContourPath {
+            elevation_m,
+            points: vec![
+                GeoPoint { lat: 0.0, lon: 0.0 },
+                GeoPoint { lat: 0.1, lon: 0.1 },
+            ],
+        }
+    }
+
+    fn test_asset(lat_bucket: i32, lon_bucket: i32) -> srtm_focus_cache::FocusContourAsset {
+        srtm_focus_cache::FocusContourAsset {
+            path: PathBuf::from("test-cache.sqlite"),
+            simplify_step: 1,
+            zoom_bucket: 0,
+            lat_bucket,
+            lon_bucket,
+        }
+    }
+
+    fn test_gpkg_linestring() -> Vec<u8> {
+        let mut geometry = b"GP\0\0\0\0\0\0".to_vec();
+        geometry.push(1);
+        geometry.extend_from_slice(&2u32.to_le_bytes());
+        geometry.extend_from_slice(&2u32.to_le_bytes());
+        for (lon, lat) in [(0.0f64, 0.0f64), (1.0, 1.0)] {
+            geometry.extend_from_slice(&lon.to_le_bytes());
+            geometry.extend_from_slice(&lat.to_le_bytes());
+        }
+        geometry
+    }
+
+    #[test]
+    fn batch_reader_keeps_good_tiles_when_one_row_is_invalid() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after Unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "1kee-contour-batch-{}-{nonce}.sqlite",
+            std::process::id()
+        ));
+        let connection = Connection::open(&path).expect("temporary contour cache");
+        connection
+            .execute_batch(
+                "CREATE TABLE contour_tiles (
+                    fid INTEGER PRIMARY KEY,
+                    zoom_bucket INTEGER,
+                    lat_bucket INTEGER,
+                    lon_bucket INTEGER,
+                    geom BLOB,
+                    elevation_m
+                )",
+            )
+            .expect("contour table");
+        connection
+            .execute(
+                "INSERT INTO contour_tiles
+                    (fid, zoom_bucket, lat_bucket, lon_bucket, geom, elevation_m)
+                 VALUES (1, 0, 0, 0, ?1, 10.0)",
+                rusqlite::params![test_gpkg_linestring()],
+            )
+            .expect("valid contour row");
+        connection
+            .execute(
+                "INSERT INTO contour_tiles
+                    (fid, zoom_bucket, lat_bucket, lon_bucket, geom, elevation_m)
+                 VALUES (2, 0, 1, 0, ?1, 'not-a-number')",
+                rusqlite::params![test_gpkg_linestring()],
+            )
+            .expect("invalid contour row");
+        drop(connection);
+
+        let asset = srtm_focus_cache::FocusContourAsset {
+            path: path.clone(),
+            simplify_step: 1,
+            zoom_bucket: 0,
+            lat_bucket: 0,
+            lon_bucket: 0,
+        };
+        let requests = vec![
+            (
+                CacheKey {
+                    path: path.clone(),
+                    lat_bucket: 0,
+                    lon_bucket: 0,
+                    zoom_bucket: 0,
+                },
+                asset.clone(),
+            ),
+            (
+                CacheKey {
+                    path: path.clone(),
+                    lat_bucket: 1,
+                    lon_bucket: 0,
+                    zoom_bucket: 0,
+                },
+                srtm_focus_cache::FocusContourAsset {
+                    lat_bucket: 1,
+                    ..asset
+                },
+            ),
+        ];
+
+        let loaded = query_local_contours_batch(&path, &requests, 120)
+            .expect("valid tile should survive neighbouring row failure");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].0.lat_bucket, 0);
+        assert!(!loaded[0].1.is_empty());
+        std::fs::remove_file(path).expect("remove temporary contour cache");
+    }
+
+    #[test]
+    fn stale_globe_read_cannot_repopulate_a_reset_cache() {
+        let asset = test_asset(4, -7);
+        let mut state = GlobeRegionCache::default();
+        let (epoch, requests) =
+            begin_globe_read(&mut state, std::slice::from_ref(&asset)).expect("first read");
+        assert!(begin_globe_read(&mut state, std::slice::from_ref(&asset)).is_none());
+
+        state.reset_all();
+        assert_ne!(state.load_epoch, epoch);
+        let cache = Mutex::new(state);
+        finish_globe_read(
+            &cache,
+            epoch,
+            &requests,
+            Some(vec![(requests[0].0.clone(), vec![test_contour(10.0)])]),
+        );
+
+        let mut state = cache.lock().expect("test cache lock");
+        assert!(state.tiles.is_empty());
+        assert_eq!(state.load_in_flight, None);
+        assert!(begin_globe_read(&mut state, std::slice::from_ref(&asset)).is_some());
+    }
+
+    #[test]
+    fn globe_merge_reuses_its_arc_until_the_tile_set_changes() {
+        let mut cache = GlobeRegionCache::default();
+        cache
+            .tiles
+            .insert((0, 0), Arc::new(vec![test_contour(100.0)]));
+        cache.mark_tiles_changed();
+
+        let first = render_globe_tiles(&mut cache).expect("first merged globe tile");
+        let second = render_globe_tiles(&mut cache).expect("cached globe merge");
+        assert!(Arc::ptr_eq(&first, &second));
+
+        cache
+            .tiles
+            .insert((0, 1), Arc::new(vec![test_contour(200.0)]));
+        cache.mark_tiles_changed();
+        let updated = render_globe_tiles(&mut cache).expect("updated globe merge");
+        assert!(!Arc::ptr_eq(&first, &updated));
+        assert_eq!(updated.len(), 2);
+
+        cache.tiles.remove(&(0, 1));
+        cache.mark_tiles_changed();
+        let evicted = render_globe_tiles(&mut cache).expect("evicted globe merge");
+        assert!(!Arc::ptr_eq(&updated, &evicted));
+        assert_eq!(evicted.len(), 1);
+    }
+
+    #[test]
+    fn globe_merge_keeps_the_zoom_fallback_for_empty_tiles() {
+        let fallback = Arc::new(vec![test_contour(100.0)]);
+        let mut cache = GlobeRegionCache {
+            zoom_fallback: Some(Arc::clone(&fallback)),
+            ..Default::default()
+        };
+        cache.tiles.insert((0, 0), Arc::new(Vec::new()));
+        cache.mark_tiles_changed();
+
+        let first = render_globe_tiles(&mut cache).expect("zoom fallback");
+        let second = render_globe_tiles(&mut cache).expect("cached zoom fallback");
+        assert!(Arc::ptr_eq(&first, &fallback));
+        assert!(Arc::ptr_eq(&second, &fallback));
+    }
+
+    #[test]
+    fn wkb_parser_rejects_nested_multiline_collections_without_recursing() {
+        let mut wkb = Vec::new();
+        wkb.push(1);
+        wkb.extend_from_slice(&2u32.to_le_bytes());
+        wkb.extend_from_slice(&2u32.to_le_bytes());
+        for (lon, lat) in [(0.0f64, 0.0f64), (1.0, 1.0)] {
+            wkb.extend_from_slice(&lon.to_le_bytes());
+            wkb.extend_from_slice(&lat.to_le_bytes());
+        }
+
+        // MultiLineString children must be LineStrings. Build deeply nested
+        // invalid collections iteratively so the test itself uses no recursion.
+        for _ in 0..64 {
+            let mut parent = Vec::with_capacity(wkb.len() + 9);
+            parent.push(1);
+            parent.extend_from_slice(&5u32.to_le_bytes());
+            parent.extend_from_slice(&1u32.to_le_bytes());
+            parent.extend_from_slice(&wkb);
+            wkb = parent;
+        }
+
+        assert!(parse_wkb_geometry(&wkb).is_none());
+    }
+
+    #[test]
+    fn wkb_parser_accepts_direct_multiline_linestring_children() {
+        let mut wkb = Vec::new();
+        wkb.push(1);
+        wkb.extend_from_slice(&5u32.to_le_bytes());
+        wkb.extend_from_slice(&1u32.to_le_bytes());
+        wkb.push(1);
+        wkb.extend_from_slice(&2u32.to_le_bytes());
+        wkb.extend_from_slice(&2u32.to_le_bytes());
+        for (lon, lat) in [(12.5f64, -3.0f64), (13.0, -2.5)] {
+            wkb.extend_from_slice(&lon.to_le_bytes());
+            wkb.extend_from_slice(&lat.to_le_bytes());
+        }
+
+        let lines = parse_wkb_geometry(&wkb).expect("valid multiline geometry");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].len(), 2);
+        assert_eq!(lines[0][0].lon, 12.5);
+        assert_eq!(lines[0][0].lat, -3.0);
+    }
+
+    #[test]
+    fn wkb_parser_rejects_impossible_point_count_before_allocating() {
+        let mut wkb = Vec::new();
+        wkb.push(1);
+        wkb.extend_from_slice(&2u32.to_le_bytes());
+        wkb.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(parse_wkb_geometry(&wkb).is_none());
+    }
 
     #[test]
     fn reads_cached_sqlite_focus_contours() {
@@ -1657,8 +1952,27 @@ mod tests {
             return;
         };
 
-        let contours = query_local_contours(path, zoom_bucket, lat_bucket, lon_bucket, 2, 1_500)
-            .expect("should read cached SRTM focus contours");
+        let request = (
+            CacheKey {
+                path: path.to_path_buf(),
+                zoom_bucket,
+                lat_bucket,
+                lon_bucket,
+            },
+            srtm_focus_cache::FocusContourAsset {
+                path: path.to_path_buf(),
+                simplify_step: 2,
+                zoom_bucket,
+                lat_bucket,
+                lon_bucket,
+            },
+        );
+        let contours = query_local_contours_batch(path, &[request], 1_500)
+            .expect("should read cached SRTM focus contours")
+            .into_iter()
+            .next()
+            .map(|(_, contours)| contours)
+            .unwrap_or_default();
         assert!(
             !contours.is_empty(),
             "expected parsed contours from shared SQLite cache"
