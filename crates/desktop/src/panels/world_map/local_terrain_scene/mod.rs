@@ -1,3 +1,4 @@
+pub(super) mod deflock_layer;
 pub(super) mod dissolve;
 pub(super) mod geography;
 pub(super) mod markers;
@@ -31,7 +32,9 @@ use crate::osm_ingest::{self, GeoBounds as OsmGeoBounds};
 use crate::terrain_assets;
 use crate::theme;
 use rayon::prelude::*;
+use std::cell::RefCell;
 use std::path::Path;
+use std::sync::Arc;
 
 use super::contour_asset;
 use super::globe_scene::GlobeScene;
@@ -61,6 +64,27 @@ pub(super) struct LocalLayout {
 pub(super) struct ProjectedLocalPoint {
     pub(super) pos: egui::Pos2,
     pub(super) depth: f32,
+}
+
+/// Exact projection inputs for the optional public ALPR local-terrain mesh.
+/// Bit keys keep cached output valid only when it is visually identical.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct DeflockLocalMeshKey {
+    snapshot_revision: u64,
+    focus_lat: u32,
+    focus_lon: u32,
+    local_yaw: u32,
+    local_pitch: u32,
+    local_layer_spread: u32,
+    extent_x_km: u32,
+    extent_y_km: u32,
+    focus_center_x: u32,
+    focus_center_y: u32,
+    layout_height: u32,
+    horizontal_scale: u32,
+    center_x: u32,
+    center_y: u32,
+    layout_width: u32,
 }
 
 pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: f64) -> GlobeScene {
@@ -123,15 +147,19 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     };
 
     let nearby = if model.focused_city().is_none() {
-        model.nearby_cameras(250.0)
+        model.nearby_camera_snapshot(250.0)
     } else {
-        Vec::new()
+        std::sync::Arc::new(Vec::new())
     };
 
     // Pulsing tile-grid glow: only draw cells that are NOT yet ready in the cache.
     let still_loading = match model.active_body {
-        crate::model::ActiveBody::Moon => srtm_focus_cache::is_lunar_contour_building() || contours.is_none(),
-        crate::model::ActiveBody::Mars => srtm_focus_cache::is_mars_contour_building() || contours.is_none(),
+        crate::model::ActiveBody::Moon => {
+            srtm_focus_cache::is_lunar_contour_building() || contours.is_none()
+        }
+        crate::model::ActiveBody::Mars => {
+            srtm_focus_cache::is_mars_contour_building() || contours.is_none()
+        }
         crate::model::ActiveBody::Earth => cache_status
             .map(|s| s.ready_assets < s.total_assets)
             .unwrap_or(contours.is_none()),
@@ -379,12 +407,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             model.show_surveillance,
         );
 
-        draw_loading_boxes(
-            painter,
-            &layout,
-            &model.globe_view,
-            viewport_center,
-        );
+        draw_loading_boxes(painter, &layout, &model.globe_view, viewport_center);
     }
 
     // ── Admin boundaries (Earth only) ─────────────────────────────────────
@@ -539,6 +562,16 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         })
         .collect();
 
+    draw_deflock_alprs(
+        painter,
+        &layout,
+        &model.globe_view,
+        viewport_center,
+        extent_x_km,
+        extent_y_km,
+        model,
+    );
+
     // Camera link lines anchor to the selected event if one exists.
     let anchor = event_markers
         .iter()
@@ -623,6 +656,104 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         arcgis_feature_markers: Vec::new(),
         beam_elevation_m: Some(beam_elevation_m),
     }
+}
+
+/// Paint the public ALPR layer from a cached local-terrain mesh whenever both
+/// the immutable source revision and every projection input are unchanged.
+/// This avoids rebuilding tens of thousands of static markers every paint while
+/// retaining the exact pixels produced by the uncached projection path.
+fn draw_deflock_alprs(
+    painter: &egui::Painter,
+    layout: &LocalLayout,
+    view: &GlobeViewState,
+    viewport_center: GeoPoint,
+    extent_x_km: f32,
+    extent_y_km: f32,
+    model: &AppModel,
+) {
+    if model.active_body != crate::model::ActiveBody::Earth
+        || !model.show_deflock_alprs
+        || model.deflock_alpr_locations.is_empty()
+    {
+        return;
+    }
+
+    let key = DeflockLocalMeshKey {
+        snapshot_revision: model.deflock_snapshot_revision(),
+        focus_lat: viewport_center.lat.to_bits(),
+        focus_lon: viewport_center.lon.to_bits(),
+        local_yaw: view.local_yaw.to_bits(),
+        local_pitch: view.local_pitch.to_bits(),
+        local_layer_spread: view.local_layer_spread.to_bits(),
+        extent_x_km: extent_x_km.to_bits(),
+        extent_y_km: extent_y_km.to_bits(),
+        focus_center_x: layout.focus_center.x.to_bits(),
+        focus_center_y: layout.focus_center.y.to_bits(),
+        layout_height: layout.height.to_bits(),
+        horizontal_scale: layout.horizontal_scale.to_bits(),
+        center_x: layout.center.x.to_bits(),
+        center_y: layout.center.y.to_bits(),
+        layout_width: layout.width.to_bits(),
+    };
+    thread_local! {
+        static ALPR_MESH: RefCell<Option<(DeflockLocalMeshKey, Arc<egui::epaint::Mesh>)>> =
+            const { RefCell::new(None) };
+    }
+    let mesh = ALPR_MESH.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        match cache.as_ref() {
+            Some((cached_key, mesh)) if *cached_key == key => Arc::clone(mesh),
+            _ => {
+                // Keep the target inside the local projector's generous range
+                // even at the highest zoom, then derive the wedge direction
+                // from the same rotated/pitched projection as its marker.
+                let bearing_step_degrees = ((extent_x_km / 111.32) * 0.25).clamp(0.0005, 0.05);
+                let projected: Vec<_> = model
+                    .deflock_alpr_locations
+                    .iter()
+                    .filter_map(|location| {
+                        projection::project_local(
+                            layout,
+                            view,
+                            viewport_center,
+                            location.location,
+                            0.0,
+                            extent_x_km,
+                            extent_y_km,
+                        )
+                        .map(|point| {
+                            let screen_direction = deflock_layer::bearing_target(
+                                location.location,
+                                location.direction_degrees,
+                                bearing_step_degrees,
+                            )
+                            .and_then(|target| {
+                                projection::project_local(
+                                    layout,
+                                    view,
+                                    viewport_center,
+                                    target,
+                                    0.0,
+                                    extent_x_km,
+                                    extent_y_km,
+                                )
+                                .and_then(|tip| {
+                                    let delta = tip.pos - point.pos;
+                                    (delta.length_sq() > f32::EPSILON)
+                                        .then(|| delta.y.atan2(delta.x))
+                                })
+                            });
+                            deflock_layer::ProjectedAlprMarker::new(point.pos, screen_direction)
+                        })
+                    })
+                    .collect();
+                let mesh = deflock_layer::build_mesh(&projected);
+                *cache = Some((key, Arc::clone(&mesh)));
+                mesh
+            }
+        }
+    });
+    deflock_layer::draw_mesh(painter, mesh);
 }
 
 #[allow(dead_code)]
@@ -1224,7 +1355,10 @@ fn draw_elevation_fill(
                         .points
                         .iter()
                         .filter(|p| {
-                            p.lat >= min_lat && p.lat <= max_lat && p.lon >= min_lon && p.lon <= max_lon
+                            p.lat >= min_lat
+                                && p.lat <= max_lat
+                                && p.lon >= min_lon
+                                && p.lon <= max_lon
                         })
                         .collect();
                     if mid_candidates.is_empty() {
@@ -1246,7 +1380,12 @@ fn draw_elevation_fill(
         view,
         layout,
         contours.len(),
-        gebco_samples.len() + if active_body != crate::model::ActiveBody::Earth { 100_000 } else { 0 },
+        gebco_samples.len()
+            + if active_body != crate::model::ActiveBody::Earth {
+                100_000
+            } else {
+                0
+            },
     );
     let state_mutex = ELEV_FILL.get_or_init(|| {
         std::sync::Mutex::new(ElevFillState {
@@ -1288,8 +1427,14 @@ fn draw_elevation_fill(
         state.building_key = Some(key);
         state.result_rx = Some(rx);
         std::thread::spawn(move || {
-            let mesh =
-                build_elev_fill_mesh(&layout_c, &view_c, focus, &contours_c, &gebco_c, active_body);
+            let mesh = build_elev_fill_mesh(
+                &layout_c,
+                &view_c,
+                focus,
+                &contours_c,
+                &gebco_c,
+                active_body,
+            );
             let _ = tx.send((key, mesh));
             ctx.request_repaint();
         });
@@ -1315,7 +1460,7 @@ fn draw_contour_stack(
     // 300_000 points prevents WGPU Validation Error index buffer overflow
     // when 1600+ cached terrain tiles accumulate.
     const MAX_CONTOUR_RENDER_POINTS: usize = 300_000;
-    
+
     // Major contour every 2× the minor interval. SRTM minor=5-50m so major at 50m rem.
     // Lunar minor=50-1000m so major at 1000m rem (two minor intervals up in any spec).
     let major_rem: i32 = match active_body {
@@ -1340,10 +1485,7 @@ fn draw_contour_stack(
         .iter()
         .filter(|c| {
             c.points.iter().any(|p| {
-                p.lat >= min_lat
-                    && p.lat <= max_lat
-                    && p.lon >= min_lon
-                    && p.lon <= max_lon
+                p.lat >= min_lat && p.lat <= max_lat && p.lon >= min_lon && p.lon <= max_lon
             })
         })
         .collect();
@@ -1444,14 +1586,28 @@ fn draw_loading_boxes(
     let alpha = (t.sin() as f32 * 0.5 + 0.5) * 0.7 + 0.3;
 
     let mut draw_box = |bounds: crate::osm_ingest::GeoBounds, color: egui::Color32| {
-        let p1 = GeoPoint { lat: bounds.min_lat, lon: bounds.min_lon };
-        let p2 = GeoPoint { lat: bounds.max_lat, lon: bounds.min_lon };
-        let p3 = GeoPoint { lat: bounds.max_lat, lon: bounds.max_lon };
-        let p4 = GeoPoint { lat: bounds.min_lat, lon: bounds.max_lon };
+        let p1 = GeoPoint {
+            lat: bounds.min_lat,
+            lon: bounds.min_lon,
+        };
+        let p2 = GeoPoint {
+            lat: bounds.max_lat,
+            lon: bounds.min_lon,
+        };
+        let p3 = GeoPoint {
+            lat: bounds.max_lat,
+            lon: bounds.max_lon,
+        };
+        let p4 = GeoPoint {
+            lat: bounds.min_lat,
+            lon: bounds.max_lon,
+        };
 
         let mut pts = Vec::new();
         for &p in &[p1, p2, p3, p4, p1] {
-            if let Some(proj) = projection::project_local(layout, view, focus, p, 10.0, extent_x_km, extent_y_km) {
+            if let Some(proj) =
+                projection::project_local(layout, view, focus, p, 10.0, extent_x_km, extent_y_km)
+            {
                 pts.push(proj.pos);
             }
         }

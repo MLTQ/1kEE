@@ -6,8 +6,11 @@ use super::camera::{self, GlobeLod};
 use super::contour_asset;
 use super::gebco_depth_fill;
 use super::globe_pass;
+use super::local_terrain_scene::deflock_layer;
 use super::srtm_focus_cache;
 use super::terrain_field;
+use std::cell::RefCell;
+use std::sync::Arc;
 
 mod geography;
 mod markers;
@@ -40,6 +43,31 @@ pub struct ProjectedPoint {
     pub pos: egui::Pos2,
     pub depth: f32,
     pub front_facing: bool,
+}
+
+/// A visible live-marker source index paired with its frame projection.
+///
+/// The scene constructs this list once, then shares it with the drawing helpers
+/// and the `GlobeScene` hit-test output. Keeping the index rather than cloning
+/// whole track records preserves source ordering without allocating per marker.
+#[derive(Clone, Copy)]
+pub(super) struct ProjectedMarker {
+    pub(super) source_index: usize,
+    pub(super) point: ProjectedPoint,
+}
+
+/// Exact inputs that determine the screen mesh for the immutable public ALPR
+/// snapshot. Raw float bits keep even sub-pixel view changes visually exact.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct DeflockGlobeMeshKey {
+    snapshot_revision: u64,
+    yaw: u32,
+    pitch: u32,
+    radius: u32,
+    focal_length: u32,
+    camera_distance: u32,
+    center_x: u32,
+    center_y: u32,
 }
 
 pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: f64) -> GlobeScene {
@@ -147,7 +175,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 
     let selected_event_id = model.selected_event_id.as_deref();
     let selected_camera_id = model.selected_camera_id.as_deref();
-    let nearby = model.nearby_cameras(250.0);
+    let nearby = model.nearby_camera_snapshot(250.0);
 
     // ── Replay flares (shown instead of live markers while replay is active) ──
     if model.replay_mode && model.active_body == crate::model::ActiveBody::Earth {
@@ -180,7 +208,9 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         }
     }
 
-    let event_markers: Vec<_> = if !model.show_event_markers || model.replay_mode || model.active_body != crate::model::ActiveBody::Earth
+    let event_markers: Vec<_> = if !model.show_event_markers
+        || model.replay_mode
+        || model.active_body != crate::model::ActiveBody::Earth
     {
         Vec::new()
     } else {
@@ -245,29 +275,58 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             .collect()
     };
 
+    draw_deflock_alprs(painter, &layout, &model.globe_view, model);
+
     // ── AIS ship markers ──────────────────────────────────────────────────
     // `model.tracks` is refreshed each frame by `render_world_map` before
-    // this function is called.  We just draw whatever is cached.
-    if model.show_ships && !model.globe_view.local_mode {
+    // this function is called. Project each visible source only once so paint,
+    // click detection, and hover detection agree on the exact same position.
+    let projected_ships = if model.show_ships && !model.globe_view.local_mode {
+        project_visible_markers(&layout, &model.globe_view, &model.tracks, |track| {
+            track.location
+        })
+    } else {
+        Vec::new()
+    };
+    if !projected_ships.is_empty() {
         markers::draw_ships(
             painter,
-            &layout,
-            &model.globe_view,
             &model.tracks,
+            &projected_ships,
             model.selected_track_mmsi,
         );
     }
+    let ship_markers: Vec<(u64, egui::Pos2)> = projected_ships
+        .iter()
+        .map(|marker| (model.tracks[marker.source_index].mmsi, marker.point.pos))
+        .collect();
 
     // ── ADS-B flight markers ───────────────────────────────────────────────
-    if model.show_flights && !model.globe_view.local_mode {
+    // Like vessels, keep rendering and interaction on one projected list.
+    let projected_flights = if model.show_flights && !model.globe_view.local_mode {
+        project_visible_markers(&layout, &model.globe_view, &model.flights, |flight| {
+            flight.location
+        })
+    } else {
+        Vec::new()
+    };
+    if !projected_flights.is_empty() {
         markers::draw_flights(
             painter,
-            &layout,
-            &model.globe_view,
             &model.flights,
+            &projected_flights,
             model.selected_flight_icao24.as_deref(),
         );
     }
+    let flight_markers: Vec<(String, egui::Pos2)> = projected_flights
+        .iter()
+        .map(|marker| {
+            (
+                model.flights[marker.source_index].icao24.clone(),
+                marker.point.pos,
+            )
+        })
+        .collect();
 
     // ── ArcGIS feature markers ─────────────────────────────────────────────
     let arcgis_feature_markers =
@@ -282,20 +341,6 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         } else {
             Vec::new()
         };
-
-    let ship_markers: Vec<(u64, egui::Pos2)> = if model.show_ships && !model.globe_view.local_mode {
-        model
-            .tracks
-            .iter()
-            .filter_map(|t| {
-                projection::project_geo(&layout, &model.globe_view, t.location, 0.0)
-                    .filter(|p| p.front_facing)
-                    .map(|p| (t.mmsi, p.pos))
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
 
     if let Some((_, event_marker)) = event_markers
         .iter()
@@ -350,21 +395,6 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         }
     }
 
-    let flight_markers: Vec<(String, egui::Pos2)> =
-        if model.show_flights && !model.globe_view.local_mode {
-            model
-                .flights
-                .iter()
-                .filter_map(|f| {
-                    projection::project_geo(&layout, &model.globe_view, f.location, 0.0)
-                        .filter(|p| p.front_facing)
-                        .map(|p| (f.icao24.clone(), p.pos))
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-
     GlobeScene {
         event_markers,
         camera_markers,
@@ -372,6 +402,153 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         flight_markers,
         arcgis_feature_markers,
         beam_elevation_m: None,
+    }
+}
+
+/// Paint the optional public ALPR overlay from a cached mesh when the data and
+/// globe transform have not changed. This leaves every marker pixel identical
+/// while avoiding reprojecting a potentially large static OSM snapshot.
+fn draw_deflock_alprs(
+    painter: &egui::Painter,
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    model: &AppModel,
+) {
+    if !model.show_deflock_alprs
+        || model.active_body != crate::model::ActiveBody::Earth
+        || model.deflock_alpr_locations.is_empty()
+    {
+        return;
+    }
+
+    let key = DeflockGlobeMeshKey {
+        snapshot_revision: model.deflock_snapshot_revision(),
+        yaw: view.yaw.to_bits(),
+        pitch: view.pitch.to_bits(),
+        radius: layout.radius.to_bits(),
+        focal_length: layout.focal_length.to_bits(),
+        camera_distance: layout.camera_distance.to_bits(),
+        center_x: layout.center.x.to_bits(),
+        center_y: layout.center.y.to_bits(),
+    };
+    thread_local! {
+        static ALPR_MESH: RefCell<Option<(DeflockGlobeMeshKey, Arc<egui::epaint::Mesh>)>> =
+            const { RefCell::new(None) };
+    }
+    let mesh = ALPR_MESH.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        match cache.as_ref() {
+            Some((cached_key, mesh)) if *cached_key == key => Arc::clone(mesh),
+            _ => {
+                let projected: Vec<_> = model
+                    .deflock_alpr_locations
+                    .iter()
+                    .filter_map(|location| {
+                        projection::project_geo(layout, view, location.location, 0.0)
+                            .filter(|point| point.front_facing)
+                            .map(|point| {
+                                let screen_direction = deflock_layer::bearing_target(
+                                    location.location,
+                                    location.direction_degrees,
+                                    0.05,
+                                )
+                                .and_then(|target| {
+                                    projection::project_geo(layout, view, target, 0.0)
+                                        .filter(|tip| tip.front_facing)
+                                        .and_then(|tip| {
+                                            let delta = tip.pos - point.pos;
+                                            (delta.length_sq() > f32::EPSILON)
+                                                .then(|| delta.y.atan2(delta.x))
+                                        })
+                                });
+                                deflock_layer::ProjectedAlprMarker::new(point.pos, screen_direction)
+                            })
+                    })
+                    .collect();
+                let mesh = deflock_layer::build_mesh(&projected);
+                *cache = Some((key, Arc::clone(&mesh)));
+                mesh
+            }
+        }
+    });
+    deflock_layer::draw_mesh(painter, mesh);
+}
+
+/// Project a live-marker source list once and retain only front-facing points.
+///
+/// Callers must use the returned source indices with the same slice that was
+/// passed here. This is deliberately generic so ships and flights retain their
+/// previous per-source projection order and filtering without duplicate loops.
+fn project_visible_markers<T>(
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    markers: &[T],
+    location: impl Fn(&T) -> GeoPoint,
+) -> Vec<ProjectedMarker> {
+    markers
+        .iter()
+        .enumerate()
+        .filter_map(|(source_index, marker)| {
+            projection::project_geo(layout, view, location(marker), 0.0)
+                .filter(|point| point.front_facing)
+                .map(|point| ProjectedMarker {
+                    source_index,
+                    point,
+                })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Copy)]
+    struct SourceMarker {
+        location: GeoPoint,
+    }
+
+    #[test]
+    fn shared_live_marker_projection_matches_the_direct_hit_test_baseline() {
+        let view = GlobeViewState::from_focus(GeoPoint { lat: 0.0, lon: 0.0 });
+        let layout = globe_layout(
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)),
+            &view,
+        );
+        let sources = [
+            SourceMarker {
+                location: GeoPoint { lat: 0.0, lon: 0.0 },
+            },
+            SourceMarker {
+                location: GeoPoint {
+                    lat: 0.0,
+                    lon: 180.0,
+                },
+            },
+            SourceMarker {
+                location: GeoPoint {
+                    lat: 20.0,
+                    lon: 15.0,
+                },
+            },
+        ];
+
+        let projected = project_visible_markers(&layout, &view, &sources, |source| source.location);
+        let direct_hit_test_baseline: Vec<_> = sources
+            .iter()
+            .enumerate()
+            .filter_map(|(source_index, source)| {
+                projection::project_geo(&layout, &view, source.location, 0.0)
+                    .filter(|point| point.front_facing)
+                    .map(|point| (source_index, point.pos))
+            })
+            .collect();
+        let shared_draw_and_hit_test_positions: Vec<_> = projected
+            .iter()
+            .map(|marker| (marker.source_index, marker.point.pos))
+            .collect();
+
+        assert_eq!(shared_draw_and_hit_test_positions, direct_hit_test_baseline);
     }
 }
 

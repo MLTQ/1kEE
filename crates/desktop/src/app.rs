@@ -1,4 +1,5 @@
 use crate::camera_registry;
+use crate::deflock_source;
 use crate::factal_stream;
 use crate::model::AppModel;
 use crate::panels;
@@ -81,6 +82,7 @@ impl Drop for DashboardApp {
         factal_stream::shutdown();
         usgs_stream::shutdown();
         camera_registry::shutdown();
+        deflock_source::shutdown();
         panels::world_map::srtm_focus_cache::terminate_active_gdal_jobs();
     }
 }
@@ -99,6 +101,7 @@ impl eframe::App for DashboardApp {
         factal_stream::history_tick(&mut self.model);
         usgs_stream::tick(&mut self.model);
         camera_registry::tick(&mut self.model);
+        deflock_source::tick(&mut self.model);
 
         // Advance stellar time.
         if self.model.show_stellar_correspondence {

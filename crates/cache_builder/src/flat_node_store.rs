@@ -36,7 +36,6 @@ const INDEX_STRIDE: u64 = 4096;
 
 pub struct NodeWriter {
     writer: BufWriter<File>,
-    pub path: PathBuf,
     pub count: u64,
 }
 
@@ -46,39 +45,65 @@ impl NodeWriter {
             .map_err(|e| format!("Cannot create node file {}: {e}", path.display()))?;
         Ok(Self {
             writer: BufWriter::with_capacity(4 * 1024 * 1024, file),
-            path: path.to_path_buf(),
             count: 0,
         })
     }
 
     #[inline]
     pub fn write(&mut self, id: i64, lat: f32, lon: f32) -> Result<(), String> {
-        self.writer.write_all(&id.to_le_bytes()).map_err(|e| e.to_string())?;
-        self.writer.write_all(&lat.to_le_bytes()).map_err(|e| e.to_string())?;
-        self.writer.write_all(&lon.to_le_bytes()).map_err(|e| e.to_string())?;
+        self.writer
+            .write_all(&id.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        self.writer
+            .write_all(&lat.to_le_bytes())
+            .map_err(|e| e.to_string())?;
+        self.writer
+            .write_all(&lon.to_le_bytes())
+            .map_err(|e| e.to_string())?;
         self.count += 1;
         Ok(())
     }
 
-    /// Open an existing node file for appending (Pass 1 resume).
-    pub fn append(path: &Path) -> Result<Self, String> {
-        let existing_count = std::fs::metadata(path)
-            .map(|m| m.len() / RECORD_BYTES)
-            .unwrap_or(0);
+    /// Restore an existing node file to an exact Pass 1 checkpoint before
+    /// appending. Records that reached the OS page cache after the last saved
+    /// checkpoint must be discarded so replaying the source blobs cannot
+    /// duplicate them.
+    pub fn append(path: &Path, checkpoint_record_count: u64) -> Result<Self, String> {
+        let checkpoint_length = checkpoint_record_count
+            .checked_mul(RECORD_BYTES)
+            .ok_or_else(|| "Node checkpoint record count overflowed file length".to_owned())?;
+        let actual_length = std::fs::metadata(path)
+            .map_err(|e| format!("Cannot inspect node file {}: {e}", path.display()))?
+            .len();
+        if actual_length < checkpoint_length {
+            return Err(format!(
+                "Node file {} is shorter than its checkpoint ({actual_length} < {checkpoint_length} bytes)",
+                path.display()
+            ));
+        }
         let file = std::fs::OpenOptions::new()
             .write(true)
             .append(true)
             .open(path)
             .map_err(|e| format!("Cannot open node file for append {}: {e}", path.display()))?;
+        file.set_len(checkpoint_length)
+            .map_err(|e| format!("Cannot truncate node file {}: {e}", path.display()))?;
         Ok(Self {
             writer: BufWriter::with_capacity(4 * 1024 * 1024, file),
-            path: path.to_path_buf(),
-            count: existing_count,
+            count: checkpoint_record_count,
         })
     }
 
     pub fn finish(mut self) -> Result<(), String> {
-        self.writer.flush().map_err(|e| e.to_string())
+        self.checkpoint()
+    }
+
+    /// Flush node records and make them durable before advancing a resume
+    /// checkpoint.  A checkpoint must never point beyond data that can be
+    /// reopened by `NodeWriter::append` after an interrupted build.
+    pub fn checkpoint(&mut self) -> Result<(), String> {
+        self.writer.flush().map_err(|e| e.to_string())?;
+        self.writer.get_ref().sync_data().map_err(|e| e.to_string())
     }
 }
 
@@ -111,8 +136,7 @@ pub fn sort_in_place(
     fs::create_dir_all(tmp_dir).map_err(|e| e.to_string())?;
 
     // ── Phase 1: produce sorted chunks ───────────────────────────────────────
-    let num_chunks =
-        (total_records as usize).div_ceil(SORT_CHUNK_RECORDS);
+    let num_chunks = (total_records as usize).div_ceil(SORT_CHUNK_RECORDS);
     let mut chunk_paths: Vec<PathBuf> = Vec::with_capacity(num_chunks);
 
     {
@@ -159,7 +183,10 @@ pub fn sort_in_place(
     }
 
     // ── Phase 2: k-way merge ─────────────────────────────────────────────────
-    progress(format!("Sort phase 2: merging {} chunks…", chunk_paths.len()));
+    progress(format!(
+        "Sort phase 2: merging {} chunks…",
+        chunk_paths.len()
+    ));
 
     let mut readers: Vec<BufReader<File>> = chunk_paths
         .iter()
@@ -254,8 +281,7 @@ pub struct NodeLookup {
 
 impl NodeLookup {
     pub fn open(path: &Path, record_count: u64) -> Result<Self, String> {
-        let file =
-            File::open(path).map_err(|e| format!("Cannot open node file: {e}"))?;
+        let file = File::open(path).map_err(|e| format!("Cannot open node file: {e}"))?;
 
         let mut index = Vec::with_capacity((record_count / INDEX_STRIDE + 1) as usize);
         let mut id_buf = [0u8; 8];
@@ -275,12 +301,10 @@ impl NodeLookup {
         })
     }
 
-    /// Look up `target_id`.  Returns `(lat, lon)` or `None` if not found.
-    pub fn lookup(&self, target_id: i64) -> Option<(f32, f32)> {
+    fn block_bounds(&self, target_id: i64) -> Option<(u64, u64)> {
         if self.record_count == 0 {
             return None;
         }
-
         // Narrow to the index block that must contain target_id (if present).
         let idx_pos = self.index.partition_point(|(id, _)| *id <= target_id);
         let block_start = if idx_pos == 0 {
@@ -294,18 +318,18 @@ impl NodeLookup {
             self.record_count
         };
 
-        if block_start >= block_end {
-            return None;
-        }
+        (block_start < block_end).then_some((block_start, block_end))
+    }
 
-        // Read the entire block in ONE pread64 call instead of one per record.
-        // This turns up to INDEX_STRIDE disk seeks into a single sequential read,
-        // which is critical when the 100+ GB node file doesn't fit in RAM.
+    fn read_block(&self, block_start: u64, block_end: u64, buffer: &mut Vec<u8>) -> Option<()> {
         let block_len = (block_end - block_start) as usize;
-        let mut buf = vec![0u8; block_len * RECORD_BYTES as usize];
-        self.file
-            .read_at(&mut buf, block_start * RECORD_BYTES)
-            .ok()?;
+        buffer.resize(block_len * RECORD_BYTES as usize, 0);
+        let bytes_read = self.file.read_at(buffer, block_start * RECORD_BYTES).ok()?;
+        (bytes_read == buffer.len()).then_some(())
+    }
+
+    fn search_block(buffer: &[u8], target_id: i64) -> Option<(f32, f32)> {
+        let block_len = buffer.len() / RECORD_BYTES as usize;
 
         // Binary search within the block (records are sorted by node_id).
         let mut lo = 0usize;
@@ -313,13 +337,11 @@ impl NodeLookup {
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let base = mid * RECORD_BYTES as usize;
-            let id = i64::from_le_bytes(buf[base..base + 8].try_into().unwrap());
+            let id = i64::from_le_bytes(buffer[base..base + 8].try_into().unwrap());
             match id.cmp(&target_id) {
                 Ordering::Equal => {
-                    let lat =
-                        f32::from_le_bytes(buf[base + 8..base + 12].try_into().unwrap());
-                    let lon =
-                        f32::from_le_bytes(buf[base + 12..base + 16].try_into().unwrap());
+                    let lat = f32::from_le_bytes(buffer[base + 8..base + 12].try_into().unwrap());
+                    let lon = f32::from_le_bytes(buffer[base + 12..base + 16].try_into().unwrap());
                     return Some((lat, lon));
                 }
                 Ordering::Less => lo = mid + 1,
@@ -329,8 +351,148 @@ impl NodeLookup {
 
         None
     }
+
+    /// Resolve a batch of node IDs while retaining one output slot per input.
+    ///
+    /// References are grouped by sparse-index block, so every block is read at
+    /// most once. This preserves the exact `lookup` result for each ID while
+    /// avoiding a temporary 64 KiB allocation and positional read per ref.
+    pub fn lookup_many(&self, target_ids: &[i64]) -> Vec<Option<(f32, f32)>> {
+        let mut results = vec![None; target_ids.len()];
+        if target_ids.is_empty() || self.record_count == 0 {
+            return results;
+        }
+
+        let mut queries = Vec::with_capacity(target_ids.len());
+        for (result_index, &target_id) in target_ids.iter().enumerate() {
+            if let Some((block_start, block_end)) = self.block_bounds(target_id) {
+                queries.push((block_start, block_end, result_index));
+            }
+        }
+        queries.sort_unstable_by_key(|(block_start, _, _)| *block_start);
+
+        let mut buffer = Vec::new();
+        let mut query_start = 0usize;
+        while query_start < queries.len() {
+            let (block_start, block_end, _) = queries[query_start];
+            let mut query_end = query_start + 1;
+            while query_end < queries.len() && queries[query_end].0 == block_start {
+                query_end += 1;
+            }
+
+            if self
+                .read_block(block_start, block_end, &mut buffer)
+                .is_some()
+            {
+                for &(_, _, result_index) in &queries[query_start..query_end] {
+                    results[result_index] = Self::search_block(&buffer, target_ids[result_index]);
+                }
+            }
+            query_start = query_end;
+        }
+
+        results
+    }
 }
 
 // SAFETY: `File::read_at` is implemented as `pread64` on POSIX, which is
 // thread-safe — it does not read or modify the file cursor.
 unsafe impl Sync for NodeLookup {}
+
+#[cfg(test)]
+mod tests {
+    use super::{INDEX_STRIDE, NodeLookup, NodeWriter};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn lookup_many_preserves_input_order_across_blocks() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "one_thousand_electric_eye_node_lookup_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nodes.bin");
+
+        let record_count = INDEX_STRIDE + 3;
+        let mut writer = NodeWriter::create(&path).unwrap();
+        for index in 0..record_count {
+            writer
+                .write(index as i64 * 10 + 10, index as f32 + 0.25, -(index as f32))
+                .unwrap();
+        }
+        writer.finish().unwrap();
+
+        let lookup = NodeLookup::open(&path, record_count).unwrap();
+        let first_block_last_id = (INDEX_STRIDE - 1) as i64 * 10 + 10;
+        let second_block_first_id = INDEX_STRIDE as i64 * 10 + 10;
+        let results = lookup.lookup_many(&[
+            second_block_first_id,
+            7,
+            10,
+            first_block_last_id,
+            second_block_first_id,
+        ]);
+
+        assert_eq!(results.len(), 5);
+        assert_eq!(
+            results[0],
+            Some((INDEX_STRIDE as f32 + 0.25, -(INDEX_STRIDE as f32)))
+        );
+        assert_eq!(results[1], None);
+        assert_eq!(results[2], Some((0.25, 0.0)));
+        assert_eq!(
+            results[3],
+            Some((INDEX_STRIDE as f32 - 0.75, -((INDEX_STRIDE - 1) as f32)))
+        );
+        assert_eq!(results[4], results[0]);
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn append_discards_records_written_after_the_checkpoint() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "one_thousand_electric_eye_node_resume_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nodes.bin");
+
+        let mut writer = NodeWriter::create(&path).unwrap();
+        for id in 1..=5 {
+            writer.write(id, id as f32, -(id as f32)).unwrap();
+        }
+        writer.finish().unwrap();
+
+        let mut resumed = NodeWriter::append(&path, 3).unwrap();
+        assert_eq!(resumed.count, 3);
+        resumed.write(4, 4.0, -4.0).unwrap();
+        resumed.finish().unwrap();
+
+        assert_eq!(fs::metadata(&path).unwrap().len(), 4 * super::RECORD_BYTES);
+        let lookup = NodeLookup::open(&path, 4).unwrap();
+        assert_eq!(
+            lookup.lookup_many(&[1, 2, 3, 4, 5]),
+            vec![
+                Some((1.0, -1.0)),
+                Some((2.0, -2.0)),
+                Some((3.0, -3.0)),
+                Some((4.0, -4.0)),
+                None,
+            ]
+        );
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+}

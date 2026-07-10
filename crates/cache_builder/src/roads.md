@@ -1,76 +1,62 @@
 # roads.rs
 
 ## Purpose
-Implements the two-pass offline road cache builder: Pass 1 collects candidate nodes into SQLite, Pass 2 resolves ways into polylines and writes per-cell GeoJSON files. Both passes are fully resumable — a blob-level byte-offset checkpoint is written after every batch so a killed process restarts from exactly where it left off, not from the beginning of the planet file.
+
+Builds focused offline vector caches from an OSM planet PBF. Pass 1 stores
+candidate nodes in SQLite; Pass 2 reconstructs selected roads, waterways,
+buildings, tree cover, and infrastructure features into per-layer `.1kc` cells.
+Both passes are resumable at PBF blob boundaries.
 
 ## Components
 
-### `PosReader`
-- **Does**: Wraps a `File` in a `Read` impl that atomically increments a shared `Arc<AtomicU64>` as bytes are consumed. Because PBF blobs are length-prefixed, the counter equals the file offset of the *next blob* after each `BlobReader::next()` call — a precise resume point.
-- **Interacts with**: `open_planet_at`, `BlobReader`
+### `PosReader` / `open_planet_at`
 
-### `open_planet_at(planet_path, start_offset)`
-- **Does**: Opens the planet file seeked to `start_offset` (0 for fresh start), wraps it in `PosReader`, and returns a `BlobReader<PosReader>` plus the shared position `Arc`.
-
-### `load_or_collect_candidate_nodes`
-- **Does**: Decides whether to (a) skip Pass 1 entirely (node cache complete), (b) resume from a saved offset, or (c) start fresh. Only calls `reset()` for case (c).
-
-### `collect_candidate_nodes`
-- **Does**: Iterates blobs, batches in-bounds nodes, and after every 50 k nodes: flushes to SQLite and writes a `"node_scan"` offset checkpoint. `ON CONFLICT DO UPDATE` makes re-inserts on resume idempotent.
-
-### `collect_roads_by_cell`
-- **Does**: Pass 2 — resolves way refs via batched `NodeStore::points_for_refs`, buffers by 1° cell, and after every 10 k roads: flushes cells to GeoJSON and saves a `"way_scan"` offset checkpoint. `merge_write_cells` deduplicates by `way_id` so any overlap at the checkpoint boundary is harmless.
-
-## Contracts
-
-| Dependent | Expects | Breaking changes |
-|-----------|---------|------------------|
-| `app.rs` | `build_bbox_cache_with_progress` emits progress with monotonically increasing `fraction` | Regressing fraction values |
-| resumed builds | `collect_candidate_nodes` does NOT call `reset()` when `resume_offset.is_some()` | Clearing partial node data on resume |
-| way-scan restart | `merge_write_cells` overwrites duplicate `way_id`s; re-processing blobs near checkpoint is safe | Changing merge to append |
-
-## Notes
-- Both passes clear their checkpoint key only on *successful* completion, so a crash always leaves a valid resume offset.
-- `unsafe impl Send for PosReader` is required because the generic wrapper inhibits the auto-impl; the `BlobReader` owns the reader exclusively so there is no actual data race.
-
-## Original Purpose
-Implements the first offline OSM cache-building command: generate direct per-cell road GeoJSON caches from a requested bbox in `planet.osm.pbf`. This is the initial step toward moving heavy OSM parsing out of the desktop app.
-
-## Components
-
-### `build_bbox_cache`
-- **Does**: Validates inputs, runs the two-pass planet scan, and writes the resulting road-cell caches
-- **Interacts with**: `args.rs`, `geojson.rs`, `util.rs`
-
-### `RoadBuildProgress`
-- **Does**: Carries stage/fraction/message updates from the offline road builder to the GUI worker
-- **Interacts with**: `job.rs`, `app.rs`
+- **Does**: Wraps a seekable planet file and records the byte offset of the
+  next PBF blob consumed by `BlobReader`.
+- **Interacts with**: `planet_all.rs`, both focused-build passes.
+- **Rationale**: A blob boundary is a safe exact restart point.
 
 ### `build_bbox_cache_with_progress`
-- **Does**: Runs the same offline road export while emitting coarse progress updates for UI consumers
-- **Interacts with**: `job.rs`, `geojson.rs`
-- **Rationale**: This is the resumable/offline-friendly path used by the GUI, including node checkpoints and incremental road-cell flushes
+
+- **Does**: Validates the focused request, builds or resumes the node store,
+  exports enabled feature layers, and emits GUI-safe progress updates.
+- **Interacts with**: `node_store.rs`, `geojson.rs`, `admin.rs`, `app.rs`.
 
 ### `collect_candidate_nodes`
-- **Does**: First pass over the planet file, retaining only nodes inside the expanded requested bbox and streaming them into the disk-backed node cache
-- **Interacts with**: `node_store.rs`, `util.rs`
-- **Rationale**: The downloaded planet file does not advertise `LocationsOnWays`, so the builder has to resolve node refs itself without holding the full candidate set in RAM
 
-### `collect_roads_by_cell`
-- **Does**: Second pass over the planet file, filters `highway=*` ways, reconstructs polylines from retained nodes, and groups them into 1° cache cells
-- **Interacts with**: `geojson.rs`, `util.rs`
+- **Does**: Retains in-bounds nodes, committing their upserts and a
+  `"node_scan"` checkpoint in one transaction at a 50k retained-node batch or
+  one million scanned nodes.
+- **Interacts with**: `NodeStore::insert_batch_and_save_scan_offset`.
+- **Rationale**: Dense scans retain efficient batches while sparse regions have
+  bounded replay work.
+
+### `collect_all_features_by_cell` / `flush_all_chunks`
+
+- **Does**: Rebuilds ways from the candidate-node map, classifies enabled
+  vector layers, and incrementally writes binary `.1kc` cells after every
+  100k buffered features.
+- **Interacts with**: `geojson.rs`, `srtm.rs`, `util.rs` classifiers.
+- **Rationale**: Checkpointed output remains usable after interruption and
+  duplicate OSM way IDs are safely replaced on resume.
 
 ## Contracts
 
 | Dependent | Expects | Breaking changes |
 |-----------|---------|------------------|
-| `main.rs` | `build_bbox_cache` returns `Result<(), String>` with readable failures | Changing the return contract |
-| `job.rs` | progress updates use `RoadBuildProgress` with `stage`, `fraction`, and `message` fields | Renaming or removing progress fields |
-| desktop road loader | emitted road classes and GeoJSON schema match the direct vector cache it already reads | Renaming road classes or changing the file format |
-| future resumed builds | disk-backed candidate-node caches under `.builder_state/` are keyed by bbox and can be reused safely for the same request | Changing cache naming/format without migration |
+| `main.rs` / `job.rs` | readable `Result` failures and monotonic `RoadBuildProgress` updates | Changing result or progress contracts |
+| resumed node scans | candidate rows and their next-blob offset commit together | Advancing an offset separately from rows |
+| resumed way scans | every completed cell flush precedes the saved `way_scan` offset | Saving an offset before its `.1kc` output is durable |
+| desktop cell loaders | per-layer `.1kc` files retain feature IDs, classes, names, points, polygon flags, and optional elevation fields | Changing the cell schema or geometry encoding |
 
 ## Notes
-- This first builder command still scans the planet twice for a bbox, which is acceptable for offline work and much better than doing it on the interactive UI thread.
-- The current target is roads only. Water, buildings, and boundaries can be layered onto the same offline builder approach next.
-- Completed node scans are now persisted as SQLite node caches so a later rerun can skip the expensive first pass without reloading millions of nodes into memory.
-- The second pass flushes road-cell GeoJSON files incrementally instead of waiting until the very end, so partial output survives app shutdowns or crashes.
+
+- The focused path supports roads, waterways, buildings, forests, power,
+  rail, pipelines, aeroways, military, communications, industrial, ports,
+  government, and surveillance layers. Optional admin boundaries are delegated
+  to `admin.rs`.
+- Existing legacy GeoJSON files are migration input only; fresh output is
+  binary `.1kc`.
+- Cross-checkpoint write coalescing requires a durable delta journal or spill
+  layer; retaining all dirty cells only in memory would break planet-scale
+  memory bounds and resume safety.

@@ -17,6 +17,18 @@ Provides the disk-backed candidate-node cache for the offline OSM builder. It ex
 - **Does**: Persists candidate nodes in transactional batches during the node scan; uses `ON CONFLICT DO UPDATE` so re-inserted nodes from a resumed scan are idempotent
 - **Interacts with**: `roads.rs`
 
+### `NodeStore::insert_batch_and_save_scan_offset`
+- **Does**: Commits candidate-node upserts and the next PBF offset in one
+  SQLite transaction, including sparse-area checkpoints with an empty batch.
+- **Interacts with**: `roads.rs`
+- **Rationale**: A saved offset must never get ahead of the candidate rows that
+  were observed before it.
+
+### `NodeStore::mark_complete_and_clear_scan_offset`
+- **Does**: Atomically changes a completed node scan from resumable state to
+  reusable completed state.
+- **Interacts with**: `load_or_collect_candidate_nodes` in `roads.rs`.
+
 ### `NodeStore::points_for_refs`
 - **Does**: Resolves way node references back into coordinates during Pass 2; uses a single `WHERE id IN (…)` query per chunk of 999 IDs instead of one round-trip per node (10-50× faster for long ways)
 - **Interacts with**: `roads.rs`
@@ -31,8 +43,10 @@ Provides the disk-backed candidate-node cache for the offline OSM builder. It ex
 |-----------|---------|------------------|
 | `roads.rs` | a completed store can be reopened and queried without loading all nodes into memory | Changing table schema or completion semantics |
 | resumed builds | `insert_batch` is idempotent (ON CONFLICT DO UPDATE), `points_for_refs` works on partial stores | Breaking upsert semantics |
-| `save_scan_offset` callers | offset is the file position of the *next unread blob*, so seeking to it on restart is immediately correct | Storing mid-blob offsets |
+| node-scan checkpoint callers | `insert_batch_and_save_scan_offset` stores rows and the next unread offset atomically | Splitting the node and offset commits |
 
 ## Notes
-- Scan offsets are cleared (`clear_scan_offset`) only after the corresponding pass completes fully; a partial offset surviving a crash is intentional and enables resumption.
+- Scan offsets are cleared only in the same transaction that marks the candidate
+  node store complete; a partial offset surviving a crash is intentional and
+  enables resumption.
 - `points_for_refs` chunks at 999 to stay within SQLite's default `SQLITE_LIMIT_VARIABLE_NUMBER`; if that limit is raised in a custom build, the chunk size can be increased proportionally.

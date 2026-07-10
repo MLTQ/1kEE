@@ -1,17 +1,33 @@
 # main.rs
 
 ## Purpose
-Entrypoint for the desktop demo. It owns native window setup and hands control to the `DashboardApp`.
+
+Declares the desktop crate's internal modules and starts the native eframe
+application with the map-oriented window configuration.
 
 ## Components
 
+### Module declarations
+- **Does**: Makes source adapters, model modules, map panels, and application
+  lifecycle code available inside the desktop binary.
+- **Interacts with**: all crate-local modules.
+
+### `deflock_source`
+- **Does**: Declares the cache-first public DeFlock-compatible ALPR adapter.
+- **Interacts with**: `model.rs`, `app.rs`, and map overlays.
+
 ### `main`
-- **Does**: Configures the `eframe` native window, compiles the desktop support modules, and launches the app
-- **Interacts with**: `DashboardApp` in `app.rs`, module declarations for terrain, OSM ingest, city catalog, settings persistence, live Factal polling, live camera-registry polling, and both declarative camera-source catalogs (structured public feeds plus curated scrape seeds)
-- **Rationale**: Keeps platform/bootstrap concerns separate from UI state and rendering
+- **Does**: Configures the native window and constructs `DashboardApp`.
+- **Interacts with**: `app.rs` and eframe.
 
 ## Contracts
 
 | Dependent | Expects | Breaking changes |
-|-----------|---------|------------------|
-| `cargo run` | Native app boot succeeds through `eframe::run_native` | Changing app bootstrap signature or crate target type |
+|---|---|---|
+| `app.rs` | `DashboardApp` is the eframe entrypoint | Changing the startup callback contract |
+| Internal modules | Required source modules are declared before use | Removing or privatizing a needed declaration |
+
+## Notes
+
+- This binary intentionally uses WGPU because the world map registers custom
+  GPU paint callbacks during app startup.

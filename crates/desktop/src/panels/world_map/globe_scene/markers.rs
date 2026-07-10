@@ -1,19 +1,13 @@
-use crate::arcgis_source;
-use crate::model::{
-    ActiveFlare, ArcGisFeature, EventRecord, FlightCategory, FlightTrack, GeoPoint, GlobeViewState,
-    MovingTrack,
-};
+use crate::model::{ActiveFlare, EventRecord, FlightCategory, FlightTrack, MovingTrack};
 use crate::theme;
 
-use super::projection::project_geo;
-use super::{GlobeLayout, ProjectedPoint};
+use super::{ProjectedMarker, ProjectedPoint};
 
 /// Draw all live AIS vessels as small ship markers on the globe.
 pub(super) fn draw_ships(
     painter: &egui::Painter,
-    layout: &GlobeLayout,
-    view: &GlobeViewState,
     tracks: &[MovingTrack],
+    projected_tracks: &[ProjectedMarker],
     selected_mmsi: Option<u64>,
 ) {
     puffin::profile_function!();
@@ -21,21 +15,15 @@ pub(super) fn draw_ships(
     let ship_color = egui::Color32::from_rgb(40, 210, 180);
     let selected_color = egui::Color32::from_rgb(255, 230, 80);
 
-    for track in tracks {
-        let Some(proj) = project_geo(layout, view, track.location, 0.0) else {
-            continue;
-        };
-        if !proj.front_facing {
-            continue;
-        }
-
+    for projected in projected_tracks {
+        let track = &tracks[projected.source_index];
         let is_selected = selected_mmsi == Some(track.mmsi);
         let col = if is_selected {
             selected_color
         } else {
             ship_color
         };
-        let pos = proj.pos;
+        let pos = projected.point.pos;
 
         // Glow halo
         painter.circle_stroke(pos, 6.0, egui::Stroke::new(4.0, col.gamma_multiply(0.12)));
@@ -94,20 +82,13 @@ pub(super) fn draw_ships(
 /// an outer selection ring so it stands out from the crowd.
 pub(super) fn draw_flights(
     painter: &egui::Painter,
-    layout: &GlobeLayout,
-    view: &GlobeViewState,
     flights: &[FlightTrack],
+    projected_flights: &[ProjectedMarker],
     selected_icao24: Option<&str>,
 ) {
     puffin::profile_function!();
-    for flight in flights {
-        let Some(proj) = project_geo(layout, view, flight.location, 0.0) else {
-            continue;
-        };
-        if !proj.front_facing {
-            continue;
-        }
-
+    for projected in projected_flights {
+        let flight = &flights[projected.source_index];
         // ── Category → base colour (theme-aware) ───────────────────────────
         let cat_col: egui::Color32 = match flight.category() {
             FlightCategory::Airline => theme::flight_airline_color(),
@@ -123,7 +104,7 @@ pub(super) fn draw_flights(
             Some(r) if r < -100.0 => cat_col.gamma_multiply(0.80),
             _ => cat_col,
         };
-        let pos = proj.pos;
+        let pos = projected.point.pos;
 
         // Soft glow halo
         painter.circle_stroke(pos, 5.5, egui::Stroke::new(3.5, col.gamma_multiply(0.10)));

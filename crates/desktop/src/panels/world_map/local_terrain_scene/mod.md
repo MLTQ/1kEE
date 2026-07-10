@@ -9,9 +9,17 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 - **Does**: Drives the local terrain renderer, assembles terrain/road/water/uploaded-layer overlays, and coordinates the split helper modules in this folder
 - **Interacts with**: `contour_asset.rs`, `terrain_field.rs`, `road_layer.rs`, `water_layer.rs`, `projection.rs`, `ui_overlays.rs`
 
-### Helper submodules (`projection`, `geography`, `markers`, `dissolve`, `ui_overlays`)
+### Helper submodules (`projection`, `geography`, `markers`, `deflock_layer`, `dissolve`, `ui_overlays`)
 - **Does**: Split projection math, geographic drawing, marker rendering, transition effects, and HUD overlays out of the main scene entrypoint
 - **Interacts with**: `render_local_terrain_scene` and world-map state in `AppModel`
+
+### DeFlock ALPR overlay
+
+- **Does**: Projects the optional public ALPR snapshot into the same local
+  terrain space as camera markers, then reuses its batched mesh whenever the
+  snapshot revision and local projection inputs are unchanged.
+- **Interacts with**: `deflock_layer.rs` and
+  `AppModel::deflock_alpr_locations`.
 
 ### Local scene tests
 - **Does**: Exercise the contour-loading/projection path against cached focus data so the local terrain stack keeps a working end-to-end sanity check
@@ -27,3 +35,5 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 
 ## Notes
 - The scene-level tests are intentionally tolerant of missing local cache data: they return early when the shared focus cache is unavailable instead of making the suite depend on large fixture assets.
+- The optional ALPR overlay is Earth-only and defaults off, so it cannot alter
+  lunar, Martian, or existing local-terrain output unless explicitly enabled.

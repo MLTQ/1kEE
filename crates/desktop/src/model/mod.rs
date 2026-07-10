@@ -8,6 +8,7 @@ mod kml_layer;
 pub mod replay;
 mod vessels;
 
+pub use crate::deflock_source::DeflockAlprLocation;
 pub use arcgis::*;
 pub use cameras::*;
 pub use events::*;
@@ -22,6 +23,7 @@ use crate::osm_ingest::{self, OsmInventory};
 use crate::settings_store;
 use crate::stellar_time;
 use crate::terrain_assets::{self, TerrainInventory};
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -112,6 +114,21 @@ pub struct AppModel {
     pub arcgis_features: Arc<Vec<ArcGisFeature>>,
     /// Selected feature for the detail panel: (source_url, object_id).
     pub selected_arcgis_feature: Option<(String, i64)>,
+    /// Public DeFlock-compatible ALPR locations loaded from the local cache or
+    /// a transparent OpenStreetMap refresh.
+    pub deflock_alpr_locations: Arc<Vec<DeflockAlprLocation>>,
+    /// Optional public ALPR overlay. It remains off until the operator enables it.
+    pub show_deflock_alprs: bool,
+    /// Human-readable cache/refresh state for the public ALPR source.
+    pub deflock_status: String,
+    /// Monotonically changes whenever the ALPR Arc snapshot is replaced. Mesh
+    /// caches use this instead of an allocation address, which can be reused.
+    deflock_snapshot_revision: u64,
+    /// Increments whenever camera data that contributes to nearby-camera
+    /// records changes. It is intentionally private so cache invalidation stays
+    /// coupled to the mutation methods below.
+    camera_registry_revision: u64,
+    nearby_camera_cache: RefCell<Option<NearbyCameraCache>>,
     pub selected_root: Option<PathBuf>,
     pub factal_settings_open: bool,
     pub factal_brief_open: bool,
@@ -152,6 +169,18 @@ pub struct AppModel {
     pub replay_history_status: String,
     pub terrain_inventory: TerrainInventory,
     pub osm_inventory: OsmInventory,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NearbyCameraCacheKey {
+    selected_event_location: Option<(u32, u32)>,
+    radius_km_bits: u32,
+    registry_revision: u64,
+}
+
+struct NearbyCameraCache {
+    key: NearbyCameraCacheKey,
+    cameras: Arc<Vec<NearbyCamera>>,
 }
 
 impl AppModel {
@@ -356,6 +385,12 @@ impl AppModel {
             arcgis_sources: Vec::new(),
             arcgis_features: Arc::new(Vec::new()),
             selected_arcgis_feature: None,
+            deflock_alpr_locations: Arc::new(Vec::new()),
+            show_deflock_alprs: false,
+            deflock_status: "cache pending".into(),
+            deflock_snapshot_revision: 0,
+            camera_registry_revision: 0,
+            nearby_camera_cache: RefCell::new(None),
             selected_root,
             factal_settings_open: false,
             factal_brief_open: false,
@@ -442,6 +477,17 @@ impl AppModel {
 
     pub fn has_camera_source_keys(&self) -> bool {
         !self.windy_webcams_api_key.trim().is_empty() || !self.ny511_api_key.trim().is_empty()
+    }
+
+    /// Replaces the immutable public ALPR snapshot and advances its cache
+    /// revision even when an allocator happens to reuse the prior Arc address.
+    pub fn replace_deflock_alpr_locations(&mut self, locations: Vec<DeflockAlprLocation>) {
+        self.deflock_alpr_locations = Arc::new(locations);
+        self.deflock_snapshot_revision = self.deflock_snapshot_revision.wrapping_add(1);
+    }
+
+    pub(crate) fn deflock_snapshot_revision(&self) -> u64 {
+        self.deflock_snapshot_revision
     }
 
     pub fn set_selected_root(&mut self, root: PathBuf) {
@@ -704,6 +750,7 @@ impl AppModel {
     pub fn replace_camera_registry(&mut self, cameras: Vec<CameraFeed>, source_label: &str) {
         let previous_selected = self.selected_camera_id.clone();
         self.cameras = cameras;
+        self.invalidate_nearby_camera_cache();
 
         if self.cameras.is_empty() {
             self.selected_camera_id = None;
@@ -748,21 +795,25 @@ impl AppModel {
     }
 
     pub fn attempt_connect(&mut self, camera_id: &str) {
-        if let Some(camera) = self
+        let updated = self
             .cameras
             .iter_mut()
             .find(|camera| camera.id == camera_id)
-        {
-            camera.status = if camera.status == CameraConnectionState::Reachable {
-                CameraConnectionState::Reachable
-            } else {
-                CameraConnectionState::Attempted
-            };
+            .map(|camera| {
+                camera.status = if camera.status == CameraConnectionState::Reachable {
+                    CameraConnectionState::Reachable
+                } else {
+                    CameraConnectionState::Attempted
+                };
+                (
+                    camera.provider.clone(),
+                    camera.label.clone(),
+                    camera.status.label(),
+                )
+            });
 
-            let provider = camera.provider.clone();
-            let label = camera.label.clone();
-            let status = camera.status.label();
-
+        if let Some((provider, label, status)) = updated {
+            self.invalidate_nearby_camera_cache();
             self.selected_camera_id = Some(camera_id.to_owned());
             self.push_log(format!(
                 "Feed connection attempted: {} [{}] -> {}",
@@ -772,9 +823,34 @@ impl AppModel {
     }
 
     pub fn nearby_cameras(&self, radius_km: f32) -> Vec<NearbyCamera> {
+        self.nearby_camera_snapshot(radius_km).as_ref().clone()
+    }
+
+    /// Returns a shared, sorted nearby-camera snapshot for the current event.
+    /// Globe and local scenes reuse this allocation across frames until either
+    /// the selected event, radius, or camera registry content changes.
+    pub fn nearby_camera_snapshot(&self, radius_km: f32) -> Arc<Vec<NearbyCamera>> {
         let Some(event) = self.selected_event() else {
-            return Vec::new();
+            return Arc::new(Vec::new());
         };
+
+        let key = NearbyCameraCacheKey {
+            selected_event_location: Some((
+                event.location.lat.to_bits(),
+                event.location.lon.to_bits(),
+            )),
+            radius_km_bits: radius_km.to_bits(),
+            registry_revision: self.camera_registry_revision,
+        };
+        if let Some(cameras) = self
+            .nearby_camera_cache
+            .borrow()
+            .as_ref()
+            .filter(|cache| cache.key == key)
+            .map(|cache| Arc::clone(&cache.cameras))
+        {
+            return cameras;
+        }
 
         let mut nearby: Vec<_> = self
             .cameras
@@ -796,7 +872,17 @@ impl AppModel {
             .collect();
 
         nearby.sort_by(|left, right| left.distance_km.total_cmp(&right.distance_km));
-        nearby
+        let cameras = Arc::new(nearby);
+        *self.nearby_camera_cache.borrow_mut() = Some(NearbyCameraCache {
+            key,
+            cameras: Arc::clone(&cameras),
+        });
+        cameras
+    }
+
+    fn invalidate_nearby_camera_cache(&mut self) {
+        self.camera_registry_revision = self.camera_registry_revision.wrapping_add(1);
+        self.nearby_camera_cache.get_mut().take();
     }
 
     /// Enter or exit replay mode.  On enter: loads history from the local
@@ -874,4 +960,34 @@ pub fn haversine_km(a: GeoPoint, b: GeoPoint) -> f32 {
 fn optional_path_field(value: &str) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nearby_camera_snapshot_reuses_matching_inputs_and_invalidates_on_registry_change() {
+        let mut model = AppModel::seed_demo();
+        let first = model.nearby_camera_snapshot(250.0);
+        let second = model.nearby_camera_snapshot(250.0);
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(
+            first
+                .windows(2)
+                .all(|pair| pair[0].distance_km <= pair[1].distance_km)
+        );
+
+        let registry = model.cameras.clone();
+        model.replace_camera_registry(registry, "test registry");
+        let refreshed = model.nearby_camera_snapshot(250.0);
+        assert!(!Arc::ptr_eq(&first, &refreshed));
+        assert_eq!(
+            first.iter().map(|camera| &camera.id).collect::<Vec<_>>(),
+            refreshed
+                .iter()
+                .map(|camera| &camera.id)
+                .collect::<Vec<_>>()
+        );
+    }
 }

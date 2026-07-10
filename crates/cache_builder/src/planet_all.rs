@@ -17,27 +17,31 @@
 //! re-scanning already-written output cells.
 
 use crate::args::PlanetAllCommand;
-use crate::flat_node_store::{NodeLookup, NodeWriter, sort_in_place, RECORD_BYTES};
+use crate::flat_node_store::{NodeLookup, NodeWriter, RECORD_BYTES, sort_in_place};
 use crate::geojson::{ensure_cache_dir, merge_write_cells, merge_write_feature_cells};
-use crate::roads::{open_planet_at, PosReader, RoadBuildProgress};
+use crate::roads::{RoadBuildProgress, open_planet_at};
 use crate::srtm::SrtmSampler;
 use crate::util::{
-    canonical_aeroway_class, canonical_building_class, canonical_comm_class,
-    canonical_govt_class, canonical_industrial_class, canonical_military_class,
-    canonical_pipeline_class, canonical_port_class, canonical_power_class,
-    canonical_railway_class, canonical_road_class, canonical_surv_class,
-    canonical_tree_class, canonical_waterway_class, focus_cells_for_bounds,
-    parse_voltage_kv, polyline_bounds, GeoPoint, RoadPolyline, WayFeature,
+    GeoPoint, RoadPolyline, WayFeature, canonical_aeroway_class, canonical_building_class,
+    canonical_comm_class, canonical_govt_class, canonical_industrial_class,
+    canonical_military_class, canonical_pipeline_class, canonical_port_class,
+    canonical_power_class, canonical_railway_class, canonical_road_class, canonical_surv_class,
+    canonical_tree_class, canonical_waterway_class, focus_cells_for_bounds, parse_voltage_kv,
+    polyline_bounds,
 };
-use osmpbf::{BlobDecode, BlobReader};
+use osmpbf::BlobDecode;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 const FLUSH_THRESHOLD: usize = 100_000;
+/// Make Pass 1 resumable at a bounded replay cost without syncing every PBF
+/// blob. Node records are made durable before the corresponding offset is
+/// published in the checkpoint.
+const PASS1_CHECKPOINT_NODE_INTERVAL: u64 = 5_000_000;
 // Number of PBF blobs decoded/processed in parallel each iteration.
 // Each blob contains ~8 000 OSM elements; 64 blobs keeps all cores busy
 // while the sequential reader refills the next batch.
@@ -63,9 +67,7 @@ impl Checkpoint {
             if let Some((k, v)) = line.split_once('=') {
                 match k.trim() {
                     "pass1_offset" => cp.pass1_offset = v.trim().parse().unwrap_or(0),
-                    "pass1_record_count" => {
-                        cp.pass1_record_count = v.trim().parse().unwrap_or(0)
-                    }
+                    "pass1_record_count" => cp.pass1_record_count = v.trim().parse().unwrap_or(0),
                     "pass1_complete" => cp.pass1_complete = v.trim() == "true",
                     "pass2_offset" => cp.pass2_offset = v.trim().parse().unwrap_or(0),
                     _ => {}
@@ -78,12 +80,14 @@ impl Checkpoint {
     fn save(&self, path: &Path) -> Result<(), String> {
         let text = format!(
             "pass1_offset={}\npass1_record_count={}\npass1_complete={}\npass2_offset={}\n",
-            self.pass1_offset,
-            self.pass1_record_count,
-            self.pass1_complete,
-            self.pass2_offset,
+            self.pass1_offset, self.pass1_record_count, self.pass1_complete, self.pass2_offset,
         );
-        fs::write(path, text).map_err(|e| e.to_string())
+        let temporary_path = path.with_extension("tmp");
+        fs::write(&temporary_path, text).map_err(|e| e.to_string())?;
+        fs::File::open(&temporary_path)
+            .and_then(|file| file.sync_data())
+            .map_err(|e| e.to_string())?;
+        fs::rename(&temporary_path, path).map_err(|e| e.to_string())
     }
 }
 
@@ -125,24 +129,16 @@ pub fn build_planet_cache_with_progress(
         progress(RoadBuildProgress {
             stage: "Sorting Nodes".to_owned(),
             fraction: 0.30,
-            message: format!(
-                "Sorting {} node records…",
-                cp.pass1_record_count
-            ),
+            message: format!("Sorting {} node records…", cp.pass1_record_count),
         });
 
-        sort_in_place(
-            &node_file,
-            &sort_tmp,
-            cp.pass1_record_count,
-            &mut |msg| {
-                progress(RoadBuildProgress {
-                    stage: "Sorting Nodes".to_owned(),
-                    fraction: 0.35,
-                    message: msg,
-                });
-            },
-        )?;
+        sort_in_place(&node_file, &sort_tmp, cp.pass1_record_count, &mut |msg| {
+            progress(RoadBuildProgress {
+                stage: "Sorting Nodes".to_owned(),
+                fraction: 0.35,
+                message: msg,
+            });
+        })?;
 
         cp.pass1_complete = true;
         cp.pass1_offset = 0; // no longer needed
@@ -166,10 +162,7 @@ pub fn build_planet_cache_with_progress(
         progress(RoadBuildProgress {
             stage: "Loaded Node Store".to_owned(),
             fraction: 0.40,
-            message: format!(
-                "Pass 1 already complete ({} nodes)",
-                cp.pass1_record_count
-            ),
+            message: format!("Pass 1 already complete ({} nodes)", cp.pass1_record_count),
         });
     }
 
@@ -229,11 +222,12 @@ fn run_pass1(
                 cp.pass1_record_count
             ),
         });
-        NodeWriter::append(node_file)?
+        NodeWriter::append(node_file, cp.pass1_record_count)?
     };
 
     let (reader, pos) = open_planet_at(planet_path, resume)?;
-    let mut scanned = 0u64;
+    let mut next_checkpoint_at =
+        (writer.count / PASS1_CHECKPOINT_NODE_INTERVAL + 1) * PASS1_CHECKPOINT_NODE_INTERVAL;
 
     for blob_result in reader {
         let blob = blob_result.map_err(|e| e.to_string())?;
@@ -249,15 +243,19 @@ fn run_pass1(
                 _ => continue,
             };
             writer.write(id, lat, lon)?;
-            scanned += 1;
         }
 
-        // Checkpoint every ~5M nodes.
-        if scanned % 5_000_000 < 4096 {
+        // Checkpoint after crossing a global record-count boundary. The old
+        // modulo condition could miss checkpoints when a blob stepped over its
+        // narrow window, especially after a resumed scan.
+        if writer.count >= next_checkpoint_at {
+            writer.checkpoint()?;
             let offset = pos.load(Ordering::Relaxed);
             cp.pass1_offset = offset;
             cp.pass1_record_count = writer.count;
             cp.save(checkpoint_path)?;
+            next_checkpoint_at = (writer.count / PASS1_CHECKPOINT_NODE_INTERVAL + 1)
+                * PASS1_CHECKPOINT_NODE_INTERVAL;
 
             progress(RoadBuildProgress {
                 stage: "Collecting Nodes".to_owned(),
@@ -273,6 +271,12 @@ fn run_pass1(
 
     let total = writer.count;
     writer.finish()?;
+    // Save the exact EOF resume point after the final durable flush. If the
+    // process stops between here and sort completion, Pass 1 resumes without
+    // duplicating its uncheckpointed tail.
+    cp.pass1_offset = pos.load(Ordering::Relaxed);
+    cp.pass1_record_count = total;
+    cp.save(checkpoint_path)?;
     Ok(total)
 }
 
@@ -286,21 +290,21 @@ struct BuildStats {
 
 // Accumulator filled by one parallel blob-processing task.
 struct BatchOutput {
-    roads:      HashMap<(i32, i32), Vec<RoadPolyline>>,
-    waterways:  HashMap<(i32, i32), Vec<WayFeature>>,
-    buildings:  HashMap<(i32, i32), Vec<WayFeature>>,
-    trees:      HashMap<(i32, i32), Vec<WayFeature>>,
-    power:      HashMap<(i32, i32), Vec<WayFeature>>,
-    rail:       HashMap<(i32, i32), Vec<WayFeature>>,
-    pipeline:   HashMap<(i32, i32), Vec<WayFeature>>,
-    aeroway:    HashMap<(i32, i32), Vec<WayFeature>>,
-    military:   HashMap<(i32, i32), Vec<WayFeature>>,
-    comm:       HashMap<(i32, i32), Vec<WayFeature>>,
+    roads: HashMap<(i32, i32), Vec<RoadPolyline>>,
+    waterways: HashMap<(i32, i32), Vec<WayFeature>>,
+    buildings: HashMap<(i32, i32), Vec<WayFeature>>,
+    trees: HashMap<(i32, i32), Vec<WayFeature>>,
+    power: HashMap<(i32, i32), Vec<WayFeature>>,
+    rail: HashMap<(i32, i32), Vec<WayFeature>>,
+    pipeline: HashMap<(i32, i32), Vec<WayFeature>>,
+    aeroway: HashMap<(i32, i32), Vec<WayFeature>>,
+    military: HashMap<(i32, i32), Vec<WayFeature>>,
+    comm: HashMap<(i32, i32), Vec<WayFeature>>,
     industrial: HashMap<(i32, i32), Vec<WayFeature>>,
-    port:       HashMap<(i32, i32), Vec<WayFeature>>,
-    govt:       HashMap<(i32, i32), Vec<WayFeature>>,
-    surv:       HashMap<(i32, i32), Vec<WayFeature>>,
-    scanned_ways:  usize,
+    port: HashMap<(i32, i32), Vec<WayFeature>>,
+    govt: HashMap<(i32, i32), Vec<WayFeature>>,
+    surv: HashMap<(i32, i32), Vec<WayFeature>>,
+    scanned_ways: usize,
     feature_count: usize,
 }
 
@@ -334,7 +338,11 @@ fn merge_map<T>(dst: &mut HashMap<(i32, i32), Vec<T>>, src: HashMap<(i32, i32), 
 }
 
 // Decode one PBF blob and classify all Way elements inside it.
-fn process_blob(blob: &osmpbf::Blob, node_lookup: &NodeLookup, cmd: &PlanetAllCommand) -> BatchOutput {
+fn process_blob(
+    blob: &osmpbf::Blob,
+    node_lookup: &NodeLookup,
+    cmd: &PlanetAllCommand,
+) -> BatchOutput {
     let mut out = BatchOutput::new();
     let decoded = match blob.decode() {
         Ok(d) => d,
@@ -352,7 +360,12 @@ fn process_blob(blob: &osmpbf::Blob, node_lookup: &NodeLookup, cmd: &PlanetAllCo
     out
 }
 
-fn process_way(way: &osmpbf::Way<'_>, node_lookup: &NodeLookup, cmd: &PlanetAllCommand, out: &mut BatchOutput) {
+fn process_way(
+    way: &osmpbf::Way<'_>,
+    node_lookup: &NodeLookup,
+    cmd: &PlanetAllCommand,
+    out: &mut BatchOutput,
+) {
     let mut road_class: Option<&'static str> = None;
     let mut waterway_class: Option<&'static str> = None;
     let mut building_class: Option<&'static str> = None;
@@ -444,9 +457,13 @@ fn process_way(way: &osmpbf::Way<'_>, node_lookup: &NodeLookup, cmd: &PlanetAllC
     }
 
     let voltage_kv = raw_voltage.as_deref().and_then(parse_voltage_kv);
-    let power_class = raw_power.as_deref().and_then(|pt| canonical_power_class(pt, voltage_kv));
+    let power_class = raw_power
+        .as_deref()
+        .and_then(|pt| canonical_power_class(pt, voltage_kv));
     let pipeline_class: Option<&'static str> = if raw_pipeline {
-        Some(canonical_pipeline_class(raw_substance.as_deref().unwrap_or("")))
+        Some(canonical_pipeline_class(
+            raw_substance.as_deref().unwrap_or(""),
+        ))
     } else {
         None
     };
@@ -475,9 +492,12 @@ fn process_way(way: &osmpbf::Way<'_>, node_lookup: &NodeLookup, cmd: &PlanetAllC
         return;
     }
 
-    let points: Vec<GeoPoint> = way
-        .refs()
-        .filter_map(|id| node_lookup.lookup(id).map(|(lat, lon)| GeoPoint { lat, lon }))
+    let refs: Vec<i64> = way.refs().collect();
+    let points: Vec<GeoPoint> = node_lookup
+        .lookup_many(&refs)
+        .into_iter()
+        .flatten()
+        .map(|(lat, lon)| GeoPoint { lat, lon })
         .collect();
     if points.len() < 2 {
         return;
@@ -642,20 +662,48 @@ fn run_pass2(
 
         if buffered >= FLUSH_THRESHOLD {
             // Update cell_set from accumulated maps (used only for the final count).
-            for k in roads_by_cell.keys()      { cell_set.insert(*k); }
-            for k in waterways_by_cell.keys()  { cell_set.insert(*k); }
-            for k in buildings_by_cell.keys()  { cell_set.insert(*k); }
-            for k in trees_by_cell.keys()      { cell_set.insert(*k); }
-            for k in power_by_cell.keys()      { cell_set.insert(*k); }
-            for k in rail_by_cell.keys()       { cell_set.insert(*k); }
-            for k in pipeline_by_cell.keys()   { cell_set.insert(*k); }
-            for k in aeroway_by_cell.keys()    { cell_set.insert(*k); }
-            for k in military_by_cell.keys()   { cell_set.insert(*k); }
-            for k in comm_by_cell.keys()       { cell_set.insert(*k); }
-            for k in industrial_by_cell.keys() { cell_set.insert(*k); }
-            for k in port_by_cell.keys()       { cell_set.insert(*k); }
-            for k in govt_by_cell.keys()       { cell_set.insert(*k); }
-            for k in surv_by_cell.keys()       { cell_set.insert(*k); }
+            for k in roads_by_cell.keys() {
+                cell_set.insert(*k);
+            }
+            for k in waterways_by_cell.keys() {
+                cell_set.insert(*k);
+            }
+            for k in buildings_by_cell.keys() {
+                cell_set.insert(*k);
+            }
+            for k in trees_by_cell.keys() {
+                cell_set.insert(*k);
+            }
+            for k in power_by_cell.keys() {
+                cell_set.insert(*k);
+            }
+            for k in rail_by_cell.keys() {
+                cell_set.insert(*k);
+            }
+            for k in pipeline_by_cell.keys() {
+                cell_set.insert(*k);
+            }
+            for k in aeroway_by_cell.keys() {
+                cell_set.insert(*k);
+            }
+            for k in military_by_cell.keys() {
+                cell_set.insert(*k);
+            }
+            for k in comm_by_cell.keys() {
+                cell_set.insert(*k);
+            }
+            for k in industrial_by_cell.keys() {
+                cell_set.insert(*k);
+            }
+            for k in port_by_cell.keys() {
+                cell_set.insert(*k);
+            }
+            for k in govt_by_cell.keys() {
+                cell_set.insert(*k);
+            }
+            for k in surv_by_cell.keys() {
+                cell_set.insert(*k);
+            }
 
             written_cells += flush_all(
                 &cmd.out_dir,
@@ -778,4 +826,50 @@ fn flush_all(
     flush_feature!(surv_by_cell, "surveillance");
 
     Ok(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Checkpoint;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn checkpoint_replacement_round_trips_latest_complete_state() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "one_thousand_electric_eye_checkpoint_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("checkpoint.txt");
+
+        let first = Checkpoint {
+            pass1_offset: 10,
+            pass1_record_count: 20,
+            pass1_complete: false,
+            pass2_offset: 30,
+        };
+        first.save(&path).unwrap();
+        let latest = Checkpoint {
+            pass1_offset: 40,
+            pass1_record_count: 50,
+            pass1_complete: true,
+            pass2_offset: 60,
+        };
+        latest.save(&path).unwrap();
+
+        let loaded = Checkpoint::load(&path);
+        assert_eq!(loaded.pass1_offset, 40);
+        assert_eq!(loaded.pass1_record_count, 50);
+        assert!(loaded.pass1_complete);
+        assert_eq!(loaded.pass2_offset, 60);
+        assert!(!path.with_extension("tmp").exists());
+
+        fs::remove_dir_all(dir).unwrap();
+    }
 }

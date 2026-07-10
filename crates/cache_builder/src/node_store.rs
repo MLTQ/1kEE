@@ -81,6 +81,7 @@ impl NodeStore {
         Ok(matches!(value.as_deref(), Some("1")))
     }
 
+    #[allow(dead_code)] // Kept as a standalone state transition for future callers.
     pub fn mark_complete(&self) -> Result<(), String> {
         self.connection
             .execute(
@@ -90,6 +91,28 @@ impl NodeStore {
             )
             .map_err(|error| error.to_string())?;
         Ok(())
+    }
+
+    /// Atomically mark the candidate-node pass complete and retire its resume
+    /// checkpoint. A crash observes either a resumable partial pass or a
+    /// complete store, never a completed flag paired with stale partial state.
+    pub fn mark_complete_and_clear_scan_offset(&mut self, pass: &str) -> Result<(), String> {
+        let key = format!("scan_offset_{pass}");
+        let transaction = self
+            .connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "INSERT INTO build_state(key, value) VALUES ('complete', '1')
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute("DELETE FROM build_state WHERE key = ?1", params![key])
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())
     }
 
     /// Persist a byte-offset checkpoint for a named scan pass ("node_scan" or "way_scan").
@@ -130,6 +153,7 @@ impl NodeStore {
         Ok(())
     }
 
+    #[allow(dead_code)] // Retains the no-op empty-batch API for independent callers.
     pub fn insert_batch(&mut self, batch: &[(i64, GeoPoint)]) -> Result<(), String> {
         if batch.is_empty() {
             return Ok(());
@@ -138,20 +162,54 @@ impl NodeStore {
             .connection
             .transaction()
             .map_err(|error| error.to_string())?;
-        {
-            let mut statement = transaction
-                .prepare(
-                    "INSERT INTO candidate_nodes(id, lat, lon) VALUES (?1, ?2, ?3)
-                     ON CONFLICT(id) DO UPDATE SET lat = excluded.lat, lon = excluded.lon",
-                )
-                .map_err(|error| error.to_string())?;
-            for (id, point) in batch {
-                statement
-                    .execute(params![id, point.lat, point.lon])
-                    .map_err(|error| error.to_string())?;
-            }
-        }
+        Self::insert_batch_in_transaction(&transaction, batch)?;
         transaction.commit().map_err(|error| error.to_string())
+    }
+
+    /// Persist candidate nodes and the next unread PBF offset in one SQLite
+    /// transaction. The offset therefore cannot get ahead of the node data it
+    /// covers, even if the process is interrupted after the commit.
+    pub fn insert_batch_and_save_scan_offset(
+        &mut self,
+        batch: &[(i64, GeoPoint)],
+        pass: &str,
+        offset: u64,
+    ) -> Result<(), String> {
+        let key = format!("scan_offset_{pass}");
+        let transaction = self
+            .connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        Self::insert_batch_in_transaction(&transaction, batch)?;
+        transaction
+            .execute(
+                "INSERT INTO build_state(key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, offset.to_string()],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())
+    }
+
+    fn insert_batch_in_transaction(
+        transaction: &rusqlite::Transaction<'_>,
+        batch: &[(i64, GeoPoint)],
+    ) -> Result<(), String> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let mut statement = transaction
+            .prepare(
+                "INSERT INTO candidate_nodes(id, lat, lon) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(id) DO UPDATE SET lat = excluded.lat, lon = excluded.lon",
+            )
+            .map_err(|error| error.to_string())?;
+        for (id, point) in batch {
+            statement
+                .execute(params![id, point.lat, point.lon])
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     pub fn count(&self) -> Result<usize, String> {
@@ -456,5 +514,65 @@ impl NodeStore {
             .iter()
             .filter_map(|id| id_to_point.get(id).copied())
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NodeStore;
+    use crate::util::GeoPoint;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn batch_and_checkpoint_commit_together() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "one_thousand_electric_eye_node_store_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nodes.sqlite");
+
+        {
+            let mut store = NodeStore::open(&path).unwrap();
+            store.reset().unwrap();
+            store
+                .insert_batch_and_save_scan_offset(
+                    &[
+                        (
+                            1,
+                            GeoPoint {
+                                lat: 1.25,
+                                lon: 2.5,
+                            },
+                        ),
+                        (
+                            2,
+                            GeoPoint {
+                                lat: 3.75,
+                                lon: 4.0,
+                            },
+                        ),
+                    ],
+                    "node_scan",
+                    12_345,
+                )
+                .unwrap();
+
+            assert_eq!(store.count().unwrap(), 2);
+            assert_eq!(store.get_scan_offset("node_scan").unwrap(), Some(12_345));
+            store
+                .mark_complete_and_clear_scan_offset("node_scan")
+                .unwrap();
+            assert!(store.is_complete().unwrap());
+            assert_eq!(store.get_scan_offset("node_scan").unwrap(), None);
+        }
+
+        fs::remove_dir_all(dir).unwrap();
     }
 }

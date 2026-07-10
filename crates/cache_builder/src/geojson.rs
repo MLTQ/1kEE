@@ -1,12 +1,14 @@
 use crate::srtm::SrtmSampler;
-use crate::util::{GeoPoint, RoadPolyline, WayFeature, bounds_intersect, focus_cell_bounds};
+use crate::util::{
+    GeoBounds, GeoPoint, RoadPolyline, WayFeature, bounds_intersect, focus_cell_bounds,
+};
 use cell_format::{
     CellFeature, CellPoint, TAG_ADMN, TAG_AERO, TAG_BLDG, TAG_COMM, TAG_GOVT, TAG_INDS, TAG_MILT,
-    TAG_PIPE, TAG_PORT, TAG_POWR, TAG_RAIL, TAG_ROAD, TAG_SURV, TAG_TREE, TAG_WATR,
-    admin_filename, cell_filename, encode_aero_class, encode_comm_class, encode_govt_class,
-    encode_inds_class, encode_milt_class, encode_pipe_class, encode_port_class,
-    encode_powr_class_from_name, encode_rail_class, encode_road_class, encode_surv_class,
-    encode_watr_class, read::read_single_chunk, write::write_cell,
+    TAG_PIPE, TAG_PORT, TAG_POWR, TAG_RAIL, TAG_ROAD, TAG_SURV, TAG_TREE, TAG_WATR, admin_filename,
+    cell_filename, encode_aero_class, encode_comm_class, encode_govt_class, encode_inds_class,
+    encode_milt_class, encode_pipe_class, encode_port_class, encode_powr_class_from_name,
+    encode_rail_class, encode_road_class, encode_surv_class, encode_watr_class,
+    read::read_single_chunk, write::write_cell,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -42,36 +44,28 @@ pub fn merge_write_cells(
 
     for (&(cell_lat, cell_lon), roads) in roads_by_cell {
         let path = vector_cell_path(cache_dir, cell_lat, cell_lon);
-        let mut merged: HashMap<i64, RoadPolyline> = load_all_roads_from_vector_cell(&path)
-            .unwrap_or_default()
+        let mut merged: HashMap<i64, CellFeature> = load_road_features_for_merge(&path)
             .into_iter()
-            .map(|road| (road.way_id, road))
+            .map(|feature| (feature.way_id, feature))
             .collect();
         let before = merged.len();
         for road in roads {
-            merged.insert(road.way_id, road.clone());
+            merged.insert(road.way_id, road_to_cell_feature(road, None));
         }
         if merged.len() == before && path.exists() {
             continue;
         }
 
         let cell_bounds = focus_cell_bounds(cell_lat, cell_lon);
-        let mut features: Vec<CellFeature> = Vec::new();
-        for road in merged.into_values() {
-            if !bounds_intersect(crate::util::polyline_bounds(&road.points), cell_bounds) {
+        let mut features = Vec::with_capacity(merged.len());
+        for mut feature in merged.into_values() {
+            if feature.points.len() < 2
+                || !bounds_intersect(cell_feature_bounds(&feature.points), cell_bounds)
+            {
                 continue;
             }
-            let elevations = if let Some(s) = srtm.as_mut() {
-                Some(
-                    road.points
-                        .iter()
-                        .map(|p| s.sample(p.lat, p.lon))
-                        .collect::<Vec<_>>(),
-                )
-            } else {
-                None
-            };
-            features.push(road_to_cell_feature(road, elevations));
+            ensure_elevations(&mut feature, srtm.as_deref_mut());
+            features.push(feature);
         }
 
         let bytes = write_cell(cell_lat as i16, cell_lon as i16, &[(TAG_ROAD, &features)]);
@@ -98,38 +92,31 @@ pub fn merge_write_feature_cells(
 
     for (&(cell_lat, cell_lon), features) in features_by_cell {
         let path = feature_cell_path(cache_dir, prefix, cell_lat, cell_lon);
-        let mut merged: HashMap<i64, WayFeature> = load_all_features_from_cell(&path, tag)
-            .unwrap_or_default()
+        let mut merged: HashMap<i64, CellFeature> = load_features_for_merge(&path, tag, prefix)
             .into_iter()
-            .map(|f| (f.way_id, f))
+            .map(|feature| (feature.way_id, feature))
             .collect();
         let before = merged.len();
         for feature in features {
-            merged.insert(feature.way_id, feature.clone());
+            merged.insert(
+                feature.way_id,
+                way_feature_to_cell_feature_with_elev(feature, prefix, None),
+            );
         }
         if merged.len() == before && path.exists() {
             continue;
         }
 
         let cell_bounds = focus_cell_bounds(cell_lat, cell_lon);
-        let mut cell_features: Vec<CellFeature> = Vec::new();
-        for f in merged.into_values() {
-            if !bounds_intersect(crate::util::polyline_bounds(&f.points), cell_bounds) {
+        let mut cell_features = Vec::with_capacity(merged.len());
+        for mut feature in merged.into_values() {
+            if feature.points.len() < 2
+                || !bounds_intersect(cell_feature_bounds(&feature.points), cell_bounds)
+            {
                 continue;
             }
-            let elevations = if let Some(s) = srtm.as_mut() {
-                Some(
-                    f.points
-                        .iter()
-                        .map(|p| s.sample(p.lat, p.lon))
-                        .collect::<Vec<_>>(),
-                )
-            } else {
-                None
-            };
-            cell_features.push(way_feature_to_cell_feature_with_elev(
-                &f, prefix, elevations,
-            ));
+            ensure_elevations(&mut feature, srtm.as_deref_mut());
+            cell_features.push(feature);
         }
 
         let bytes = write_cell(cell_lat as i16, cell_lon as i16, &[(tag, &cell_features)]);
@@ -189,94 +176,53 @@ pub fn write_admin_level_file(
     Ok(count)
 }
 
-// ── Read-back helpers (for merge; fall back to legacy GeoJSON if needed) ──────
-
-/// Load roads from a binary cell file, falling back to legacy GeoJSON.
-pub fn load_all_roads_from_vector_cell(path: &Path) -> Option<Vec<RoadPolyline>> {
+/// Loads binary cache features directly for a merge so pre-baked elevations
+/// survive later incremental flushes.
+fn load_road_features_for_merge(path: &Path) -> Vec<CellFeature> {
     if path.exists() {
-        if let Some(roads) = load_roads_from_binary(path) {
-            return Some(roads);
+        if let Some(features) = read_single_chunk(&fs::read(path).unwrap_or_default(), TAG_ROAD) {
+            return features
+                .into_iter()
+                .filter(|feature| feature.points.len() >= 2)
+                .collect();
         }
     }
-    // Legacy GeoJSON fallback — lets the builder migrate existing caches.
-    let geojson_path = path.with_extension("geojson");
-    load_roads_from_geojson(&geojson_path)
+
+    load_roads_from_geojson(&path.with_extension("geojson"))
+        .unwrap_or_default()
+        .iter()
+        .map(|road| road_to_cell_feature(road, None))
+        .collect()
 }
 
-fn load_roads_from_binary(path: &Path) -> Option<Vec<RoadPolyline>> {
-    let data = fs::read(path).ok()?;
-    let features = read_single_chunk(&data, TAG_ROAD)?;
-    Some(
-        features
-            .into_iter()
-            .filter(|f| f.points.len() >= 2)
-            .map(|f| RoadPolyline {
-                way_id: f.way_id,
-                road_class: cell_format::decode_road_class(f.class).to_owned(),
-                name: f.name,
-                points: f
-                    .points
-                    .into_iter()
-                    .map(|p| GeoPoint {
-                        lat: p.lat,
-                        lon: p.lon,
-                    })
-                    .collect(),
-            })
-            .collect(),
-    )
-}
-
-/// Load features from a binary cell file, falling back to legacy GeoJSON.
-pub fn load_all_features_from_cell(path: &Path, tag: [u8; 4]) -> Option<Vec<WayFeature>> {
+fn load_features_for_merge(path: &Path, tag: [u8; 4], prefix: &str) -> Vec<CellFeature> {
     if path.exists() {
-        if let Some(features) = load_features_from_binary(path, tag) {
-            return Some(features);
+        if let Some(features) = read_single_chunk(&fs::read(path).unwrap_or_default(), tag) {
+            return features
+                .into_iter()
+                .filter(|feature| feature.points.len() >= 2)
+                .collect();
         }
     }
-    let geojson_path = path.with_extension("geojson");
-    load_features_from_geojson(&geojson_path)
-}
 
-fn load_features_from_binary(path: &Path, tag: [u8; 4]) -> Option<Vec<WayFeature>> {
-    let data = fs::read(path).ok()?;
-    let features = read_single_chunk(&data, tag)?;
-    Some(
-        features
-            .into_iter()
-            .filter(|f| f.points.len() >= 2)
-            .map(|f| {
-                let feature_class = cell_format::decode_class(&tag, f.class).to_owned();
-                WayFeature {
-                    way_id: f.way_id,
-                    feature_class,
-                    name: f.name,
-                    points: f
-                        .points
-                        .into_iter()
-                        .map(|p| GeoPoint {
-                            lat: p.lat,
-                            lon: p.lon,
-                        })
-                        .collect(),
-                    is_polygon: f.is_polygon,
-                }
-            })
-            .collect(),
-    )
+    load_features_from_geojson(&path.with_extension("geojson"))
+        .unwrap_or_default()
+        .iter()
+        .map(|feature| way_feature_to_cell_feature_with_elev(feature, prefix, None))
+        .collect()
 }
 
 // ── Conversion helpers ────────────────────────────────────────────────────────
 
-fn road_to_cell_feature(road: RoadPolyline, elevations: Option<Vec<f32>>) -> CellFeature {
+fn road_to_cell_feature(road: &RoadPolyline, elevations: Option<Vec<f32>>) -> CellFeature {
     CellFeature {
         way_id: road.way_id,
         class: encode_road_class(&road.road_class),
         is_polygon: false,
-        name: road.name,
+        name: road.name.clone(),
         points: road
             .points
-            .into_iter()
+            .iter()
             .map(|p| CellPoint {
                 lon: p.lon,
                 lat: p.lat,
@@ -322,8 +268,39 @@ fn way_feature_to_cell_feature_with_elev(
     }
 }
 
-fn way_feature_to_cell_feature(f: &WayFeature, prefix: &str) -> CellFeature {
-    way_feature_to_cell_feature_with_elev(f, prefix, None)
+fn ensure_elevations(feature: &mut CellFeature, srtm: Option<&mut SrtmSampler>) {
+    if feature.elevations.is_some() {
+        return;
+    }
+    let Some(srtm) = srtm else {
+        return;
+    };
+    feature.elevations = Some(
+        feature
+            .points
+            .iter()
+            .map(|point| srtm.sample(point.lat, point.lon))
+            .collect(),
+    );
+}
+
+fn cell_feature_bounds(points: &[CellPoint]) -> GeoBounds {
+    let mut min_lat = f32::INFINITY;
+    let mut max_lat = f32::NEG_INFINITY;
+    let mut min_lon = f32::INFINITY;
+    let mut max_lon = f32::NEG_INFINITY;
+    for point in points {
+        min_lat = min_lat.min(point.lat);
+        max_lat = max_lat.max(point.lat);
+        min_lon = min_lon.min(point.lon);
+        max_lon = max_lon.max(point.lon);
+    }
+    GeoBounds {
+        min_lat,
+        max_lat,
+        min_lon,
+        max_lon,
+    }
 }
 
 fn prefix_to_tag(prefix: &str) -> [u8; 4] {
@@ -342,25 +319,6 @@ fn prefix_to_tag(prefix: &str) -> [u8; 4] {
         "government" => TAG_GOVT,
         "surveillance" => TAG_SURV,
         _ => TAG_BLDG,
-    }
-}
-
-fn tag_to_prefix(tag: [u8; 4]) -> &'static str {
-    match &tag {
-        b"WATR" => "waterway",
-        b"BLDG" => "building",
-        b"TREE" => "tree",
-        b"POWR" => "power",
-        b"RAIL" => "railway",
-        b"PIPE" => "pipeline",
-        b"AERO" => "aeroway",
-        b"MILT" => "military",
-        b"COMM" => "comm",
-        b"INDS" => "industrial",
-        b"PORT" => "port",
-        b"GOVT" => "government",
-        b"SURV" => "surveillance",
-        _ => "unknown",
     }
 }
 
@@ -464,4 +422,80 @@ fn load_features_from_geojson(path: &Path) -> Option<Vec<WayFeature>> {
     }
 
     Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{load_road_features_for_merge, merge_write_cells, vector_cell_path};
+    use crate::util::{GeoPoint, RoadPolyline};
+    use cell_format::{
+        CellFeature, CellPoint, TAG_ROAD, read::read_single_chunk, write::write_cell,
+    };
+    use std::collections::HashMap;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn merge_loader_keeps_existing_baked_elevations() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "one_thousand_electric_eye_geojson_merge_{}_{}",
+            std::process::id(),
+            unique
+        ));
+        let road_dir = dir.join("road_cells");
+        fs::create_dir_all(&road_dir).unwrap();
+        let path = vector_cell_path(&dir, 40, -74);
+        let feature = CellFeature {
+            way_id: 77,
+            class: 2,
+            is_polygon: false,
+            name: Some("existing".to_owned()),
+            points: vec![
+                CellPoint {
+                    lon: -73.9,
+                    lat: 40.7,
+                },
+                CellPoint {
+                    lon: -73.8,
+                    lat: 40.8,
+                },
+            ],
+            elevations: Some(vec![12.5, 18.25]),
+        };
+        fs::write(&path, write_cell(40, -74, &[(TAG_ROAD, &[feature])])).unwrap();
+
+        let loaded = load_road_features_for_merge(&path);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].elevations.as_deref(), Some(&[12.5, 18.25][..]));
+
+        let updates = HashMap::from([(
+            (40, -74),
+            vec![RoadPolyline {
+                way_id: 88,
+                road_class: "primary".to_owned(),
+                name: None,
+                points: vec![
+                    GeoPoint {
+                        lon: -73.95,
+                        lat: 40.75,
+                    },
+                    GeoPoint {
+                        lon: -73.85,
+                        lat: 40.85,
+                    },
+                ],
+            }],
+        )]);
+        assert_eq!(merge_write_cells(&dir, &updates, None).unwrap(), 1);
+
+        let saved = read_single_chunk(&fs::read(&path).unwrap(), TAG_ROAD).unwrap();
+        let preserved = saved.iter().find(|item| item.way_id == 77).unwrap();
+        assert_eq!(preserved.elevations.as_deref(), Some(&[12.5, 18.25][..]));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
 }

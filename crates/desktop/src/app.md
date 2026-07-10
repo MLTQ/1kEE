@@ -1,32 +1,42 @@
 # app.rs
 
 ## Purpose
-Coordinates the desktop app at the highest level. It owns the root `AppModel`, installs visuals, and composes the major UI panels.
+
+Owns the desktop application's egui lifecycle, initializes shared rendering and
+data services, and advances non-blocking source pollers each frame. It is the
+UI-thread coordinator for `AppModel`.
 
 ## Components
 
-### `DashboardApp`
-- **Does**: Stores shared UI state for the running app
-- **Interacts with**: `AppModel` in `model.rs`, panel renderers in `panels/`, `factal_stream.rs`, `camera_registry.rs`, shutdown cleanup in `panels/world_map/srtm_focus_cache.rs`
-
 ### `DashboardApp::new`
-- **Does**: Installs theme configuration and seeds the demo model
-- **Interacts with**: `install` in `theme.rs`, `AppModel::seed_demo` in `model.rs`
+- **Does**: Installs the theme, starts GPU callbacks and local services, then
+  constructs the initial model and companion bridge.
+- **Interacts with**: `model.rs`, GPU world-map passes, event storage, and
+  `GruveBridge`.
+
+### `DashboardApp::update`
+- **Does**: Drains companion commands, ticks source adapters, updates animation
+  state, and renders the desktop panels.
+- **Interacts with**: source modules, `AppModel`, and `panels`.
+
+### DeFlock source lifecycle
+- **Does**: Ticks the cache-first public ALPR adapter and signals its workers on
+  shutdown alongside other source adapters.
+- **Interacts with**: `deflock_source.rs`.
 
 ### `Drop for DashboardApp`
-- **Does**: Cancels active GDAL terrain-cache subprocesses and suppresses new Factal and camera-registry poll scheduling when the native app is tearing down
-- **Interacts with**: `shutdown` in `factal_stream.rs`, `shutdown` in `camera_registry.rs`, `terminate_active_gdal_jobs` in `panels/world_map/srtm_focus_cache.rs`
-- **Rationale**: Prevents terrain or live-event background work from continuing unsupervised during shutdown
-
-### `eframe::App::update`
-- **Does**: Advances the live Factal poll loop, advances the live camera-registry poll loop, and lays out the shell around header, Factal brief window, Factal settings, terrain-library window, sidebars, status log, and map canvas
-- **Interacts with**: `tick` in `factal_stream.rs`, `tick` in `camera_registry.rs`, `render_*` functions in `panels/mod.rs`
-- **Rationale**: Keeps app composition separate from the details of each view
+- **Does**: Signals background source workers and active terrain jobs to stop.
+- **Interacts with**: source shutdown hooks and world-map terrain cache.
 
 ## Contracts
 
 | Dependent | Expects | Breaking changes |
-|-----------|---------|------------------|
-| `main.rs` | `DashboardApp::new` returns a ready-to-render app | Constructor signature |
-| `panels/*` | Shared state lives in `AppModel` and remains mutable here | Moving state ownership elsewhere |
-| Runtime shutdown | Dropping `DashboardApp` terminates tracked terrain-cache subprocesses and suppresses new Factal polling | Removing the cleanup hooks or making them best-effort elsewhere |
+|---|---|---|
+| Source adapters | `tick` is called on the UI thread every frame and must be non-blocking | Adding a blocking source call to `update` |
+| Source workers | Shutdown hooks run before application teardown | Removing shutdown calls |
+| Panels | Model mutations from completed source work are visible before rendering | Moving poller ticks after panel rendering |
+
+## Notes
+
+- Network or disk-heavy source work belongs in source-module workers; this file
+  only schedules and applies ready results.

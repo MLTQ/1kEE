@@ -70,7 +70,7 @@ fn tab_cameras(ui: &mut egui::Ui, model: &mut AppModel) {
     );
     ui.add_space(8.0);
 
-    let nearby = model.nearby_cameras(250.0);
+    let nearby = model.nearby_camera_snapshot(250.0);
 
     if nearby.is_empty() {
         ui.label("Select an event to inspect nearby cameras.");
@@ -88,7 +88,7 @@ fn tab_cameras(ui: &mut egui::Ui, model: &mut AppModel) {
     ui.add_space(8.0);
 
     egui::ScrollArea::vertical().show(ui, |ui| {
-        for camera in nearby {
+        for camera in nearby.iter() {
             let is_selected = model.selected_camera_id.as_deref() == Some(camera.id.as_str());
 
             egui::Frame::group(ui.style())

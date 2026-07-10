@@ -20,6 +20,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const ROAD_FLUSH_THRESHOLD: usize = 100_000;
 const NODE_INSERT_BATCH: usize = 50_000;
+/// Bound the work replayed by a resumed node scan even over sparse areas where
+/// the retained-node batch does not fill for a long time.
+const NODE_CHECKPOINT_SCAN_INTERVAL: usize = 1_000_000;
+const NODE_PROGRESS_SCAN_INTERVAL: usize = 2_000_000;
 
 // ── Position-tracking reader ──────────────────────────────────────────────────
 //
@@ -216,8 +220,7 @@ fn load_or_collect_candidate_nodes(
         resume_offset,
         progress,
     )?;
-    node_store.mark_complete()?;
-    node_store.clear_scan_offset("node_scan")?;
+    node_store.mark_complete_and_clear_scan_offset("node_scan")?;
 
     let node_count = node_store.count()?;
     progress(RoadBuildProgress {
@@ -245,6 +248,8 @@ fn collect_candidate_nodes(
     let mut scanned = 0usize;
     let mut kept = 0usize;
     let mut batch: Vec<(i64, GeoPoint)> = Vec::with_capacity(NODE_INSERT_BATCH);
+    let mut next_checkpoint_at = NODE_CHECKPOINT_SCAN_INTERVAL;
+    let mut next_progress_at = NODE_PROGRESS_SCAN_INTERVAL;
 
     for blob_result in reader {
         let blob = blob_result.map_err(|e| e.to_string())?;
@@ -267,15 +272,18 @@ fn collect_candidate_nodes(
             scanned += 1;
         }
 
-        // Flush + checkpoint after each full batch.
-        if batch.len() >= NODE_INSERT_BATCH {
-            node_store.insert_batch(&batch)?;
-            batch.clear();
-            // Save the position of the NEXT blob — safe to resume from here.
+        // Keep both the candidate-node rows and the offset in one transaction.
+        // Checkpointing based on scanned nodes also prevents huge replay gaps
+        // through sparse regions that never fill a retained-node batch.
+        if batch.len() >= NODE_INSERT_BATCH || scanned >= next_checkpoint_at {
             let checkpoint = pos.load(Ordering::Relaxed);
-            node_store.save_scan_offset("node_scan", checkpoint)?;
+            node_store.insert_batch_and_save_scan_offset(&batch, "node_scan", checkpoint)?;
+            batch.clear();
+            while scanned >= next_checkpoint_at {
+                next_checkpoint_at += NODE_CHECKPOINT_SCAN_INTERVAL;
+            }
 
-            if scanned % 2_000_000 < NODE_INSERT_BATCH {
+            if scanned >= next_progress_at {
                 progress(RoadBuildProgress {
                     stage: "Scanning Nodes".to_owned(),
                     fraction: 0.30,
@@ -284,12 +292,17 @@ fn collect_candidate_nodes(
                         scanned, kept
                     ),
                 });
+                while scanned >= next_progress_at {
+                    next_progress_at += NODE_PROGRESS_SCAN_INTERVAL;
+                }
             }
         }
     }
 
-    // Flush final partial batch (no checkpoint needed — mark_complete() follows).
-    node_store.insert_batch(&batch)?;
+    // Persist the final tail and EOF offset together. If completion is
+    // interrupted below, the next run starts at EOF instead of rewriting it.
+    let checkpoint = pos.load(Ordering::Relaxed);
+    node_store.insert_batch_and_save_scan_offset(&batch, "node_scan", checkpoint)?;
     Ok(())
 }
 
@@ -698,7 +711,10 @@ fn collect_all_features_by_cell(
                         for cell in focus_cells_for_bounds(way_bounds) {
                             if assigned.insert(cell) {
                                 touched_cells.insert(cell);
-                                pipeline_by_cell.entry(cell).or_default().push(feature.clone());
+                                pipeline_by_cell
+                                    .entry(cell)
+                                    .or_default()
+                                    .push(feature.clone());
                             }
                         }
                         feature_count += 1;
@@ -726,7 +742,10 @@ fn collect_all_features_by_cell(
                         for cell in focus_cells_for_bounds(way_bounds) {
                             if assigned.insert(cell) {
                                 touched_cells.insert(cell);
-                                aeroway_by_cell.entry(cell).or_default().push(feature.clone());
+                                aeroway_by_cell
+                                    .entry(cell)
+                                    .or_default()
+                                    .push(feature.clone());
                             }
                         }
                         feature_count += 1;
@@ -750,7 +769,10 @@ fn collect_all_features_by_cell(
                         for cell in focus_cells_for_bounds(way_bounds) {
                             if assigned.insert(cell) {
                                 touched_cells.insert(cell);
-                                military_by_cell.entry(cell).or_default().push(feature.clone());
+                                military_by_cell
+                                    .entry(cell)
+                                    .or_default()
+                                    .push(feature.clone());
                             }
                         }
                         feature_count += 1;
