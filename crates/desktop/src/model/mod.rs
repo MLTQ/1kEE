@@ -72,6 +72,9 @@ pub struct AppModel {
     pub fill_elevation: bool,
     pub show_bathymetry: bool,
     pub show_contours: bool,
+    /// Operator-selected multiplier for contour-derived stroke widths. Kept
+    /// private so all rendering paths receive a finite, supported value.
+    contour_stroke_scale: f32,
     pub show_trees: bool,
     pub show_buildings: bool,
     pub show_admin: bool,
@@ -352,6 +355,7 @@ impl AppModel {
             fill_elevation: false,
             show_bathymetry: true,
             show_contours: true,
+            contour_stroke_scale: app_settings.contour_stroke_scale,
             show_trees: false,
             show_buildings: false,
             show_admin: false,
@@ -479,6 +483,18 @@ impl AppModel {
         !self.windy_webcams_api_key.trim().is_empty() || !self.ny511_api_key.trim().is_empty()
     }
 
+    /// Return the normalized contour-stroke multiplier shared by globe and
+    /// local-terrain renderers. `1.0` is the legacy visual weight.
+    pub fn contour_stroke_scale(&self) -> f32 {
+        self.contour_stroke_scale
+    }
+
+    /// Update the contour-stroke multiplier while retaining the bounds and
+    /// finite-value invariant expected by the renderers.
+    pub fn set_contour_stroke_scale(&mut self, scale: f32) {
+        self.contour_stroke_scale = settings_store::normalize_contour_stroke_scale(scale);
+    }
+
     /// Replaces the immutable public ALPR snapshot and advances its cache
     /// revision even when an allocator happens to reuse the prior Arc address.
     pub fn replace_deflock_alpr_locations(&mut self, locations: Vec<DeflockAlprLocation>) {
@@ -535,6 +551,7 @@ impl AppModel {
             gdal_bin_dir: optional_path_field(&self.settings_gdal_bin_dir),
             osmium_bin_dir: optional_path_field(&self.settings_osmium_bin_dir),
             prefer_overpass: self.settings_prefer_overpass,
+            contour_stroke_scale: self.contour_stroke_scale,
         };
         settings_store::save_app_settings(&settings)
     }
@@ -555,6 +572,7 @@ impl AppModel {
         self.settings_gdal_bin_dir = settings.gdal_bin_dir.unwrap_or_default();
         self.settings_osmium_bin_dir = settings.osmium_bin_dir.unwrap_or_default();
         self.settings_prefer_overpass = settings.prefer_overpass;
+        self.set_contour_stroke_scale(settings.contour_stroke_scale);
         self.windy_webcams_api_key = settings.windy_webcams_api_key.trim().to_owned();
         self.ny511_api_key = settings.ny511_api_key.trim().to_owned();
         self.aisstream_api_key = settings.aisstream_api_key.trim().to_owned();
@@ -988,6 +1006,26 @@ mod tests {
                 .iter()
                 .map(|camera| &camera.id)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn contour_stroke_scale_defaults_and_stays_within_renderable_bounds() {
+        let mut model = AppModel::seed_demo();
+        assert_eq!(
+            model.contour_stroke_scale(),
+            settings_store::DEFAULT_CONTOUR_STROKE_SCALE
+        );
+
+        model.set_contour_stroke_scale(0.0);
+        assert_eq!(
+            model.contour_stroke_scale(),
+            settings_store::DEFAULT_CONTOUR_STROKE_SCALE
+        );
+        model.set_contour_stroke_scale(10.0);
+        assert_eq!(
+            model.contour_stroke_scale(),
+            settings_store::MAX_CONTOUR_STROKE_SCALE
         );
     }
 }

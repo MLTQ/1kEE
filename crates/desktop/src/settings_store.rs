@@ -5,7 +5,13 @@ use std::sync::{Mutex, OnceLock};
 
 const SETTINGS_FILE: &str = ".1kee_settings.json";
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// The default keeps the contour renderer byte-for-byte equivalent to the
+/// visual weight it used before the operator control was added.
+pub(crate) const DEFAULT_CONTOUR_STROKE_SCALE: f32 = 1.0;
+pub(crate) const MIN_CONTOUR_STROKE_SCALE: f32 = 0.25;
+pub(crate) const MAX_CONTOUR_STROKE_SCALE: f32 = 3.0;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
     pub factal_api_key: String,
@@ -35,6 +41,44 @@ pub struct AppSettings {
     /// if osmium + a local planet file are both available.
     #[serde(default)]
     pub prefer_overpass: bool,
+    /// Multiplier for contour-derived stroke widths in globe and local views.
+    #[serde(default = "default_contour_stroke_scale")]
+    pub contour_stroke_scale: f32,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            factal_api_key: String::new(),
+            windy_webcams_api_key: String::new(),
+            ny511_api_key: String::new(),
+            aisstream_api_key: String::new(),
+            asset_root: None,
+            data_root: None,
+            derived_root: None,
+            srtm_root: None,
+            planet_path: None,
+            gdal_bin_dir: None,
+            osmium_bin_dir: None,
+            prefer_overpass: false,
+            contour_stroke_scale: DEFAULT_CONTOUR_STROKE_SCALE,
+        }
+    }
+}
+
+fn default_contour_stroke_scale() -> f32 {
+    DEFAULT_CONTOUR_STROKE_SCALE
+}
+
+/// Clamp persisted/operator input to the supported visual range. Invalid
+/// values fall back to the legacy 1× appearance instead of producing an
+/// invisible or malformed GPU stroke.
+pub(crate) fn normalize_contour_stroke_scale(value: f32) -> f32 {
+    if !value.is_finite() || value <= 0.0 {
+        DEFAULT_CONTOUR_STROKE_SCALE
+    } else {
+        value.clamp(MIN_CONTOUR_STROKE_SCALE, MAX_CONTOUR_STROKE_SCALE)
+    }
 }
 
 pub fn load_app_settings() -> AppSettings {
@@ -200,7 +244,7 @@ fn load_uncached() -> AppSettings {
         .and_then(|path| fs::read_to_string(path).ok())
         .and_then(|body| serde_json::from_str::<AppSettings>(&body).ok())
         .map(normalize_settings)
-        .unwrap_or_default();
+        .unwrap_or_else(|| normalize_settings(AppSettings::default()));
 
     if let Ok(mut guard) = settings_cache().lock() {
         *guard = Some(settings.clone());
@@ -220,6 +264,7 @@ fn normalize_settings(mut settings: AppSettings) -> AppSettings {
     settings.srtm_root = normalize_srtm_root_owned(settings.srtm_root);
     settings.planet_path = normalize_optional_owned(settings.planet_path);
     settings.gdal_bin_dir = normalize_optional_owned(settings.gdal_bin_dir);
+    settings.contour_stroke_scale = normalize_contour_stroke_scale(settings.contour_stroke_scale);
     settings
 }
 
@@ -304,4 +349,35 @@ fn normalize_srtm_root_owned(value: Option<String>) -> Option<String> {
 fn path_from_optional(text: &str) -> Option<PathBuf> {
     let trimmed = text.trim();
     (!trimmed.is_empty()).then(|| PathBuf::from(trimmed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contour_stroke_scale_defaults_to_legacy_visual_weight() {
+        let settings: AppSettings = serde_json::from_str("{}").expect("valid legacy settings");
+        assert_eq!(settings.contour_stroke_scale, DEFAULT_CONTOUR_STROKE_SCALE);
+    }
+
+    #[test]
+    fn contour_stroke_scale_rejects_invalid_and_out_of_range_values() {
+        assert_eq!(
+            normalize_contour_stroke_scale(f32::NAN),
+            DEFAULT_CONTOUR_STROKE_SCALE
+        );
+        assert_eq!(
+            normalize_contour_stroke_scale(0.0),
+            DEFAULT_CONTOUR_STROKE_SCALE
+        );
+        assert_eq!(
+            normalize_contour_stroke_scale(0.1),
+            MIN_CONTOUR_STROKE_SCALE
+        );
+        assert_eq!(
+            normalize_contour_stroke_scale(10.0),
+            MAX_CONTOUR_STROKE_SCALE
+        );
+    }
 }

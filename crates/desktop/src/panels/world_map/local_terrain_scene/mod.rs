@@ -240,6 +240,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             contours_slice,
             1.0,
             model.active_body,
+            model.contour_stroke_scale(),
         );
     }
 
@@ -267,6 +268,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             contours_slice,
             1.0,
             model.active_body,
+            model.contour_stroke_scale(),
         );
     }
     if !contours_slice.is_empty() && model.active_body == crate::model::ActiveBody::Earth {
@@ -587,6 +589,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             viewport_center,
             render_zoom,
             model.selected_root.as_deref(),
+            model.contour_stroke_scale(),
         );
     }
     if model.show_bathymetry && model.active_body == crate::model::ActiveBody::Earth {
@@ -597,6 +600,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             viewport_center,
             render_zoom,
             model.selected_root.as_deref(),
+            model.contour_stroke_scale(),
         );
     }
     if !model.geojson_layers.is_empty() {
@@ -794,6 +798,7 @@ pub fn paint_transition_overlay(
         contours.as_ref(),
         progress,
         model.active_body,
+        model.contour_stroke_scale(),
     );
 }
 
@@ -1455,6 +1460,7 @@ fn draw_contour_stack(
     contours: &[contour_asset::ContourPath],
     alpha: f32,
     active_body: crate::model::ActiveBody,
+    contour_stroke_scale: f32,
 ) {
     puffin::profile_function!();
     // 300_000 points prevents WGPU Validation Error index buffer overflow
@@ -1524,7 +1530,11 @@ fn draw_contour_stack(
 
             let major = (contour.elevation_m.round() as i32).rem_euclid(major_rem) == 0;
             let stroke = egui::Stroke::new(
-                if major { 1.35 } else { 0.7 } * (0.72 + alpha * 0.28),
+                local_contour_stroke_width(
+                    if major { 1.35 } else { 0.7 },
+                    alpha,
+                    contour_stroke_scale,
+                ),
                 if major { major_color } else { minor_color }
                     .gamma_multiply((if major { 1.0 } else { 0.78 }) * alpha),
             );
@@ -1543,6 +1553,11 @@ fn draw_contour_stack(
         remaining_points = remaining_points.saturating_sub(points.len());
         painter.add(egui::Shape::line(points, stroke));
     }
+}
+
+#[inline]
+fn local_contour_stroke_width(base_width: f32, alpha: f32, contour_stroke_scale: f32) -> f32 {
+    base_width * (0.72 + alpha * 0.28) * contour_stroke_scale
 }
 
 // ── Road / Water cache public API ─────────────────────────────────────────
@@ -1905,5 +1920,11 @@ mod tests {
         assert!(!points.is_empty());
         assert!(max_x - min_x > 180.0);
         assert!(max_y - min_y > 140.0);
+    }
+
+    #[test]
+    fn default_contour_stroke_scale_preserves_local_line_widths() {
+        assert_eq!(local_contour_stroke_width(1.35, 1.0, 1.0), 1.35);
+        assert_eq!(local_contour_stroke_width(0.7, 1.0, 1.0), 0.7);
     }
 }

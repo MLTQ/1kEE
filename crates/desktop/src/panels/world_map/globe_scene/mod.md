@@ -41,6 +41,12 @@ model and viewport into an egui-painted `GlobeScene` each frame.
 - **Interacts with**: `local_terrain_scene/deflock_layer.rs` and
   `AppModel::deflock_alpr_locations`.
 
+### Contour stroke routing
+
+- **Does**: Reads the shared contour scale once per globe frame and forwards
+  it to the GPU terrain, coastline, and bathymetry contour passes.
+- **Interacts with**: `geography.rs` and `AppModel::contour_stroke_scale`.
+
 ## Contracts
 
 | Dependent | Expects | Breaking changes |
@@ -48,6 +54,7 @@ model and viewport into an egui-painted `GlobeScene` each frame.
 | `world_map.rs` | `paint` returns marker IDs and positions matching the pixels drawn this frame | Changing marker order, position, or ID types |
 | `markers.rs` | Projection results use the same view/layout that produced the frame | Reprojecting with different geometry or dropping front-facing state |
 | `map_tooltips.rs` | Hit-test vectors contain only visible, interactive marker positions | Returning hidden or differently positioned markers |
+| Layer drawer | The Contours toggle gates globe terrain contours just as it gates local terrain contours | Rendering terrain contours while the toggle is off |
 
 ## Notes
 
@@ -58,3 +65,5 @@ model and viewport into an egui-painted `GlobeScene` each frame.
   source ordering and front-facing filtering previously used in both passes.
 - The optional ALPR overlay is surface-projected and front-face filtered before
   mesh construction; it does not alter existing layer geometry when disabled.
+- A `1×` contour scale is deliberately passed through unchanged, preserving the
+  prior GPU contour width while allowing later frames to alter only uniforms.

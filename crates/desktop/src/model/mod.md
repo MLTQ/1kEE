@@ -15,6 +15,14 @@ source pollers.
 - **Interacts with**: settings, terrain/OSM inventories, and the model domain
   modules.
 
+### Contour stroke scale
+
+- **Does**: Holds the validated, persisted multiplier shared by every
+  contour-derived line renderer; `1.0` exactly preserves the original visual
+  weight.
+- **Interacts with**: `settings_store.rs`, the layer drawer, globe contour
+  callbacks, and local-terrain contour painters.
+
 ### Selection and replacement methods
 - **Does**: Maintain valid event/camera selection while focus, event feeds, and
   camera registries change.
@@ -48,6 +56,7 @@ source pollers.
 | Map scenes | Selection, display toggles, and live data form a consistent immutable snapshot per paint pass | Renaming fields or changing selection semantics |
 | Source pollers | `replace_*` methods retain valid selection and report source state | Removing replacement methods or changing their ownership contracts |
 | Camera sidebar | Nearby records are sorted ascending by exact `haversine_km` results | Changing distance calculation, inclusion boundary, or sort order |
+| Map renderers | `contour_stroke_scale()` is finite and within the supported range | Bypassing the setter or exposing unchecked mutable state |
 | Gruve bridge | Public model fields can be snapshotted and commands can update supported selection state | Removing required state or thread-affecting changes |
 
 ## Notes
@@ -57,3 +66,5 @@ source pollers.
 - Camera/event data may update independently, so derived nearby-camera data is
   keyed by selected-event coordinates, radius, and an internal camera-registry
   revision before it can be reused.
+- The contour multiplier remains private and is normalized on both load and
+  update so a corrupted local settings file cannot yield invisible GPU lines.

@@ -116,19 +116,61 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         draw_hud_frame(painter, rect);
     }
 
+    let contour_stroke_scale = model.contour_stroke_scale();
     if model.active_body == crate::model::ActiveBody::Earth {
         if model.show_bathymetry {
-            geography::draw_global_bathymetry(painter, &layout, &model.globe_view, selected_root);
+            geography::draw_global_bathymetry(
+                painter,
+                &layout,
+                &model.globe_view,
+                selected_root,
+                contour_stroke_scale,
+            );
         }
         if model.show_coastlines {
-            geography::draw_global_coastlines(painter, &layout, &model.globe_view, selected_root);
+            geography::draw_global_coastlines(
+                painter,
+                &layout,
+                &model.globe_view,
+                selected_root,
+                contour_stroke_scale,
+            );
         }
-        geography::draw_global_topo(painter, &layout, &model.globe_view, selected_root);
-        geography::draw_srtm_on_globe(painter, &layout, &model.globe_view, &lod, selected_root);
+        if model.show_contours {
+            geography::draw_global_topo(
+                painter,
+                &layout,
+                &model.globe_view,
+                selected_root,
+                contour_stroke_scale,
+            );
+            geography::draw_srtm_on_globe(
+                painter,
+                &layout,
+                &model.globe_view,
+                &lod,
+                selected_root,
+                contour_stroke_scale,
+            );
+        }
     } else if model.active_body == crate::model::ActiveBody::Moon {
-        geography::draw_lunar_topo(painter, &layout, &model.globe_view, selected_root);
+        geography::draw_lunar_topo(
+            painter,
+            &layout,
+            &model.globe_view,
+            selected_root,
+            model.show_contours,
+            contour_stroke_scale,
+        );
     } else if model.active_body == crate::model::ActiveBody::Mars {
-        geography::draw_mars_topo(painter, &layout, &model.globe_view, selected_root);
+        geography::draw_mars_topo(
+            painter,
+            &layout,
+            &model.globe_view,
+            selected_root,
+            model.show_contours,
+            contour_stroke_scale,
+        );
     }
 
     // ── GeoJSON user overlay layers ────────────────────────────────────────

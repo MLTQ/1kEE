@@ -1,12 +1,12 @@
 # settings_store.rs
 
 ## Purpose
-Persists the desktop app's local configuration so it survives restarts. That now includes the Factal API key, live camera-source keys, and path overrides for the asset root, data roots, and GDAL tool discovery.
+Persists the desktop app's local configuration so it survives restarts. That now includes the Factal API key, live camera-source keys, path overrides for the asset root, data roots, GDAL tool discovery, and the operator-selected contour line thickness.
 
 ## Components
 
 ### `AppSettings`
-- **Does**: Holds the app-managed settings payload for Factal, live camera sources, and filesystem/tool paths
+- **Does**: Holds the app-managed settings payload for Factal, live camera sources, filesystem/tool paths, and contour stroke scale
 - **Interacts with**: `model.rs`, `terrain_assets.rs`, `osm_ingest.rs`, `srtm_focus_cache.rs`, `factal_settings.rs`, `camera_registry.rs`
 
 ### `load_app_settings` / `save_app_settings`
@@ -31,6 +31,7 @@ Persists the desktop app's local configuration so it survives restarts. That now
 |-----------|---------|------------------|
 | `model.rs` | Settings loading is cheap enough to use at startup and returns executable-directory defaults when unset | Making settings resolution expensive or removing the default asset-root fallback |
 | `factal_settings.rs` | Saving an empty key clears the on-disk value and blank path fields revert to auto-detect/default behavior | Changing clear semantics or making blank path fields invalid |
+| Map renderers | Missing or malformed contour scale settings fall back to 1×, the pre-control visual weight | Allowing invalid or out-of-range values through normalization |
 
 ## Notes
 - The settings file now lives beside the executable so moving the app bundle/worktree to another machine keeps the local path model coherent by default.
@@ -38,3 +39,5 @@ Persists the desktop app's local configuration so it survives restarts. That now
 - GDAL discovery now prefers the app-configured bin directory and otherwise relies on `PATH`; it no longer assumes Postgres.app.
 - Path settings are now normalized on save/load so operators can point at a parent folder like `/Volumes/Hilbert/Data` and still have the app infer nested `Data/`, `Derived/`, or `srtm_gl1/SRTM_GL1_srtm` subpaths when those exist.
 - If `Asset Root` is accidentally pointed at a `Data/` or `Derived/` folder, it is normalized back to the parent asset root to avoid silently creating `Data/Data` or `Data/Derived` layouts.
+- `contour_stroke_scale` is bounded to `0.25×..=3×`; legacy settings files
+  default to `1×` so an upgrade does not change map appearance.

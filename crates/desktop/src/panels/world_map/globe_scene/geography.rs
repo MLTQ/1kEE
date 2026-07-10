@@ -20,6 +20,7 @@ fn paint_contour_layer(
     batch: Option<(u64, Arc<Vec<SegmentInstance>>)>,
     radius_offset: f32,
     alpha: f32,
+    contour_stroke_scale: f32,
 ) {
     let Some((version, instances)) = batch else {
         return;
@@ -36,6 +37,7 @@ fn paint_contour_layer(
             view,
             radius_offset,
             alpha,
+            contour_stroke_scale,
             painter.ctx().pixels_per_point(),
         )
         .into_paint_callback(painter.clip_rect()),
@@ -67,6 +69,7 @@ pub(super) fn draw_global_coastlines(
     layout: &GlobeLayout,
     view: &GlobeViewState,
     selected_root: Option<&std::path::Path>,
+    contour_stroke_scale: f32,
 ) {
     puffin::profile_function!();
     let Some(coastlines) =
@@ -93,6 +96,7 @@ pub(super) fn draw_global_coastlines(
         batch,
         0.015,
         0.92,
+        contour_stroke_scale,
     );
 }
 
@@ -101,6 +105,7 @@ pub(super) fn draw_global_bathymetry(
     layout: &GlobeLayout,
     view: &GlobeViewState,
     selected_root: Option<&std::path::Path>,
+    contour_stroke_scale: f32,
 ) {
     puffin::profile_function!();
     // ── Layer 1: depth-fill texture mapped onto the sphere ───────────────────
@@ -177,6 +182,7 @@ pub(super) fn draw_global_bathymetry(
         batch,
         0.01,
         0.92,
+        contour_stroke_scale,
     );
 }
 
@@ -384,6 +390,7 @@ pub(super) fn draw_global_topo(
     layout: &GlobeLayout,
     view: &GlobeViewState,
     selected_root: Option<&std::path::Path>,
+    contour_stroke_scale: f32,
 ) {
     puffin::profile_function!();
     // Crossfade: full opacity at zoom ≤ 3.0, fade to zero by zoom 5.0.
@@ -421,6 +428,7 @@ pub(super) fn draw_global_topo(
         batch,
         0.015,
         alpha * 0.92,
+        contour_stroke_scale,
     );
 }
 
@@ -434,6 +442,7 @@ pub(super) fn draw_srtm_on_globe(
     view: &GlobeViewState,
     _lod: &GlobeLod,
     selected_root: Option<&std::path::Path>,
+    contour_stroke_scale: f32,
 ) {
     puffin::profile_function!();
     if view.zoom < 1.5 {
@@ -476,6 +485,7 @@ pub(super) fn draw_srtm_on_globe(
         batch,
         0.020,
         alpha * 0.92,
+        contour_stroke_scale,
     );
 }
 
@@ -486,12 +496,14 @@ pub(super) fn draw_lunar_topo(
     layout: &GlobeLayout,
     view: &GlobeViewState,
     selected_root: Option<&std::path::Path>,
+    show_contours: bool,
+    contour_stroke_scale: f32,
 ) {
     puffin::profile_function!();
     // ── Contour lines ─────────────────────────────────────────────────────────
     // Fade in from zoom 0.6 → 1.4 so they don't clutter the full-disc view.
     let contour_alpha = ((view.zoom - 0.6) / 0.8).clamp(0.0, 1.0);
-    if contour_alpha > 0.01 {
+    if show_contours && contour_alpha > 0.01 {
         if let Some(contours) = contour_asset::load_lunar_for_globe(
             selected_root,
             view.local_center,
@@ -515,7 +527,11 @@ pub(super) fn draw_lunar_topo(
                     } else {
                         // Below datum — bluish-grey to hint at the dark maria floors.
                         let base = egui::Color32::from_rgb(90, 100, 130);
-                        if major { base } else { base.gamma_multiply(0.55) }
+                        if major {
+                            base
+                        } else {
+                            base.gamma_multiply(0.55)
+                        }
                     }
                 },
             );
@@ -527,6 +543,7 @@ pub(super) fn draw_lunar_topo(
                 batch,
                 0.015,
                 contour_alpha * 0.92,
+                contour_stroke_scale,
             );
         }
     }
@@ -562,12 +579,14 @@ pub(super) fn draw_mars_topo(
     layout: &GlobeLayout,
     view: &GlobeViewState,
     selected_root: Option<&std::path::Path>,
+    show_contours: bool,
+    contour_stroke_scale: f32,
 ) {
     puffin::profile_function!();
     // ── Contour lines ─────────────────────────────────────────────────────────
     // Fade in from zoom 0.6 → 1.4 so they don't clutter the full-disc view.
     let contour_alpha = ((view.zoom - 0.6) / 0.8).clamp(0.0, 1.0);
-    if contour_alpha > 0.01 {
+    if show_contours && contour_alpha > 0.01 {
         if let Some(contours) = contour_asset::load_mars_for_globe(
             selected_root,
             view.local_center,
@@ -588,7 +607,11 @@ pub(super) fn draw_mars_topo(
                     } else {
                         // Below datum — rusty red to hint at the deep basins.
                         let base = egui::Color32::from_rgb(180, 80, 50);
-                        if major { base } else { base.gamma_multiply(0.55) }
+                        if major {
+                            base
+                        } else {
+                            base.gamma_multiply(0.55)
+                        }
                     }
                 },
             );
@@ -600,6 +623,7 @@ pub(super) fn draw_mars_topo(
                 batch,
                 0.015,
                 contour_alpha * 0.92,
+                contour_stroke_scale,
             );
         }
     }

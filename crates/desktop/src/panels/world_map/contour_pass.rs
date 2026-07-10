@@ -46,6 +46,8 @@ pub enum ContourLayer {
 const LAYER_COUNT: usize = 6;
 /// wgpu requires dynamic uniform offsets to be 256-aligned on most hardware.
 const UNIFORM_STRIDE: u64 = 256;
+/// The legacy CPU contour path used a 1.15 logical-point stroke.
+const BASE_STROKE_WIDTH_POINTS: f32 = 1.15;
 
 impl ContourLayer {
     fn slot(self) -> u32 {
@@ -140,6 +142,11 @@ fn linear_u8(c: egui::Color32) -> [u8; 4] {
     let mut l = color_to_linear(c);
     l[3] = (c.a() as f32 / 255.0).powf(2.2);
     l.map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+}
+
+#[inline]
+fn contour_stroke_half_px(stroke_scale: f32, pixels_per_point: f32) -> f32 {
+    BASE_STROKE_WIDTH_POINTS * 0.5 * stroke_scale * pixels_per_point
 }
 
 /// Cheap identity for a contour set + palette combination. The `Arc` pointer
@@ -275,7 +282,7 @@ impl ContourPassResources {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: true,
                     min_binding_size: wgpu::BufferSize::new(
-                        std::mem::size_of::<ContourUniforms>() as u64,
+                        std::mem::size_of::<ContourUniforms>() as u64
                     ),
                 },
                 count: None,
@@ -373,7 +380,8 @@ impl ContourCallback {
     /// Build a callback for one layer. `radius_offset` is the constant
     /// altitude offset previously passed to `draw_geo_path`; `alpha` is the
     /// layer fade multiplier (zoom crossfades × the 0.92 stroke dimming the
-    /// CPU path applied).
+    /// CPU path applied). `stroke_scale` changes only this callback's uniform,
+    /// so adjusting it never rebuilds contour instances.
     pub fn new(
         layer: ContourLayer,
         version: u64,
@@ -382,6 +390,7 @@ impl ContourCallback {
         view: &GlobeViewState,
         radius_offset: f32,
         alpha: f32,
+        stroke_scale: f32,
         pixels_per_point: f32,
     ) -> Self {
         Self {
@@ -403,8 +412,8 @@ impl ContourCallback {
                 // Same gamma-space→linear-space correction as `linear_u8`:
                 // the CPU path applied this fade via `gamma_multiply`.
                 alpha: alpha.powf(2.2),
-                // Same visual weight as the CPU stroke (1.15 logical px).
-                stroke_half_px: 1.15 * 0.5 * pixels_per_point,
+                // At 1× this remains the legacy 1.15 logical-point stroke.
+                stroke_half_px: contour_stroke_half_px(stroke_scale, pixels_per_point),
                 feather_px: 1.0,
                 pixels_per_point,
                 _pad: [0.0; 3],
@@ -498,3 +507,18 @@ impl egui_wgpu::CallbackTrait for ContourCallback {
 // Source lives in `contour_lines.wgsl`. Its `Uniforms` struct must stay
 // byte-for-byte in sync with `ContourUniforms` above.
 const CONTOUR_WGSL: &str = include_str!("contour_lines.wgsl");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_stroke_scale_preserves_the_legacy_gpu_width() {
+        let pixels_per_point = 2.0;
+        let legacy_half_width = BASE_STROKE_WIDTH_POINTS * 0.5 * pixels_per_point;
+        assert_eq!(
+            contour_stroke_half_px(1.0, pixels_per_point),
+            legacy_half_width
+        );
+    }
+}

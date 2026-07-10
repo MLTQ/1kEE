@@ -25,6 +25,13 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 - **Does**: Exercise the contour-loading/projection path against cached focus data so the local terrain stack keeps a working end-to-end sanity check
 - **Interacts with**: `contour_asset::load_srtm_region_for_view`, egui layout helpers
 
+### Contour stroke scale
+
+- **Does**: Threads the shared operator scale through both ordinary and
+  transition contour stacks while retaining their existing alpha/major-minor
+  weight relationships.
+- **Interacts with**: `AppModel::contour_stroke_scale` and `geography.rs`.
+
 ## Contracts
 
 | Dependent | Expects | Breaking changes |
@@ -32,8 +39,12 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 | `world_map.rs` | This module remains the local-mode renderer entrypoint and can be switched to by zoom/focus state alone | Moving the local scene entrypoint or changing its model/context contract |
 | Overlay renderers | Imported user layers, roads, water, and contours share the same local projection space | Changing coordinate transforms without updating overlay helpers |
 | Scene tests | The local contour loader stays reachable through `contour_asset::load_srtm_region_for_view` for end-to-end validation | Renaming/removing that loader without updating the tests |
+| Globe scene | A shared `1×` contour scale produces the same default local stroke widths as before | Applying a different scale or bypassing it in transition rendering |
 
 ## Notes
 - The scene-level tests are intentionally tolerant of missing local cache data: they return early when the shared focus cache is unavailable instead of making the suite depend on large fixture assets.
 - The optional ALPR overlay is Earth-only and defaults off, so it cannot alter
   lunar, Martian, or existing local-terrain output unless explicitly enabled.
+- The local geography helpers receive the same scale for coastline and
+  bathymetry linework, while unrelated roads, boundaries, and marker strokes
+  deliberately retain their independent visual contracts.

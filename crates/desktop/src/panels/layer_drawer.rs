@@ -1,6 +1,7 @@
 use crate::arcgis_source;
 use crate::model::AppModel;
 use crate::panels::world_map;
+use crate::settings_store;
 use crate::theme;
 
 pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
@@ -98,6 +99,34 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                     world_map::invalidate_water_cache_pub();
                 }
                 ui.checkbox(&mut model.show_contours, "Contours");
+                ui.indent("contour_thickness", |ui| {
+                    let mut stroke_scale = model.contour_stroke_scale();
+                    let response = ui
+                        .add(
+                            egui::Slider::new(
+                                &mut stroke_scale,
+                                settings_store::MIN_CONTOUR_STROKE_SCALE
+                                    ..=settings_store::MAX_CONTOUR_STROKE_SCALE,
+                            )
+                            .logarithmic(true)
+                            .max_decimals(2)
+                            .text("Line thickness")
+                            .suffix("×"),
+                        )
+                        .on_hover_text(
+                            "Scales contour, coastline, and bathymetry strokes. 1× matches the original visual weight.",
+                        );
+                    if response.changed() {
+                        model.set_contour_stroke_scale(stroke_scale);
+                    }
+                    // Persist a click/keyboard adjustment immediately, but
+                    // defer continuous slider drags until the pointer releases.
+                    if response.drag_stopped() || (response.changed() && !response.dragged()) {
+                        if let Err(error) = model.save_settings() {
+                            model.push_log(format!("Contour thickness save failed: {error}"));
+                        }
+                    }
+                });
                 ui.checkbox(&mut model.show_trees, "Trees");
                 ui.add_space(6.0);
 
