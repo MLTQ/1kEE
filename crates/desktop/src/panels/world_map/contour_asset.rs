@@ -1,6 +1,8 @@
 use crate::model::GeoPoint;
 use crate::terrain_assets;
-use rusqlite::{Connection, params};
+use rusqlite::params;
+#[cfg(test)]
+use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1291,7 +1293,7 @@ fn query_global_bathymetry(
     simplify_step: usize,
     feature_budget: usize,
 ) -> rusqlite::Result<Vec<ContourPath>> {
-    let connection = Connection::open(path)?;
+    let connection = srtm_focus_cache::db::open_cache_db_read_only(path)?;
 
     // gdal_contour fragments each isobath into many short scan-line segments.
     // Stride-sampling those fragments gives a globally-distributed but spotty
@@ -1369,7 +1371,7 @@ fn query_global_topo(
     simplify_step: usize,
     feature_budget: usize,
 ) -> rusqlite::Result<Vec<ContourPath>> {
-    let connection = Connection::open(path)?;
+    let connection = srtm_focus_cache::db::open_cache_db_read_only(path)?;
     // Land-positive contours only.  The GPKG is ordered by scan position (N→S)
     // so a bare LIMIT returns only Arctic/northern features.  Stride-sample
     // across the full FID range to get globally-distributed land contours.
@@ -1436,7 +1438,7 @@ fn query_global_coastlines(
     simplify_step: usize,
     feature_budget: usize,
 ) -> rusqlite::Result<Vec<ContourPath>> {
-    let connection = Connection::open(path)?;
+    let connection = srtm_focus_cache::db::open_cache_db_read_only(path)?;
     let mut statement = connection.prepare("SELECT geom, elevation_m FROM contour ORDER BY fid")?;
     let rows = statement.query_map([], |row| {
         let geometry: Vec<u8> = row.get(0)?;
@@ -1475,7 +1477,7 @@ fn query_local_contours_batch(
     requests: &[(CacheKey, srtm_focus_cache::FocusContourAsset)],
     feature_budget: usize,
 ) -> rusqlite::Result<Vec<(CacheKey, Vec<ContourPath>)>> {
-    let connection = Connection::open(path)?;
+    let connection = srtm_focus_cache::db::open_cache_db_read_only(path)?;
     let mut statement = connection.prepare(
         "SELECT geom, elevation_m
          FROM contour_tiles
@@ -1931,7 +1933,8 @@ mod tests {
             return;
         }
 
-        let connection = Connection::open(path).expect("should open shared SRTM cache DB");
+        let connection = srtm_focus_cache::db::open_cache_db_read_only(path)
+            .expect("should open shared SRTM cache DB");
         let tile = connection
             .query_row(
                 "SELECT zoom_bucket, lat_bucket, lon_bucket

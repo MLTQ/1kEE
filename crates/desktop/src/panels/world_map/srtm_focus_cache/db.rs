@@ -1,6 +1,6 @@
 use super::{CACHE_DB_NAME, TileKey};
 use crate::terrain_assets;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -16,6 +16,64 @@ pub fn open_cache_db(path: &Path) -> rusqlite::Result<Connection> {
     connection.pragma_update(None, "temp_store", "MEMORY")?;
     ensure_cache_schema_with_connection(&connection)?;
     Ok(connection)
+}
+
+/// Open an existing cache strictly for rendering/status queries. Unlike
+/// [`open_cache_db`], this never changes journal mode or runs schema DDL, so
+/// cached contours remain readable when the terrain volume has no free space.
+///
+/// SQLite may still need to create a shared-memory file for a normal read-only
+/// WAL connection. If that fails (for example `SQLITE_FULL`), retry with an
+/// immutable URI: it reads the last checkpointed database without any sidecar
+/// files. The renderer can then keep showing existing geometry while builders
+/// wait for storage to be freed.
+pub fn open_cache_db_read_only(path: &Path) -> rusqlite::Result<Connection> {
+    let normal = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .and_then(configure_read_connection)
+        .and_then(verify_read_connection);
+    match normal {
+        Ok(connection) => Ok(connection),
+        Err(normal_error) => {
+            let uri = immutable_read_uri(path);
+            Connection::open_with_flags(
+                uri,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+            )
+            .and_then(configure_read_connection)
+            .and_then(verify_read_connection)
+            .map_err(|_| normal_error)
+        }
+    }
+}
+
+fn configure_read_connection(connection: Connection) -> rusqlite::Result<Connection> {
+    connection.busy_timeout(Duration::from_secs(30))?;
+    connection.pragma_update(None, "query_only", "ON")?;
+    // ORDER BY ABS(elevation_m) may need scratch space. Keep it in memory so
+    // a full terrain volume cannot turn an otherwise read-only query into an
+    // `SQLITE_FULL` failure.
+    connection.pragma_update(None, "temp_store", "MEMORY")?;
+    Ok(connection)
+}
+
+/// Force SQLite to read the schema before handing the normal connection to a
+/// caller. In WAL mode a read-only connection can otherwise defer creating or
+/// opening its shared-memory file until the first tile query. That would hide
+/// an `SQLITE_FULL` failure from the immutable fallback above.
+fn verify_read_connection(connection: Connection) -> rusqlite::Result<Connection> {
+    connection.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))?;
+    Ok(connection)
+}
+
+fn immutable_read_uri(path: &Path) -> String {
+    let encoded = path
+        .to_string_lossy()
+        .replace('%', "%25")
+        .replace(' ', "%20")
+        .replace('#', "%23")
+        .replace('?', "%3F")
+        .replace('&', "%26");
+    format!("file:{encoded}?immutable=1")
 }
 
 pub fn ensure_cache_schema_with_connection(connection: &Connection) -> rusqlite::Result<()> {
@@ -311,4 +369,57 @@ pub fn temp_tile_paths(cache_root: &Path, tile: TileKey) -> (PathBuf, PathBuf) {
         temp_root.join(format!("{stem}.tmp.tif")),
         temp_root.join(format!("{stem}.tmp.gpkg")),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_only_connection_reads_existing_manifest_without_write_access() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after Unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "1kee-read-only-cache-{}-{nonce}.sqlite",
+            std::process::id()
+        ));
+        let tile = TileKey {
+            zoom_bucket: 3,
+            lat_bucket: 4,
+            lon_bucket: -5,
+        };
+
+        let writable = Connection::open(&path).expect("temporary cache database");
+        writable
+            .execute_batch(
+                "CREATE TABLE contour_tile_manifest (
+                    zoom_bucket INTEGER NOT NULL,
+                    lat_bucket INTEGER NOT NULL,
+                    lon_bucket INTEGER NOT NULL,
+                    contour_count INTEGER NOT NULL,
+                    PRIMARY KEY (zoom_bucket, lat_bucket, lon_bucket)
+                );",
+            )
+            .expect("manifest schema");
+        writable
+            .execute(
+                "INSERT INTO contour_tile_manifest
+                    (zoom_bucket, lat_bucket, lon_bucket, contour_count)
+                 VALUES (?1, ?2, ?3, 1)",
+                params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
+            )
+            .expect("manifest entry");
+        drop(writable);
+
+        let read_only = open_cache_db_read_only(&path).expect("read-only cache connection");
+        assert!(tile_exists(&read_only, tile).expect("read manifest entry"));
+        assert!(read_only
+            .execute("DELETE FROM contour_tile_manifest", [])
+            .is_err());
+        drop(read_only);
+
+        let _ = fs::remove_file(path);
+    }
 }

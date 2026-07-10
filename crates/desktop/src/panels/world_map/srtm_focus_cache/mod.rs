@@ -36,7 +36,7 @@ pub fn ready_lunar_tile_buckets(
     let Some(cache_db_path) = lunar_cache_db_path(selected_root) else {
         return set;
     };
-    let Ok(connection) = db::open_cache_db(&cache_db_path) else {
+    let Ok(connection) = db::open_cache_db_read_only(&cache_db_path) else {
         return set;
     };
     let spec = zoom::lunar_spec_for_zoom(zoom);
@@ -72,7 +72,7 @@ pub fn ready_mars_tile_buckets(
     let Some(cache_db_path) = mars_cache_db_path(selected_root) else {
         return set;
     };
-    let Ok(connection) = db::open_cache_db(&cache_db_path) else {
+    let Ok(connection) = db::open_cache_db_read_only(&cache_db_path) else {
         return set;
     };
     let spec = zoom::mars_spec_for_zoom(zoom);
@@ -140,6 +140,17 @@ pub(self) struct TileKey {
     pub lon_bucket: i32,
 }
 
+/// Renderer-facing region selection should never need to mutate an established
+/// cache. A missing database is the one exception: retain the first-run path
+/// that initializes its schema so on-demand builders can populate it.
+fn open_region_cache_db(path: &Path) -> rusqlite::Result<Connection> {
+    match db::open_cache_db_read_only(path) {
+        Ok(connection) => Ok(connection),
+        Err(_) if !path.exists() => db::open_cache_db(path),
+        Err(error) => Err(error),
+    }
+}
+
 pub fn ensure_focus_contour_region(
     selected_root: Option<&Path>,
     focus: GeoPoint,
@@ -155,9 +166,10 @@ pub fn ensure_focus_contour_region(
     let Some(cache_db_path) = db::focus_cache_db_path(selected_root) else {
         return Vec::new();
     };
-    // Open ONE connection for all tile checks — avoids 25 separate open+pragma
-    // cycles per frame that stall the render thread under WAL contention.
-    let Ok(connection) = db::open_cache_db(&cache_db_path) else {
+    // Open one read-only connection for all tile checks. A missing cache is
+    // initialized only for first-run builder scheduling; existing caches stay
+    // readable even if their volume cannot accept WAL/schema writes.
+    let Ok(connection) = open_region_cache_db(&cache_db_path) else {
         return Vec::new();
     };
     let spec = zoom::spec_for_zoom(zoom);
@@ -199,7 +211,7 @@ pub fn ready_tile_buckets(
     let Some(cache_db_path) = db::focus_cache_db_path(selected_root) else {
         return set;
     };
-    let Ok(connection) = db::open_cache_db(&cache_db_path) else {
+    let Ok(connection) = db::open_cache_db_read_only(&cache_db_path) else {
         return set;
     };
     let spec = zoom::spec_for_zoom(zoom);
@@ -229,7 +241,7 @@ pub fn focus_contour_region_status(
 ) -> Option<FocusContourRegionStatus> {
     // Don't require SRTM root — status should reflect cache hits too.
     let cache_db_path = db::focus_cache_db_path(selected_root)?;
-    let connection = db::open_cache_db(&cache_db_path).ok()?;
+    let connection = db::open_cache_db_read_only(&cache_db_path).ok()?;
     let spec = zoom::spec_for_zoom(zoom);
     let bucket_step = spec.half_extent_deg * 0.45;
     let center_lat_bucket = (focus.lat / bucket_step).round() as i32;
@@ -510,7 +522,7 @@ pub fn lunar_tile_counts(
     let Some(cache_db_path) = lunar_cache_db_path(selected_root) else {
         return (0, 0, 0);
     };
-    let Ok(connection) = db::open_cache_db(&cache_db_path) else {
+    let Ok(connection) = db::open_cache_db_read_only(&cache_db_path) else {
         return (0, 0, 0);
     };
     let spec = zoom::lunar_spec_for_zoom(zoom);
@@ -554,7 +566,7 @@ pub fn mars_tile_counts(
     let Some(cache_db_path) = mars_cache_db_path(selected_root) else {
         return (0, 0, 0);
     };
-    let Ok(connection) = db::open_cache_db(&cache_db_path) else {
+    let Ok(connection) = db::open_cache_db_read_only(&cache_db_path) else {
         return (0, 0, 0);
     };
     let spec = zoom::mars_spec_for_zoom(zoom);
@@ -607,7 +619,7 @@ pub fn ensure_lunar_contour_region(
     let Some(cache_db_path) = lunar_cache_db_path(selected_root) else {
         return Vec::new();
     };
-    let Ok(connection) = db::open_cache_db(&cache_db_path) else {
+    let Ok(connection) = open_region_cache_db(&cache_db_path) else {
         return Vec::new();
     };
 
@@ -664,7 +676,7 @@ pub fn ensure_mars_contour_region(
     let Some(cache_db_path) = mars_cache_db_path(selected_root) else {
         return Vec::new();
     };
-    let Ok(connection) = db::open_cache_db(&cache_db_path) else {
+    let Ok(connection) = open_region_cache_db(&cache_db_path) else {
         return Vec::new();
     };
 

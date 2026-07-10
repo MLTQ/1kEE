@@ -47,7 +47,8 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 
 ### `query_local_contours_batch`
 - **Does**: Decode tile contour blobs from SQLite into `ContourPath` polylines.
-- **Interacts with**: `parse_gpkg_lines`, render caches.
+- **Interacts with**: `srtm_focus_cache::db::open_cache_db_read_only`,
+  `parse_gpkg_lines`, render caches.
 
 ## Contracts
 
@@ -61,6 +62,9 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 ## Notes
 - Lunar local rendering still performs the midpoint-based exclusive-region filter so overlapping tiles do not double-draw the same contour.
 - Batched reads still execute one SQL query per tile, but they reuse a single SQLite connection and one worker thread per repaint batch.
+- All renderer geometry readers, including global contour GeoPackages, use the
+  cache module's read-only/immutable fallback. A full derived-data volume can
+  therefore stop new cache builds without blanking already checkpointed lines.
 - `blast_tile_caches()` clears tile entries and memoized merges together, so a
   manual reset cannot retain obsolete contour geometry in memory; its epoch
   also prevents old readers from writing back after the reset.
