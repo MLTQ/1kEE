@@ -281,7 +281,7 @@ fn mark_tile_empty(cache_db_path: &Path, tile: TileKey) {
 /// Pre-build Mars contour tiles for the given bounding box and zoom buckets.
 ///
 /// Writes into `command.cache_db_path` (the desktop reads this as
-/// `Derived/terrain/mars_focus_cache.sqlite`).
+/// `Derived/terrain/mars_ctx_cache.sqlite`).
 pub fn build_mars_contour_tiles(
     command: MarsBuildCommand,
     progress: &mut dyn FnMut(ContourBuildProgress),

@@ -136,7 +136,7 @@ pub struct BuilderApp {
     // ── Mars tab ──────────────────────────────────────────────────────────────
     mars_form: MarsForm,
     mars_drag_start: Option<egui::Pos2>,
-    /// Mars tiles already in mars_focus_cache.sqlite
+    /// Mars tiles already in mars_ctx_cache.sqlite
     mars_cached_tiles: Vec<(i32, f32, f32, f32, f32)>,
     /// Mars tiles built in the current session
     mars_live_tiles: Vec<(f32, f32, f32, f32)>,
@@ -283,7 +283,7 @@ impl BuilderApp {
                     .unwrap_or_else(|_| PathBuf::from("."))
                     .join("Derived")
                     .join("terrain")
-                    .join("mars_focus_cache.sqlite")
+                    .join("mars_ctx_cache.sqlite")
                     .display()
                     .to_string(),
                 gdal_bin_dir: String::new(),
@@ -1159,7 +1159,7 @@ impl BuilderApp {
 
     fn show_mars_panel(&mut self, ui: &mut egui::Ui) {
         ui.heading("Mars Contours (CTX DTMs + MOLA)");
-        ui.label("Pre-build mars_focus_cache.sqlite from CTX stereo-pair DEMs with global MOLA fallback.");
+        ui.label("Pre-build mars_ctx_cache.sqlite from CTX stereo-pair DEMs with global MOLA fallback.");
         ui.separator();
 
         // ── Data root ────────────────────────────────────────────────────────
@@ -1174,13 +1174,13 @@ impl BuilderApp {
         });
 
         // ── Cache DB ─────────────────────────────────────────────────────────
-        ui.label("Mars cache DB (mars_focus_cache.sqlite)");
+        ui.label("Mars cache DB (desktop: mars_ctx_cache.sqlite)");
         ui.horizontal(|ui| {
             ui.text_edit_singleline(&mut self.mars_form.cache_db);
             if ui.small_button("…").clicked() {
                 if let Some(folder) = rfd::FileDialog::new().pick_folder() {
                     self.mars_form.cache_db = folder
-                        .join("mars_focus_cache.sqlite")
+                        .join("mars_ctx_cache.sqlite")
                         .display()
                         .to_string();
                 }

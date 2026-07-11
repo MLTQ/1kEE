@@ -21,6 +21,12 @@ Provides the minimal egui desktop shell for the offline cache-builder. It is the
 - **Does**: Scans the selected cache directory and summarizes the generated road cell files
 - **Interacts with**: filesystem
 
+### Mars cache form
+
+- **Does**: Defaults Mars builds and folder-picker selections to
+  `mars_ctx_cache.sqlite`, the file consumed by the desktop renderer.
+- **Interacts with**: `mars.rs` and the desktop Mars terrain cache contract.
+
 ## Contracts
 
 | Dependent | Expects | Breaking changes |
@@ -31,3 +37,6 @@ Provides the minimal egui desktop shell for the offline cache-builder. It is the
 ## Notes
 - Roads are the only implemented export asset today. Water, buildings, and boundaries are present as disabled planned toggles so the intended builder shape is visible immediately.
 - The inspector intentionally stays lightweight: it reports road-cell count, node-cache count, approximate cache size, and the most recently touched files so users can sanity-check output directories without opening another tool.
+- Mars defaults intentionally do not rename, merge, or import legacy
+  `mars_focus_cache.sqlite` files; operators can still choose a custom path
+  explicitly when they need to inspect an old cache.
