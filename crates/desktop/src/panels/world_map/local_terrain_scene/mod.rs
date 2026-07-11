@@ -45,7 +45,13 @@ use super::srtm_stream;
 pub const LOCAL_TRANSITION_START_ZOOM: f32 = 4.0;
 #[allow(dead_code)]
 pub const LOCAL_MODE_MIN_ZOOM: f32 = 25.0;
-const LOCAL_STREAM_RADIUS: i32 = 2;
+/// Local-only contour source reaches six rings in every direction (13×13
+/// tiles). Globe callers keep their existing smaller envelopes.
+const LOCAL_CONTOUR_PREFETCH_RADIUS: i32 = 6;
+/// Overlapping Moon/Mars contours use an exclusive midpoint owner, so a cold
+/// outer source tile can own a line that crosses the visible edge. Build the
+/// complete local source envelope to preserve that geometry without gaps.
+const LOCAL_CONTOUR_BUILD_RADIUS: i32 = LOCAL_CONTOUR_PREFETCH_RADIUS;
 pub(super) const BASE_VERTICAL_EXAGGERATION: f32 = 2.1;
 
 // Minimum local zoom value — allows zooming out to ~500 km half-span.
@@ -110,13 +116,14 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let viewport_center = model.globe_view.local_center;
     let render_zoom = local_render_zoom(model.globe_view.local_zoom);
 
-    let contours = match model.active_body {
+    let contour_load = match model.active_body {
         crate::model::ActiveBody::Moon => contour_asset::load_lunar_region_for_view(
             model.selected_root.as_deref(),
             focus,
             viewport_center,
             render_zoom,
-            LOCAL_STREAM_RADIUS,
+            LOCAL_CONTOUR_PREFETCH_RADIUS,
+            LOCAL_CONTOUR_BUILD_RADIUS,
             painter.ctx().clone(),
         ),
         crate::model::ActiveBody::Mars => contour_asset::load_mars_region_for_view(
@@ -124,7 +131,8 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             focus,
             viewport_center,
             render_zoom,
-            LOCAL_STREAM_RADIUS,
+            LOCAL_CONTOUR_PREFETCH_RADIUS,
+            LOCAL_CONTOUR_BUILD_RADIUS,
             painter.ctx().clone(),
         ),
         crate::model::ActiveBody::Earth => contour_asset::load_srtm_region_for_view(
@@ -132,18 +140,15 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             focus,
             viewport_center,
             render_zoom,
-            LOCAL_STREAM_RADIUS,
+            LOCAL_CONTOUR_PREFETCH_RADIUS,
+            LOCAL_CONTOUR_BUILD_RADIUS,
             painter.ctx().clone(),
         ),
     };
+    let contours = contour_load.contours.clone();
     let cache_status = match model.active_body {
         crate::model::ActiveBody::Moon | crate::model::ActiveBody::Mars => None,
-        crate::model::ActiveBody::Earth => srtm_focus_cache::focus_contour_region_status(
-            model.selected_root.as_deref(),
-            viewport_center,
-            render_zoom,
-            LOCAL_STREAM_RADIUS,
-        ),
+        crate::model::ActiveBody::Earth => Some(contour_load.status),
     };
 
     let nearby = if model.focused_city().is_none() {
@@ -153,26 +158,11 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     };
 
     // Pulsing tile-grid glow: only draw cells that are NOT yet ready in the cache.
-    let still_loading = match model.active_body {
-        crate::model::ActiveBody::Moon => {
-            srtm_focus_cache::is_lunar_contour_building() || contours.is_none()
-        }
-        crate::model::ActiveBody::Mars => {
-            srtm_focus_cache::is_mars_contour_building() || contours.is_none()
-        }
-        crate::model::ActiveBody::Earth => cache_status
-            .map(|s| s.ready_assets < s.total_assets)
-            .unwrap_or(contours.is_none()),
-    };
+    let still_loading = contour_load.status.ready_assets < contour_load.status.total_assets
+        || contours.is_none();
     if still_loading {
         match model.active_body {
             crate::model::ActiveBody::Moon => {
-                let ready_buckets = srtm_focus_cache::ready_lunar_tile_buckets(
-                    model.selected_root.as_deref(),
-                    viewport_center,
-                    render_zoom,
-                    LOCAL_STREAM_RADIUS,
-                );
                 let half_extent = srtm_focus_cache::lunar_half_extent_for_zoom(render_zoom);
                 dissolve::draw_tile_pulse_grid(
                     painter,
@@ -180,47 +170,35 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                     &model.globe_view,
                     viewport_center,
                     render_zoom,
-                    LOCAL_STREAM_RADIUS,
+                    LOCAL_CONTOUR_BUILD_RADIUS,
                     time,
-                    &ready_buckets,
+                    &contour_load.ready_buckets,
                     Some(half_extent),
                 );
             }
             crate::model::ActiveBody::Mars => {
-                let ready_buckets = srtm_focus_cache::ready_mars_tile_buckets(
-                    model.selected_root.as_deref(),
-                    viewport_center,
-                    render_zoom,
-                    LOCAL_STREAM_RADIUS,
-                );
                 dissolve::draw_tile_pulse_grid(
                     painter,
                     &layout,
                     &model.globe_view,
                     viewport_center,
                     render_zoom,
-                    LOCAL_STREAM_RADIUS,
+                    LOCAL_CONTOUR_BUILD_RADIUS,
                     time,
-                    &ready_buckets,
+                    &contour_load.ready_buckets,
                     None,
                 );
             }
             crate::model::ActiveBody::Earth => {
-                let ready_buckets = srtm_focus_cache::ready_tile_buckets(
-                    model.selected_root.as_deref(),
-                    viewport_center,
-                    render_zoom,
-                    LOCAL_STREAM_RADIUS,
-                );
                 dissolve::draw_tile_pulse_grid(
                     painter,
                     &layout,
                     &model.globe_view,
                     viewport_center,
                     render_zoom,
-                    LOCAL_STREAM_RADIUS,
+                    LOCAL_CONTOUR_BUILD_RADIUS,
                     time,
-                    &ready_buckets,
+                    &contour_load.ready_buckets,
                     None,
                 );
             }
@@ -626,17 +604,10 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         model.active_body,
     );
     let (off_ready, off_building, off_total) = match model.active_body {
-        crate::model::ActiveBody::Moon => srtm_focus_cache::lunar_tile_counts(
-            model.selected_root.as_deref(),
-            viewport_center,
-            render_zoom,
-            LOCAL_STREAM_RADIUS,
-        ),
-        crate::model::ActiveBody::Mars => srtm_focus_cache::mars_tile_counts(
-            model.selected_root.as_deref(),
-            viewport_center,
-            render_zoom,
-            LOCAL_STREAM_RADIUS,
+        crate::model::ActiveBody::Moon | crate::model::ActiveBody::Mars => (
+            contour_load.status.ready_assets,
+            contour_load.status.pending_assets,
+            contour_load.status.total_assets,
         ),
         crate::model::ActiveBody::Earth => (0, 0, 0),
     };
@@ -782,9 +753,12 @@ pub fn paint_transition_overlay(
         focus,
         viewport_center,
         render_zoom,
-        LOCAL_STREAM_RADIUS,
+        LOCAL_CONTOUR_PREFETCH_RADIUS,
+        LOCAL_CONTOUR_BUILD_RADIUS,
         painter.ctx().clone(),
-    ) else {
+    )
+    .contours
+    else {
         return;
     };
 
@@ -822,26 +796,10 @@ pub fn transition_progress(zoom: f32) -> f32 {
 }
 
 pub fn has_pending_cache(model: &AppModel) -> bool {
-    let Some(_) = model.terrain_focus_location() else {
+    if !model.globe_view.local_mode || model.terrain_focus_location().is_none() {
         return false;
-    };
-
-    if model.active_body == crate::model::ActiveBody::Moon {
-        return srtm_focus_cache::is_lunar_contour_building();
     }
-    if model.active_body == crate::model::ActiveBody::Mars {
-        return srtm_focus_cache::is_mars_contour_building();
-    }
-
-    let render_zoom = local_render_zoom(model.globe_view.local_zoom);
-    srtm_focus_cache::focus_contour_region_status(
-        model.selected_root.as_deref(),
-        model.globe_view.local_center,
-        render_zoom,
-        LOCAL_STREAM_RADIUS,
-    )
-    .map(|status| status.ready_assets < status.total_assets)
-    .unwrap_or(true)
+    contour_asset::local_contours_pending(model.active_body)
 }
 
 pub fn local_render_zoom(local_zoom: f32) -> f32 {
@@ -921,6 +879,31 @@ fn transition_layout(rect: egui::Rect, progress: f32) -> LocalLayout {
     }
 }
 
+/// Return contours that have at least one point inside a local geographic
+/// viewport margin. The wider source cache remains intact; consumers select
+/// the margin appropriate to their own visual or sampling contract.
+fn contours_intersecting_local_bounds<'a>(
+    contours: &'a [contour_asset::ContourPath],
+    focus: GeoPoint,
+    margin_deg: f32,
+) -> Vec<&'a contour_asset::ContourPath> {
+    let min_lat = focus.lat - margin_deg;
+    let max_lat = focus.lat + margin_deg;
+    let min_lon = focus.lon - margin_deg;
+    let max_lon = focus.lon + margin_deg;
+    contours
+        .iter()
+        .filter(|contour| {
+            contour.points.iter().any(|point| {
+                point.lat >= min_lat
+                    && point.lat <= max_lat
+                    && point.lon >= min_lon
+                    && point.lon <= max_lon
+            })
+        })
+        .collect()
+}
+
 /// Cherry-red targeting beam: a vertical line falling from the sky to the
 /// terrain surface at the viewport centre. The ground contact point is
 /// projected via `project_local` so it rises over hills and drops into
@@ -944,17 +927,13 @@ fn draw_local_beam(
     // of viewport_center; that contour passes through (or very near) center,
     // so its elevation approximates the terrain surface there.
     let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
-    let search_radius_deg = (half_extent_deg * 0.08).max(0.004); // ~8% of viewport radius
-    let elevation_m = contours
-        .unwrap_or(&[])
+    let elevation_m = contours_intersecting_local_bounds(
+        contours.unwrap_or(&[]),
+        viewport_center,
+        (half_extent_deg * 0.08).max(0.004),
+    )
         .iter()
-        .filter(|c| {
-            c.points.iter().any(|p| {
-                (p.lat - viewport_center.lat).abs() < search_radius_deg
-                    && (p.lon - viewport_center.lon).abs() < search_radius_deg
-            })
-        })
-        .map(|c| c.elevation_m)
+        .map(|contour| contour.elevation_m)
         .fold(0.0f32, f32::max);
 
     if !show {
@@ -1345,6 +1324,10 @@ fn draw_elevation_fill(
     let max_lat = focus.lat + margin;
     let min_lon = focus.lon - margin;
     let max_lon = focus.lon + margin;
+    // The contour loader intentionally keeps a much wider ownership envelope
+    // for line continuity. Elevation interpolation is local, so retain only
+    // a generous viewport-margin subset before cloning into its worker.
+    let fill_contours = contours_intersecting_local_bounds(contours, focus, margin);
 
     let bathy_zoom = view.local_zoom.clamp(1.0, 8.0);
     // Moon has no oceans — skip GEBCO bathymetry samples entirely.
@@ -1389,7 +1372,7 @@ fn draw_elevation_fill(
         focus,
         view,
         layout,
-        contours.len(),
+        fill_contours.len(),
         gebco_samples.len()
             + if active_body != crate::model::ActiveBody::Earth {
                 100_000
@@ -1437,7 +1420,7 @@ fn draw_elevation_fill(
     if should_start_elevation_fill_build(need_build, state.building_key.is_some()) {
         let layout_c = *layout;
         let view_c = *view;
-        let contours_c: Vec<_> = contours.to_vec();
+        let contours_c: Vec<_> = fill_contours.into_iter().cloned().collect();
         let gebco_c = gebco_samples;
         let ctx = painter.ctx().clone();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1508,19 +1491,7 @@ fn draw_contour_stack(
     // AABB cull: skip contours with no points inside the viewport (+ generous
     // margin so lines that cross the edge aren't clipped prematurely).
     let margin_deg = half_extent_deg * 1.5;
-    let min_lat = focus.lat - margin_deg;
-    let max_lat = focus.lat + margin_deg;
-    let min_lon = focus.lon - margin_deg;
-    let max_lon = focus.lon + margin_deg;
-
-    let mut ordered: Vec<_> = contours
-        .iter()
-        .filter(|c| {
-            c.points.iter().any(|p| {
-                p.lat >= min_lat && p.lat <= max_lat && p.lon >= min_lon && p.lon <= max_lon
-            })
-        })
-        .collect();
+    let mut ordered = contours_intersecting_local_bounds(contours, focus, margin_deg);
     ordered.sort_by(|left, right| left.elevation_m.total_cmp(&right.elevation_m));
 
     // Pre-compute colors — theme functions may touch global state and must
@@ -1875,6 +1846,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn local_contour_builds_cover_the_full_source_envelope() {
+        assert_eq!(LOCAL_CONTOUR_BUILD_RADIUS, LOCAL_CONTOUR_PREFETCH_RADIUS);
+    }
+
+    #[test]
+    fn local_bounds_filter_keeps_near_contours_out_of_fill_workers() {
+        let focus = GeoPoint { lat: 0.0, lon: 0.0 };
+        let contours = vec![
+            contour_asset::ContourPath {
+                elevation_m: 10.0,
+                points: vec![focus],
+            },
+            contour_asset::ContourPath {
+                elevation_m: 20.0,
+                points: vec![GeoPoint {
+                    lat: 20.0,
+                    lon: 20.0,
+                }],
+            },
+        ];
+
+        let selected = contours_intersecting_local_bounds(&contours, focus, 1.0);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].elevation_m, 10.0);
+    }
+
+    #[test]
     fn local_projection_expands_paris_contour_stack() {
         let model = crate::model::AppModel::seed_demo();
         let event = model.selected_event().expect("selected event");
@@ -1886,8 +1884,10 @@ mod tests {
                 event.location,
                 render_zoom,
                 2,
+                2,
                 egui::Context::default(),
             );
+            let contours = contours.contours;
             if contours.is_none() {
                 std::thread::sleep(std::time::Duration::from_millis(150));
             }

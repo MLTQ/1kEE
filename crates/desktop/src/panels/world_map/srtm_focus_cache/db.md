@@ -26,6 +26,12 @@ contracts shared by on-demand terrain builders and render-time tile lookups.
 - **Does**: Read and update contour/coastline tile manifest rows.
 - **Interacts with**: tile builders and focus-region asset selection.
 
+### `contour_manifest_window`
+
+- **Does**: Reads one indexed rectangular manifest snapshot for a zoom bucket.
+- **Interacts with**: `mod.rs` region selection, which uses it to make wide
+  local prefetch decisions without a SQLite query per tile.
+
 ## Contracts
 
 | Dependent | Expects | Breaking changes |
@@ -41,3 +47,5 @@ contracts shared by on-demand terrain builders and render-time tile lookups.
 - The normal connection reads `schema_version` before it is returned. This
   makes a deferred WAL/`-shm` failure trigger immutable fallback instead of
   surfacing later in a contour query.
+- Manifest-window snapshots are read-only and contain only tile identifiers
+  and contour counts; geometry remains in the background WKB reader.

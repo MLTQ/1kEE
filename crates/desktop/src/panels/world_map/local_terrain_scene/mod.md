@@ -32,6 +32,14 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
   weight relationships.
 - **Interacts with**: `AppModel::contour_stroke_scale` and `geography.rs`.
 
+### Local contour envelope
+
+- **Does**: Requests, builds, and merges a 13×13 local source grid. This keeps
+  overlapping outer-tile contours available at the viewport edge without
+  expanding the globe-mode request envelope; existing AABB culling still
+  limits projection to the local scene.
+- **Interacts with**: `contour_asset.rs` and `srtm_focus_cache` region APIs.
+
 ### Elevation-fill worker scheduling
 
 - **Does**: Retains one mesh build while the camera moves, then builds the
@@ -63,3 +71,11 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 - If a mesh worker exits without sending a result, the stale mesh stays visible
   and the single-flight gate is released rather than leaving elevation fill
   permanently blocked.
+- The local source and build radii intentionally match at 13×13: an uncached
+  Moon/Mars tile outside a smaller central window can uniquely own a contour
+  that crosses the visible edge. The loader returns its ready/progress snapshot
+  to the pulse grid and overlay, avoiding extra cache queries during local
+  paint.
+- The elevation-fill worker takes only the local viewport's padded contour
+  subset; the wider source envelope remains available to line rendering but
+  cannot inflate fill-worker cloning or bias local elevation interpolation.

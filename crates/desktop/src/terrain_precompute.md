@@ -14,7 +14,7 @@ Manages background city-oriented terrain precompute jobs on top of the existing 
 - **Interacts with**: `city_catalog.rs`, `terrain_library.rs`
 
 ### `tick`
-- **Does**: Advances queued jobs by requesting missing SRTM contour neighborhoods for each configured zoom band
+- **Does**: Advances queued jobs by requesting missing SRTM contour neighborhoods for each configured zoom band, using the full precompute radius as both the fetch and build window
 - **Interacts with**: `srtm_focus_cache.rs`
 - **Rationale**: Reuses the same cache builder as live navigation so precompute and lazy loading stay compatible
 

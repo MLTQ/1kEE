@@ -98,6 +98,10 @@ const BUILD_TIMEOUT: Duration = Duration::from_secs(90);
 const CACHE_DB_NAME: &str = "srtm_focus_cache.sqlite";
 const LUNAR_CACHE_DB_NAME: &str = "lunar_focus_cache.sqlite";
 const TEMP_DIR_NAME: &str = "srtm_focus_tmp";
+/// Bound externally supplied region requests before turning them into a tile
+/// rectangle. Local terrain currently needs six rings; this cap keeps a bad
+/// caller from allocating an unbounded manifest/query window on the UI thread.
+const MAX_CONTOUR_REGION_RADIUS: i32 = 16;
 
 #[derive(Clone)]
 pub struct FocusContourAsset {
@@ -113,6 +117,15 @@ pub struct FocusContourRegionStatus {
     pub ready_assets: usize,
     pub pending_assets: usize,
     pub total_assets: usize,
+}
+
+/// The ready tiles and progress numbers for one local visible/build window.
+/// It is derived from the loader's manifest snapshot, so overlays do not need
+/// to issue another round of SQLite lookups after the region is selected.
+#[derive(Clone)]
+pub struct LocalContourRegionState {
+    pub ready_buckets: HashSet<(i32, i32)>,
+    pub status: FocusContourRegionStatus,
 }
 
 #[derive(Clone, Copy)]
@@ -140,6 +153,183 @@ pub(self) struct TileKey {
     pub lon_bucket: i32,
 }
 
+fn bounded_region_radius(radius: i32) -> i32 {
+    radius.clamp(0, MAX_CONTOUR_REGION_RADIUS)
+}
+
+fn region_radii(prefetch_radius: i32, build_radius: i32) -> (i32, i32) {
+    let prefetch_radius = bounded_region_radius(prefetch_radius);
+    (prefetch_radius, build_radius.clamp(0, prefetch_radius))
+}
+
+fn tile_ring_distance(
+    lat_bucket: i32,
+    lon_bucket: i32,
+    center_lat_bucket: i32,
+    center_lon_bucket: i32,
+) -> i64 {
+    (i64::from(lat_bucket) - i64::from(center_lat_bucket))
+        .abs()
+        .max((i64::from(lon_bucket) - i64::from(center_lon_bucket)).abs())
+}
+
+fn bucket_has_latitude_coverage(
+    lat_bucket: i32,
+    bucket_step: f32,
+    spec: FocusContourSpec,
+    max_abs_lat: Option<f32>,
+) -> bool {
+    max_abs_lat.map_or(true, |max_abs_lat| {
+        (lat_bucket as f32 * bucket_step).abs() <= max_abs_lat + spec.half_extent_deg
+    })
+}
+
+/// Visit the center tile and nearby rings before outer prefetch rings. This
+/// lets the bounded builder slots serve the visible local scene first.
+fn ordered_tile_buckets(
+    center_lat_bucket: i32,
+    center_lon_bucket: i32,
+    radius: i32,
+) -> Vec<(i32, i32)> {
+    let radius = bounded_region_radius(radius);
+    let side = (radius * 2 + 1) as usize;
+    let mut buckets = Vec::with_capacity(side * side);
+    for lat_bucket in center_lat_bucket.saturating_sub(radius)..=center_lat_bucket.saturating_add(radius) {
+        for lon_bucket in center_lon_bucket.saturating_sub(radius)..=center_lon_bucket.saturating_add(radius) {
+            let lat_distance = (i64::from(lat_bucket) - i64::from(center_lat_bucket)).abs();
+            let lon_distance = (i64::from(lon_bucket) - i64::from(center_lon_bucket)).abs();
+            buckets.push((lat_bucket, lon_bucket, lat_distance, lon_distance));
+        }
+    }
+    buckets.sort_unstable_by_key(|(lat_bucket, lon_bucket, lat_distance, lon_distance)| {
+        (
+            (*lat_distance).max(*lon_distance),
+            *lat_distance + *lon_distance,
+            *lat_bucket,
+            *lon_bucket,
+        )
+    });
+    buckets
+        .into_iter()
+        .map(|(lat_bucket, lon_bucket, _, _)| (lat_bucket, lon_bucket))
+        .collect()
+}
+
+fn local_region_state_from_assets(
+    assets: &[FocusContourAsset],
+    focus: GeoPoint,
+    spec: FocusContourSpec,
+    radius: i32,
+    max_abs_lat: Option<f32>,
+    pending_tiles: HashSet<TileKey>,
+) -> LocalContourRegionState {
+    let radius = bounded_region_radius(radius);
+    let bucket_step = spec.half_extent_deg * 0.45;
+    let center_lat_bucket = (focus.lat / bucket_step).round() as i32;
+    let center_lon_bucket = (focus.lon / bucket_step).round() as i32;
+    let mut ready_buckets = HashSet::new();
+
+    for asset in assets {
+        if asset.zoom_bucket == spec.zoom_bucket
+            && tile_ring_distance(
+                asset.lat_bucket,
+                asset.lon_bucket,
+                center_lat_bucket,
+                center_lon_bucket,
+            ) <= i64::from(radius)
+            && bucket_has_latitude_coverage(asset.lat_bucket, bucket_step, spec, max_abs_lat)
+        {
+            ready_buckets.insert((asset.lat_bucket, asset.lon_bucket));
+        }
+    }
+
+    let mut total_assets = 0usize;
+    let mut pending_assets = 0usize;
+    for (lat_bucket, lon_bucket) in
+        ordered_tile_buckets(center_lat_bucket, center_lon_bucket, radius)
+    {
+        if !bucket_has_latitude_coverage(lat_bucket, bucket_step, spec, max_abs_lat) {
+            continue;
+        }
+        total_assets += 1;
+        let tile = TileKey {
+            zoom_bucket: spec.zoom_bucket,
+            lat_bucket,
+            lon_bucket,
+        };
+        if !ready_buckets.contains(&(lat_bucket, lon_bucket)) && pending_tiles.contains(&tile) {
+            pending_assets += 1;
+        }
+    }
+
+    LocalContourRegionState {
+        status: FocusContourRegionStatus {
+            ready_assets: ready_buckets.len(),
+            pending_assets,
+            total_assets,
+        },
+        ready_buckets,
+    }
+}
+
+/// Build one local-progress snapshot from the ready assets the loader already
+/// selected. This avoids duplicate manifest scans for the progress card and
+/// pulse grid during camera motion.
+pub fn local_contour_region_state(
+    active_body: crate::model::ActiveBody,
+    assets: &[FocusContourAsset],
+    focus: GeoPoint,
+    zoom: f32,
+    radius: i32,
+) -> LocalContourRegionState {
+    match active_body {
+        crate::model::ActiveBody::Earth => local_region_state_from_assets(
+            assets,
+            focus,
+            zoom::spec_for_zoom(zoom),
+            radius,
+            None,
+            builders::pending_set()
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or_default(),
+        ),
+        crate::model::ActiveBody::Moon => local_region_state_from_assets(
+            assets,
+            focus,
+            zoom::lunar_spec_for_zoom(zoom),
+            radius,
+            Some(60.0),
+            builders::lunar_pending_set()
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or_default(),
+        ),
+        crate::model::ActiveBody::Mars => local_region_state_from_assets(
+            assets,
+            focus,
+            zoom::mars_spec_for_zoom(zoom),
+            radius,
+            Some(80.0),
+            builders::mars_pending_set()
+                .lock()
+                .map(|guard| guard.clone())
+                .unwrap_or_default(),
+        ),
+    }
+}
+
+/// Current in-process contour-cache write revision. Local region snapshots
+/// compare this before reusing their manifest result.
+pub fn contour_manifest_revision() -> u64 {
+    builders::manifest_revision()
+}
+
+/// Release failed-build cooldowns after an explicit in-memory cache reset.
+pub fn clear_contour_build_backoffs() {
+    builders::clear_failed_build_backoffs();
+}
+
 /// Renderer-facing region selection should never need to mutate an established
 /// cache. A missing database is the one exception: retain the first-run path
 /// that initializes its schema so on-demand builders can populate it.
@@ -155,7 +345,8 @@ pub fn ensure_focus_contour_region(
     selected_root: Option<&Path>,
     focus: GeoPoint,
     zoom: f32,
-    radius: i32,
+    prefetch_radius: i32,
+    build_radius: i32,
 ) -> Vec<FocusContourAsset> {
     // SRTM root is only needed to spawn on-demand GDAL builds for uncached tiles.
     // Pre-built tiles in the SQLite cache are returned even without SRTM access.
@@ -176,22 +367,44 @@ pub fn ensure_focus_contour_region(
     let bucket_step = spec.half_extent_deg * 0.45;
     let center_lat_bucket = (focus.lat / bucket_step).round() as i32;
     let center_lon_bucket = (focus.lon / bucket_step).round() as i32;
+    let (prefetch_radius, build_radius) = region_radii(prefetch_radius, build_radius);
+    let min_lat_bucket = center_lat_bucket.saturating_sub(prefetch_radius);
+    let max_lat_bucket = center_lat_bucket.saturating_add(prefetch_radius);
+    let min_lon_bucket = center_lon_bucket.saturating_sub(prefetch_radius);
+    let max_lon_bucket = center_lon_bucket.saturating_add(prefetch_radius);
+    let Ok(manifest) = db::contour_manifest_window(
+        &connection,
+        spec.zoom_bucket,
+        min_lat_bucket,
+        max_lat_bucket,
+        min_lon_bucket,
+        max_lon_bucket,
+    ) else {
+        return Vec::new();
+    };
     let mut assets = Vec::new();
 
-    for lat_bucket in (center_lat_bucket - radius)..=(center_lat_bucket + radius) {
-        for lon_bucket in (center_lon_bucket - radius)..=(center_lon_bucket + radius) {
-            if let Some(asset) = builders::ensure_bucket_asset(
-                srtm_root.as_deref(),
-                &cache_root,
-                &cache_db_path,
-                &connection,
-                spec,
-                lat_bucket,
-                lon_bucket,
-                bucket_step,
-            ) {
-                assets.push(asset);
-            }
+    for (lat_bucket, lon_bucket) in
+        ordered_tile_buckets(center_lat_bucket, center_lon_bucket, prefetch_radius)
+    {
+        let allow_build = tile_ring_distance(
+            lat_bucket,
+            lon_bucket,
+            center_lat_bucket,
+            center_lon_bucket,
+        ) <= i64::from(build_radius);
+        if let Some(asset) = builders::ensure_bucket_asset(
+            srtm_root.as_deref(),
+            &cache_root,
+            &cache_db_path,
+            manifest.get(&(lat_bucket, lon_bucket)).copied(),
+            allow_build,
+            spec,
+            lat_bucket,
+            lon_bucket,
+            bucket_step,
+        ) {
+            assets.push(asset);
         }
     }
 
@@ -609,6 +822,8 @@ pub fn ensure_lunar_contour_region(
     selected_root: Option<&Path>,
     focus: GeoPoint,
     zoom: f32,
+    prefetch_radius: i32,
+    build_radius: i32,
 ) -> Vec<FocusContourAsset> {
     let Some(jp2_path) = crate::terrain_assets::find_sldem_jp2(selected_root) else {
         return Vec::new();
@@ -627,28 +842,44 @@ pub fn ensure_lunar_contour_region(
     let bucket_step = spec.half_extent_deg * 0.45;
     let center_lat_bucket = (focus.lat / bucket_step).round() as i32;
     let center_lon_bucket = (focus.lon / bucket_step).round() as i32;
+    let (prefetch_radius, build_radius) = region_radii(prefetch_radius, build_radius);
+    let Ok(manifest) = db::contour_manifest_window(
+        &connection,
+        spec.zoom_bucket,
+        center_lat_bucket.saturating_sub(prefetch_radius),
+        center_lat_bucket.saturating_add(prefetch_radius),
+        center_lon_bucket.saturating_sub(prefetch_radius),
+        center_lon_bucket.saturating_add(prefetch_radius),
+    ) else {
+        return Vec::new();
+    };
     let mut assets = Vec::new();
 
-    const RADIUS: i32 = 2;
-    for lat_bucket in (center_lat_bucket - RADIUS)..=(center_lat_bucket + RADIUS) {
+    for (lat_bucket, lon_bucket) in
+        ordered_tile_buckets(center_lat_bucket, center_lon_bucket, prefetch_radius)
+    {
         // Skip tiles whose centre falls outside SLDEM2015 coverage (±60° lat).
-        let bucket_lat = lat_bucket as f32 * bucket_step;
-        if bucket_lat.abs() > 60.0 + spec.half_extent_deg {
+        if !bucket_has_latitude_coverage(lat_bucket, bucket_step, spec, Some(60.0)) {
             continue;
         }
-        for lon_bucket in (center_lon_bucket - RADIUS)..=(center_lon_bucket + RADIUS) {
-            if let Some(asset) = builders::ensure_lunar_bucket_asset(
-                &jp2_path,
-                &cache_root,
-                &cache_db_path,
-                &connection,
-                spec,
-                lat_bucket,
-                lon_bucket,
-                bucket_step,
-            ) {
-                assets.push(asset);
-            }
+        let allow_build = tile_ring_distance(
+            lat_bucket,
+            lon_bucket,
+            center_lat_bucket,
+            center_lon_bucket,
+        ) <= i64::from(build_radius);
+        if let Some(asset) = builders::ensure_lunar_bucket_asset(
+            &jp2_path,
+            &cache_root,
+            &cache_db_path,
+            manifest.get(&(lat_bucket, lon_bucket)).copied(),
+            allow_build,
+            spec,
+            lat_bucket,
+            lon_bucket,
+            bucket_step,
+        ) {
+            assets.push(asset);
         }
     }
 
@@ -659,6 +890,8 @@ pub fn ensure_mars_contour_region(
     selected_root: Option<&Path>,
     focus: GeoPoint,
     zoom: f32,
+    prefetch_radius: i32,
+    build_radius: i32,
 ) -> Vec<FocusContourAsset> {
     // The CTX data lives in <mars_root>/mars_data/ as 44 k per-DTM subdirectories.
     // MOLA tiles (global fallback) live in <mars_root>/MOLA/ as megt*.img files.
@@ -684,30 +917,92 @@ pub fn ensure_mars_contour_region(
     let bucket_step = spec.half_extent_deg * 0.45;
     let center_lat_bucket = (focus.lat / bucket_step).round() as i32;
     let center_lon_bucket = (focus.lon / bucket_step).round() as i32;
+    let (prefetch_radius, build_radius) = region_radii(prefetch_radius, build_radius);
+    let Ok(manifest) = db::contour_manifest_window(
+        &connection,
+        spec.zoom_bucket,
+        center_lat_bucket.saturating_sub(prefetch_radius),
+        center_lat_bucket.saturating_add(prefetch_radius),
+        center_lon_bucket.saturating_sub(prefetch_radius),
+        center_lon_bucket.saturating_add(prefetch_radius),
+    ) else {
+        return Vec::new();
+    };
     let mut assets = Vec::new();
 
-    const RADIUS: i32 = 2;
-    for lat_bucket in (center_lat_bucket - RADIUS)..=(center_lat_bucket + RADIUS) {
-        let bucket_lat = lat_bucket as f32 * bucket_step;
-        if bucket_lat.abs() > 80.0 + spec.half_extent_deg {
+    for (lat_bucket, lon_bucket) in
+        ordered_tile_buckets(center_lat_bucket, center_lon_bucket, prefetch_radius)
+    {
+        if !bucket_has_latitude_coverage(lat_bucket, bucket_step, spec, Some(80.0)) {
             continue;
         }
-        for lon_bucket in (center_lon_bucket - RADIUS)..=(center_lon_bucket + RADIUS) {
-            if let Some(asset) = builders::ensure_mars_bucket_asset(
-                &data_root,
-                &mola_tiles,
-                &cache_root,
-                &cache_db_path,
-                &connection,
-                spec,
-                lat_bucket,
-                lon_bucket,
-                bucket_step,
-            ) {
-                assets.push(asset);
-            }
+        let allow_build = tile_ring_distance(
+            lat_bucket,
+            lon_bucket,
+            center_lat_bucket,
+            center_lon_bucket,
+        ) <= i64::from(build_radius);
+        if let Some(asset) = builders::ensure_mars_bucket_asset(
+            &data_root,
+            &mola_tiles,
+            &cache_root,
+            &cache_db_path,
+            manifest.get(&(lat_bucket, lon_bucket)).copied(),
+            allow_build,
+            spec,
+            lat_bucket,
+            lon_bucket,
+            bucket_step,
+        ) {
+            assets.push(asset);
         }
     }
 
     assets
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ordered_tile_buckets_visits_the_center_before_prefetch_rings() {
+        let buckets = ordered_tile_buckets(10, -4, 2);
+
+        assert_eq!(buckets.len(), 25);
+        assert_eq!(buckets.first(), Some(&(10, -4)));
+        let distances: Vec<_> = buckets
+            .iter()
+            .map(|&(lat_bucket, lon_bucket)| {
+                tile_ring_distance(lat_bucket, lon_bucket, 10, -4)
+            })
+            .collect();
+        assert!(distances.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert_eq!(distances.last(), Some(&2));
+    }
+
+    #[test]
+    fn local_region_state_reuses_ready_assets_without_manifest_queries() {
+        let zoom = 6.0;
+        let spec = zoom::spec_for_zoom(zoom);
+        let ready = FocusContourAsset {
+            path: PathBuf::from("test-cache.sqlite"),
+            simplify_step: spec.simplify_step,
+            zoom_bucket: spec.zoom_bucket,
+            lat_bucket: 0,
+            lon_bucket: 0,
+        };
+
+        let state = local_contour_region_state(
+            crate::model::ActiveBody::Earth,
+            &[ready],
+            GeoPoint { lat: 0.0, lon: 0.0 },
+            zoom,
+            1,
+        );
+
+        assert!(state.ready_buckets.contains(&(0, 0)));
+        assert_eq!(state.status.ready_assets, 1);
+        assert_eq!(state.status.total_assets, 9);
+    }
 }

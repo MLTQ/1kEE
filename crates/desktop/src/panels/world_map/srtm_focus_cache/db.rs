@@ -1,6 +1,7 @@
 use super::{CACHE_DB_NAME, TileKey};
 use crate::terrain_assets;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -140,21 +141,40 @@ pub fn tile_exists(connection: &Connection, tile: TileKey) -> rusqlite::Result<b
         .map(|value| value.is_some())
 }
 
-/// Return the contour count recorded for this tile, or `None` if the tile is
-/// not in the manifest at all.  A count of 0 means the tile was explicitly
-/// marked empty (no source coverage at build time) and can be upgraded when
-/// better data (e.g. MOLA) becomes available.
-pub fn tile_contour_count(connection: &Connection, tile: TileKey) -> rusqlite::Result<Option<i64>> {
-    connection
-        .query_row(
-            "SELECT contour_count
-             FROM contour_tile_manifest
-             WHERE zoom_bucket = ?1 AND lat_bucket = ?2 AND lon_bucket = ?3
-             LIMIT 1",
-            params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()
+/// Read a rectangular manifest window with one indexed query. Region selection
+/// uses this snapshot to avoid issuing one SQLite round-trip per tile during a
+/// wide local-terrain prefetch.
+pub fn contour_manifest_window(
+    connection: &Connection,
+    zoom_bucket: i32,
+    min_lat_bucket: i32,
+    max_lat_bucket: i32,
+    min_lon_bucket: i32,
+    max_lon_bucket: i32,
+) -> rusqlite::Result<HashMap<(i32, i32), i64>> {
+    let mut statement = connection.prepare(
+        "SELECT lat_bucket, lon_bucket, contour_count
+         FROM contour_tile_manifest
+         WHERE zoom_bucket = ?1
+           AND lat_bucket BETWEEN ?2 AND ?3
+           AND lon_bucket BETWEEN ?4 AND ?5",
+    )?;
+    let rows = statement.query_map(
+        params![
+            zoom_bucket,
+            min_lat_bucket,
+            max_lat_bucket,
+            min_lon_bucket,
+            max_lon_bucket
+        ],
+        |row| Ok(((row.get(0)?, row.get(1)?), row.get(2)?)),
+    )?;
+    let mut manifest = HashMap::new();
+    for row in rows {
+        let (bucket, contour_count) = row?;
+        manifest.insert(bucket, contour_count);
+    }
+    Ok(manifest)
 }
 
 pub fn import_tile_into_cache(
@@ -420,6 +440,40 @@ mod tests {
             .is_err());
         drop(read_only);
 
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn manifest_window_returns_only_requested_buckets_in_one_snapshot() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after Unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "1kee-manifest-window-{}-{nonce}.sqlite",
+            std::process::id()
+        ));
+        let connection = Connection::open(&path).expect("temporary cache database");
+        ensure_cache_schema_with_connection(&connection).expect("manifest schema");
+        for (lat_bucket, lon_bucket, contour_count) in [(0, 0, 4), (1, -1, 7), (4, 4, 9)] {
+            connection
+                .execute(
+                    "INSERT INTO contour_tile_manifest
+                        (zoom_bucket, lat_bucket, lon_bucket, contour_count)
+                     VALUES (3, ?1, ?2, ?3)",
+                    params![lat_bucket, lon_bucket, contour_count],
+                )
+                .expect("manifest entry");
+        }
+
+        let manifest = contour_manifest_window(&connection, 3, -1, 1, -1, 1)
+            .expect("manifest window");
+        assert_eq!(manifest.len(), 2);
+        assert_eq!(manifest.get(&(0, 0)), Some(&4));
+        assert_eq!(manifest.get(&(1, -1)), Some(&7));
+        assert!(!manifest.contains_key(&(4, 4)));
+
+        drop(connection);
         let _ = fs::remove_file(path);
     }
 }

@@ -7,7 +7,11 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 
 ### `LocalRegionCache`
 - **Does**: Tracks currently visible local-terrain tiles, a generation-safe
-  single in-flight SQLite/WKB read, and zoom fallback geometry.
+  single in-flight SQLite/WKB read, a wide decoded return-pan envelope,
+  memoized manifest snapshots, and zoom fallback geometry. It merges the
+  active 13×13 source envelope so overlapping Moon/Mars contours owned by an
+  outer tile cannot vanish at the visible edge; the local draw pass performs
+  its existing geographic AABB cull before projection.
 - **Interacts with**: `load_srtm_region_for_view`, `load_lunar_region_for_view`.
 
 ### `GlobeRegionCache`
@@ -29,7 +33,9 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 - **Does**: Coalesce camera-driven tile requests into at most one named reader
   per cache. Reset epochs make late readers discard stale results rather than
   repopulating a cleared or newly selected scene; a short retry backoff avoids
-  reader churn when a cache database is temporarily unavailable.
+  reader churn when a cache database is temporarily unavailable. Local reads
+  prioritize the viewport center and consume bounded batches, so a wide
+  prefetch ring does not delay visible contours behind outer tiles.
 - **Interacts with**: Both local and globe contour loaders,
   `query_local_contours_batch`, and repaint scheduling.
 
@@ -56,7 +62,7 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 |-----------|---------|------------------|
 | World-map renderers | Returned contours are simplified but geographically correct polylines | Changing coordinate decoding or simplification semantics |
 | `srtm_focus_cache` | Tile cache keys remain `(path, zoom_bucket, lat_bucket, lon_bucket)` compatible with SQLite manifests | Changing keying or bucket math |
-| UI responsiveness | All disk reads stay off the render thread; each cache has one coalesced reader during camera motion | Reintroducing synchronous reads or an unbounded reader fan-out |
+| UI responsiveness | All disk reads stay off the render thread; each cache has one coalesced reader and local reads stay batch-bounded during camera motion | Reintroducing synchronous reads or an unbounded reader fan-out |
 | GPU contour pass | Unchanged globe tiles return the same merged Arc so their instance version stays stable across repaints | Allocating a fresh merged Arc every frame |
 
 ## Notes
@@ -67,9 +73,20 @@ Loads contour geometry from disk into in-memory render caches for both local ter
   therefore stop new cache builds without blanking already checkpointed lines.
 - `blast_tile_caches()` clears tile entries and memoized merges together, so a
   manual reset cannot retain obsolete contour geometry in memory; its epoch
-  also prevents old readers from writing back after the reset.
+  also prevents old readers from writing back after the reset and releases
+  any failed-build cooldowns after a user fixes storage/source availability.
 - Ready-but-empty tiles are cached as empty results, avoiding repeated SQLite
   reads for nodata terrain while preserving an existing zoom fallback.
+- Local terrain retains a bounded 12-tile return-pan envelope. Its full local
+  prefetch envelope is both the merge source and build window, ensuring a cold
+  outer Moon/Mars ownership tile cannot leave a gap at the visible edge. The
+  globe keeps its own smaller fetch behavior.
+- Local manifest selections are reused while the viewport remains in the same
+  bucket. In-process builder completion invalidates them immediately; a short
+  timeout admits writes from the companion cache builder without continuous
+  SQLite polling.
+- `LocalContourLoad` carries ready/progress data from that same manifest
+  selection, so the pulse grid and progress cards do not rescan SQLite.
 - A mixed batch commits every tile it decoded successfully. A fully failed
   batch retries after a short delay, so one locked or malformed tile cannot
   repeatedly throw away healthy neighbouring contours.

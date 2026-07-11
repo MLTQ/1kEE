@@ -1,13 +1,21 @@
-use super::db::{tile_contour_count, tile_exists};
 use super::gdal::{build_focus_contours, build_lunar_contour_tile, build_mars_contour_tile, shutdown_requested};
-use super::zoom::spec_for_zoom;
 use super::{FocusContourAsset, FocusContourSpec, GeoBounds, TileKey};
 use crate::model::GeoPoint;
-use rusqlite::Connection;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+const FAILED_BUILD_RETRY_DELAY: Duration = Duration::from_secs(5);
+const MAX_FAILED_BUILD_RETRY_DELAY: Duration = Duration::from_secs(60);
+const MAX_TRACKED_FAILED_BUILDS: usize = 1_024;
+
+#[derive(Clone, Copy)]
+struct FailedBuildBackoff {
+    retry_at: Instant,
+    attempts: u8,
+}
 
 fn max_background_builds() -> usize {
     let cpus = std::thread::available_parallelism()
@@ -19,6 +27,22 @@ fn max_background_builds() -> usize {
 fn active_build_slots() -> &'static AtomicUsize {
     static ACTIVE: OnceLock<AtomicUsize> = OnceLock::new();
     ACTIVE.get_or_init(|| AtomicUsize::new(0))
+}
+
+fn manifest_revision_counter() -> &'static AtomicU64 {
+    static MANIFEST_REVISION: OnceLock<AtomicU64> = OnceLock::new();
+    MANIFEST_REVISION.get_or_init(|| AtomicU64::new(0))
+}
+
+/// Monotonically increases after an in-process contour builder finishes. Local
+/// manifest snapshots use it to refresh immediately instead of waiting for
+/// their short external-writer timeout.
+pub fn manifest_revision() -> u64 {
+    manifest_revision_counter().load(Ordering::Acquire)
+}
+
+fn bump_manifest_revision() {
+    manifest_revision_counter().fetch_add(1, Ordering::AcqRel);
 }
 
 pub fn try_acquire_build_slot() -> bool {
@@ -52,6 +76,127 @@ pub fn mars_pending_set() -> &'static Mutex<HashSet<TileKey>> {
     MARS_PENDING.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+fn failed_builds() -> &'static Mutex<HashMap<TileKey, FailedBuildBackoff>> {
+    static FAILED: OnceLock<Mutex<HashMap<TileKey, FailedBuildBackoff>>> = OnceLock::new();
+    FAILED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn lunar_failed_builds() -> &'static Mutex<HashMap<TileKey, FailedBuildBackoff>> {
+    static FAILED: OnceLock<Mutex<HashMap<TileKey, FailedBuildBackoff>>> = OnceLock::new();
+    FAILED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn mars_failed_builds() -> &'static Mutex<HashMap<TileKey, FailedBuildBackoff>> {
+    static FAILED: OnceLock<Mutex<HashMap<TileKey, FailedBuildBackoff>>> = OnceLock::new();
+    FAILED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// A failed cache volume or unavailable GDAL source affects more than one
+/// tile. Per-body gates prevent a fresh outer ring from immediately consuming
+/// every build slot after the first failure.
+fn failed_build_gate() -> &'static Mutex<Option<FailedBuildBackoff>> {
+    static FAILED: OnceLock<Mutex<Option<FailedBuildBackoff>>> = OnceLock::new();
+    FAILED.get_or_init(|| Mutex::new(None))
+}
+
+fn lunar_failed_build_gate() -> &'static Mutex<Option<FailedBuildBackoff>> {
+    static FAILED: OnceLock<Mutex<Option<FailedBuildBackoff>>> = OnceLock::new();
+    FAILED.get_or_init(|| Mutex::new(None))
+}
+
+fn mars_failed_build_gate() -> &'static Mutex<Option<FailedBuildBackoff>> {
+    static FAILED: OnceLock<Mutex<Option<FailedBuildBackoff>>> = OnceLock::new();
+    FAILED.get_or_init(|| Mutex::new(None))
+}
+
+fn next_failed_build_backoff(previous: Option<FailedBuildBackoff>) -> FailedBuildBackoff {
+    let attempts = previous
+        .map(|backoff| backoff.attempts.saturating_add(1))
+        .unwrap_or(1);
+    let shift = attempts.saturating_sub(1).min(4);
+    let delay = Duration::from_secs(
+        (FAILED_BUILD_RETRY_DELAY.as_secs() << shift).min(MAX_FAILED_BUILD_RETRY_DELAY.as_secs()),
+    );
+    FailedBuildBackoff {
+        retry_at: Instant::now() + delay,
+        attempts,
+    }
+}
+
+fn retry_allowed(failures: &Mutex<HashMap<TileKey, FailedBuildBackoff>>, tile: TileKey) -> bool {
+    let Ok(failures) = failures.lock() else {
+        return true;
+    };
+    let Some(backoff) = failures.get(&tile).copied() else {
+        return true;
+    };
+    backoff.retry_at <= Instant::now()
+}
+
+fn record_failed_build(failures: &Mutex<HashMap<TileKey, FailedBuildBackoff>>, tile: TileKey) {
+    if let Ok(mut failures) = failures.lock() {
+        if failures.len() >= MAX_TRACKED_FAILED_BUILDS {
+            let now = Instant::now();
+            failures.retain(|_, backoff| backoff.retry_at > now);
+        }
+        let backoff = next_failed_build_backoff(failures.get(&tile).copied());
+        failures.insert(tile, backoff);
+    }
+}
+
+fn retry_gate_allows(gate: &Mutex<Option<FailedBuildBackoff>>) -> bool {
+    gate.lock()
+        .map(|gate| {
+            gate.as_ref()
+                .map_or(true, |backoff| backoff.retry_at <= Instant::now())
+        })
+        .unwrap_or(true)
+}
+
+fn record_failed_build_gate(gate: &Mutex<Option<FailedBuildBackoff>>) {
+    if let Ok(mut gate) = gate.lock() {
+        if gate
+            .as_ref()
+            .map_or(false, |backoff| backoff.retry_at > Instant::now())
+        {
+            return;
+        }
+        *gate = Some(next_failed_build_backoff(*gate));
+    }
+}
+
+fn clear_failed_build_gate(gate: &Mutex<Option<FailedBuildBackoff>>) {
+    if let Ok(mut gate) = gate.lock() {
+        *gate = None;
+    }
+}
+
+fn clear_failed_build(
+    failures: &Mutex<HashMap<TileKey, FailedBuildBackoff>>,
+    tile: TileKey,
+) {
+    if let Ok(mut failures) = failures.lock() {
+        failures.remove(&tile);
+    }
+}
+
+/// A manual tile-cache reset should also release failed-build cooldowns so a
+/// user who fixed a missing source or freed storage can retry immediately.
+pub fn clear_failed_build_backoffs() {
+    for failures in [failed_builds(), lunar_failed_builds(), mars_failed_builds()] {
+        if let Ok(mut failures) = failures.lock() {
+            failures.clear();
+        }
+    }
+    for gate in [
+        failed_build_gate(),
+        lunar_failed_build_gate(),
+        mars_failed_build_gate(),
+    ] {
+        clear_failed_build_gate(gate);
+    }
+}
+
 /// Maximum number of concurrent SLDEM2015 JP2 tile builds.
 /// The JP2 is a single ~22 GB file; all lunar builds compete for the same I/O.
 /// Capping at 2 keeps throughput high without thrashing disk/memory bandwidth.
@@ -68,15 +213,13 @@ pub fn ensure_bucket_asset(
     srtm_root: Option<&Path>,
     cache_root: &Path,
     cache_db_path: &Path,
-    connection: &Connection,
+    manifest_contour_count: Option<i64>,
+    allow_build: bool,
     spec: FocusContourSpec,
     lat_bucket: i32,
     lon_bucket: i32,
     bucket_step: f32,
 ) -> Option<FocusContourAsset> {
-    use super::zoom::spec_for_zoom as _spec_for_zoom;
-    let _ = _spec_for_zoom; // suppress unused import warning
-
     if shutdown_requested().load(Ordering::Relaxed) {
         return None;
     }
@@ -92,9 +235,11 @@ pub fn ensure_bucket_asset(
         lon_bucket,
     };
 
-    // Use the shared connection passed from ensure_focus_contour_region —
-    // avoids opening a new SQLite connection (with WAL pragma overhead) per tile.
-    if tile_exists(connection, tile).unwrap_or(false) {
+    // Region selection supplies a single-query manifest snapshot. Any cached
+    // manifest row is immediately renderable, including an explicitly empty
+    // Earth tile.
+    if manifest_contour_count.is_some() {
+        clear_failed_build(failed_builds(), tile);
         return Some(FocusContourAsset {
             path: cache_db_path.to_path_buf(),
             simplify_step: spec.simplify_step,
@@ -102,6 +247,14 @@ pub fn ensure_bucket_asset(
             lat_bucket,
             lon_bucket,
         });
+    }
+
+    if !allow_build {
+        return None;
+    }
+
+    if !retry_gate_allows(failed_build_gate()) || !retry_allowed(failed_builds(), tile) {
+        return None;
     }
 
     // Cache miss — need SRTM root to build on-demand; skip silently if unavailable.
@@ -127,7 +280,16 @@ pub fn ensure_bucket_asset(
     let cache_root = cache_root.to_path_buf();
     let cache_db_path = cache_db_path.to_path_buf();
     std::thread::spawn(move || {
-        let _ = build_focus_contours(&srtm_root, &cache_root, &cache_db_path, tile, bounds, spec);
+        if build_focus_contours(&srtm_root, &cache_root, &cache_db_path, tile, bounds, spec)
+            .is_some()
+        {
+            bump_manifest_revision();
+            clear_failed_build(failed_builds(), tile);
+            clear_failed_build_gate(failed_build_gate());
+        } else {
+            record_failed_build(failed_builds(), tile);
+            record_failed_build_gate(failed_build_gate());
+        }
         if let Ok(mut guard) = pending_set().lock() {
             guard.remove(&tile);
         }
@@ -144,7 +306,8 @@ pub fn ensure_lunar_bucket_asset(
     jp2_path: &Path,
     cache_root: &Path,
     cache_db_path: &Path,
-    connection: &Connection,
+    manifest_contour_count: Option<i64>,
+    allow_build: bool,
     spec: FocusContourSpec,
     lat_bucket: i32,
     lon_bucket: i32,
@@ -165,7 +328,8 @@ pub fn ensure_lunar_bucket_asset(
         lon_bucket,
     };
 
-    if tile_exists(connection, tile).unwrap_or(false) {
+    if manifest_contour_count.is_some() {
+        clear_failed_build(lunar_failed_builds(), tile);
         return Some(FocusContourAsset {
             path: cache_db_path.to_path_buf(),
             simplify_step: spec.simplify_step,
@@ -173,6 +337,14 @@ pub fn ensure_lunar_bucket_asset(
             lat_bucket,
             lon_bucket,
         });
+    }
+
+    if !allow_build {
+        return None;
+    }
+
+    if !retry_gate_allows(lunar_failed_build_gate()) || !retry_allowed(lunar_failed_builds(), tile) {
+        return None;
     }
 
     // All lunar builds read from the same large JP2 file — cap concurrency to
@@ -204,8 +376,16 @@ pub fn ensure_lunar_bucket_asset(
     let cache_root = cache_root.to_path_buf();
     let cache_db_path = cache_db_path.to_path_buf();
     std::thread::spawn(move || {
-        let _ =
-            build_lunar_contour_tile(&jp2_path, &cache_root, &cache_db_path, tile, bounds, spec);
+        if build_lunar_contour_tile(&jp2_path, &cache_root, &cache_db_path, tile, bounds, spec)
+            .is_some()
+        {
+            bump_manifest_revision();
+            clear_failed_build(lunar_failed_builds(), tile);
+            clear_failed_build_gate(lunar_failed_build_gate());
+        } else {
+            record_failed_build(lunar_failed_builds(), tile);
+            record_failed_build_gate(lunar_failed_build_gate());
+        }
         if let Ok(mut guard) = lunar_pending_set().lock() {
             guard.remove(&tile);
         }
@@ -226,7 +406,8 @@ pub fn ensure_mars_bucket_asset(
     mola_tiles: &[std::path::PathBuf],
     cache_root: &Path,
     cache_db_path: &Path,
-    connection: &Connection,
+    manifest_contour_count: Option<i64>,
+    allow_build: bool,
     spec: FocusContourSpec,
     lat_bucket: i32,
     lon_bucket: i32,
@@ -250,8 +431,9 @@ pub fn ensure_mars_bucket_asset(
     // Check the cache.  A tile with contour_count > 0 is fully built — serve it.
     // A tile with contour_count = 0 was previously marked empty (no CTX coverage);
     // if MOLA is now available we fall through and rebuild it.
-    match tile_contour_count(connection, tile).unwrap_or(None) {
+    match manifest_contour_count {
         Some(count) if count > 0 => {
+            clear_failed_build(mars_failed_builds(), tile);
             return Some(FocusContourAsset {
                 path: cache_db_path.to_path_buf(),
                 simplify_step: spec.simplify_step,
@@ -263,6 +445,7 @@ pub fn ensure_mars_bucket_asset(
         Some(0) if mola_tiles.is_empty() => {
             // Cached empty and no MOLA to upgrade it — serve the empty asset
             // so the render loop doesn't retry this tile every frame.
+            clear_failed_build(mars_failed_builds(), tile);
             return Some(FocusContourAsset {
                 path: cache_db_path.to_path_buf(),
                 simplify_step: spec.simplify_step,
@@ -273,6 +456,14 @@ pub fn ensure_mars_bucket_asset(
         }
         // Some(0) with MOLA available, or None (not cached yet) — fall through to build.
         _ => {}
+    }
+
+    if !allow_build {
+        return None;
+    }
+
+    if !retry_gate_allows(mars_failed_build_gate()) || !retry_allowed(mars_failed_builds(), tile) {
+        return None;
     }
 
     let pending = mars_pending_set();
@@ -302,9 +493,18 @@ pub fn ensure_mars_bucket_asset(
     let cache_root = cache_root.to_path_buf();
     let cache_db_path = cache_db_path.to_path_buf();
     std::thread::spawn(move || {
-        let _ = build_mars_contour_tile(
+        if build_mars_contour_tile(
             &data_root, &mola_tiles, &cache_root, &cache_db_path, tile, bounds, spec,
-        );
+        )
+        .is_some()
+        {
+            bump_manifest_revision();
+            clear_failed_build(mars_failed_builds(), tile);
+            clear_failed_build_gate(mars_failed_build_gate());
+        } else {
+            record_failed_build(mars_failed_builds(), tile);
+            record_failed_build_gate(mars_failed_build_gate());
+        }
         if let Ok(mut guard) = mars_pending_set().lock() {
             guard.remove(&tile);
         }
@@ -313,4 +513,30 @@ pub fn ensure_mars_bucket_asset(
     });
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_build_cooldown_blocks_only_until_it_is_cleared() {
+        let failures = Mutex::new(HashMap::new());
+        let gate = Mutex::new(None);
+        let tile = TileKey {
+            zoom_bucket: 2,
+            lat_bucket: 3,
+            lon_bucket: -4,
+        };
+
+        assert!(retry_allowed(&failures, tile));
+        record_failed_build(&failures, tile);
+        assert!(!retry_allowed(&failures, tile));
+        record_failed_build_gate(&gate);
+        assert!(!retry_gate_allows(&gate));
+        clear_failed_build(&failures, tile);
+        clear_failed_build_gate(&gate);
+        assert!(retry_allowed(&failures, tile));
+        assert!(retry_gate_allows(&gate));
+    }
 }

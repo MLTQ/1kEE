@@ -84,6 +84,7 @@ pub fn tick(root: Option<&Path>) {
                 city.location,
                 zoom,
                 radius,
+                radius,
             );
         }
     }
