@@ -38,6 +38,10 @@ SQLite assets immediately.
 - `allow_build=false` is intentionally a no-op on cache misses; the tile will
   be scheduled when it enters a caller's build window or a narrower caller
   requests it.
+- Desktop on-demand GDAL generation is capped at two concurrent jobs. This
+  leaves capacity for egui, WGPU, SQLite reads, and merge workers while the
+  local 13×13 envelope fills; the companion cache builder is the preferred
+  path for high-throughput bulk precomputation.
 - Builder calls receive the region selector's manifest count rather than
   querying SQLite per tile. Completed in-process builds advance a revision so
   local manifest snapshots refresh immediately.

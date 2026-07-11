@@ -32,6 +32,16 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
   weight relationships.
 - **Interacts with**: `AppModel::contour_stroke_scale` and `geography.rs`.
 
+### Contour projection budget
+
+- **Does**: Projects ordered local contours in fixed Rayon chunks and stops at
+  the existing render-point safety cap before allocating paths that would be
+  discarded.
+- **Interacts with**: `draw_contour_stack` and `contour_asset.rs` merged arcs.
+- **Rationale**: Keeps accepted contour ordering and visual output identical
+  while preventing a dense tile arrival from projecting the entire 13×13
+  source set after the cap is already exhausted.
+
 ### Local contour envelope
 
 - **Does**: Requests, builds, and merges a 13×13 local source grid. This keeps
@@ -79,3 +89,6 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 - The elevation-fill worker takes only the local viewport's padded contour
   subset; the wider source envelope remains available to line rendering but
   cannot inflate fill-worker cloning or bias local elevation interpolation.
+- Local contour line projection is chunked in source/elevation order. Rayon
+  still handles point projection, while egui submission stays serial and
+  stops before work the existing point budget would never draw.

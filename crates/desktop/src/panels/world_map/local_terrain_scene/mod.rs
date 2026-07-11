@@ -33,13 +33,11 @@ use crate::terrain_assets;
 use crate::theme;
 use rayon::prelude::*;
 use std::cell::RefCell;
-use std::path::Path;
 use std::sync::Arc;
 
 use super::contour_asset;
 use super::globe_scene::GlobeScene;
 use super::srtm_focus_cache;
-use super::srtm_stream;
 
 #[allow(dead_code)]
 pub const LOCAL_TRANSITION_START_ZOOM: f32 = 4.0;
@@ -1500,55 +1498,61 @@ fn draw_contour_stack(
     let minor_color = theme::contour_color();
 
     // Parallel projection: each contour's points are fully independent.
-    // Build (Vec<Pos2>, Stroke) on rayon workers; submit to painter serially.
-    let projected: Vec<Option<(Vec<egui::Pos2>, egui::Stroke)>> = ordered
-        .par_iter()
-        .map(|contour| {
-            let points: Vec<egui::Pos2> = contour
-                .points
-                .iter()
-                .filter_map(|point| {
-                    projection::project_local(
-                        layout,
-                        view,
-                        focus,
-                        *point,
-                        contour.elevation_m,
-                        extent_x_km,
-                        extent_y_km,
-                    )
-                    .map(|p| p.pos)
-                })
-                .collect();
-
-            if points.len() < 2 {
-                return None;
-            }
-
-            let major = (contour.elevation_m.round() as i32).rem_euclid(major_rem) == 0;
-            let stroke = egui::Stroke::new(
-                local_contour_stroke_width(
-                    if major { 1.35 } else { 0.7 },
-                    alpha,
-                    contour_stroke_scale,
-                ),
-                if major { major_color } else { minor_color }
-                    .gamma_multiply((if major { 1.0 } else { 0.78 }) * alpha),
-            );
-
-            Some((points, stroke))
-        })
-        .collect();
-
-    // Serial submission — painter is not Send, so this stays on the main thread.
-    // The point budget is a safety cap against pathological tile accumulations.
+    // Process fixed ordered chunks instead of materializing every projected
+    // path before checking the existing point cap. The serial submission order
+    // and accepted geometry remain unchanged, while paths beyond that cap no
+    // longer allocate/project during a dense tile arrival.
+    const CONTOUR_PROJECTION_CHUNK_SIZE: usize = 64;
     let mut remaining_points = MAX_CONTOUR_RENDER_POINTS;
-    for (points, stroke) in projected.into_iter().flatten() {
-        if remaining_points < 2 {
-            break;
+    'projection: for chunk in ordered.chunks(CONTOUR_PROJECTION_CHUNK_SIZE) {
+        let projected: Vec<Option<(Vec<egui::Pos2>, egui::Stroke)>> = chunk
+            .par_iter()
+            .map(|contour| {
+                let points: Vec<egui::Pos2> = contour
+                    .points
+                    .iter()
+                    .filter_map(|point| {
+                        projection::project_local(
+                            layout,
+                            view,
+                            focus,
+                            *point,
+                            contour.elevation_m,
+                            extent_x_km,
+                            extent_y_km,
+                        )
+                        .map(|p| p.pos)
+                    })
+                    .collect();
+
+                if points.len() < 2 {
+                    return None;
+                }
+
+                let major = (contour.elevation_m.round() as i32).rem_euclid(major_rem) == 0;
+                let stroke = egui::Stroke::new(
+                    local_contour_stroke_width(
+                        if major { 1.35 } else { 0.7 },
+                        alpha,
+                        contour_stroke_scale,
+                    ),
+                    if major { major_color } else { minor_color }
+                        .gamma_multiply((if major { 1.0 } else { 0.78 }) * alpha),
+                );
+
+                Some((points, stroke))
+            })
+            .collect();
+
+        // Painter is not Send, so only the already prepared paths are added
+        // on the UI thread. This preserves the previous elevation ordering.
+        for (points, stroke) in projected.into_iter().flatten() {
+            if remaining_points < 2 {
+                break 'projection;
+            }
+            remaining_points = remaining_points.saturating_sub(points.len());
+            painter.add(egui::Shape::line(points, stroke));
         }
-        remaining_points = remaining_points.saturating_sub(points.len());
-        painter.add(egui::Shape::line(points, stroke));
     }
 }
 

@@ -10,6 +10,10 @@ const MIN_LAND_ELEVATION_M: f32 = -600.0;
 #[allow(dead_code)]
 const MAX_LAND_ELEVATION_M: f32 = 9_000.0;
 const MAX_CACHED_TILES: usize = 8;
+/// Raw TIFF decode (or GDAL normalization) is intentionally serialized for
+/// interactive marker preloads. Exact background layer sampling retains its
+/// existing independent path, while local paint keeps a core free.
+const MAX_CONCURRENT_MARKER_PRELOADS: usize = 1;
 
 struct SrtmTile {
     width: u32,
@@ -25,6 +29,21 @@ struct CachedTile {
 struct TileCache {
     tiles: Vec<CachedTile>,
     missing: HashSet<PathBuf>,
+    /// Tile rasters currently being decoded or normalized by a preload worker.
+    /// This is path-keyed so dozens of visible markers cannot launch duplicate
+    /// TIFF decodes or GDAL subprocesses for the same one-degree tile.
+    loading: HashSet<PathBuf>,
+}
+
+fn tile_cache() -> &'static Mutex<TileCache> {
+    static CACHE: OnceLock<Mutex<TileCache>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        Mutex::new(TileCache {
+            tiles: Vec::new(),
+            missing: HashSet::new(),
+            loading: HashSet::new(),
+        })
+    })
 }
 
 #[allow(dead_code)]
@@ -40,13 +59,7 @@ pub fn sample_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> Opti
     let root = terrain_assets::find_srtm_root(selected_root)?;
     let path = tile_path(&root, point);
 
-    static CACHE: OnceLock<Mutex<TileCache>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| {
-        Mutex::new(TileCache {
-            tiles: Vec::new(),
-            missing: HashSet::new(),
-        })
-    });
+    let cache = tile_cache();
     // Block 1: Lock to check cache
     {
         let mut guard = cache.lock().ok()?;
@@ -88,6 +101,74 @@ pub fn sample_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> Opti
     }
 
     Some(value)
+}
+
+/// Return a loaded SRTM sample without ever opening a raster or waiting for
+/// GDAL. Local marker paint uses this path, preserving the blocking sampler
+/// above for background layer builders that require an exact elevation.
+pub fn peek_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> Option<f32> {
+    let root = terrain_assets::find_srtm_root(selected_root)?;
+    let path = tile_path(&root, point);
+    let mut cache = tile_cache().lock().ok()?;
+
+    if cache.missing.contains(&path) {
+        return None;
+    }
+    let index = cache.tiles.iter().position(|tile| tile.path == path)?;
+    let cached = cache.tiles.remove(index);
+    let value = cached.tile.sample_elevation_m(point);
+    cache.tiles.insert(0, cached);
+    Some(value)
+}
+
+/// Start a deduplicated background SRTM tile load. The first local marker in
+/// a new tile renders at its existing zero-terrain fallback for one or more
+/// frames; a repaint replaces it with the exact cached elevation once ready.
+pub fn request_elevation_preload(selected_root: Option<&Path>, point: GeoPoint) {
+    let Some(root) = terrain_assets::find_srtm_root(selected_root) else {
+        return;
+    };
+    let path = tile_path(&root, point);
+    let cache = tile_cache();
+    {
+        let Ok(mut cache) = cache.lock() else {
+            return;
+        };
+        if cache.missing.contains(&path)
+            || cache.tiles.iter().any(|tile| tile.path == path)
+            || cache.loading.len() >= MAX_CONCURRENT_MARKER_PRELOADS
+            || !cache.loading.insert(path.clone())
+        {
+            return;
+        }
+    }
+
+    let cleanup_path = path.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("srtm-elevation-preload".into())
+        .spawn(move || {
+            let tile = load_tile(path.clone());
+            if let Ok(mut cache) = cache.lock() {
+                cache.loading.remove(&path);
+                if let Some(tile) = tile {
+                    if !cache.tiles.iter().any(|cached| cached.path == path) {
+                        cache.tiles.insert(0, CachedTile { path, tile });
+                        if cache.tiles.len() > MAX_CACHED_TILES {
+                            cache.tiles.pop();
+                        }
+                    }
+                } else {
+                    cache.missing.insert(path);
+                }
+            }
+            crate::app::request_repaint();
+        })
+    {
+        if let Ok(mut cache) = cache.lock() {
+            cache.loading.remove(&cleanup_path);
+        }
+        eprintln!("[1kEE] failed to spawn SRTM elevation preload: {error}");
+    }
 }
 
 impl SrtmTile {

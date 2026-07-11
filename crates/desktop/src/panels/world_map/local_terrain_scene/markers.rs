@@ -232,6 +232,13 @@ pub(super) fn draw_camera_marker(
 }
 
 pub(super) fn marker_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> f32 {
-    let terrain_elevation_m = srtm_stream::sample_elevation_m(selected_root, point).unwrap_or(0.0);
+    // Marker paint must never be the first caller that decodes a full SRTM
+    // raster or runs gdal_translate. Keep the existing fallback for the short
+    // preload window, then repaint at the exact elevation once it is cached.
+    let terrain_elevation_m =
+        srtm_stream::peek_elevation_m(selected_root, point).unwrap_or_else(|| {
+            srtm_stream::request_elevation_preload(selected_root, point);
+            0.0
+        });
     terrain_elevation_m + 18.0
 }

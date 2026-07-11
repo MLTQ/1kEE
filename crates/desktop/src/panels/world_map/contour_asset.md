@@ -8,10 +8,11 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 ### `LocalRegionCache`
 - **Does**: Tracks currently visible local-terrain tiles, a generation-safe
   single in-flight SQLite/WKB read, a wide decoded return-pan envelope,
-  memoized manifest snapshots, and zoom fallback geometry. It merges the
-  active 13×13 source envelope so overlapping Moon/Mars contours owned by an
-  outer tile cannot vanish at the visible edge; the local draw pass performs
-  its existing geographic AABB cull before projection.
+  background manifest/merge workers, and zoom fallback geometry. It merges
+  the active 13×13 source envelope off-thread so overlapping Moon/Mars
+  contours owned by an outer tile cannot vanish at the visible edge or stall
+  paint; the local draw pass performs its existing geographic AABB cull before
+  projection.
 - **Interacts with**: `load_srtm_region_for_view`, `load_lunar_region_for_view`.
 
 ### `GlobeRegionCache`
@@ -34,8 +35,9 @@ Loads contour geometry from disk into in-memory render caches for both local ter
   per cache. Reset epochs make late readers discard stale results rather than
   repopulating a cleared or newly selected scene; a short retry backoff avoids
   reader churn when a cache database is temporarily unavailable. Local reads
-  prioritize the viewport center and consume bounded batches, so a wide
-  prefetch ring does not delay visible contours behind outer tiles.
+  prioritize the viewport center and consume small bounded batches, so a wide
+  prefetch ring does not delay visible contours behind outer tiles or publish
+  a large one-frame geometry spike.
 - **Interacts with**: Both local and globe contour loaders,
   `query_local_contours_batch`, and repaint scheduling.
 
@@ -56,13 +58,23 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 - **Interacts with**: `srtm_focus_cache::db::open_cache_db_read_only`,
   `parse_gpkg_lines`, render caches.
 
+### Local manifest and merge workers
+
+- **Does**: Runs SQLite/root/build selection and full local tile flattening on
+  named single-flight workers. Results are revision/window checked before
+  publication; the last complete contour `Arc` stays drawable during a refresh.
+- **Interacts with**: `LocalRegionCache`, `srtm_focus_cache`, and egui repaint
+  requests.
+- **Rationale**: A cache miss, external-drive contention, or dense Mars batch
+  must never make the UI thread wait for SQLite or clone every contour path.
+
 ## Contracts
 
 | Dependent | Expects | Breaking changes |
 |-----------|---------|------------------|
 | World-map renderers | Returned contours are simplified but geographically correct polylines | Changing coordinate decoding or simplification semantics |
 | `srtm_focus_cache` | Tile cache keys remain `(path, zoom_bucket, lat_bucket, lon_bucket)` compatible with SQLite manifests | Changing keying or bucket math |
-| UI responsiveness | All disk reads stay off the render thread; each cache has one coalesced reader and local reads stay batch-bounded during camera motion | Reintroducing synchronous reads or an unbounded reader fan-out |
+| UI responsiveness | Local manifest selection, disk reads, and full contour merges stay off the render thread; each cache has one coalesced reader/merge and local reads stay batch-bounded during camera motion | Reintroducing synchronous selection/merges or an unbounded reader fan-out |
 | GPU contour pass | Unchanged globe tiles return the same merged Arc so their instance version stays stable across repaints | Allocating a fresh merged Arc every frame |
 
 ## Notes
@@ -82,9 +94,16 @@ Loads contour geometry from disk into in-memory render caches for both local ter
   outer Moon/Mars ownership tile cannot leave a gap at the visible edge. The
   globe keeps its own smaller fetch behavior.
 - Local manifest selections are reused while the viewport remains in the same
-  bucket. In-process builder completion invalidates them immediately; a short
-  timeout admits writes from the companion cache builder without continuous
-  SQLite polling.
+  bucket. Their refresh and on-demand build selection happen in a single
+  worker; in-process builder completion invalidates them immediately, while a
+  short timeout admits writes from the companion cache builder without
+  continuous SQLite polling.
+- A local read batch is intentionally eight tiles. The full 13×13 envelope is
+  still retained and eventually decoded, but small center-first arrivals avoid
+  a burst of thousands of new paths in one frame.
+- Full tile flattening and lunar/Mars ownership partitioning use an immutable
+  `Arc` snapshot on a background worker. A result only replaces the displayed
+  merge if its cache revision and requested camera window still match.
 - `LocalContourLoad` carries ready/progress data from that same manifest
   selection, so the pulse grid and progress cards do not rescan SQLite.
 - A mixed batch commits every tile it decoded successfully. A fully failed

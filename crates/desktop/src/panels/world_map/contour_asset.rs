@@ -26,7 +26,7 @@ static GLOBAL_BATHYMETRY_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = 
 const CONTOUR_READ_RETRY_DELAY: Duration = Duration::from_millis(250);
 /// Keep local-view reads responsive even when the prefetch envelope includes
 /// many cached tiles. The next repaint claims the following nearest batch.
-const LOCAL_CONTOUR_READ_BATCH_SIZE: usize = 49;
+const LOCAL_CONTOUR_READ_BATCH_SIZE: usize = 8;
 /// Keep a wide decoded-tile envelope while the viewport moves, without
 /// retaining an unbounded trail across a long local-terrain session.
 const LOCAL_CONTOUR_RETAIN_RADIUS: i32 = 12;
@@ -158,6 +158,32 @@ struct LocalManifestSnapshot {
     refreshed_at: Instant,
 }
 
+/// Identity for an asynchronously flattened local contour window.  The tile
+/// cache stores decoded geometry per tile; this key makes a worker result
+/// publishable only when it still matches the latest camera window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LocalMergeKey {
+    load_epoch: u64,
+    entries_revision: u64,
+    partition_bucket_step_bits: Option<u32>,
+    center_lat_bucket: i32,
+    center_lon_bucket: i32,
+    source_radius: i32,
+}
+
+#[derive(Clone, Copy)]
+struct LocalMergeSpec {
+    center_lat_bucket: i32,
+    center_lon_bucket: i32,
+    source_radius: i32,
+    partition_bucket_step: Option<f32>,
+}
+
+struct LocalMergeWork {
+    key: LocalMergeKey,
+    tiles: Vec<(CacheKey, Arc<Vec<ContourPath>>)>,
+}
+
 /// Per-zoom-level cache for globe-mode SRTM tiles.
 /// Unlike `LocalRegionCache`, this accumulates tiles across orbit movements
 /// and only clears when the zoom bucket changes.  Eviction is by distance
@@ -242,6 +268,13 @@ impl GlobeRegionCache {
 struct LocalRegionCache {
     scene_key: Option<SceneKey>,
     manifest_snapshot: Option<LocalManifestSnapshot>,
+    /// Most recent manifest request, which may be newer than the published
+    /// snapshot while a slow SQLite/root lookup is still running.
+    manifest_requested_key: Option<LocalManifestKey>,
+    /// At most one manifest/build-selection worker per terrain body.  Camera
+    /// motion updates `manifest_requested_key`; the next repaint coalesces to
+    /// it after this worker completes.
+    manifest_in_flight: Option<LocalManifestKey>,
     last_status: Option<srtm_focus_cache::FocusContourRegionStatus>,
     entries: HashMap<CacheKey, Arc<Vec<ContourPath>>>,
     /// Keys for which a background load thread has been spawned but not yet
@@ -253,15 +286,19 @@ struct LocalRegionCache {
     /// while tiles at the new zoom level are building / loading.  Cleared as
     /// soon as the new zoom has at least one tile in `entries`.
     zoom_fallback: Option<Arc<Vec<ContourPath>>>,
-    /// Memoized flattened merge of the active source window in `entries`, plus
-    /// the signature of the entry set it was built from. Rebuilt only when the
-    /// set of tiles (or their contents) changes, so the per-frame call returns
-    /// a cheap `Arc` clone instead of deep-cloning contour paths every frame.
+    /// Most recently completed flattened merge.  It intentionally remains
+    /// drawable while a replacement is built on a worker, so a newly decoded
+    /// batch cannot make the paint thread clone the full source envelope.
     merged: Option<Arc<Vec<ContourPath>>>,
     entries_revision: u64,
-    /// `None` is the ordinary all-tile merge; `Some(bits)` is a lunar/Mars
-    /// overlap-partitioned merge at that exact bucket-step value.
-    merged_key: Option<(u64, Option<u32>, i32, i32, i32)>,
+    /// Key of the completed `merged` value.
+    merged_key: Option<LocalMergeKey>,
+    /// The latest window requested by paint.  A worker whose camera window is
+    /// no longer current discards its result instead of briefly drawing stale
+    /// geometry after a pan.
+    merge_requested_key: Option<LocalMergeKey>,
+    /// Single-flight background flatten/partition worker marker.
+    merge_in_flight: Option<LocalMergeKey>,
     load_epoch: u64,
     load_in_flight: Option<u64>,
     read_retry_at: Option<Instant>,
@@ -272,6 +309,8 @@ impl Default for LocalRegionCache {
         Self {
             scene_key: None,
             manifest_snapshot: None,
+            manifest_requested_key: None,
+            manifest_in_flight: None,
             last_status: None,
             entries: HashMap::new(),
             in_flight: HashSet::new(),
@@ -279,6 +318,8 @@ impl Default for LocalRegionCache {
             merged: None,
             entries_revision: 0,
             merged_key: None,
+            merge_requested_key: None,
+            merge_in_flight: None,
             load_epoch: 0,
             load_in_flight: None,
             read_retry_at: None,
@@ -289,7 +330,8 @@ impl Default for LocalRegionCache {
 impl LocalRegionCache {
     fn mark_entries_changed(&mut self) {
         self.entries_revision = self.entries_revision.wrapping_add(1);
-        self.merged = None;
+        // Keep the previous complete merge visible until a worker replaces it.
+        // Dropping it here would turn every tile arrival into a blank frame.
         self.merged_key = None;
     }
 
@@ -297,6 +339,10 @@ impl LocalRegionCache {
         self.entries.clear();
         self.in_flight.clear();
         self.last_status = None;
+        self.merged = None;
+        self.merged_key = None;
+        self.merge_requested_key = None;
+        self.merge_in_flight = None;
         self.mark_entries_changed();
         self.load_epoch = self.load_epoch.wrapping_add(1);
         self.read_retry_at = None;
@@ -305,6 +351,8 @@ impl LocalRegionCache {
     fn reset_all(&mut self) {
         self.scene_key = None;
         self.manifest_snapshot = None;
+        self.manifest_requested_key = None;
+        self.manifest_in_flight = None;
         self.last_status = None;
         self.zoom_fallback = None;
         self.clear_entries_for_new_scene();
@@ -333,87 +381,57 @@ fn retain_local_entries(
     }
 }
 
-/// Return the flattened local contour source window, rebuilding only when its
-/// entries or bucket-window position changes. Tiles outside that window remain
-/// decoded in `entries` for rapid return pans.
-fn merged_local_contours(
-    cache: &mut LocalRegionCache,
-    center_lat_bucket: i32,
-    center_lon_bucket: i32,
-    source_radius: i32,
-) -> Option<Arc<Vec<ContourPath>>> {
-    let merge_key = (
-        cache.entries_revision,
-        None,
-        center_lat_bucket,
-        center_lon_bucket,
-        source_radius,
-    );
-    if cache.merged_key == Some(merge_key) {
-        return cache.merged.clone();
-    }
-    if cache.entries.is_empty() {
-        cache.merged = None;
-        cache.merged_key = Some(merge_key);
+/// Claim a background flatten/partition job.  The only UI-thread work here is
+/// cloning tile `Arc`s under the short cache lock; copying individual contour
+/// paths and points happens after the lock has been released.
+fn begin_local_merge(cache: &mut LocalRegionCache, spec: LocalMergeSpec) -> Option<LocalMergeWork> {
+    let key = LocalMergeKey {
+        load_epoch: cache.load_epoch,
+        entries_revision: cache.entries_revision,
+        partition_bucket_step_bits: spec.partition_bucket_step.map(f32::to_bits),
+        center_lat_bucket: spec.center_lat_bucket,
+        center_lon_bucket: spec.center_lon_bucket,
+        source_radius: spec.source_radius,
+    };
+    cache.merge_requested_key = Some(key);
+    if cache.merged_key == Some(key) || cache.merge_in_flight.is_some() {
         return None;
     }
-    let mut merged = Vec::new();
-    for (key, contours) in &cache.entries {
-        if local_tile_distance(key, center_lat_bucket, center_lon_bucket) <= source_radius {
-            merged.extend(contours.iter().cloned());
-        }
-    }
-    if merged.is_empty() {
+
+    let tiles = cache
+        .entries
+        .iter()
+        .filter(|(tile, _)| {
+            local_tile_distance(tile, spec.center_lat_bucket, spec.center_lon_bucket)
+                <= spec.source_radius
+        })
+        .map(|(tile, contours)| (tile.clone(), Arc::clone(contours)))
+        .collect::<Vec<_>>();
+    if tiles.is_empty() {
         cache.merged = None;
-        cache.merged_key = Some(merge_key);
+        cache.merged_key = Some(key);
         return None;
     }
-    let arc = Arc::new(merged);
-    cache.merged = Some(Arc::clone(&arc));
-    cache.merged_key = Some(merge_key);
-    Some(arc)
+
+    cache.merge_in_flight = Some(key);
+    Some(LocalMergeWork { key, tiles })
 }
 
-/// Merge overlapping lunar/Mars tile sets without redrawing the same contour
-/// from neighbouring tiles. Like the ordinary local merge, this retains a
-/// stable `Arc` while the cache entries are unchanged.
-fn merged_partitioned_local_contours(
-    cache: &mut LocalRegionCache,
-    bucket_step: f32,
-    center_lat_bucket: i32,
-    center_lon_bucket: i32,
-    source_radius: i32,
-) -> Option<Arc<Vec<ContourPath>>> {
-    let merge_key = (
-        cache.entries_revision,
-        Some(bucket_step.to_bits()),
-        center_lat_bucket,
-        center_lon_bucket,
-        source_radius,
-    );
-    if cache.entries.is_empty() {
-        cache.merged = None;
-        cache.merged_key = Some(merge_key);
-        return cache.zoom_fallback.clone();
-    }
+/// Flatten a snapshot of tile `Arc`s, keeping exclusive midpoint ownership for
+/// lunar and Mars contour tiles. This runs only on named merge workers.
+fn flatten_local_merge(work: LocalMergeWork) -> Arc<Vec<ContourPath>> {
+    let capacity = work.tiles.iter().map(|(_, contours)| contours.len()).sum();
+    let mut merged = Vec::with_capacity(capacity);
+    let partition_bucket_step = work.key.partition_bucket_step_bits.map(f32::from_bits);
 
-    if cache.merged_key == Some(merge_key) {
-        if let Some(merged) = &cache.merged {
-            return if merged.is_empty() {
-                cache.zoom_fallback.clone()
-            } else {
-                Some(Arc::clone(merged))
-            };
-        }
-    }
-
-    let mut merged = Vec::new();
-    for (key, contours) in &cache.entries {
-        if local_tile_distance(key, center_lat_bucket, center_lon_bucket) > source_radius {
+    for (tile, contours) in work.tiles {
+        let Some(bucket_step) = partition_bucket_step else {
+            merged.extend(contours.iter().cloned());
             continue;
-        }
-        let tile_lat = key.lat_bucket as f32 * bucket_step;
-        let tile_lon = key.lon_bucket as f32 * bucket_step;
+        };
+
+        let tile_lat = tile.lat_bucket as f32 * bucket_step;
+        let tile_lon = tile.lon_bucket as f32 * bucket_step;
         let half_step = bucket_step * 0.5;
         for contour in contours.iter() {
             if contour.points.is_empty() {
@@ -426,15 +444,123 @@ fn merged_partitioned_local_contours(
         }
     }
 
-    let merged = Arc::new(merged);
-    cache.merged = Some(Arc::clone(&merged));
-    cache.merged_key = Some(merge_key);
-    if merged.is_empty() {
-        cache.zoom_fallback.clone()
-    } else {
-        cache.zoom_fallback = None;
-        Some(merged)
+    Arc::new(merged)
+}
+
+fn finish_local_merge(
+    cache: &Mutex<LocalRegionCache>,
+    key: LocalMergeKey,
+    merged: Option<Arc<Vec<ContourPath>>>,
+) {
+    let Ok(mut cache) = cache.lock() else {
+        return;
+    };
+    if cache.merge_in_flight == Some(key) {
+        cache.merge_in_flight = None;
     }
+    if cache.load_epoch != key.load_epoch
+        || cache.entries_revision != key.entries_revision
+        || cache.merge_requested_key != Some(key)
+    {
+        return;
+    }
+
+    if let Some(merged) = merged {
+        if key.partition_bucket_step_bits.is_some() && !merged.is_empty() {
+            cache.zoom_fallback = None;
+        }
+        cache.merged = Some(merged);
+        cache.merged_key = Some(key);
+    }
+}
+
+fn spawn_local_merge(
+    cache: &'static Mutex<LocalRegionCache>,
+    work: LocalMergeWork,
+    ctx: egui::Context,
+    worker_name: &'static str,
+) {
+    let key = work.key;
+    let cleanup_ctx = ctx.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name(worker_name.into())
+        .spawn(move || {
+            let merged = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                flatten_local_merge(work)
+            })) {
+                Ok(merged) => Some(merged),
+                Err(_) => {
+                    eprintln!("[1kEE] {worker_name} panicked while merging contour tiles");
+                    None
+                }
+            };
+            finish_local_merge(cache, key, merged);
+            ctx.request_repaint();
+        })
+    {
+        finish_local_merge(cache, key, None);
+        eprintln!("[1kEE] failed to spawn {worker_name}: {error}");
+        cleanup_ctx.request_repaint();
+    }
+}
+
+#[cfg(test)]
+fn merged_local_contours(
+    cache: &LocalRegionCache,
+    center_lat_bucket: i32,
+    center_lon_bucket: i32,
+    source_radius: i32,
+) -> Option<Arc<Vec<ContourPath>>> {
+    let tiles = cache
+        .entries
+        .iter()
+        .filter(|(tile, _)| {
+            local_tile_distance(tile, center_lat_bucket, center_lon_bucket) <= source_radius
+        })
+        .map(|(tile, contours)| (tile.clone(), Arc::clone(contours)))
+        .collect();
+    let merged = flatten_local_merge(LocalMergeWork {
+        key: LocalMergeKey {
+            load_epoch: cache.load_epoch,
+            entries_revision: cache.entries_revision,
+            partition_bucket_step_bits: None,
+            center_lat_bucket,
+            center_lon_bucket,
+            source_radius,
+        },
+        tiles,
+    });
+    (!merged.is_empty()).then_some(merged)
+}
+
+#[cfg(test)]
+fn merged_partitioned_local_contours(
+    cache: &LocalRegionCache,
+    bucket_step: f32,
+    center_lat_bucket: i32,
+    center_lon_bucket: i32,
+    source_radius: i32,
+) -> Option<Arc<Vec<ContourPath>>> {
+    let tiles = cache
+        .entries
+        .iter()
+        .filter(|(tile, _)| {
+            local_tile_distance(tile, center_lat_bucket, center_lon_bucket) <= source_radius
+        })
+        .map(|(tile, contours)| (tile.clone(), Arc::clone(contours)))
+        .collect();
+    let merged = flatten_local_merge(LocalMergeWork {
+        key: LocalMergeKey {
+            load_epoch: cache.load_epoch,
+            entries_revision: cache.entries_revision,
+            partition_bucket_step_bits: Some(bucket_step.to_bits()),
+            center_lat_bucket,
+            center_lon_bucket,
+            source_radius,
+        },
+        tiles,
+    });
+    (!merged.is_empty()).then_some(merged)
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -692,41 +818,102 @@ fn spawn_globe_read(
     }
 }
 
+/// Publish a background manifest selection only when its camera key remains
+/// current. This keeps a slow/locked SQLite volume from ever blocking paint.
+fn finish_local_manifest(
+    cache: &Mutex<LocalRegionCache>,
+    key: &LocalManifestKey,
+    assets: Option<Vec<srtm_focus_cache::FocusContourAsset>>,
+) {
+    let Ok(mut cache) = cache.lock() else {
+        return;
+    };
+    if cache.manifest_in_flight.as_ref() == Some(key) {
+        cache.manifest_in_flight = None;
+    }
+    if cache.manifest_requested_key.as_ref() != Some(key) {
+        return;
+    }
+    if let Some(assets) = assets {
+        cache.manifest_snapshot = Some(LocalManifestSnapshot {
+            key: key.clone(),
+            assets,
+            // Observe the revision after selection: a builder that completed
+            // during the query is already represented by this snapshot.
+            manifest_revision: srtm_focus_cache::contour_manifest_revision(),
+            refreshed_at: Instant::now(),
+        });
+    }
+}
+
 /// Reuse a local manifest selection while the camera stays in the same bucket.
-/// The short timeout admits companion cache-builder writes, while the in-process
-/// builder revision makes freshly completed tiles visible on the next repaint.
-fn local_manifest_assets(
+/// SQLite/root discovery and on-demand build selection run in a single worker;
+/// paint immediately keeps the previous exact snapshot (or an empty result)
+/// until that worker publishes.
+fn local_manifest_assets<F>(
     cache: &'static Mutex<LocalRegionCache>,
     key: LocalManifestKey,
-    fetch: impl FnOnce() -> Vec<srtm_focus_cache::FocusContourAsset>,
-) -> Vec<srtm_focus_cache::FocusContourAsset> {
+    ctx: egui::Context,
+    worker_name: &'static str,
+    fetch: F,
+) -> Vec<srtm_focus_cache::FocusContourAsset>
+where
+    F: FnOnce() -> Vec<srtm_focus_cache::FocusContourAsset> + Send + 'static,
+{
     let manifest_revision = srtm_focus_cache::contour_manifest_revision();
-    if let Ok(guard) = cache.lock() {
-        if let Some(snapshot) = &guard.manifest_snapshot {
-            if snapshot.key == key
+    let (cached_assets, start_worker) = if let Ok(mut guard) = cache.lock() {
+        let cached_assets = guard.manifest_snapshot.as_ref().and_then(|snapshot| {
+            // Do not feed a changed root/zoom/center into the reader. Exact
+            // snapshots are safe to keep rendering while their refresh runs.
+            (snapshot.key == key).then(|| snapshot.assets.clone())
+        });
+        let snapshot_is_fresh = guard.manifest_snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.key == key
                 && snapshot.manifest_revision == manifest_revision
                 && snapshot.refreshed_at.elapsed() < LOCAL_MANIFEST_SNAPSHOT_TTL
-            {
-                return snapshot.assets.clone();
-            }
+        });
+        if snapshot_is_fresh {
+            // A previous slow request may still be in flight for another
+            // viewport. Record this key before returning so that worker
+            // cannot overwrite the fresh snapshot after a quick pan back.
+            guard.manifest_requested_key = Some(key);
+            return cached_assets.unwrap_or_default();
+        }
+        guard.manifest_requested_key = Some(key.clone());
+        let start_worker = guard.manifest_in_flight.is_none();
+        if start_worker {
+            guard.manifest_in_flight = Some(key.clone());
+        }
+        (cached_assets, start_worker)
+    } else {
+        (None, false)
+    };
+
+    if start_worker {
+        let worker_key = key.clone();
+        let cleanup_key = worker_key.clone();
+        let cleanup_ctx = ctx.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name(worker_name.into())
+            .spawn(move || {
+                let assets = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(fetch)) {
+                    Ok(assets) => Some(assets),
+                    Err(_) => {
+                        eprintln!("[1kEE] {worker_name} panicked while selecting contour tiles");
+                        None
+                    }
+                };
+                finish_local_manifest(cache, &worker_key, assets);
+                ctx.request_repaint();
+            })
+        {
+            finish_local_manifest(cache, &cleanup_key, None);
+            eprintln!("[1kEE] failed to spawn {worker_name}: {error}");
+            cleanup_ctx.request_repaint();
         }
     }
 
-    let assets = fetch();
-    let snapshot = LocalManifestSnapshot {
-        key,
-        assets: assets.clone(),
-        // Keep the revision observed before the query. If an in-process build
-        // finishes while the manifest is being read, the next paint sees the
-        // newer revision and refreshes instead of retaining this stale result
-        // for the external-writer timeout.
-        manifest_revision,
-        refreshed_at: Instant::now(),
-    };
-    if let Ok(mut guard) = cache.lock() {
-        guard.manifest_snapshot = Some(snapshot);
-    }
-    assets
+    cached_assets.unwrap_or_default()
 }
 
 pub fn load_srtm_region_for_view(
@@ -754,15 +941,22 @@ pub fn load_srtm_region_for_view(
         prefetch_radius,
         build_radius,
     };
-    let assets = local_manifest_assets(cache, manifest_key, || {
-        srtm_focus_cache::ensure_focus_contour_region(
-            selected_root,
-            viewport_center,
-            zoom,
-            prefetch_radius,
-            build_radius,
-        )
-    });
+    let manifest_root = selected_root.map(Path::to_path_buf);
+    let assets = local_manifest_assets(
+        cache,
+        manifest_key,
+        ctx.clone(),
+        "earth-local-contour-manifest",
+        move || {
+            srtm_focus_cache::ensure_focus_contour_region(
+                manifest_root.as_deref(),
+                viewport_center,
+                zoom,
+                prefetch_radius,
+                build_radius,
+            )
+        },
+    );
     let state = srtm_focus_cache::local_contour_region_state(
         crate::model::ActiveBody::Earth,
         &assets,
@@ -792,12 +986,7 @@ pub fn load_srtm_region_for_view(
             guard.clear_entries_for_new_scene();
         }
         guard.last_status = Some(state.status);
-        begin_local_read(
-            &mut guard,
-            &assets,
-            center_lat_bucket,
-            center_lon_bucket,
-        )
+        begin_local_read(&mut guard, &assets, center_lat_bucket, center_lon_bucket)
     } else {
         None
     };
@@ -813,18 +1002,27 @@ pub fn load_srtm_region_for_view(
         );
     }
 
-    // Merge the complete source envelope. The draw pass still AABB-culls
-    // contours before projecting, while preserving lines owned by an outer
-    // overlapping tile that cross into the viewport.
-    let contours = cache.lock().ok().and_then(|mut guard| {
+    // Flattening the complete source envelope is intentionally asynchronous:
+    // decode arrivals can contain thousands of paths, and cloning them on the
+    // paint thread caused the visible tile-arrival hitch.
+    let (contours, merge) = if let Ok(mut guard) = cache.lock() {
         retain_local_entries(&mut guard, center_lat_bucket, center_lon_bucket);
-        merged_local_contours(
+        let merge = begin_local_merge(
             &mut guard,
-            center_lat_bucket,
-            center_lon_bucket,
-            prefetch_radius,
-        )
-    });
+            LocalMergeSpec {
+                center_lat_bucket,
+                center_lon_bucket,
+                source_radius: prefetch_radius,
+                partition_bucket_step: None,
+            },
+        );
+        (guard.merged.clone(), merge)
+    } else {
+        (None, None)
+    };
+    if let Some(work) = merge {
+        spawn_local_merge(cache, work, ctx.clone(), "earth-local-contour-merge");
+    }
     LocalContourLoad {
         contours,
         ready_buckets: state.ready_buckets,
@@ -861,15 +1059,22 @@ pub fn load_lunar_region_for_view(
         prefetch_radius,
         build_radius,
     };
-    let assets = local_manifest_assets(cache, manifest_key, || {
-        srtm_focus_cache::ensure_lunar_contour_region(
-            selected_root,
-            viewport_center,
-            zoom,
-            prefetch_radius,
-            build_radius,
-        )
-    });
+    let manifest_root = selected_root.map(Path::to_path_buf);
+    let assets = local_manifest_assets(
+        cache,
+        manifest_key,
+        ctx.clone(),
+        "lunar-local-contour-manifest",
+        move || {
+            srtm_focus_cache::ensure_lunar_contour_region(
+                manifest_root.as_deref(),
+                viewport_center,
+                zoom,
+                prefetch_radius,
+                build_radius,
+            )
+        },
+    );
     let state = srtm_focus_cache::local_contour_region_state(
         crate::model::ActiveBody::Moon,
         &assets,
@@ -896,15 +1101,9 @@ pub fn load_lunar_region_for_view(
             guard.clear_entries_for_new_scene();
         }
         guard.last_status = Some(state.status);
-        (!assets.is_empty()).then(|| {
-            begin_local_read(
-                &mut guard,
-                &assets,
-                center_lat_bucket,
-                center_lon_bucket,
-            )
-        })
-        .flatten()
+        (!assets.is_empty())
+            .then(|| begin_local_read(&mut guard, &assets, center_lat_bucket, center_lon_bucket))
+            .flatten()
     } else {
         None
     };
@@ -920,16 +1119,30 @@ pub fn load_lunar_region_for_view(
         );
     }
 
-    let contours = cache.lock().ok().and_then(|mut guard| {
+    let (contours, merge) = if let Ok(mut guard) = cache.lock() {
         retain_local_entries(&mut guard, center_lat_bucket, center_lon_bucket);
-        merged_partitioned_local_contours(
+        let merge = begin_local_merge(
             &mut guard,
-            bucket_step,
-            center_lat_bucket,
-            center_lon_bucket,
-            prefetch_radius,
-        )
-    });
+            LocalMergeSpec {
+                center_lat_bucket,
+                center_lon_bucket,
+                source_radius: prefetch_radius,
+                partition_bucket_step: Some(bucket_step),
+            },
+        );
+        let contours = guard
+            .merged
+            .as_ref()
+            .filter(|merged| !merged.is_empty())
+            .cloned()
+            .or_else(|| guard.zoom_fallback.clone());
+        (contours, merge)
+    } else {
+        (None, None)
+    };
+    if let Some(work) = merge {
+        spawn_local_merge(cache, work, ctx.clone(), "lunar-local-contour-merge");
+    }
     LocalContourLoad {
         contours,
         ready_buckets: state.ready_buckets,
@@ -966,15 +1179,22 @@ pub fn load_mars_region_for_view(
         prefetch_radius,
         build_radius,
     };
-    let assets = local_manifest_assets(cache, manifest_key, || {
-        srtm_focus_cache::ensure_mars_contour_region(
-            selected_root,
-            viewport_center,
-            zoom,
-            prefetch_radius,
-            build_radius,
-        )
-    });
+    let manifest_root = selected_root.map(Path::to_path_buf);
+    let assets = local_manifest_assets(
+        cache,
+        manifest_key,
+        ctx.clone(),
+        "mars-local-contour-manifest",
+        move || {
+            srtm_focus_cache::ensure_mars_contour_region(
+                manifest_root.as_deref(),
+                viewport_center,
+                zoom,
+                prefetch_radius,
+                build_radius,
+            )
+        },
+    );
     let state = srtm_focus_cache::local_contour_region_state(
         crate::model::ActiveBody::Mars,
         &assets,
@@ -999,15 +1219,9 @@ pub fn load_mars_region_for_view(
             guard.clear_entries_for_new_scene();
         }
         guard.last_status = Some(state.status);
-        (!assets.is_empty()).then(|| {
-            begin_local_read(
-                &mut guard,
-                &assets,
-                center_lat_bucket,
-                center_lon_bucket,
-            )
-        })
-        .flatten()
+        (!assets.is_empty())
+            .then(|| begin_local_read(&mut guard, &assets, center_lat_bucket, center_lon_bucket))
+            .flatten()
     } else {
         None
     };
@@ -1023,16 +1237,30 @@ pub fn load_mars_region_for_view(
         );
     }
 
-    let contours = cache.lock().ok().and_then(|mut guard| {
+    let (contours, merge) = if let Ok(mut guard) = cache.lock() {
         retain_local_entries(&mut guard, center_lat_bucket, center_lon_bucket);
-        merged_partitioned_local_contours(
+        let merge = begin_local_merge(
             &mut guard,
-            bucket_step,
-            center_lat_bucket,
-            center_lon_bucket,
-            prefetch_radius,
-        )
-    });
+            LocalMergeSpec {
+                center_lat_bucket,
+                center_lon_bucket,
+                source_radius: prefetch_radius,
+                partition_bucket_step: Some(bucket_step),
+            },
+        );
+        let contours = guard
+            .merged
+            .as_ref()
+            .filter(|merged| !merged.is_empty())
+            .cloned()
+            .or_else(|| guard.zoom_fallback.clone());
+        (contours, merge)
+    } else {
+        (None, None)
+    };
+    if let Some(work) = merge {
+        spawn_local_merge(cache, work, ctx.clone(), "mars-local-contour-merge");
+    }
     LocalContourLoad {
         contours,
         ready_buckets: state.ready_buckets,
@@ -2097,6 +2325,91 @@ mod tests {
             .expect("full source window should retain the outer owner");
         assert_eq!(prefetched.len(), 1);
         assert_eq!(prefetched[0].elevation_m, 20.0);
+    }
+
+    #[test]
+    fn background_local_merge_discards_a_stale_tile_snapshot() {
+        let first = test_cache_key(0, 0);
+        let second = test_cache_key(1, 0);
+        let cache = Mutex::new(LocalRegionCache::default());
+        let spec = LocalMergeSpec {
+            center_lat_bucket: 0,
+            center_lon_bucket: 0,
+            source_radius: 2,
+            partition_bucket_step: None,
+        };
+
+        let stale_work = {
+            let mut state = cache.lock().expect("test cache lock");
+            state
+                .entries
+                .insert(first, Arc::new(vec![test_contour(10.0)]));
+            state.mark_entries_changed();
+            begin_local_merge(&mut state, spec).expect("initial merge work")
+        };
+        let stale_key = stale_work.key;
+
+        {
+            let mut state = cache.lock().expect("test cache lock");
+            state
+                .entries
+                .insert(second, Arc::new(vec![test_contour(20.0)]));
+            state.mark_entries_changed();
+            // A new camera/revision request is recorded, but waits for the
+            // active worker rather than allowing concurrent full clones.
+            assert!(begin_local_merge(&mut state, spec).is_none());
+            assert_ne!(state.merge_requested_key, Some(stale_key));
+        }
+
+        finish_local_merge(&cache, stale_key, Some(flatten_local_merge(stale_work)));
+
+        let mut state = cache.lock().expect("test cache lock");
+        assert!(state.merged_key.is_none());
+        assert!(state.merge_in_flight.is_none());
+        let fresh_work = begin_local_merge(&mut state, spec).expect("fresh merge work");
+        let fresh_key = fresh_work.key;
+        drop(state);
+
+        finish_local_merge(&cache, fresh_key, Some(flatten_local_merge(fresh_work)));
+        let state = cache.lock().expect("test cache lock");
+        let merged = state.merged.as_ref().expect("published current merge");
+        assert_eq!(merged.len(), 2);
+        assert_eq!(state.merged_key, Some(fresh_key));
+    }
+
+    #[test]
+    fn stale_manifest_worker_cannot_replace_the_latest_window() {
+        let stale_key = LocalManifestKey {
+            root: None,
+            center_lat_bucket: 0,
+            center_lon_bucket: 0,
+            zoom_bucket: 1,
+            prefetch_radius: 6,
+            build_radius: 6,
+        };
+        let requested_key = LocalManifestKey {
+            center_lat_bucket: 1,
+            ..stale_key.clone()
+        };
+        let cache = Mutex::new(LocalRegionCache {
+            manifest_snapshot: Some(LocalManifestSnapshot {
+                key: requested_key.clone(),
+                assets: vec![test_asset(1, 0)],
+                manifest_revision: 0,
+                refreshed_at: Instant::now(),
+            }),
+            manifest_requested_key: Some(requested_key.clone()),
+            manifest_in_flight: Some(stale_key.clone()),
+            ..Default::default()
+        });
+
+        finish_local_manifest(&cache, &stale_key, Some(vec![test_asset(0, 0)]));
+
+        let state = cache.lock().expect("test cache lock");
+        assert!(state.manifest_in_flight.is_none());
+        let snapshot = state.manifest_snapshot.as_ref().expect("current snapshot");
+        assert!(snapshot.key == requested_key);
+        assert_eq!(snapshot.assets[0].lat_bucket, 1);
     }
 
     #[test]

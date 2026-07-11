@@ -10,6 +10,11 @@ use std::time::{Duration, Instant};
 const FAILED_BUILD_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_FAILED_BUILD_RETRY_DELAY: Duration = Duration::from_secs(60);
 const MAX_TRACKED_FAILED_BUILDS: usize = 1_024;
+/// Interactive contour creation invokes CPU- and I/O-heavy GDAL work. Keep a
+/// core free for egui/WGPU and one for readers/merges while a local 13×13
+/// envelope is filling; the companion cache builder remains the fast path for
+/// bulk precomputation.
+const MAX_INTERACTIVE_BACKGROUND_BUILDS: usize = 2;
 
 #[derive(Clone, Copy)]
 struct FailedBuildBackoff {
@@ -21,7 +26,8 @@ fn max_background_builds() -> usize {
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    (cpus.saturating_sub(1)).clamp(2, 8)
+    cpus.saturating_sub(1)
+        .clamp(1, MAX_INTERACTIVE_BACKGROUND_BUILDS)
 }
 
 fn active_build_slots() -> &'static AtomicUsize {
