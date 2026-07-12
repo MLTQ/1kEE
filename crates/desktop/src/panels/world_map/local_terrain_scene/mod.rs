@@ -221,7 +221,10 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     }
 
     // ── Elevation fill (opaque — occludes the background contour pass above) ──
-    if model.fill_elevation && !contours_slice.is_empty() {
+    // Keep the exact sampled surface that produced the mesh. Markers and the
+    // centre beam use it below, so their ground contact stays on the pixels
+    // currently rendered even while a newer fill is building in the background.
+    let elevation_surface = if model.fill_elevation && !contours_slice.is_empty() {
         draw_elevation_fill(
             painter,
             &layout,
@@ -230,8 +233,10 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             contours_slice,
             model.selected_root.as_deref(),
             model.active_body,
-        );
-    }
+        )
+    } else {
+        None
+    };
 
     // ── Surface contour pass (drawn after fill so lines on top are visible) ───
     if !contours_slice.is_empty() && model.show_contours {
@@ -438,6 +443,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         &model.globe_view,
         viewport_center,
         contours.as_ref().map(|v| v.as_slice()),
+        elevation_surface.as_ref(),
         model.show_beam,
     );
     // ── Event beams — all events in the viewport, no contour dependency ───────
@@ -451,94 +457,117 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 
     const EVENT_BEAM_HEIGHT_PX: f32 = 110.0;
 
-    let event_markers: Vec<(String, egui::Pos2)> =
-        if model.cinematic_mode || !model.show_event_markers {
+    let event_markers: Vec<(String, egui::Pos2)> = if !should_show_local_event_indicators(
+        model.active_body,
+        model.cinematic_mode,
+        model.show_event_markers,
+    ) {
+        Vec::new()
+    } else {
+        model
+            .events
+            .iter()
+            .filter_map(|event| {
+                // Cheap pre-cull: skip events well outside the viewport.
+                let dlat = (event.location.lat - viewport_center.lat).abs();
+                let dlon = {
+                    let d = (event.location.lon - viewport_center.lon).abs();
+                    d.min(360.0 - d)
+                };
+                if dlat > half_extent_deg * 2.5 || dlon > half_extent_deg * 2.5 {
+                    return None;
+                }
+                let elev = markers::marker_surface_elevation_m(
+                    model.active_body,
+                    model.selected_root.as_deref(),
+                    event.location,
+                    elevation_surface
+                        .as_ref()
+                        .and_then(|surface| surface.elevation_at(event.location)),
+                );
+                let ground = projection::project_local(
+                    &layout,
+                    &model.globe_view,
+                    viewport_center,
+                    event.location,
+                    elev,
+                    extent_x_km,
+                    extent_y_km,
+                )?;
+                // Tip: project the same point 1 km higher, then cap the
+                // screen-space length so beams don't vary wildly with tilt.
+                let tip = projection::project_local(
+                    &layout,
+                    &model.globe_view,
+                    viewport_center,
+                    event.location,
+                    elev + 1000.0,
+                    extent_x_km,
+                    extent_y_km,
+                )
+                .map(|sky| {
+                    let dx = sky.pos.x - ground.pos.x;
+                    let dy = sky.pos.y - ground.pos.y;
+                    let len = (dx * dx + dy * dy).sqrt().max(0.1);
+                    egui::pos2(
+                        ground.pos.x + dx / len * EVENT_BEAM_HEIGHT_PX,
+                        ground.pos.y + dy / len * EVENT_BEAM_HEIGHT_PX,
+                    )
+                })
+                .unwrap_or(egui::pos2(
+                    ground.pos.x,
+                    ground.pos.y - EVENT_BEAM_HEIGHT_PX,
+                ));
+                markers::draw_event_marker(
+                    painter,
+                    ground,
+                    tip,
+                    event,
+                    model.selected_event_id.as_deref() == Some(event.id.as_str()),
+                    time,
+                );
+                Some((event.id.clone(), ground.pos))
+            })
+            .collect()
+    };
+
+    // Nearby cameras are Earth data, so never project them into lunar or
+    // Martian terrain (nor ask the Earth SRTM cache for an alien-body point).
+    let camera_markers: Vec<(String, egui::Pos2)> =
+        if model.active_body != crate::model::ActiveBody::Earth {
             Vec::new()
         } else {
-            model
-                .events
+            nearby
                 .iter()
-                .filter_map(|event| {
-                    // Cheap pre-cull: skip events well outside the viewport.
-                    let dlat = (event.location.lat - viewport_center.lat).abs();
-                    let dlon = {
-                        let d = (event.location.lon - viewport_center.lon).abs();
-                        d.min(360.0 - d)
-                    };
-                    if dlat > half_extent_deg * 2.5 || dlon > half_extent_deg * 2.5 {
-                        return None;
-                    }
-                    let elev =
-                        markers::marker_elevation_m(model.selected_root.as_deref(), event.location);
-                    let ground = projection::project_local(
+                .filter_map(|camera| {
+                    let elev = markers::marker_surface_elevation_m(
+                        model.active_body,
+                        model.selected_root.as_deref(),
+                        camera.location,
+                        elevation_surface
+                            .as_ref()
+                            .and_then(|surface| surface.elevation_at(camera.location)),
+                    );
+                    projection::project_local(
                         &layout,
                         &model.globe_view,
                         viewport_center,
-                        event.location,
+                        camera.location,
                         elev,
                         extent_x_km,
                         extent_y_km,
-                    )?;
-                    // Tip: project the same point 1 km higher, then cap the
-                    // screen-space length so beams don't vary wildly with tilt.
-                    let tip = projection::project_local(
-                        &layout,
-                        &model.globe_view,
-                        viewport_center,
-                        event.location,
-                        elev + 1000.0,
-                        extent_x_km,
-                        extent_y_km,
                     )
-                    .map(|sky| {
-                        let dx = sky.pos.x - ground.pos.x;
-                        let dy = sky.pos.y - ground.pos.y;
-                        let len = (dx * dx + dy * dy).sqrt().max(0.1);
-                        egui::pos2(
-                            ground.pos.x + dx / len * EVENT_BEAM_HEIGHT_PX,
-                            ground.pos.y + dy / len * EVENT_BEAM_HEIGHT_PX,
-                        )
+                    .map(|projected| {
+                        markers::draw_camera_marker(
+                            painter,
+                            projected,
+                            model.selected_camera_id.as_deref() == Some(camera.id.as_str()),
+                        );
+                        (camera.id.clone(), projected.pos)
                     })
-                    .unwrap_or(egui::pos2(
-                        ground.pos.x,
-                        ground.pos.y - EVENT_BEAM_HEIGHT_PX,
-                    ));
-                    markers::draw_event_marker(
-                        painter,
-                        ground,
-                        tip,
-                        event,
-                        model.selected_event_id.as_deref() == Some(event.id.as_str()),
-                        time,
-                    );
-                    Some((event.id.clone(), ground.pos))
                 })
                 .collect()
         };
-
-    // Camera markers for all nearby cameras.
-    let camera_markers: Vec<(String, egui::Pos2)> = nearby
-        .iter()
-        .filter_map(|camera| {
-            projection::project_local(
-                &layout,
-                &model.globe_view,
-                viewport_center,
-                camera.location,
-                markers::marker_elevation_m(model.selected_root.as_deref(), camera.location),
-                extent_x_km,
-                extent_y_km,
-            )
-            .map(|projected| {
-                markers::draw_camera_marker(
-                    painter,
-                    projected,
-                    model.selected_camera_id.as_deref() == Some(camera.id.as_str()),
-                );
-                (camera.id.clone(), projected.pos)
-            })
-        })
-        .collect();
 
     draw_deflock_alprs(
         painter,
@@ -902,6 +931,15 @@ fn contours_intersecting_local_bounds<'a>(
         .collect()
 }
 
+#[inline]
+fn should_show_local_event_indicators(
+    active_body: crate::model::ActiveBody,
+    cinematic_mode: bool,
+    show_event_markers: bool,
+) -> bool {
+    active_body == crate::model::ActiveBody::Earth && !cinematic_mode && show_event_markers
+}
+
 /// Cherry-red targeting beam: a vertical line falling from the sky to the
 /// terrain surface at the viewport centre. The ground contact point is
 /// projected via `project_local` so it rises over hills and drops into
@@ -914,25 +952,27 @@ fn draw_local_beam(
     view: &GlobeViewState,
     viewport_center: GeoPoint,
     contours: Option<&[contour_asset::ContourPath]>,
+    displayed_surface: Option<&ElevationSurface>,
     show: bool,
 ) -> f32 {
     puffin::profile_function!();
     let cherry = egui::Color32::from_rgb(210, 18, 50);
 
-    // Derive terrain elevation at the crosshair from the loaded contour data —
-    // the same data used to draw the terrain, so it's always available and in sync.
-    // Find the highest-elevation contour that has a point within a tight radius
-    // of viewport_center; that contour passes through (or very near) center,
-    // so its elevation approximates the terrain surface there.
+    // Prefer the exact sampled field of the currently displayed elevation-fill
+    // mesh. If no fill is available, retain the contour-only approximation.
     let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
-    let elevation_m = contours_intersecting_local_bounds(
-        contours.unwrap_or(&[]),
-        viewport_center,
-        (half_extent_deg * 0.08).max(0.004),
-    )
-        .iter()
-        .map(|contour| contour.elevation_m)
-        .fold(0.0f32, f32::max);
+    let elevation_m = displayed_surface
+        .and_then(|surface| surface.elevation_at(viewport_center))
+        .unwrap_or_else(|| {
+            contours_intersecting_local_bounds(
+                contours.unwrap_or(&[]),
+                viewport_center,
+                (half_extent_deg * 0.08).max(0.004),
+            )
+            .iter()
+            .map(|contour| contour.elevation_m)
+            .fold(0.0f32, f32::max)
+        });
 
     if !show {
         return elevation_m;
@@ -1013,18 +1053,84 @@ fn draw_local_beam(
 
 // ── Elevation fill (hypsometric tint + hillshade) ─────────────────────────────
 
-type ElevFillKey = (i32, i32, i32, i32, i32, i32, i32, i32, u8);
+type ElevFillKey = (i32, i32, i32, i32, i32, i32, i32, i32, u8, u8);
+
+/// The sampled elevation field used to generate the currently drawn fill mesh.
+/// Keeping it with the mesh lets overlay anchors interpolate the same triangles
+/// that are visible on screen rather than sampling a different terrain source.
+#[derive(Clone)]
+struct ElevationSurface {
+    focus: GeoPoint,
+    half_extent_deg: f32,
+    elevations: Arc<[f32]>,
+}
+
+impl ElevationSurface {
+    const CELLS_PER_SIDE: usize = 60;
+    const VERTICES_PER_SIDE: usize = Self::CELLS_PER_SIDE + 1;
+
+    /// Samples using the two triangles emitted for each fill-mesh grid cell.
+    /// This is deliberately triangle interpolation, not bilinear interpolation:
+    /// it agrees exactly with the painter mesh between the source vertices.
+    fn elevation_at(&self, point: GeoPoint) -> Option<f32> {
+        let half_extent = self.half_extent_deg;
+        if !half_extent.is_finite() || half_extent <= 0.0 {
+            return None;
+        }
+
+        // Use the short longitude direction so a fill centered near the
+        // antimeridian can still serve points on either side of it.
+        let mut lon_offset = point.lon - self.focus.lon;
+        if lon_offset > 180.0 {
+            lon_offset -= 360.0;
+        } else if lon_offset < -180.0 {
+            lon_offset += 360.0;
+        }
+        let lat_offset = point.lat - self.focus.lat;
+        let x = (lon_offset + half_extent) / (2.0 * half_extent);
+        let y = (lat_offset + half_extent) / (2.0 * half_extent);
+        if !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
+            return None;
+        }
+
+        let cells = Self::CELLS_PER_SIDE;
+        let grid_x = x * cells as f32;
+        let grid_y = y * cells as f32;
+        let col = (grid_x.floor() as usize).min(cells - 1);
+        let row = (grid_y.floor() as usize).min(cells - 1);
+        let u = grid_x - col as f32;
+        let v = grid_y - row as f32;
+        let side = Self::VERTICES_PER_SIDE;
+        let elevation = |r: usize, c: usize| self.elevations[r * side + c];
+        let upper_left = elevation(row, col);
+        let upper_right = elevation(row, col + 1);
+        let lower_left = elevation(row + 1, col);
+        let lower_right = elevation(row + 1, col + 1);
+
+        Some(if u + v <= 1.0 {
+            upper_left * (1.0 - u - v) + upper_right * u + lower_left * v
+        } else {
+            lower_left * (1.0 - u) + lower_right * (u + v - 1.0) + upper_right * (1.0 - v)
+        })
+    }
+}
+
+struct BuiltElevationFill {
+    mesh: egui::Mesh,
+    surface: ElevationSurface,
+}
 
 struct ElevFillEntry {
     key: ElevFillKey,
     mesh: egui::Mesh,
+    surface: ElevationSurface,
 }
 
 struct ElevFillState {
     /// Key for which a background build is in-flight.
     building_key: Option<ElevFillKey>,
     /// Channel from the background thread.
-    result_rx: Option<std::sync::mpsc::Receiver<(ElevFillKey, egui::Mesh)>>,
+    result_rx: Option<std::sync::mpsc::Receiver<(ElevFillKey, BuiltElevationFill)>>,
     /// Last successfully built mesh (may be stale while a new one is building).
     ready: Option<ElevFillEntry>,
 }
@@ -1037,6 +1143,7 @@ fn elev_fill_key(
     layout: &LocalLayout,
     contour_count: usize,
     gebco_sample_count: usize,
+    active_body: crate::model::ActiveBody,
 ) -> ElevFillKey {
     (
         (focus.lat * 100.0) as i32,
@@ -1051,7 +1158,17 @@ fn elev_fill_key(
         // GEBCO sample count: invalidates when bathymetry data finishes loading.
         gebco_sample_count as i32,
         theme::hot_color().r(), // proxy for theme identity
+        active_body_key(active_body),
     )
+}
+
+#[inline]
+fn active_body_key(active_body: crate::model::ActiveBody) -> u8 {
+    match active_body {
+        crate::model::ActiveBody::Earth => 0,
+        crate::model::ActiveBody::Moon => 1,
+        crate::model::ActiveBody::Mars => 2,
+    }
 }
 
 fn elev_lerp(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
@@ -1116,8 +1233,8 @@ fn build_elev_fill_mesh(
     contours: &[contour_asset::ContourPath],
     gebco_samples: &[(f32, f32, f32)],
     active_body: crate::model::ActiveBody,
-) -> egui::Mesh {
-    const N: usize = 60; // 61×61 = 3,721 vertices, 7,200 triangles
+) -> BuiltElevationFill {
+    const N: usize = ElevationSurface::CELLS_PER_SIDE; // 61×61 = 3,721 vertices, 7,200 triangles
 
     let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
     let km_per_deg_lat = 111.32f32;
@@ -1295,7 +1412,14 @@ fn build_elev_fill_mesh(
         mesh.indices.extend_from_slice(tri);
     }
 
-    mesh
+    BuiltElevationFill {
+        mesh,
+        surface: ElevationSurface {
+            focus,
+            half_extent_deg,
+            elevations: Arc::from(elevs),
+        },
+    }
 }
 
 #[inline]
@@ -1311,7 +1435,7 @@ fn draw_elevation_fill(
     contours: &[contour_asset::ContourPath],
     selected_root: Option<&std::path::Path>,
     active_body: crate::model::ActiveBody,
-) {
+) -> Option<ElevationSurface> {
     puffin::profile_function!();
     // Load GEBCO bathymetry contours and extract midpoints within the viewport.
     // These provide ocean-floor elevation samples so IDW gives negative elevations
@@ -1371,12 +1495,8 @@ fn draw_elevation_fill(
         view,
         layout,
         fill_contours.len(),
-        gebco_samples.len()
-            + if active_body != crate::model::ActiveBody::Earth {
-                100_000
-            } else {
-                0
-            },
+        gebco_samples.len(),
+        active_body,
     );
     let state_mutex = ELEV_FILL.get_or_init(|| {
         std::sync::Mutex::new(ElevFillState {
@@ -1392,10 +1512,11 @@ fn draw_elevation_fill(
     // single-flight marker so the next frame can retry instead of freezing
     // elevation fill permanently.
     match state.result_rx.as_ref().map(|rx| rx.try_recv()) {
-        Some(Ok((built_key, mesh))) => {
+        Some(Ok((built_key, built))) => {
             state.ready = Some(ElevFillEntry {
                 key: built_key,
-                mesh,
+                mesh: built.mesh,
+                surface: built.surface,
             });
             state.building_key = None;
             state.result_rx = None;
@@ -1438,8 +1559,8 @@ fn draw_elevation_fill(
                     )
                 }));
                 match built {
-                    Ok(mesh) => {
-                        let _ = tx.send((key, mesh));
+                    Ok(fill) => {
+                        let _ = tx.send((key, fill));
                     }
                     Err(_) => eprintln!("[1kEE] elevation-fill worker panicked; retrying"),
                 }
@@ -1455,6 +1576,9 @@ fn draw_elevation_fill(
     // Render the last ready mesh (stale is fine while a new one is building).
     if let Some(entry) = &state.ready {
         painter.add(egui::Shape::mesh(entry.mesh.clone()));
+        Some(entry.surface.clone())
+    } else {
+        None
     }
 }
 
@@ -1963,5 +2087,83 @@ mod tests {
         assert!(should_start_elevation_fill_build(true, false));
         assert!(!should_start_elevation_fill_build(true, true));
         assert!(!should_start_elevation_fill_build(false, false));
+    }
+
+    #[test]
+    fn elevation_surface_samples_the_same_triangles_as_the_fill_mesh() {
+        let side = ElevationSurface::VERTICES_PER_SIDE;
+        let row = 10;
+        let col = 12;
+        let mut elevations = vec![0.0; side * side];
+        elevations[row * side + col] = 10.0;
+        elevations[row * side + col + 1] = 30.0;
+        elevations[(row + 1) * side + col] = 20.0;
+        elevations[(row + 1) * side + col + 1] = 40.0;
+        let surface = ElevationSurface {
+            focus: GeoPoint { lat: 0.0, lon: 0.0 },
+            half_extent_deg: 1.0,
+            elevations: Arc::from(elevations),
+        };
+        let point_at = |u: f32, v: f32| GeoPoint {
+            lat: -1.0 + (row as f32 + v) / ElevationSurface::CELLS_PER_SIDE as f32 * 2.0,
+            lon: -1.0 + (col as f32 + u) / ElevationSurface::CELLS_PER_SIDE as f32 * 2.0,
+        };
+
+        let first_triangle = surface.elevation_at(point_at(0.25, 0.25)).unwrap();
+        let second_triangle = surface.elevation_at(point_at(0.75, 0.75)).unwrap();
+        assert!(
+            (first_triangle - 17.5).abs() < 0.001,
+            "first triangle sampled {first_triangle}"
+        );
+        assert!(
+            (second_triangle - 32.5).abs() < 0.001,
+            "second triangle sampled {second_triangle}"
+        );
+    }
+
+    #[test]
+    fn elevation_fill_key_keeps_planetary_surfaces_distinct() {
+        let view = crate::model::AppModel::seed_demo().globe_view;
+        let layout = layout(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(800.0, 600.0),
+        ));
+        let focus = GeoPoint { lat: 0.0, lon: 0.0 };
+        let earth = elev_fill_key(
+            focus,
+            &view,
+            &layout,
+            12,
+            4,
+            crate::model::ActiveBody::Earth,
+        );
+        let moon = elev_fill_key(focus, &view, &layout, 12, 4, crate::model::ActiveBody::Moon);
+        let mars = elev_fill_key(focus, &view, &layout, 12, 4, crate::model::ActiveBody::Mars);
+        assert_ne!(earth, moon);
+        assert_ne!(moon, mars);
+    }
+
+    #[test]
+    fn local_event_indicators_are_earth_only() {
+        assert!(should_show_local_event_indicators(
+            crate::model::ActiveBody::Earth,
+            false,
+            true,
+        ));
+        assert!(!should_show_local_event_indicators(
+            crate::model::ActiveBody::Moon,
+            false,
+            true,
+        ));
+        assert!(!should_show_local_event_indicators(
+            crate::model::ActiveBody::Mars,
+            false,
+            true,
+        ));
+        assert!(!should_show_local_event_indicators(
+            crate::model::ActiveBody::Earth,
+            true,
+            true,
+        ));
     }
 }

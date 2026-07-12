@@ -24,6 +24,16 @@ model and viewport into an egui-painted `GlobeScene` each frame.
   between the scene, projection, marker helpers, and hit-test output.
 - **Interacts with**: `projection.rs` and `markers.rs`.
 
+### Surface marker projection
+
+- **Does**: Places event, camera, and replay bases on the GPU globe's unit
+  surface, then projects beam tips outward by their existing visual height.
+- **Interacts with**: `projection::project_geo_unit_surface` and
+  `projection::project_geo_unit_surface_elevated`.
+- **Rationale**: The globe backdrop shades terrain without displacing its
+  sphere, so negative synthetic terrain offsets must not pull indicators
+  inside the visible globe.
+
 ### `screen_to_latlon`
 - **Does**: Maps a globe screen position back to geographic coordinates for the
   coordinate overlay.
@@ -54,6 +64,7 @@ model and viewport into an egui-painted `GlobeScene` each frame.
 | `world_map.rs` | `paint` returns marker IDs and positions matching the pixels drawn this frame | Changing marker order, position, or ID types |
 | `markers.rs` | Projection results use the same view/layout that produced the frame | Reprojecting with different geometry or dropping front-facing state |
 | `map_tooltips.rs` | Hit-test vectors contain only visible, interactive marker positions | Returning hidden or differently positioned markers |
+| Globe event/camera overlays | Bases stay on the visible unit sphere and tips extend outward from those bases | Reintroducing inward terrain-radius displacement |
 | Layer drawer | The Contours toggle gates globe terrain contours just as it gates local terrain contours | Rendering terrain contours while the toggle is off |
 
 ## Notes
@@ -63,6 +74,10 @@ model and viewport into an egui-painted `GlobeScene` each frame.
 - Ships and flights are projected once per frame into `ProjectedMarker` lists.
   Those lists are reused for painting and interaction, preserving the exact
   source ordering and front-facing filtering previously used in both passes.
+- Event and camera bases use the same unit-sphere geometry as the GPU backdrop;
+  their front-face filter runs before either painter submission or hit-test
+  output is created. Replay and live event beams retain the same radial tip
+  height, measured outward from that surface base.
 - The optional ALPR overlay is surface-projected and front-face filtered before
   mesh construction; it does not alter existing layer geometry when disabled.
 - A `1×` contour scale is deliberately passed through unchanged, preserving the

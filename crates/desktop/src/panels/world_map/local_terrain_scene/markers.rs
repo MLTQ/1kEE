@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::model::{EventRecord, GeoPoint, GlobeViewState, NearbyCamera};
+use crate::model::{ActiveBody, EventRecord, GeoPoint, GlobeViewState, NearbyCamera};
 use crate::theme;
 
 use super::super::srtm_stream;
@@ -9,6 +9,10 @@ use super::{LocalLayout, ProjectedLocalPoint, visual_half_extent_for_zoom};
 
 /// Height in screen-space pixels of an event laser beam.
 const EVENT_BEAM_HEIGHT_PX: f32 = 110.0;
+
+/// Small visual clearance that prevents glyph strokes from z-fighting with the
+/// terrain mesh while keeping their perceived ground contact on the surface.
+pub(super) const MARKER_SURFACE_CLEARANCE_M: f32 = 18.0;
 
 #[allow(dead_code)]
 pub(super) fn draw_markers(
@@ -232,13 +236,30 @@ pub(super) fn draw_camera_marker(
 }
 
 pub(super) fn marker_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> f32 {
+    marker_surface_elevation_m(ActiveBody::Earth, selected_root, point, None)
+}
+
+/// Returns a marker anchor height above the terrain that is visibly rendered
+/// this frame. The local scene supplies `displayed_surface_elevation_m` from
+/// its fill mesh; raw SRTM remains an Earth-only nonblocking fallback for
+/// contour-only frames and the legacy `draw_markers` helper.
+pub(super) fn marker_surface_elevation_m(
+    active_body: ActiveBody,
+    selected_root: Option<&Path>,
+    point: GeoPoint,
+    displayed_surface_elevation_m: Option<f32>,
+) -> f32 {
     // Marker paint must never be the first caller that decodes a full SRTM
     // raster or runs gdal_translate. Keep the existing fallback for the short
     // preload window, then repaint at the exact elevation once it is cached.
-    let terrain_elevation_m =
-        srtm_stream::peek_elevation_m(selected_root, point).unwrap_or_else(|| {
-            srtm_stream::request_elevation_preload(selected_root, point);
-            0.0
-        });
-    terrain_elevation_m + 18.0
+    let terrain_elevation_m = displayed_surface_elevation_m.unwrap_or_else(|| match active_body {
+        ActiveBody::Earth => {
+            srtm_stream::peek_elevation_m(selected_root, point).unwrap_or_else(|| {
+                srtm_stream::request_elevation_preload(selected_root, point);
+                0.0
+            })
+        }
+        ActiveBody::Moon | ActiveBody::Mars => 0.0,
+    });
+    terrain_elevation_m + MARKER_SURFACE_CLEARANCE_M
 }

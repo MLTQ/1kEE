@@ -224,23 +224,19 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         if let Some(state) = &model.replay_state {
             let wall_elapsed = state.wall_elapsed();
             for flare in &state.active_flares {
-                let Some(base) = projection::project_geo(
+                let Some(base) = projection::project_geo_unit_surface(
                     &layout,
                     &model.globe_view,
                     flare.event.location,
-                    lod.altitude_scale * 0.7,
-                ) else {
+                )
+                .filter(|base| base.front_facing) else {
                     continue;
                 };
-                if !base.front_facing {
-                    continue;
-                }
                 let extra_r = (135.0 / layout.radius).clamp(0.060, 0.220);
-                let tip = projection::project_geo_elevated(
+                let tip = projection::project_geo_unit_surface_elevated(
                     &layout,
                     &model.globe_view,
                     flare.event.location,
-                    lod.altitude_scale * 0.7,
                     extra_r,
                 )
                 .map(|p| p.pos)
@@ -260,12 +256,12 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             .events
             .iter()
             .filter_map(|event| {
-                let base = projection::project_geo(
+                let base = projection::project_geo_unit_surface(
                     &layout,
                     &model.globe_view,
                     event.location,
-                    lod.altitude_scale * 0.7,
-                )?;
+                )
+                .filter(|base| base.front_facing)?;
                 // Beam tip: project the same geographic point at a higher
                 // radius so that 3-D perspective foreshortening is correct.
                 // When the event faces the camera, base and tip project to
@@ -274,11 +270,10 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 // beam).  This eliminates the "spinning" artefact caused by
                 // computing the direction in screen space.
                 let extra_r = (135.0 / layout.radius).clamp(0.060, 0.220);
-                let tip = projection::project_geo_elevated(
+                let tip = projection::project_geo_unit_surface_elevated(
                     &layout,
                     &model.globe_view,
                     event.location,
-                    lod.altitude_scale * 0.7,
                     extra_r,
                 )
                 .map(|p| p.pos)
@@ -302,17 +297,13 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         nearby
             .iter()
             .filter_map(|camera| {
-                projection::project_geo(
-                    &layout,
-                    &model.globe_view,
-                    camera.location,
-                    lod.altitude_scale * 0.35,
-                )
-                .map(|projected| {
-                    let is_selected = selected_camera_id == Some(camera.id.as_str());
-                    markers::draw_camera_marker(painter, projected, is_selected);
-                    (camera.id.clone(), projected.pos)
-                })
+                projection::project_geo_unit_surface(&layout, &model.globe_view, camera.location)
+                    .filter(|projected| projected.front_facing)
+                    .map(|projected| {
+                        let is_selected = selected_camera_id == Some(camera.id.as_str());
+                        markers::draw_camera_marker(painter, projected, is_selected);
+                        (camera.id.clone(), projected.pos)
+                    })
             })
             .collect()
     };

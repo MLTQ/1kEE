@@ -52,12 +52,22 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 
 ### Elevation-fill worker scheduling
 
-- **Does**: Retains one mesh build while the camera moves, then builds the
-  newest key after that worker completes instead of cloning contours and
-  spawning a replacement worker every frame. Disconnected/panicked workers
-  clear their marker so the next frame retries.
+- **Does**: Retains one mesh build and its sampled 61×61 elevation surface
+  while the camera moves, then builds the newest key after that worker
+  completes instead of cloning contours and spawning a replacement worker
+  every frame. Disconnected/panicked workers clear their marker so the next
+  frame retries.
 - **Interacts with**: `draw_elevation_fill`, `build_elev_fill_mesh`, and the
-  local repaint loop.
+  local repaint loop. The retained surface supplies beam and marker anchors.
+
+### Surface-aligned indicators
+
+- **Does**: Samples the exact triangles used by the displayed elevation-fill
+  mesh before projecting event/camera markers and the targeting beam. Marker
+  glyphs keep a small clearance above that ground contact.
+- **Interacts with**: `markers.rs`, `draw_local_beam`, and `ElevationSurface`.
+- **Rationale**: Raw SRTM samples and the interpolated visible mesh can differ;
+  using the latter prevents indicators from appearing above or below topology.
 
 ## Contracts
 
@@ -68,6 +78,7 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 | Scene tests | The local contour loader stays reachable through `contour_asset::load_srtm_region_for_view` for end-to-end validation | Renaming/removing that loader without updating the tests |
 | Globe scene | A shared `1×` contour scale produces the same default local stroke widths as before | Applying a different scale or bypassing it in transition rendering |
 | Cinematic movement | At most one elevation-fill mesh worker is active while camera-derived keys change | Replacing the receiver and spawning a worker per frame |
+| Local markers and beam | Ground contacts match the exact elevation surface of the mesh painted this frame | Sampling a separate terrain source or pairing a stale mesh with a newer grid |
 
 ## Notes
 - The scene-level tests are intentionally tolerant of missing local cache data: they return early when the shared focus cache is unavailable instead of making the suite depend on large fixture assets.
@@ -81,6 +92,9 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 - If a mesh worker exits without sending a result, the stale mesh stays visible
   and the single-flight gate is released rather than leaving elevation fill
   permanently blocked.
+- Elevation-fill cache keys include the active body. This prevents a retained
+  Moon/Mars surface from being reused after a body change, and Earth-only event
+  and camera data is not projected into planetary local scenes.
 - The local source and build radii intentionally match at 13×13: an uncached
   Moon/Mars tile outside a smaller central window can uniquely own a contour
   that crosses the visible edge. The loader returns its ready/progress snapshot
