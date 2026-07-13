@@ -116,9 +116,10 @@ pub struct ContourPath {
     pub points: Vec<GeoPoint>,
 }
 
-/// One local-terrain frame's decoded contours plus the ready/progress snapshot
-/// derived from the same manifest selection. The scene uses this for its pulse
-/// grid and progress card instead of opening SQLite again.
+/// One local-terrain frame's decoded contours plus its ready/progress snapshot.
+/// The scene uses this for its pulse grid and progress card instead of opening
+/// SQLite again; a compatible prior manifest supplies known overlap while the
+/// exact current manifest refreshes in the background.
 #[derive(Clone)]
 pub struct LocalContourLoad {
     pub contours: Option<Arc<Vec<ContourPath>>>,
@@ -156,6 +157,30 @@ struct LocalManifestSnapshot {
     assets: Vec<srtm_focus_cache::FocusContourAsset>,
     manifest_revision: u64,
     refreshed_at: Instant,
+}
+
+/// The two views a local paint frame needs while a manifest refresh is in
+/// flight. Only an exact snapshot can schedule new SQLite/WKB reads; a
+/// compatible prior snapshot may still describe overlapping ready tiles for
+/// the loading overlay during an overlapping pan.
+#[derive(Default)]
+struct LocalManifestAssetViews {
+    assets: Vec<srtm_focus_cache::FocusContourAsset>,
+    exact_for_reads: bool,
+}
+
+impl LocalManifestAssetViews {
+    fn reader_assets(&self) -> &[srtm_focus_cache::FocusContourAsset] {
+        if self.exact_for_reads {
+            &self.assets
+        } else {
+            &[]
+        }
+    }
+
+    fn display_assets(&self) -> &[srtm_focus_cache::FocusContourAsset] {
+        &self.assets
+    }
 }
 
 /// Identity for an asynchronously flattened local contour window.  The tile
@@ -846,27 +871,76 @@ fn finish_local_manifest(
     }
 }
 
+/// Return the asset views that are safe for the requested local window.
+///
+/// An exact snapshot can drive both rendering progress and new read requests.
+/// During a compatible pan, the old snapshot remains useful only to identify
+/// overlapping ready tiles: submitting it to the reader would make stale
+/// manifest selection drive new I/O. Restricting that fallback to the new
+/// prefetch window prevents a short manifest handoff from reporting every
+/// local tile as missing while the retained contour merge remains visible.
+fn local_manifest_asset_views(
+    snapshot: Option<&LocalManifestSnapshot>,
+    requested_key: &LocalManifestKey,
+) -> LocalManifestAssetViews {
+    let Some(snapshot) = snapshot else {
+        return LocalManifestAssetViews::default();
+    };
+
+    if snapshot.key == *requested_key {
+        return LocalManifestAssetViews {
+            assets: snapshot.assets.clone(),
+            exact_for_reads: true,
+        };
+    }
+
+    let same_display_contract = snapshot.key.root == requested_key.root
+        && snapshot.key.zoom_bucket == requested_key.zoom_bucket
+        && snapshot.key.prefetch_radius == requested_key.prefetch_radius
+        && snapshot.key.build_radius == requested_key.build_radius;
+    if !same_display_contract {
+        return LocalManifestAssetViews::default();
+    }
+
+    let display_assets = snapshot
+        .assets
+        .iter()
+        .filter(|asset| {
+            asset.zoom_bucket == requested_key.zoom_bucket
+                && (i64::from(asset.lat_bucket) - i64::from(requested_key.center_lat_bucket))
+                    .abs()
+                    .max(
+                        (i64::from(asset.lon_bucket) - i64::from(requested_key.center_lon_bucket))
+                            .abs(),
+                    )
+                    <= i64::from(requested_key.prefetch_radius)
+        })
+        .cloned()
+        .collect();
+    LocalManifestAssetViews {
+        assets: display_assets,
+        exact_for_reads: false,
+    }
+}
+
 /// Reuse a local manifest selection while the camera stays in the same bucket.
-/// SQLite/root discovery and on-demand build selection run in a single worker;
-/// paint immediately keeps the previous exact snapshot (or an empty result)
-/// until that worker publishes.
+/// SQLite/root discovery and on-demand build selection run in a single worker.
+/// While a compatible pan waits for that worker, paint uses the overlapping
+/// prior snapshot only for progress/pulse display; read scheduling still waits
+/// for an exact current manifest.
 fn local_manifest_assets<F>(
     cache: &'static Mutex<LocalRegionCache>,
     key: LocalManifestKey,
     ctx: egui::Context,
     worker_name: &'static str,
     fetch: F,
-) -> Vec<srtm_focus_cache::FocusContourAsset>
+) -> LocalManifestAssetViews
 where
     F: FnOnce() -> Vec<srtm_focus_cache::FocusContourAsset> + Send + 'static,
 {
     let manifest_revision = srtm_focus_cache::contour_manifest_revision();
-    let (cached_assets, start_worker) = if let Ok(mut guard) = cache.lock() {
-        let cached_assets = guard.manifest_snapshot.as_ref().and_then(|snapshot| {
-            // Do not feed a changed root/zoom/center into the reader. Exact
-            // snapshots are safe to keep rendering while their refresh runs.
-            (snapshot.key == key).then(|| snapshot.assets.clone())
-        });
+    let (asset_views, start_worker) = if let Ok(mut guard) = cache.lock() {
+        let asset_views = local_manifest_asset_views(guard.manifest_snapshot.as_ref(), &key);
         let snapshot_is_fresh = guard.manifest_snapshot.as_ref().is_some_and(|snapshot| {
             snapshot.key == key
                 && snapshot.manifest_revision == manifest_revision
@@ -877,16 +951,16 @@ where
             // viewport. Record this key before returning so that worker
             // cannot overwrite the fresh snapshot after a quick pan back.
             guard.manifest_requested_key = Some(key);
-            return cached_assets.unwrap_or_default();
+            return asset_views;
         }
         guard.manifest_requested_key = Some(key.clone());
         let start_worker = guard.manifest_in_flight.is_none();
         if start_worker {
             guard.manifest_in_flight = Some(key.clone());
         }
-        (cached_assets, start_worker)
+        (asset_views, start_worker)
     } else {
-        (None, false)
+        (LocalManifestAssetViews::default(), false)
     };
 
     if start_worker {
@@ -913,7 +987,7 @@ where
         }
     }
 
-    cached_assets.unwrap_or_default()
+    asset_views
 }
 
 pub fn load_srtm_region_for_view(
@@ -959,13 +1033,13 @@ pub fn load_srtm_region_for_view(
     );
     let state = srtm_focus_cache::local_contour_region_state(
         crate::model::ActiveBody::Earth,
-        &assets,
+        assets.display_assets(),
         viewport_center,
         zoom,
         build_radius,
     );
     let feature_budget = srtm_focus_cache::feature_budget_for_zoom(zoom);
-    let per_asset_budget = (feature_budget / assets.len().max(1)).max(120);
+    let per_asset_budget = (feature_budget / assets.reader_assets().len().max(1)).max(120);
     let scene_key = SceneKey {
         root: selected_root.map(Path::to_path_buf),
         anchor_lat_bucket: (scene_anchor.lat * 20.0).round() as i32,
@@ -979,14 +1053,23 @@ pub fn load_srtm_region_for_view(
         if guard.scene_key.as_ref() != Some(&scene_key) {
             eprintln!(
                 "[1kEE] scene change → {} assets for zoom_bucket={} (entries cleared)",
-                assets.len(),
-                assets.first().map(|a| a.zoom_bucket).unwrap_or(-1)
+                assets.reader_assets().len(),
+                assets
+                    .reader_assets()
+                    .first()
+                    .map(|a| a.zoom_bucket)
+                    .unwrap_or(-1)
             );
             guard.scene_key = Some(scene_key);
             guard.clear_entries_for_new_scene();
         }
         guard.last_status = Some(state.status);
-        begin_local_read(&mut guard, &assets, center_lat_bucket, center_lon_bucket)
+        begin_local_read(
+            &mut guard,
+            assets.reader_assets(),
+            center_lat_bucket,
+            center_lon_bucket,
+        )
     } else {
         None
     };
@@ -1077,12 +1160,12 @@ pub fn load_lunar_region_for_view(
     );
     let state = srtm_focus_cache::local_contour_region_state(
         crate::model::ActiveBody::Moon,
-        &assets,
+        assets.display_assets(),
         viewport_center,
         zoom,
         build_radius,
     );
-    let per_asset_budget = (360usize / assets.len().max(1)).max(120);
+    let per_asset_budget = (360usize / assets.reader_assets().len().max(1)).max(120);
     let scene_key = SceneKey {
         root: selected_root.map(Path::to_path_buf),
         anchor_lat_bucket: (scene_anchor.lat * 20.0).round() as i32,
@@ -1101,8 +1184,15 @@ pub fn load_lunar_region_for_view(
             guard.clear_entries_for_new_scene();
         }
         guard.last_status = Some(state.status);
-        (!assets.is_empty())
-            .then(|| begin_local_read(&mut guard, &assets, center_lat_bucket, center_lon_bucket))
+        (!assets.reader_assets().is_empty())
+            .then(|| {
+                begin_local_read(
+                    &mut guard,
+                    assets.reader_assets(),
+                    center_lat_bucket,
+                    center_lon_bucket,
+                )
+            })
             .flatten()
     } else {
         None
@@ -1197,12 +1287,12 @@ pub fn load_mars_region_for_view(
     );
     let state = srtm_focus_cache::local_contour_region_state(
         crate::model::ActiveBody::Mars,
-        &assets,
+        assets.display_assets(),
         viewport_center,
         zoom,
         build_radius,
     );
-    let per_asset_budget = (360usize / assets.len().max(1)).max(120);
+    let per_asset_budget = (360usize / assets.reader_assets().len().max(1)).max(120);
     let scene_key = SceneKey {
         root: selected_root.map(Path::to_path_buf),
         anchor_lat_bucket: (scene_anchor.lat * 20.0).round() as i32,
@@ -1219,8 +1309,15 @@ pub fn load_mars_region_for_view(
             guard.clear_entries_for_new_scene();
         }
         guard.last_status = Some(state.status);
-        (!assets.is_empty())
-            .then(|| begin_local_read(&mut guard, &assets, center_lat_bucket, center_lon_bucket))
+        (!assets.reader_assets().is_empty())
+            .then(|| {
+                begin_local_read(
+                    &mut guard,
+                    assets.reader_assets(),
+                    center_lat_bucket,
+                    center_lon_bucket,
+                )
+            })
             .flatten()
     } else {
         None
@@ -2410,6 +2507,79 @@ mod tests {
         let snapshot = state.manifest_snapshot.as_ref().expect("current snapshot");
         assert!(snapshot.key == requested_key);
         assert_eq!(snapshot.assets[0].lat_bucket, 1);
+    }
+
+    #[test]
+    fn compatible_manifest_pan_fallback_keeps_overlapping_tiles_ready() {
+        let source_key = LocalManifestKey {
+            root: Some(PathBuf::from("terrain-root")),
+            center_lat_bucket: 0,
+            center_lon_bucket: 0,
+            zoom_bucket: 0,
+            prefetch_radius: 1,
+            build_radius: 1,
+        };
+        let snapshot = LocalManifestSnapshot {
+            key: source_key.clone(),
+            assets: (-1..=1)
+                .flat_map(|lat_bucket| {
+                    (-1..=1).map(move |lon_bucket| test_asset(lat_bucket, lon_bucket))
+                })
+                .collect(),
+            manifest_revision: 0,
+            refreshed_at: Instant::now(),
+        };
+
+        let exact = local_manifest_asset_views(Some(&snapshot), &source_key);
+        assert_eq!(exact.reader_assets().len(), 9);
+        assert_eq!(exact.display_assets().len(), 9);
+
+        let adjacent_key = LocalManifestKey {
+            center_lat_bucket: 1,
+            ..source_key.clone()
+        };
+        let adjacent = local_manifest_asset_views(Some(&snapshot), &adjacent_key);
+        // A changed viewport must not drive a reader from the old manifest,
+        // but the 2×3 overlapping tile strip remains valid progress data.
+        assert!(adjacent.reader_assets().is_empty());
+        assert_eq!(adjacent.display_assets().len(), 6);
+        assert!(adjacent
+            .display_assets()
+            .iter()
+            .all(|asset| (0..=1).contains(&asset.lat_bucket)));
+
+        let zoom = 0.5;
+        let bucket_step = srtm_focus_cache::half_extent_for_zoom(zoom) * 0.45;
+        let progress = srtm_focus_cache::local_contour_region_state(
+            crate::model::ActiveBody::Earth,
+            adjacent.display_assets(),
+            GeoPoint {
+                lat: bucket_step,
+                lon: 0.0,
+            },
+            zoom,
+            1,
+        );
+        assert_eq!(progress.status.ready_assets, 6);
+        assert_eq!(progress.status.total_assets, 9);
+
+        let different_root = LocalManifestKey {
+            root: Some(PathBuf::from("other-root")),
+            ..adjacent_key.clone()
+        };
+        let different_zoom = LocalManifestKey {
+            zoom_bucket: 1,
+            ..adjacent_key.clone()
+        };
+        let different_radii = LocalManifestKey {
+            prefetch_radius: 2,
+            ..adjacent_key
+        };
+        for incompatible_key in [different_root, different_zoom, different_radii] {
+            let incompatible = local_manifest_asset_views(Some(&snapshot), &incompatible_key);
+            assert!(incompatible.reader_assets().is_empty());
+            assert!(incompatible.display_assets().is_empty());
+        }
     }
 
     #[test]

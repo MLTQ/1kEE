@@ -15,6 +15,17 @@ Loads contour geometry from disk into in-memory render caches for both local ter
   projection.
 - **Interacts with**: `load_srtm_region_for_view`, `load_lunar_region_for_view`.
 
+### Local manifest handoff
+- **Does**: Separates exact manifest assets used to schedule tile reads from a
+  compatible prior manifest's overlapping assets used only for pulse-grid and
+  progress display during a pan.
+- **Interacts with**: `local_manifest_assets`,
+  `srtm_focus_cache::local_contour_region_state`, and the local terrain scene.
+- **Rationale**: An async manifest refresh can briefly lack an exact current
+  snapshot even while a retained contour merge covers the viewport. Keeping
+  the known overlap prevents a false all-tile loading flash without allowing
+  stale viewport selection to schedule new SQLite reads.
+
 ### `GlobeRegionCache`
 - **Does**: Accumulates globe-mode tiles across orbit movement, tracks in-flight
   background loads, and memoizes the merged contour `Arc` behind a monotonic
@@ -98,14 +109,19 @@ Loads contour geometry from disk into in-memory render caches for both local ter
   worker; in-process builder completion invalidates them immediately, while a
   short timeout admits writes from the companion cache builder without
   continuous SQLite polling.
+- During a compatible overlapping pan, the previous manifest contributes only
+  its overlapping ready tiles to the local pulse grid. The new manifest still
+  owns read scheduling, so a root, zoom, or envelope change correctly reports
+  unknown terrain rather than reusing stale data.
 - A local read batch is intentionally eight tiles. The full 13×13 envelope is
   still retained and eventually decoded, but small center-first arrivals avoid
   a burst of thousands of new paths in one frame.
 - Full tile flattening and lunar/Mars ownership partitioning use an immutable
   `Arc` snapshot on a background worker. A result only replaces the displayed
   merge if its cache revision and requested camera window still match.
-- `LocalContourLoad` carries ready/progress data from that same manifest
-  selection, so the pulse grid and progress cards do not rescan SQLite.
+- `LocalContourLoad` carries ready/progress data from the exact manifest or a
+  compatible prior overlap during refresh, so the pulse grid and progress
+  cards do not rescan SQLite or flash all tiles as unloaded on a covered pan.
 - A mixed batch commits every tile it decoded successfully. A fully failed
   batch retries after a short delay, so one locked or malformed tile cannot
   repeatedly throw away healthy neighbouring contours.
