@@ -25,12 +25,22 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 - **Does**: Exercise the contour-loading/projection path against cached focus data so the local terrain stack keeps a working end-to-end sanity check
 - **Interacts with**: `contour_asset::load_srtm_region_for_view`, egui layout helpers
 
-### Contour stroke scale
+### Contour width routing
 
-- **Does**: Threads the shared operator scale through both ordinary and
-  transition contour stacks while retaining their existing alpha/major-minor
-  weight relationships.
-- **Interacts with**: `AppModel::contour_stroke_scale` and `geography.rs`.
+- **Does**: Converts the shared physical primary width to the existing local
+  relative scale before threading it through ordinary and transition contour
+  stacks. This retains alpha and major/minor weight relationships.
+- **Interacts with**: `AppModel::contour_stroke_scale_for_pixels_per_point`
+  and `geography.rs`.
+
+### Local stroke floor
+
+- **Does**: Raises each derived local contour, coastline, and bathymetry stroke
+  to one physical pixel when the selected primary width or transition fade
+  would otherwise make it sub-pixel.
+- **Interacts with**: `draw_contour_stack` and `geography.rs`.
+- **Rationale**: The width control's lower bound must be visible in both map
+  views without flattening local stroke relationships at normal widths.
 
 ### Contour projection budget
 
@@ -76,7 +86,7 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 | `world_map.rs` | This module remains the local-mode renderer entrypoint and can be switched to by zoom/focus state alone | Moving the local scene entrypoint or changing its model/context contract |
 | Overlay renderers | Imported user layers, roads, water, and contours share the same local projection space | Changing coordinate transforms without updating overlay helpers |
 | Scene tests | The local contour loader stays reachable through `contour_asset::load_srtm_region_for_view` for end-to-end validation | Renaming/removing that loader without updating the tests |
-| Globe scene | A shared `1×` contour scale produces the same default local stroke widths as before | Applying a different scale or bypassing it in transition rendering |
+| Globe scene | A shared physical primary width produces matching derived local widths, with every local stroke clamped to at least 1 px | Applying a different conversion or bypassing the floor in transition rendering |
 | Cinematic movement | At most one elevation-fill mesh worker is active while camera-derived keys change | Replacing the receiver and spawning a worker per frame |
 | Local markers and beam | Ground contacts match the exact elevation surface of the mesh painted this frame | Sampling a separate terrain source or pairing a stale mesh with a newer grid |
 

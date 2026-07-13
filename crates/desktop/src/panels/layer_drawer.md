@@ -26,9 +26,10 @@ optional external overlays without owning their data pipelines.
 
 ### Contour thickness control
 
-- **Does**: Exposes a logarithmic `0.25×..=3×` line-thickness slider beneath
-  the contour toggle and persists a completed adjustment locally.
-- **Interacts with**: `AppModel::set_contour_stroke_scale` and
+- **Does**: Exposes a linear physical-pixel contour-width slider (`1..=16 px`,
+  quarter-pixel steps) beneath the contour toggle and persists a completed
+  adjustment locally.
+- **Interacts with**: `AppModel::set_contour_stroke_width_px` and
   `AppModel::save_settings`.
 
 ## Contracts
@@ -38,7 +39,7 @@ optional external overlays without owning their data pipelines.
 | World map | Toggle values correspond directly to renderer visibility checks | Relabeling a control while changing its target field |
 | Cache helpers | Disabling road/water layers triggers the appropriate invalidation behavior | Removing cache invalidation on affected toggles |
 | Optional sources | A layer can remain off while its cache/data becomes available | Making a source fetch conditional on visual enablement alone |
-| Contour renderers | A `1×` slider value preserves the prior stroke appearance across globe and local views | Sending an unchecked or differently-scaled value to one renderer |
+| Contour renderers | No contour-derived local or globe stroke is below 1 px; local major/minor, coastline, and bathymetry strokes retain their hierarchy above that floor | Sending an unchecked physical width or allowing sub-pixel strokes |
 
 ## Notes
 
@@ -46,3 +47,6 @@ optional external overlays without owning their data pipelines.
   triggering network work inside this rendering function.
 - Slider drags update the live view each frame but defer the settings-file
   write until release, avoiding repeated disk writes during adjustment.
+- Legacy multiplier-only settings display their equivalent current pixel width
+  until the operator moves the control. Only old sub-pixel values are raised to
+  the new visible minimum.

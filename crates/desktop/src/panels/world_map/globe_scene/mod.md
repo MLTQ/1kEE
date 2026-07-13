@@ -51,11 +51,11 @@ model and viewport into an egui-painted `GlobeScene` each frame.
 - **Interacts with**: `local_terrain_scene/deflock_layer.rs` and
   `AppModel::deflock_alpr_locations`.
 
-### Contour stroke routing
+### Contour width routing
 
-- **Does**: Reads the shared contour scale once per globe frame and forwards
-  it to the GPU terrain, coastline, and bathymetry contour passes.
-- **Interacts with**: `geography.rs` and `AppModel::contour_stroke_scale`.
+- **Does**: Reads the shared physical contour width once per globe frame and
+  forwards it to the GPU terrain, coastline, and bathymetry contour passes.
+- **Interacts with**: `geography.rs` and `AppModel::contour_stroke_width_px`.
 
 ## Contracts
 
@@ -80,5 +80,6 @@ model and viewport into an egui-painted `GlobeScene` each frame.
   height, measured outward from that surface base.
 - The optional ALPR overlay is surface-projected and front-face filtered before
   mesh construction; it does not alter existing layer geometry when disabled.
-- A `1×` contour scale is deliberately passed through unchanged, preserving the
-  prior GPU contour width while allowing later frames to alter only uniforms.
+- The selected physical width alters only contour uniforms, preserving cached
+  geometry. Multiplier-only legacy settings resolve to their prior pixel width
+  before routing, except that an old sub-pixel value is raised to 1 px.

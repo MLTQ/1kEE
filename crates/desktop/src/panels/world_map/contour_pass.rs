@@ -46,8 +46,6 @@ pub enum ContourLayer {
 const LAYER_COUNT: usize = 6;
 /// wgpu requires dynamic uniform offsets to be 256-aligned on most hardware.
 const UNIFORM_STRIDE: u64 = 256;
-/// The legacy CPU contour path used a 1.15 logical-point stroke.
-const BASE_STROKE_WIDTH_POINTS: f32 = 1.15;
 
 impl ContourLayer {
     fn slot(self) -> u32 {
@@ -145,8 +143,8 @@ fn linear_u8(c: egui::Color32) -> [u8; 4] {
 }
 
 #[inline]
-fn contour_stroke_half_px(stroke_scale: f32, pixels_per_point: f32) -> f32 {
-    BASE_STROKE_WIDTH_POINTS * 0.5 * stroke_scale * pixels_per_point
+fn contour_stroke_half_px(stroke_width_px: f32) -> f32 {
+    stroke_width_px * 0.5
 }
 
 /// Cheap identity for a contour set + palette combination. The `Arc` pointer
@@ -413,7 +411,7 @@ impl ContourCallback {
     /// Build a callback for one layer. `radius_offset` is the constant
     /// altitude offset previously passed to `draw_geo_path`; `alpha` is the
     /// layer fade multiplier (zoom crossfades × the 0.92 stroke dimming the
-    /// CPU path applied). `stroke_scale` changes only this callback's uniform,
+    /// CPU path applied). `stroke_width_px` changes only this callback's uniform,
     /// so adjusting it never rebuilds contour instances.
     pub fn new(
         layer: ContourLayer,
@@ -423,7 +421,7 @@ impl ContourCallback {
         view: &GlobeViewState,
         radius_offset: f32,
         alpha: f32,
-        stroke_scale: f32,
+        stroke_width_px: f32,
         pixels_per_point: f32,
     ) -> Self {
         Self {
@@ -445,8 +443,8 @@ impl ContourCallback {
                 // Same gamma-space→linear-space correction as `linear_u8`:
                 // the CPU path applied this fade via `gamma_multiply`.
                 alpha: alpha.powf(2.2),
-                // At 1× this remains the legacy 1.15 logical-point stroke.
-                stroke_half_px: contour_stroke_half_px(stroke_scale, pixels_per_point),
+                // The UI-selected width is already in physical pixels.
+                stroke_half_px: contour_stroke_half_px(stroke_width_px),
                 feather_px: 1.0,
                 pixels_per_point,
                 _pad: [0.0; 3],
@@ -546,13 +544,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_stroke_scale_preserves_the_legacy_gpu_width() {
-        let pixels_per_point = 2.0;
-        let legacy_half_width = BASE_STROKE_WIDTH_POINTS * 0.5 * pixels_per_point;
-        assert_eq!(
-            contour_stroke_half_px(1.0, pixels_per_point),
-            legacy_half_width
-        );
+    fn physical_stroke_width_maps_directly_to_the_gpu_half_width() {
+        assert_eq!(contour_stroke_half_px(1.0), 0.5);
+        assert_eq!(contour_stroke_half_px(2.3), 1.15);
     }
 
     #[test]

@@ -116,7 +116,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         draw_hud_frame(painter, rect);
     }
 
-    let contour_stroke_scale = model.contour_stroke_scale();
+    let contour_stroke_width_px = model.contour_stroke_width_px(painter.ctx().pixels_per_point());
     if model.active_body == crate::model::ActiveBody::Earth {
         if model.show_bathymetry {
             geography::draw_global_bathymetry(
@@ -124,7 +124,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 &layout,
                 &model.globe_view,
                 selected_root,
-                contour_stroke_scale,
+                contour_stroke_width_px,
             );
         }
         if model.show_coastlines {
@@ -133,7 +133,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 &layout,
                 &model.globe_view,
                 selected_root,
-                contour_stroke_scale,
+                contour_stroke_width_px,
             );
         }
         if model.show_contours {
@@ -142,7 +142,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 &layout,
                 &model.globe_view,
                 selected_root,
-                contour_stroke_scale,
+                contour_stroke_width_px,
             );
             geography::draw_srtm_on_globe(
                 painter,
@@ -150,7 +150,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 &model.globe_view,
                 &lod,
                 selected_root,
-                contour_stroke_scale,
+                contour_stroke_width_px,
             );
         }
     } else if model.active_body == crate::model::ActiveBody::Moon {
@@ -160,7 +160,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             &model.globe_view,
             selected_root,
             model.show_contours,
-            contour_stroke_scale,
+            contour_stroke_width_px,
         );
     } else if model.active_body == crate::model::ActiveBody::Mars {
         geography::draw_mars_topo(
@@ -169,7 +169,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             &model.globe_view,
             selected_root,
             model.show_contours,
-            contour_stroke_scale,
+            contour_stroke_width_px,
         );
     }
 

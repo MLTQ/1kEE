@@ -204,6 +204,10 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     }
 
     let contours_slice = contours.as_ref().map(|v| v.as_slice()).unwrap_or(&[]);
+    // Local egui strokes remain relative to their established major/minor
+    // weights; derive that scale from the operator's physical primary width.
+    let contour_stroke_scale =
+        model.contour_stroke_scale_for_pixels_per_point(painter.ctx().pixels_per_point());
 
     // ── Background contour pass (drawn before fill so opaque fill covers them) ─
     if model.fill_elevation && !contours_slice.is_empty() && model.show_contours {
@@ -216,7 +220,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             contours_slice,
             1.0,
             model.active_body,
-            model.contour_stroke_scale(),
+            contour_stroke_scale,
         );
     }
 
@@ -249,7 +253,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             contours_slice,
             1.0,
             model.active_body,
-            model.contour_stroke_scale(),
+            contour_stroke_scale,
         );
     }
     if !contours_slice.is_empty() && model.active_body == crate::model::ActiveBody::Earth {
@@ -594,7 +598,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             viewport_center,
             render_zoom,
             model.selected_root.as_deref(),
-            model.contour_stroke_scale(),
+            contour_stroke_scale,
         );
     }
     if model.show_bathymetry && model.active_body == crate::model::ActiveBody::Earth {
@@ -605,7 +609,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             viewport_center,
             render_zoom,
             model.selected_root.as_deref(),
-            model.contour_stroke_scale(),
+            contour_stroke_scale,
         );
     }
     if !model.geojson_layers.is_empty() {
@@ -790,6 +794,8 @@ pub fn paint_transition_overlay(
     };
 
     let layout = transition_layout(rect, progress);
+    let contour_stroke_scale =
+        model.contour_stroke_scale_for_pixels_per_point(painter.ctx().pixels_per_point());
     draw_contour_stack(
         painter,
         &layout,
@@ -799,7 +805,7 @@ pub fn paint_transition_overlay(
         contours.as_ref(),
         progress,
         model.active_body,
-        model.contour_stroke_scale(),
+        contour_stroke_scale,
     );
 }
 
@@ -1620,6 +1626,7 @@ fn draw_contour_stack(
     // not be called from rayon worker threads.
     let major_color = theme::hot_color();
     let minor_color = theme::contour_color();
+    let pixels_per_point = painter.ctx().pixels_per_point();
 
     // Parallel projection: each contour's points are fully independent.
     // Process fixed ordered chunks instead of materializing every projected
@@ -1659,6 +1666,7 @@ fn draw_contour_stack(
                         if major { 1.35 } else { 0.7 },
                         alpha,
                         contour_stroke_scale,
+                        pixels_per_point,
                     ),
                     if major { major_color } else { minor_color }
                         .gamma_multiply((if major { 1.0 } else { 0.78 }) * alpha),
@@ -1681,8 +1689,26 @@ fn draw_contour_stack(
 }
 
 #[inline]
-fn local_contour_stroke_width(base_width: f32, alpha: f32, contour_stroke_scale: f32) -> f32 {
-    base_width * (0.72 + alpha * 0.28) * contour_stroke_scale
+pub(super) fn local_stroke_width_points(width_points: f32, pixels_per_point: f32) -> f32 {
+    let pixels_per_point = if pixels_per_point.is_finite() && pixels_per_point > 0.0 {
+        pixels_per_point
+    } else {
+        1.0
+    };
+    width_points.max(crate::settings_store::MIN_CONTOUR_STROKE_WIDTH_PX / pixels_per_point)
+}
+
+#[inline]
+fn local_contour_stroke_width(
+    base_width: f32,
+    alpha: f32,
+    contour_stroke_scale: f32,
+    pixels_per_point: f32,
+) -> f32 {
+    local_stroke_width_points(
+        base_width * (0.72 + alpha * 0.28) * contour_stroke_scale,
+        pixels_per_point,
+    )
 }
 
 // ── Road / Water cache public API ─────────────────────────────────────────
@@ -2077,9 +2103,15 @@ mod tests {
     }
 
     #[test]
-    fn default_contour_stroke_scale_preserves_local_line_widths() {
-        assert_eq!(local_contour_stroke_width(1.35, 1.0, 1.0), 1.35);
-        assert_eq!(local_contour_stroke_width(0.7, 1.0, 1.0), 0.7);
+    fn primary_contour_width_preserves_local_weights_above_the_pixel_floor() {
+        assert_eq!(local_contour_stroke_width(1.35, 1.0, 1.0, 2.0), 1.35);
+        assert_eq!(local_contour_stroke_width(0.7, 1.0, 1.0, 2.0), 0.7);
+        assert_eq!(local_contour_stroke_width(0.7, 1.0, 1.0, 1.0), 1.0);
+        // Bathymetry minor lines and coastlines share this helper, so they
+        // receive the same physical-pixel floor as the terrain stack.
+        assert_eq!(local_stroke_width_points(0.3, 2.0), 0.5);
+        assert_eq!(local_stroke_width_points(0.7, 1.0), 1.0);
+        assert_eq!(local_stroke_width_points(1.0, 1.0), 1.0);
     }
 
     #[test]

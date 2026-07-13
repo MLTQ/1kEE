@@ -10,7 +10,8 @@ layers, plus geographic overlay helpers and planetary labels.
 ### `paint_contour_layer`
 
 - **Does**: Converts a cached contour batch into the GPU callback for one
-  frame, forwarding fade, elevation offset, and the shared stroke scale.
+  frame, forwarding fade, elevation offset, and the shared physical stroke
+  width.
 - **Interacts with**: `world_map/contour_pass.rs`.
 
 ### Terrain and planetary contour functions
@@ -24,8 +25,8 @@ layers, plus geographic overlay helpers and planetary labels.
 
 | Dependent | Expects | Breaking changes |
 |---|---|---|
-| Globe scene | All contour-derived globe line layers accept the same validated scale | Scaling only one body or contour type |
-| Contour pass | A `1×` scale preserves legacy width and avoids cache rebuilds | Baking scale into palette or geometry cache keys |
+| Globe scene | All contour-derived globe line layers accept the same validated physical width | Scaling only one body or contour type |
+| Contour pass | Physical width changes avoid cache rebuilds | Baking width into palette or geometry cache keys |
 
 ## Notes
 

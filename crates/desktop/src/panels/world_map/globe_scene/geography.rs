@@ -20,7 +20,7 @@ fn paint_contour_layer(
     batch: Option<(u64, Arc<Vec<SegmentInstance>>)>,
     radius_offset: f32,
     alpha: f32,
-    contour_stroke_scale: f32,
+    contour_stroke_width_px: f32,
 ) {
     let Some((version, instances)) = batch else {
         return;
@@ -37,7 +37,7 @@ fn paint_contour_layer(
             view,
             radius_offset,
             alpha,
-            contour_stroke_scale,
+            contour_stroke_width_px,
             painter.ctx().pixels_per_point(),
         )
         .into_paint_callback(painter.clip_rect()),
@@ -69,7 +69,7 @@ pub(super) fn draw_global_coastlines(
     layout: &GlobeLayout,
     view: &GlobeViewState,
     selected_root: Option<&std::path::Path>,
-    contour_stroke_scale: f32,
+    contour_stroke_width_px: f32,
 ) {
     puffin::profile_function!();
     let Some(coastlines) =
@@ -96,7 +96,7 @@ pub(super) fn draw_global_coastlines(
         batch,
         0.015,
         0.92,
-        contour_stroke_scale,
+        contour_stroke_width_px,
     );
 }
 
@@ -105,7 +105,7 @@ pub(super) fn draw_global_bathymetry(
     layout: &GlobeLayout,
     view: &GlobeViewState,
     selected_root: Option<&std::path::Path>,
-    contour_stroke_scale: f32,
+    contour_stroke_width_px: f32,
 ) {
     puffin::profile_function!();
     // ── Layer 1: depth-fill texture mapped onto the sphere ───────────────────
@@ -182,7 +182,7 @@ pub(super) fn draw_global_bathymetry(
         batch,
         0.01,
         0.92,
-        contour_stroke_scale,
+        contour_stroke_width_px,
     );
 }
 
@@ -390,7 +390,7 @@ pub(super) fn draw_global_topo(
     layout: &GlobeLayout,
     view: &GlobeViewState,
     selected_root: Option<&std::path::Path>,
-    contour_stroke_scale: f32,
+    contour_stroke_width_px: f32,
 ) {
     puffin::profile_function!();
     // Crossfade: full opacity at zoom ≤ 3.0, fade to zero by zoom 5.0.
@@ -428,7 +428,7 @@ pub(super) fn draw_global_topo(
         batch,
         0.015,
         alpha * 0.92,
-        contour_stroke_scale,
+        contour_stroke_width_px,
     );
 }
 
@@ -442,7 +442,7 @@ pub(super) fn draw_srtm_on_globe(
     view: &GlobeViewState,
     _lod: &GlobeLod,
     selected_root: Option<&std::path::Path>,
-    contour_stroke_scale: f32,
+    contour_stroke_width_px: f32,
 ) {
     puffin::profile_function!();
     if view.zoom < 1.5 {
@@ -485,7 +485,7 @@ pub(super) fn draw_srtm_on_globe(
         batch,
         0.020,
         alpha * 0.92,
-        contour_stroke_scale,
+        contour_stroke_width_px,
     );
 }
 
@@ -497,7 +497,7 @@ pub(super) fn draw_lunar_topo(
     view: &GlobeViewState,
     selected_root: Option<&std::path::Path>,
     show_contours: bool,
-    contour_stroke_scale: f32,
+    contour_stroke_width_px: f32,
 ) {
     puffin::profile_function!();
     // ── Contour lines ─────────────────────────────────────────────────────────
@@ -543,7 +543,7 @@ pub(super) fn draw_lunar_topo(
                 batch,
                 0.015,
                 contour_alpha * 0.92,
-                contour_stroke_scale,
+                contour_stroke_width_px,
             );
         }
     }
@@ -580,7 +580,7 @@ pub(super) fn draw_mars_topo(
     view: &GlobeViewState,
     selected_root: Option<&std::path::Path>,
     show_contours: bool,
-    contour_stroke_scale: f32,
+    contour_stroke_width_px: f32,
 ) {
     puffin::profile_function!();
     // ── Contour lines ─────────────────────────────────────────────────────────
@@ -623,7 +623,7 @@ pub(super) fn draw_mars_topo(
                 batch,
                 0.015,
                 contour_alpha * 0.92,
-                contour_stroke_scale,
+                contour_stroke_width_px,
             );
         }
     }

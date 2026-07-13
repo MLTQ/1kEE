@@ -100,24 +100,29 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                 }
                 ui.checkbox(&mut model.show_contours, "Contours");
                 ui.indent("contour_thickness", |ui| {
-                    let mut stroke_scale = model.contour_stroke_scale();
+                    let pixels_per_point = ui.ctx().pixels_per_point();
+                    let mut stroke_width_px = model.contour_stroke_width_px(pixels_per_point);
+                    // Keep any unusually wide legacy setting visible without
+                    // changing its appearance merely because this new control
+                    // has a normal operator-facing upper range.
+                    let slider_max_px = settings_store::MAX_CONTOUR_STROKE_WIDTH_PX
+                        .max(stroke_width_px);
                     let response = ui
                         .add(
                             egui::Slider::new(
-                                &mut stroke_scale,
-                                settings_store::MIN_CONTOUR_STROKE_SCALE
-                                    ..=settings_store::MAX_CONTOUR_STROKE_SCALE,
+                                &mut stroke_width_px,
+                                settings_store::MIN_CONTOUR_STROKE_WIDTH_PX..=slider_max_px,
                             )
-                            .logarithmic(true)
+                            .step_by(0.25)
                             .max_decimals(2)
-                            .text("Line thickness")
-                            .suffix("×"),
+                            .text("Contour width")
+                            .suffix(" px"),
                         )
                         .on_hover_text(
-                            "Scales contour, coastline, and bathymetry strokes. 1× matches the original visual weight.",
+                            "Sets the primary contour width in screen pixels. Every contour-derived stroke stays at least 1 px; local major/minor, coastline, and bathymetry relationships are preserved above that floor.",
                         );
                     if response.changed() {
-                        model.set_contour_stroke_scale(stroke_scale);
+                        model.set_contour_stroke_width_px(stroke_width_px);
                     }
                     // Persist a click/keyboard adjustment immediately, but
                     // defer continuous slider drags until the pointer releases.

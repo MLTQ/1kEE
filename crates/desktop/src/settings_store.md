@@ -6,7 +6,7 @@ Persists the desktop app's local configuration so it survives restarts. That now
 ## Components
 
 ### `AppSettings`
-- **Does**: Holds the app-managed settings payload for Factal, live camera sources, filesystem/tool paths, and contour stroke scale
+- **Does**: Holds the app-managed settings payload for Factal, live camera sources, filesystem/tool paths, a legacy contour multiplier, and an optional physical contour width
 - **Interacts with**: `model.rs`, `terrain_assets.rs`, `osm_ingest.rs`, `srtm_focus_cache.rs`, `factal_settings.rs`, `camera_registry.rs`
 
 ### `load_app_settings` / `save_app_settings`
@@ -31,7 +31,7 @@ Persists the desktop app's local configuration so it survives restarts. That now
 |-----------|---------|------------------|
 | `model.rs` | Settings loading is cheap enough to use at startup and returns executable-directory defaults when unset | Making settings resolution expensive or removing the default asset-root fallback |
 | `factal_settings.rs` | Saving an empty key clears the on-disk value and blank path fields revert to auto-detect/default behavior | Changing clear semantics or making blank path fields invalid |
-| Map renderers | Missing or malformed contour scale settings fall back to 1×, the pre-control visual weight | Allowing invalid or out-of-range values through normalization |
+| Map renderers | Older files retain their multiplier-derived visual width when it is already visible; new physical widths stay within the 1–16 px range | Dropping the legacy fallback or allowing invalid pixel widths through normalization |
 
 ## Notes
 - The settings file now lives beside the executable so moving the app bundle/worktree to another machine keeps the local path model coherent by default.
@@ -39,5 +39,9 @@ Persists the desktop app's local configuration so it survives restarts. That now
 - GDAL discovery now prefers the app-configured bin directory and otherwise relies on `PATH`; it no longer assumes Postgres.app.
 - Path settings are now normalized on save/load so operators can point at a parent folder like `/Volumes/Hilbert/Data` and still have the app infer nested `Data/`, `Derived/`, or `srtm_gl1/SRTM_GL1_srtm` subpaths when those exist.
 - If `Asset Root` is accidentally pointed at a `Data/` or `Derived/` folder, it is normalized back to the parent asset root to avoid silently creating `Data/Data` or `Data/Derived` layouts.
-- `contour_stroke_scale` is bounded to `0.25×..=3×`; legacy settings files
-  default to `1×` so an upgrade does not change map appearance.
+- `contour_stroke_scale` remains as a compatibility field for older files.
+  `contour_stroke_width_px` is optional: when absent, the legacy multiplier is
+  resolved at the current display density so upgrading preserves existing
+  visible output. Older sub-pixel values are raised to the new 1 px floor.
+  Once an operator moves the new control, its physical width is persisted in
+  the visible `1..=16 px` range.

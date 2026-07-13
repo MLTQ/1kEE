@@ -4,7 +4,7 @@ use crate::model::{GeoPoint, GlobeViewState};
 
 use super::super::contour_asset;
 use super::projection::project_local;
-use super::{LocalLayout, visual_half_extent_for_zoom};
+use super::{LocalLayout, local_stroke_width_points, visual_half_extent_for_zoom};
 
 pub(super) fn draw_bathymetry_local(
     painter: &egui::Painter,
@@ -16,6 +16,7 @@ pub(super) fn draw_bathymetry_local(
     contour_stroke_scale: f32,
 ) {
     puffin::profile_function!();
+    let pixels_per_point = painter.ctx().pixels_per_point();
     // Use GEBCO bathymetry — same zoom/LOD approach as global coastline.
     let bathy_zoom = view.local_zoom.clamp(1.0, 8.0);
     let Some(bathy) =
@@ -57,7 +58,10 @@ pub(super) fn draw_bathymetry_local(
         let g = (55.0 * (1.0 - depth_norm * 0.6)) as u8;
         let b = (130 + (60.0 * depth_norm) as u8).min(255);
         let color = egui::Color32::from_rgba_premultiplied(r, g, b, a);
-        let width = (if major { 1.2 } else { 0.7 }) * contour_stroke_scale;
+        let width = local_stroke_width_points(
+            (if major { 1.2 } else { 0.7 }) * contour_stroke_scale,
+            pixels_per_point,
+        );
         let stroke = egui::Stroke::new(width, color);
 
         let points: Vec<_> = contour
@@ -95,6 +99,7 @@ pub(super) fn draw_coastlines_local(
     contour_stroke_scale: f32,
 ) {
     puffin::profile_function!();
+    let pixels_per_point = painter.ctx().pixels_per_point();
     let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
     let km_per_deg_lat = 111.32f32;
     let km_per_deg_lon = km_per_deg_lat * focus.lat.to_radians().cos().abs().max(0.2);
@@ -118,7 +123,7 @@ pub(super) fn draw_coastlines_local(
     // Single thin white line — same visual weight as the topo contours.
     const COAST_ELEV: f32 = -3.0;
     let stroke = egui::Stroke::new(
-        contour_stroke_scale,
+        local_stroke_width_points(contour_stroke_scale, pixels_per_point),
         egui::Color32::from_rgba_premultiplied(220, 230, 255, 55),
     );
 

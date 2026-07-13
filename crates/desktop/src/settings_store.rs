@@ -10,6 +10,16 @@ const SETTINGS_FILE: &str = ".1kee_settings.json";
 pub(crate) const DEFAULT_CONTOUR_STROKE_SCALE: f32 = 1.0;
 pub(crate) const MIN_CONTOUR_STROKE_SCALE: f32 = 0.25;
 pub(crate) const MAX_CONTOUR_STROKE_SCALE: f32 = 3.0;
+/// The historical globe contour width at a `1×` multiplier, expressed in
+/// egui logical points. New pixel-width selections convert through this value
+/// so the local renderer keeps its established major/minor hierarchy.
+pub(crate) const LEGACY_CONTOUR_STROKE_WIDTH_POINTS: f32 = 1.15;
+/// A full GPU contour stroke must retain at least one physical pixel of core
+/// width so the anti-aliased line does not disappear at the lower endpoint.
+pub(crate) const MIN_CONTOUR_STROKE_WIDTH_PX: f32 = 1.0;
+/// The new pixel-width control supports a comfortably wider range than the
+/// former multiplier without changing any legacy saved appearance.
+pub(crate) const MAX_CONTOUR_STROKE_WIDTH_PX: f32 = 16.0;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -41,9 +51,15 @@ pub struct AppSettings {
     /// if osmium + a local planet file are both available.
     #[serde(default)]
     pub prefer_overpass: bool,
-    /// Multiplier for contour-derived stroke widths in globe and local views.
+    /// Historical multiplier for contour-derived stroke widths. Retained so
+    /// saved settings from before the pixel-width control keep their exact
+    /// legacy visual weight until the operator chooses a pixel value.
     #[serde(default = "default_contour_stroke_scale")]
     pub contour_stroke_scale: f32,
+    /// Physical-pixel width selected by the contour control. `None` means use
+    /// `contour_stroke_scale` as a backwards-compatible legacy fallback.
+    #[serde(default)]
+    pub contour_stroke_width_px: Option<f32>,
 }
 
 impl Default for AppSettings {
@@ -62,6 +78,7 @@ impl Default for AppSettings {
             osmium_bin_dir: None,
             prefer_overpass: false,
             contour_stroke_scale: DEFAULT_CONTOUR_STROKE_SCALE,
+            contour_stroke_width_px: None,
         }
     }
 }
@@ -79,6 +96,23 @@ pub(crate) fn normalize_contour_stroke_scale(value: f32) -> f32 {
     } else {
         value.clamp(MIN_CONTOUR_STROKE_SCALE, MAX_CONTOUR_STROKE_SCALE)
     }
+}
+
+/// Normalize a new operator-selected physical contour width. Invalid direct
+/// setter input still resolves to the visible one-pixel minimum; malformed
+/// persisted optional values instead fall back to the legacy field below.
+pub(crate) fn normalize_contour_stroke_width_px(value: f32) -> f32 {
+    if !value.is_finite() {
+        MIN_CONTOUR_STROKE_WIDTH_PX
+    } else {
+        value.clamp(MIN_CONTOUR_STROKE_WIDTH_PX, MAX_CONTOUR_STROKE_WIDTH_PX)
+    }
+}
+
+fn normalize_optional_contour_stroke_width_px(value: Option<f32>) -> Option<f32> {
+    value
+        .filter(|width_px| width_px.is_finite() && *width_px > 0.0)
+        .map(normalize_contour_stroke_width_px)
 }
 
 pub fn load_app_settings() -> AppSettings {
@@ -265,6 +299,8 @@ fn normalize_settings(mut settings: AppSettings) -> AppSettings {
     settings.planet_path = normalize_optional_owned(settings.planet_path);
     settings.gdal_bin_dir = normalize_optional_owned(settings.gdal_bin_dir);
     settings.contour_stroke_scale = normalize_contour_stroke_scale(settings.contour_stroke_scale);
+    settings.contour_stroke_width_px =
+        normalize_optional_contour_stroke_width_px(settings.contour_stroke_width_px);
     settings
 }
 
@@ -356,9 +392,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn contour_stroke_scale_defaults_to_legacy_visual_weight() {
+    fn contour_stroke_settings_default_to_the_legacy_visual_weight() {
         let settings: AppSettings = serde_json::from_str("{}").expect("valid legacy settings");
         assert_eq!(settings.contour_stroke_scale, DEFAULT_CONTOUR_STROKE_SCALE);
+        assert_eq!(settings.contour_stroke_width_px, None);
+    }
+
+    #[test]
+    fn multiplier_only_settings_remain_on_the_legacy_migration_path() {
+        let settings: AppSettings = serde_json::from_str(r#"{"contour_stroke_scale": 0.25}"#)
+            .expect("valid legacy settings");
+        let normalized = normalize_settings(settings);
+
+        assert_eq!(normalized.contour_stroke_scale, MIN_CONTOUR_STROKE_SCALE);
+        assert_eq!(normalized.contour_stroke_width_px, None);
     }
 
     #[test]
@@ -379,5 +426,22 @@ mod tests {
             normalize_contour_stroke_scale(10.0),
             MAX_CONTOUR_STROKE_SCALE
         );
+    }
+
+    #[test]
+    fn contour_stroke_width_uses_a_visible_pixel_range() {
+        assert_eq!(
+            normalize_contour_stroke_width_px(f32::NAN),
+            MIN_CONTOUR_STROKE_WIDTH_PX
+        );
+        assert_eq!(
+            normalize_contour_stroke_width_px(0.5),
+            MIN_CONTOUR_STROKE_WIDTH_PX
+        );
+        assert_eq!(
+            normalize_contour_stroke_width_px(99.0),
+            MAX_CONTOUR_STROKE_WIDTH_PX
+        );
+        assert_eq!(normalize_optional_contour_stroke_width_px(Some(0.0)), None);
     }
 }

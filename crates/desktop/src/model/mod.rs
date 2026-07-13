@@ -72,9 +72,12 @@ pub struct AppModel {
     pub fill_elevation: bool,
     pub show_bathymetry: bool,
     pub show_contours: bool,
-    /// Operator-selected multiplier for contour-derived stroke widths. Kept
-    /// private so all rendering paths receive a finite, supported value.
-    contour_stroke_scale: f32,
+    /// Saved multiplier used only when an older settings file has no physical
+    /// pixel-width value. Keeping it preserves pre-slider visual output.
+    legacy_contour_stroke_scale: f32,
+    /// Operator-selected primary contour width in physical pixels. `None`
+    /// selects the legacy multiplier compatibility path above.
+    contour_stroke_width_px: Option<f32>,
     pub show_trees: bool,
     pub show_buildings: bool,
     pub show_admin: bool,
@@ -355,7 +358,8 @@ impl AppModel {
             fill_elevation: false,
             show_bathymetry: true,
             show_contours: true,
-            contour_stroke_scale: app_settings.contour_stroke_scale,
+            legacy_contour_stroke_scale: app_settings.contour_stroke_scale,
+            contour_stroke_width_px: app_settings.contour_stroke_width_px,
             show_trees: false,
             show_buildings: false,
             show_admin: false,
@@ -483,16 +487,34 @@ impl AppModel {
         !self.windy_webcams_api_key.trim().is_empty() || !self.ny511_api_key.trim().is_empty()
     }
 
-    /// Return the normalized contour-stroke multiplier shared by globe and
-    /// local-terrain renderers. `1.0` is the legacy visual weight.
-    pub fn contour_stroke_scale(&self) -> f32 {
-        self.contour_stroke_scale
+    /// Return the primary globe contour width in physical pixels. Older
+    /// settings files intentionally resolve their stored multiplier at the
+    /// current display scale, preserving the exact legacy visual weight.
+    pub fn contour_stroke_width_px(&self, pixels_per_point: f32) -> f32 {
+        let pixels_per_point = normalized_pixels_per_point(pixels_per_point);
+        self.contour_stroke_width_px
+            .unwrap_or_else(|| {
+                settings_store::LEGACY_CONTOUR_STROKE_WIDTH_POINTS
+                    * self.legacy_contour_stroke_scale
+                    * pixels_per_point
+            })
+            .max(settings_store::MIN_CONTOUR_STROKE_WIDTH_PX)
     }
 
-    /// Update the contour-stroke multiplier while retaining the bounds and
-    /// finite-value invariant expected by the renderers.
-    pub fn set_contour_stroke_scale(&mut self, scale: f32) {
-        self.contour_stroke_scale = settings_store::normalize_contour_stroke_scale(scale);
+    /// Convert the selected physical primary width to the legacy relative
+    /// scale used by local major/minor, coastline, and bathymetry painters.
+    /// This deliberately preserves their established visual hierarchy.
+    pub fn contour_stroke_scale_for_pixels_per_point(&self, pixels_per_point: f32) -> f32 {
+        let pixels_per_point = normalized_pixels_per_point(pixels_per_point);
+        self.contour_stroke_width_px(pixels_per_point)
+            / (settings_store::LEGACY_CONTOUR_STROKE_WIDTH_POINTS * pixels_per_point)
+    }
+
+    /// Set the physical width exposed in the layer drawer. Settings storage
+    /// preserves the old multiplier separately for backwards compatibility.
+    pub fn set_contour_stroke_width_px(&mut self, width_px: f32) {
+        self.contour_stroke_width_px =
+            Some(settings_store::normalize_contour_stroke_width_px(width_px));
     }
 
     /// Replaces the immutable public ALPR snapshot and advances its cache
@@ -551,7 +573,8 @@ impl AppModel {
             gdal_bin_dir: optional_path_field(&self.settings_gdal_bin_dir),
             osmium_bin_dir: optional_path_field(&self.settings_osmium_bin_dir),
             prefer_overpass: self.settings_prefer_overpass,
-            contour_stroke_scale: self.contour_stroke_scale,
+            contour_stroke_scale: self.legacy_contour_stroke_scale,
+            contour_stroke_width_px: self.contour_stroke_width_px,
         };
         settings_store::save_app_settings(&settings)
     }
@@ -572,7 +595,9 @@ impl AppModel {
         self.settings_gdal_bin_dir = settings.gdal_bin_dir.unwrap_or_default();
         self.settings_osmium_bin_dir = settings.osmium_bin_dir.unwrap_or_default();
         self.settings_prefer_overpass = settings.prefer_overpass;
-        self.set_contour_stroke_scale(settings.contour_stroke_scale);
+        self.legacy_contour_stroke_scale =
+            settings_store::normalize_contour_stroke_scale(settings.contour_stroke_scale);
+        self.contour_stroke_width_px = settings.contour_stroke_width_px;
         self.windy_webcams_api_key = settings.windy_webcams_api_key.trim().to_owned();
         self.ny511_api_key = settings.ny511_api_key.trim().to_owned();
         self.aisstream_api_key = settings.aisstream_api_key.trim().to_owned();
@@ -980,6 +1005,15 @@ fn optional_path_field(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
+#[inline]
+fn normalized_pixels_per_point(pixels_per_point: f32) -> f32 {
+    if pixels_per_point.is_finite() && pixels_per_point > 0.0 {
+        pixels_per_point
+    } else {
+        1.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1010,22 +1044,62 @@ mod tests {
     }
 
     #[test]
-    fn contour_stroke_scale_defaults_and_stays_within_renderable_bounds() {
+    fn contour_width_preserves_legacy_scale_then_uses_visible_pixel_bounds() {
         let mut model = AppModel::seed_demo();
         assert_eq!(
-            model.contour_stroke_scale(),
-            settings_store::DEFAULT_CONTOUR_STROKE_SCALE
+            model.contour_stroke_width_px(2.0),
+            settings_store::LEGACY_CONTOUR_STROKE_WIDTH_POINTS * 2.0
+        );
+        assert_eq!(model.contour_stroke_scale_for_pixels_per_point(2.0), 1.0);
+
+        model.set_contour_stroke_width_px(0.0);
+        assert_eq!(
+            model.contour_stroke_width_px(2.0),
+            settings_store::MIN_CONTOUR_STROKE_WIDTH_PX
+        );
+        assert_eq!(
+            model.contour_stroke_scale_for_pixels_per_point(2.0),
+            settings_store::MIN_CONTOUR_STROKE_WIDTH_PX
+                / (settings_store::LEGACY_CONTOUR_STROKE_WIDTH_POINTS * 2.0)
         );
 
-        model.set_contour_stroke_scale(0.0);
+        model.set_contour_stroke_width_px(99.0);
         assert_eq!(
-            model.contour_stroke_scale(),
-            settings_store::DEFAULT_CONTOUR_STROKE_SCALE
+            model.contour_stroke_width_px(2.0),
+            settings_store::MAX_CONTOUR_STROKE_WIDTH_PX
         );
-        model.set_contour_stroke_scale(10.0);
+    }
+
+    #[test]
+    fn selected_contour_width_stays_physical_across_display_densities() {
+        let mut model = AppModel::seed_demo();
+        model.set_contour_stroke_width_px(2.5);
+
+        assert_eq!(model.contour_stroke_width_px(1.0), 2.5);
+        assert_eq!(model.contour_stroke_width_px(2.0), 2.5);
         assert_eq!(
-            model.contour_stroke_scale(),
-            settings_store::MAX_CONTOUR_STROKE_SCALE
+            model.contour_stroke_scale_for_pixels_per_point(1.0),
+            2.5 / settings_store::LEGACY_CONTOUR_STROKE_WIDTH_POINTS
+        );
+        assert_eq!(
+            model.contour_stroke_scale_for_pixels_per_point(2.0),
+            2.5 / (settings_store::LEGACY_CONTOUR_STROKE_WIDTH_POINTS * 2.0)
+        );
+    }
+
+    #[test]
+    fn legacy_thin_scale_is_raised_to_the_one_pixel_floor() {
+        let mut model = AppModel::seed_demo();
+        model.legacy_contour_stroke_scale = settings_store::MIN_CONTOUR_STROKE_SCALE;
+        model.contour_stroke_width_px = None;
+
+        assert_eq!(
+            model.contour_stroke_width_px(1.0),
+            settings_store::MIN_CONTOUR_STROKE_WIDTH_PX
+        );
+        assert_eq!(
+            model.contour_stroke_width_px(2.0),
+            settings_store::MIN_CONTOUR_STROKE_WIDTH_PX
         );
     }
 }

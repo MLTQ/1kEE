@@ -18,10 +18,11 @@ projection, using the same cached vector geometry as the globe scene.
 
 | Dependent | Expects | Breaking changes |
 |---|---|---|
-| Layer drawer | The shared contour scale changes coastline and bathymetry width in local mode as it does on the globe | Omitting the scale from either helper |
+| Layer drawer | The physical primary width is converted once to the shared local scale, changing coastline and bathymetry alongside local contours while retaining a 1 px floor | Omitting that derived scale or floor from either helper |
 | Local terrain scene | Roads, boundaries, and other non-contour strokes retain their own widths | Applying the contour scale to unrelated overlays |
 
 ## Notes
 
-- At `1×`, the original 1.2/0.7 bathymetry and 1.0 coastline widths are
-  unchanged.
+- The local scene converts the operator's physical primary width back to the
+  legacy scale before these helpers run, retaining the original 1.2/0.7
+  bathymetry and 1.0 coastline proportions above the one-pixel floor.
