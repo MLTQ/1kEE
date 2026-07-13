@@ -147,6 +147,24 @@ fn contour_stroke_half_px(stroke_width_px: f32) -> f32 {
     stroke_width_px * 0.5
 }
 
+/// Keep the anti-alias fringe narrow enough that dense global contours do not
+/// visually merge into bands. A half-pixel fringe is sufficient for the
+/// one-pixel minimum; wider strokes receive a little more edge coverage while
+/// never exceeding the old one-pixel fringe.
+#[inline]
+fn contour_feather_px(stroke_width_px: f32) -> f32 {
+    const MIN_FEATHER_PX: f32 = 0.5;
+    const MAX_FEATHER_PX: f32 = 1.0;
+    const FEATHER_FRACTION: f32 = 0.1;
+
+    let width = if stroke_width_px.is_finite() && stroke_width_px > 0.0 {
+        stroke_width_px
+    } else {
+        1.0
+    };
+    (width * FEATHER_FRACTION).clamp(MIN_FEATHER_PX, MAX_FEATHER_PX)
+}
+
 /// Cheap identity for a contour set + palette combination. The `Arc` pointer
 /// stands in for the tile contents (tile loads always allocate a fresh vec);
 /// the palette key folds in whatever colours the layer bakes per contour, so a
@@ -445,7 +463,7 @@ impl ContourCallback {
                 alpha: alpha.powf(2.2),
                 // The UI-selected width is already in physical pixels.
                 stroke_half_px: contour_stroke_half_px(stroke_width_px),
-                feather_px: 1.0,
+                feather_px: contour_feather_px(stroke_width_px),
                 pixels_per_point,
                 _pad: [0.0; 3],
             },
@@ -547,6 +565,14 @@ mod tests {
     fn physical_stroke_width_maps_directly_to_the_gpu_half_width() {
         assert_eq!(contour_stroke_half_px(1.0), 0.5);
         assert_eq!(contour_stroke_half_px(2.3), 1.15);
+    }
+
+    #[test]
+    fn contour_feather_stays_narrow_at_small_widths() {
+        assert_eq!(contour_feather_px(1.0), 0.5);
+        assert_eq!(contour_feather_px(5.0), 0.5);
+        assert_eq!(contour_feather_px(16.0), 1.0);
+        assert_eq!(contour_feather_px(f32::NAN), 0.5);
     }
 
     #[test]
