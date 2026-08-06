@@ -22,7 +22,9 @@ on-demand Earth, lunar, and Mars tile builds.
 
 - **Does**: Report ready tiles and build progress without mutating cache files.
   Local loaders can derive the same information directly from their selected
-  manifest snapshot instead of issuing a second region query.
+  manifest snapshot instead of issuing a second region query. `ready_buckets`
+  is the set of buckets that need no loading treatment; the status counters
+  describe only buckets that can hold contours.
 - **Interacts with**: map overlays and local/globe renderers.
 
 ### Cache path helpers
@@ -52,3 +54,10 @@ on-demand Earth, lunar, and Mars tile builds.
 - Failed tile builds enter a bounded exponential per-tile cooldown, preventing
   an unavailable source or full cache volume from repeatedly consuming
   background build slots.
+- Earth buckets over open ocean have no SRTM source file, so they can never
+  produce contours. They join `ready_buckets` — stopping the local pulse grid —
+  but are excluded from `total_assets`, so the cache card counts only terrain
+  that is genuinely outstanding rather than stalling short of its total.
+- Latitude coverage and ocean coverage are separate exclusions: the former is a
+  static per-body bound (lunar/Mars), the latter is discovered per bucket from
+  the SRTM source layout.

@@ -13,6 +13,14 @@ Owns the desktop-side GDAL pipelines for terrain assets: SRTM focus contours, GE
 - **Does**: Builds one SRTM focus tile from one or more source GeoTIFF tiles and imports it into SQLite.
 - **Interacts with**: `db.rs` import helpers.
 
+### `bounds_have_srtm_source`
+- **Does**: Reports whether any SRTM source file overlaps a bucket's bounds,
+  short-circuiting on the first hit.
+- **Interacts with**: `builders.rs` sourceless-tile memo.
+- **Rationale**: `build_focus_contours` returns `None` both when no source
+  covers the bounds and when GDAL genuinely fails. Callers that must not retry
+  ocean forever need to distinguish the two before scheduling any work.
+
 ### Lunar source chunk helpers
 - **Does**: Build and reuse persistent `lunar_source_chunks/` GeoTIFFs under the terrain cache root.
 - **Interacts with**: `build_lunar_contour_tile`, `gdal_translate`.

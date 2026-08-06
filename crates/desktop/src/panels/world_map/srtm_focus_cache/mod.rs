@@ -222,6 +222,7 @@ fn local_region_state_from_assets(
     radius: i32,
     max_abs_lat: Option<f32>,
     pending_tiles: HashSet<TileKey>,
+    sourceless_tiles: HashSet<TileKey>,
 ) -> LocalContourRegionState {
     let radius = bounded_region_radius(radius);
     let bucket_step = spec.half_extent_deg * 0.45;
@@ -243,6 +244,9 @@ fn local_region_state_from_assets(
         }
     }
 
+    // Progress counts only buckets that can ever hold contours. Sourceless
+    // buckets join `ready_buckets` afterwards purely to suppress their pulse.
+    let ready_assets = ready_buckets.len();
     let mut total_assets = 0usize;
     let mut pending_assets = 0usize;
     for (lat_bucket, lon_bucket) in
@@ -251,12 +255,19 @@ fn local_region_state_from_assets(
         if !bucket_has_latitude_coverage(lat_bucket, bucket_step, spec, max_abs_lat) {
             continue;
         }
-        total_assets += 1;
         let tile = TileKey {
             zoom_bucket: spec.zoom_bucket,
             lat_bucket,
             lon_bucket,
         };
+        if !ready_buckets.contains(&(lat_bucket, lon_bucket)) && sourceless_tiles.contains(&tile) {
+            // Open ocean: no source terrain exists here, so the bucket is
+            // resolved rather than loading. It is neither an asset the region
+            // is waiting on nor a tile the pulse grid should keep animating.
+            ready_buckets.insert((lat_bucket, lon_bucket));
+            continue;
+        }
+        total_assets += 1;
         if !ready_buckets.contains(&(lat_bucket, lon_bucket)) && pending_tiles.contains(&tile) {
             pending_assets += 1;
         }
@@ -264,7 +275,7 @@ fn local_region_state_from_assets(
 
     LocalContourRegionState {
         status: FocusContourRegionStatus {
-            ready_assets: ready_buckets.len(),
+            ready_assets,
             pending_assets,
             total_assets,
         },
@@ -293,7 +304,10 @@ pub fn local_contour_region_state(
                 .lock()
                 .map(|guard| guard.clone())
                 .unwrap_or_default(),
+            builders::sourceless_tile_set(),
         ),
+        // The lunar and Mars sources are global rasters, so every in-latitude
+        // bucket has source coverage; only SRTM has ocean gaps.
         crate::model::ActiveBody::Moon => local_region_state_from_assets(
             assets,
             focus,
@@ -304,6 +318,7 @@ pub fn local_contour_region_state(
                 .lock()
                 .map(|guard| guard.clone())
                 .unwrap_or_default(),
+            HashSet::new(),
         ),
         crate::model::ActiveBody::Mars => local_region_state_from_assets(
             assets,
@@ -315,6 +330,7 @@ pub fn local_contour_region_state(
                 .lock()
                 .map(|guard| guard.clone())
                 .unwrap_or_default(),
+            HashSet::new(),
         ),
     }
 }
@@ -979,6 +995,46 @@ mod tests {
             .collect();
         assert!(distances.windows(2).all(|pair| pair[0] <= pair[1]));
         assert_eq!(distances.last(), Some(&2));
+    }
+
+    #[test]
+    fn sourceless_ocean_buckets_resolve_instead_of_pulsing() {
+        let zoom = 6.0;
+        let spec = zoom::spec_for_zoom(zoom);
+        let ready = FocusContourAsset {
+            path: PathBuf::from("test-cache.sqlite"),
+            simplify_step: spec.simplify_step,
+            zoom_bucket: spec.zoom_bucket,
+            lat_bucket: 0,
+            lon_bucket: 0,
+        };
+        // The whole outer ring is open ocean: no SRTM file covers it.
+        let sourceless: HashSet<TileKey> = (-1..=1)
+            .flat_map(|lat_bucket| (-1..=1).map(move |lon_bucket| (lat_bucket, lon_bucket)))
+            .filter(|&bucket| bucket != (0, 0))
+            .map(|(lat_bucket, lon_bucket)| TileKey {
+                zoom_bucket: spec.zoom_bucket,
+                lat_bucket,
+                lon_bucket,
+            })
+            .collect();
+
+        let state = local_region_state_from_assets(
+            &[ready],
+            GeoPoint { lat: 0.0, lon: 0.0 },
+            spec,
+            1,
+            None,
+            HashSet::new(),
+            sourceless,
+        );
+
+        // Every bucket in the window is resolved, so nothing keeps animating.
+        assert_eq!(state.ready_buckets.len(), 9);
+        // Ocean buckets are not assets the region is still waiting on.
+        assert_eq!(state.status.ready_assets, 1);
+        assert_eq!(state.status.total_assets, 1);
+        assert_eq!(state.status.pending_assets, 0);
     }
 
     #[test]

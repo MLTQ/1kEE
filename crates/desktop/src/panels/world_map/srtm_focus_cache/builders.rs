@@ -1,8 +1,11 @@
-use super::gdal::{build_focus_contours, build_lunar_contour_tile, build_mars_contour_tile, shutdown_requested};
+use super::gdal::{
+    bounds_have_srtm_source, build_focus_contours, build_lunar_contour_tile,
+    build_mars_contour_tile, shutdown_requested,
+};
 use super::{FocusContourAsset, FocusContourSpec, GeoBounds, TileKey};
 use crate::model::GeoPoint;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -10,6 +13,9 @@ use std::time::{Duration, Instant};
 const FAILED_BUILD_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_FAILED_BUILD_RETRY_DELAY: Duration = Duration::from_secs(60);
 const MAX_TRACKED_FAILED_BUILDS: usize = 1_024;
+/// A long ocean pan can visit many sourceless buckets. Bound the memo and
+/// rebuild it on overflow; re-checking costs a handful of `exists()` calls.
+const MAX_TRACKED_SOURCELESS_TILES: usize = 4_096;
 /// Interactive contour creation invokes CPU- and I/O-heavy GDAL work. Keep a
 /// core free for egui/WGPU and one for readers/merges while a local 13×13
 /// envelope is filling; the companion cache builder remains the fast path for
@@ -80,6 +86,69 @@ pub fn lunar_pending_set() -> &'static Mutex<HashSet<TileKey>> {
 pub fn mars_pending_set() -> &'static Mutex<HashSet<TileKey>> {
     static MARS_PENDING: OnceLock<Mutex<HashSet<TileKey>>> = OnceLock::new();
     MARS_PENDING.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Earth buckets whose footprint contains no SRTM source file at all.
+///
+/// SRTM covers land only, so an open-ocean bucket can never yield contours.
+/// The set is scoped to the source root that produced it: pointing the app at
+/// a different (or newly mounted) terrain root re-checks every bucket.
+#[derive(Default)]
+struct SourcelessTiles {
+    root: Option<PathBuf>,
+    tiles: HashSet<TileKey>,
+}
+
+fn sourceless_tiles() -> &'static Mutex<SourcelessTiles> {
+    static SOURCELESS: OnceLock<Mutex<SourcelessTiles>> = OnceLock::new();
+    SOURCELESS.get_or_init(|| Mutex::new(SourcelessTiles::default()))
+}
+
+/// Tiles known to have no SRTM source. Region state treats them as resolved
+/// terrain rather than tiles that are still loading.
+pub fn sourceless_tile_set() -> HashSet<TileKey> {
+    sourceless_tiles()
+        .lock()
+        .map(|guard| guard.tiles.clone())
+        .unwrap_or_default()
+}
+
+/// Memoized "no source file overlaps this bucket" check.
+///
+/// Returning `true` is a permanent answer for the current source root, so the
+/// caller must schedule no build and record no failure.
+fn tile_lacks_srtm_source(srtm_root: &Path, tile: TileKey, bounds: GeoBounds) -> bool {
+    if let Ok(guard) = sourceless_tiles().lock() {
+        if guard.root.as_deref() == Some(srtm_root) && guard.tiles.contains(&tile) {
+            return true;
+        }
+    }
+
+    if bounds_have_srtm_source(srtm_root, bounds) {
+        return false;
+    }
+
+    if let Ok(mut guard) = sourceless_tiles().lock() {
+        if guard.root.as_deref() != Some(srtm_root) {
+            guard.root = Some(srtm_root.to_path_buf());
+            guard.tiles.clear();
+        }
+        if guard.tiles.len() >= MAX_TRACKED_SOURCELESS_TILES {
+            guard.tiles.clear();
+        }
+        guard.tiles.insert(tile);
+    }
+    true
+}
+
+/// Forget which buckets lacked source terrain. A manual cache reset happens
+/// after a user fixes storage or source availability, so a bucket that was
+/// sourceless because its volume was unmounted must be re-checked.
+pub fn clear_sourceless_tiles() {
+    if let Ok(mut guard) = sourceless_tiles().lock() {
+        guard.root = None;
+        guard.tiles.clear();
+    }
 }
 
 fn failed_builds() -> &'static Mutex<HashMap<TileKey, FailedBuildBackoff>> {
@@ -189,6 +258,7 @@ fn clear_failed_build(
 /// A manual tile-cache reset should also release failed-build cooldowns so a
 /// user who fixed a missing source or freed storage can retry immediately.
 pub fn clear_failed_build_backoffs() {
+    clear_sourceless_tiles();
     for failures in [failed_builds(), lunar_failed_builds(), mars_failed_builds()] {
         if let Ok(mut failures) = failures.lock() {
             failures.clear();
@@ -256,6 +326,14 @@ pub fn ensure_bucket_asset(
     }
 
     if !allow_build {
+        return None;
+    }
+
+    // A bucket over open ocean has no SRTM source file to contour. That is a
+    // permanent property of the terrain, not a build failure: schedule nothing,
+    // record no cooldown, and let region state report the tile as resolved so
+    // its loading pulse stops instead of cycling forever.
+    if srtm_root.is_some_and(|root| tile_lacks_srtm_source(root, tile, bounds)) {
         return None;
     }
 

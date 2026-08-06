@@ -1140,23 +1140,30 @@ pub fn build_mars_contour_tile(
     Some(())
 }
 
-fn tile_paths_for_bounds(root: &Path, bounds: GeoBounds) -> Vec<PathBuf> {
-    let mut tiles = Vec::new();
+/// Whole-degree SRTM source cells that overlap `bounds`, present or not.
+fn source_cells_for_bounds(bounds: GeoBounds) -> impl Iterator<Item = (i32, i32)> {
     let lat_start = bounds.min_lat.floor() as i32;
     let lat_end = bounds.max_lat.floor() as i32;
     let lon_start = bounds.min_lon.floor() as i32;
     let lon_end = bounds.max_lon.floor() as i32;
 
-    for lat in lat_start..=lat_end {
-        for lon in lon_start..=lon_end {
-            let path = root.join(tile_name(lat, lon));
-            if path.exists() {
-                tiles.push(path);
-            }
-        }
-    }
+    (lat_start..=lat_end).flat_map(move |lat| (lon_start..=lon_end).map(move |lon| (lat, lon)))
+}
 
-    tiles
+fn tile_paths_for_bounds(root: &Path, bounds: GeoBounds) -> Vec<PathBuf> {
+    source_cells_for_bounds(bounds)
+        .map(|(lat, lon)| root.join(tile_name(lat, lon)))
+        .filter(|path| path.exists())
+        .collect()
+}
+
+/// Whether any SRTM source file overlaps `bounds`.
+///
+/// SRTM ships land cells only, so open ocean has no source file whatsoever.
+/// Callers use this to tell that permanent absence apart from a build that
+/// failed and deserves a retry.
+pub fn bounds_have_srtm_source(root: &Path, bounds: GeoBounds) -> bool {
+    source_cells_for_bounds(bounds).any(|(lat, lon)| root.join(tile_name(lat, lon)).exists())
 }
 
 fn tile_name(lat: i32, lon: i32) -> String {
@@ -1242,4 +1249,59 @@ fn run_gdal_coastline_0m(input_path: &Path, output_path: &Path) -> std::io::Resu
     command.arg(input_path);
     command.arg(output_path);
     run_command(command, "gdal_contour (srtm coastline 0m)")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::GeoPoint;
+
+    /// SRTM ships land cells only, so source presence is what separates a
+    /// bucket that is still loading from open ocean that never will.
+    #[test]
+    fn source_presence_distinguishes_land_buckets_from_open_ocean() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "1kee-srtm-source-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("temporary srtm root");
+        // A single land cell covering Tokyo, matching the real GL1 layout.
+        fs::write(root.join("N35E139.tif"), b"").expect("source cell");
+
+        let tokyo = GeoBounds::around(
+            GeoPoint {
+                lat: 35.68,
+                lon: 139.77,
+            },
+            0.2,
+        );
+        // Open Pacific east of Honshu — the region that pulsed forever.
+        let pacific = GeoBounds::around(
+            GeoPoint {
+                lat: 38.0,
+                lon: 145.5,
+            },
+            0.2,
+        );
+
+        assert!(bounds_have_srtm_source(&root, tokyo));
+        assert!(!bounds_have_srtm_source(&root, pacific));
+        // A bucket straddling the coast still counts as land-backed.
+        assert!(bounds_have_srtm_source(
+            &root,
+            GeoBounds::around(
+                GeoPoint {
+                    lat: 35.9,
+                    lon: 140.0,
+                },
+                0.5,
+            )
+        ));
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }
