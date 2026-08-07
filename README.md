@@ -5,16 +5,17 @@ surface. A GPU-rendered world globe is the primary canvas, with live event feeds
 public geospatial layers projected onto geography. The core workflow:
 event → nearby cameras → attempted feed connection.
 
-## What it does today
+<!-- Screenshots: drop 1–2 images here, e.g.
+![1kEE globe view](docs/media/globe.png)
+-->
 
-This is well past the original "mock-data scaffold." The app integrates a number of
-real, live data sources and ships a custom GPU geo-rendering engine:
+## Features
 
 - **Globe / map canvas** — a custom wgpu fragment shader does per-pixel ray–sphere
   intersection, terrain shading, and anti-aliased graticules for Earth, Moon, and Mars
   (`panels/world_map/`, shader in `panels/world_map/globe.wgsl`).
 - **Event stream** — live polling of the Factal API (`factal_stream.rs`), surfaced in
-  the brief panel and on the map. Requires an API key in `.1kee_factal_api_key`.
+  the brief panel and on the map.
 - **Moving tracks** — AIS vessel tracking over AISStream WebSocket (`moving_tracks.rs`)
   and ADS-B flights via OpenSky (`flight_tracks.rs`).
 - **Cameras** — public webcam registries and provider scrapers (`camera_registry.rs`,
@@ -25,15 +26,58 @@ real, live data sources and ships a custom GPU geo-rendering engine:
   (`osm_ingest/`).
 - **Terrain & bodies** — GEBCO / SRTM / Natural Earth elevation, a stellar catalog and
   ephemeris, and a replay timeline.
+- **Multiplayer** — a companion web view that mirrors the analyst's live view onto a
+  local mesh (see below).
 
 > **Scope note:** camera-source ingestion stays limited to openly published metadata and
 > feeds, subject to source terms and legal review. See [`docs/architecture.md`](docs/architecture.md).
 
+## Getting started
+
+You need a recent stable Rust toolchain (the workspace uses edition 2024) and a GPU
+with Metal / Vulkan / DX12 support for wgpu.
+
+```bash
+cargo run --release -p one-thousand-electric-eye-desktop
+```
+
+The app launches with no configuration: the globe, graticules, and any keyless layers
+work out of the box. Live feeds and terrain detail are enabled by configuration below —
+everything is optional and independent.
+
+### API keys
+
+All keys are entered in-app under **Settings → APIs** and saved locally to
+`.1kee_settings.json` next to the binary (gitignored; keys never belong in the repo).
+
+| Layer | Provider | Key required |
+| --- | --- | --- |
+| Event stream | [Factal](https://www.factal.com/) | Yes — commercial API access |
+| Vessels (AIS) | [AISStream](https://aisstream.io/) | Yes — free |
+| Webcams | [Windy Webcams](https://api.windy.com/webcams) | Yes — free tier |
+| New York traffic cams | [511NY](https://511ny.org/) | Yes — free |
+| Flights (ADS-B) | [OpenSky](https://opensky-network.org/) | No — anonymous, rate-limited |
+
+### Terrain & map data
+
+Detailed terrain (contours, shaded relief, roads) comes from locally preprocessed
+datasets — GEBCO bathymetry, SRTM elevation, Natural Earth relief, and OSM extracts.
+Raw downloads live under a `data/` directory and derived outputs under `Derived/`;
+both are gitignored. The offline cache builder turns raw data into runtime assets:
+
+```bash
+# GUI, or CLI subcommands: roads-bbox, planet-all, contours-bbox
+cargo run --release -p one-thousand-electric-eye-cache-builder
+```
+
+Point the app at your asset root under **Settings → Paths**. See
+[`docs/terrain-pipeline.md`](docs/terrain-pipeline.md) for the GDAL preprocessing path.
+
 ## Multiplayer over Gruve
 
-The app puts itself on a [Gruve](gruve-kit/README.md) mesh via a **companion web view**
-(`crates/desktop/src/gruve/`). Because 1kEE is a native egui/wgpu app it can't be served
-over the mesh directly, so instead the running app embeds a small HTTP server that:
+The app can put itself on a Gruve mesh (a local-network app-sharing/collaboration
+layer, not yet public) via a companion web view (`crates/desktop/src/gruve/`). Because 1kEE is a native egui/wgpu app it can't be
+served over the mesh directly, so the running app embeds a small HTTP server that:
 
 - **announces** itself to the local Gruve agent (a `1kEE` tile appears in the lobby),
 - serves a thin web globe that **mirrors the analyst's live view** — host camera centre,
@@ -41,10 +85,12 @@ over the mesh directly, so instead the running app embeds a small HTTP server th
 - lets a viewer **steer the host** ("look here" / select an event) and drop a **shared
   pin** that every viewer of the tile sees (Gruve session state).
 
-It degrades silently: with no agent running, no free port, or no viewers, the desktop app
-behaves exactly as before. The feed-connection step stays on the host — camera *positions
-and reachability* go to the mesh, not feed URLs. Run `gruve-kit/gruve doctor
-crates/desktop/src/gruve/web` to lint the web view against the contract.
+It degrades silently: with no agent running, no free port, or no viewers, the desktop
+app behaves exactly as before. The feed-connection step stays on the host — camera
+*positions and reachability* go to the mesh, not feed URLs. The Gruve Rust SDK is
+vendored in `crates/gruve_sdk` and the JS SDK in the desktop crate's web assets, so
+the build has no external Gruve dependency; the Gruve agent itself is separate tooling
+and not part of this repo.
 
 ## Workspace
 
@@ -60,21 +106,7 @@ Three crates (`cargo` workspace, edition 2024):
   cells, with chunk-based forward compatibility.
 
 See [`docs/architecture.md`](docs/architecture.md) for module layout and integration
-boundaries, and [`docs/terrain-pipeline.md`](docs/terrain-pipeline.md) for the GDAL
-preprocessing path.
-
-## Run
-
-```bash
-# Main app
-cargo run -p one-thousand-electric-eye-desktop
-
-# Offline cache builder (GUI)
-cargo run -p one-thousand-electric-eye-cache-builder
-```
-
-Large raw datasets live under `data/`, derived outputs under `Derived/`; both are
-gitignored, as is the Factal API key.
+boundaries.
 
 ## Notes
 

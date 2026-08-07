@@ -17,7 +17,9 @@ data/
 
 .DS_Store
 
-.1kee_factal_api_key
+# Local app state — settings (contains API keys), event DB, legacy key file.
+# Normally written next to the executable, but never let one slip in from here.
+.1kee_*
 
 # Gruve integration kit — tooling (agent binary, zip). The Rust SDK is vendored
 # into crates/gruve_sdk and the JS SDK into the desktop crate's web assets, so the

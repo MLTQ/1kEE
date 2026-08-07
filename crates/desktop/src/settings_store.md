@@ -37,7 +37,7 @@ Persists the desktop app's local configuration so it survives restarts. That now
 - The settings file now lives beside the executable so moving the app bundle/worktree to another machine keeps the local path model coherent by default.
 - The Factal key and camera-source keys are still stored as plain text because this is a local demo, not a hardened credential store.
 - GDAL discovery now prefers the app-configured bin directory and otherwise relies on `PATH`; it no longer assumes Postgres.app.
-- Path settings are now normalized on save/load so operators can point at a parent folder like `/Volumes/Hilbert/Data` and still have the app infer nested `Data/`, `Derived/`, or `srtm_gl1/SRTM_GL1_srtm` subpaths when those exist.
+- Path settings are now normalized on save/load so operators can point at a parent folder like `/Volumes/BigDisk/Data` and still have the app infer nested `Data/`, `Derived/`, or `srtm_gl1/SRTM_GL1_srtm` subpaths when those exist.
 - If `Asset Root` is accidentally pointed at a `Data/` or `Derived/` folder, it is normalized back to the parent asset root to avoid silently creating `Data/Data` or `Data/Derived` layouts.
 - `contour_stroke_scale` remains as a compatibility field for older files.
   `contour_stroke_width_px` is optional: when absent, the legacy multiplier is
