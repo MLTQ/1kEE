@@ -50,6 +50,8 @@ pub struct AppModel {
     pub flights: Arc<Vec<FlightTrack>>,
     pub selected_event_id: Option<String>,
     pub selected_camera_id: Option<String>,
+    /// Whether the selected camera's floating live-feed window is open.
+    pub camera_feed_window_open: bool,
     /// MMSI string of the currently-selected vessel (for detail panel).
     pub selected_track_mmsi: Option<u64>,
     /// ICAO24 hex of the currently-selected flight (for detail panel).
@@ -62,6 +64,7 @@ pub struct AppModel {
     pub active_body: ActiveBody,
     pub map_theme: crate::theme::MapTheme,
     pub show_event_markers: bool,
+    pub show_camera_markers: bool,
     pub show_coastlines: bool,
     pub show_graticule: bool,
     pub show_reticle: bool,
@@ -141,6 +144,9 @@ pub struct AppModel {
     pub factal_api_key: String,
     pub windy_webcams_api_key: String,
     pub ny511_api_key: String,
+    pub eyes_on_enabled: bool,
+    pub eyes_on_country_code: String,
+    pub eyes_on_max_pages: u8,
     pub aisstream_api_key: String,
     pub settings_asset_root: String,
     pub settings_data_root: String,
@@ -200,6 +206,9 @@ impl AppModel {
         let factal_api_key = app_settings.factal_api_key.trim().to_owned();
         let windy_webcams_api_key = app_settings.windy_webcams_api_key.trim().to_owned();
         let ny511_api_key = app_settings.ny511_api_key.trim().to_owned();
+        let eyes_on_enabled = app_settings.eyes_on_enabled;
+        let eyes_on_country_code = app_settings.eyes_on_country_code.clone();
+        let eyes_on_max_pages = app_settings.eyes_on_max_pages;
         let aisstream_api_key = app_settings.aisstream_api_key.trim().to_owned();
 
         let events = vec![
@@ -335,6 +344,7 @@ impl AppModel {
             flights: Arc::new(Vec::new()),
             selected_event_id: Some("evt-sf".into()),
             selected_camera_id: None,
+            camera_feed_window_open: false,
             selected_track_mmsi: None,
             selected_flight_icao24: None,
             globe_view: GlobeViewState::from_focus(GeoPoint {
@@ -348,6 +358,7 @@ impl AppModel {
             active_body: ActiveBody::Earth,
             map_theme: crate::theme::MapTheme::Topo,
             show_event_markers: true,
+            show_camera_markers: true,
             show_coastlines: true,
             show_graticule: true,
             show_reticle: true,
@@ -405,6 +416,9 @@ impl AppModel {
             factal_api_key: factal_api_key.clone(),
             windy_webcams_api_key: windy_webcams_api_key.clone(),
             ny511_api_key: ny511_api_key.clone(),
+            eyes_on_enabled,
+            eyes_on_country_code,
+            eyes_on_max_pages,
             aisstream_api_key: aisstream_api_key.clone(),
             settings_asset_root: settings_store::effective_asset_root()
                 .map(|path| path.display().to_string())
@@ -426,9 +440,13 @@ impl AppModel {
                     } else {
                         "Factal API key loaded from local settings; live polling is ready.".into()
                     },
-                    if windy_webcams_api_key.is_empty() && ny511_api_key.is_empty() {
-                        "Camera registry is in demo mode until a live source key is configured."
-                            .into()
+                    if windy_webcams_api_key.is_empty()
+                        && ny511_api_key.is_empty()
+                        && !eyes_on_enabled
+                    {
+                        "Camera registry is in demo mode until a live source is configured.".into()
+                    } else if eyes_on_enabled {
+                        "Project Eyes On public-directory sync is enabled.".into()
                     } else {
                         "Camera registry keys loaded; live camera sync is ready.".into()
                     },
@@ -462,7 +480,9 @@ impl AppModel {
             // The USGS quake feed is public and keyless; polling starts
             // immediately.
             usgs_stream_status: "syncing".into(),
-            camera_registry_status: if windy_webcams_api_key.is_empty() && ny511_api_key.is_empty()
+            camera_registry_status: if windy_webcams_api_key.is_empty()
+                && ny511_api_key.is_empty()
+                && !eyes_on_enabled
             {
                 "demo".into()
             } else {
@@ -485,6 +505,10 @@ impl AppModel {
 
     pub fn has_camera_source_keys(&self) -> bool {
         !self.windy_webcams_api_key.trim().is_empty() || !self.ny511_api_key.trim().is_empty()
+    }
+
+    pub fn has_enabled_camera_sources(&self) -> bool {
+        self.has_camera_source_keys() || self.eyes_on_enabled
     }
 
     /// Return the primary globe contour width in physical pixels. Older
@@ -564,6 +588,11 @@ impl AppModel {
             factal_api_key: self.factal_api_key.trim().to_owned(),
             windy_webcams_api_key: self.windy_webcams_api_key.trim().to_owned(),
             ny511_api_key: self.ny511_api_key.trim().to_owned(),
+            eyes_on_enabled: self.eyes_on_enabled,
+            eyes_on_country_code: settings_store::normalize_eyes_on_country_code(
+                &self.eyes_on_country_code,
+            ),
+            eyes_on_max_pages: settings_store::normalize_eyes_on_max_pages(self.eyes_on_max_pages),
             aisstream_api_key: self.aisstream_api_key.trim().to_owned(),
             asset_root: optional_path_field(&self.settings_asset_root),
             data_root: optional_path_field(&self.settings_data_root),
@@ -600,12 +629,15 @@ impl AppModel {
         self.contour_stroke_width_px = settings.contour_stroke_width_px;
         self.windy_webcams_api_key = settings.windy_webcams_api_key.trim().to_owned();
         self.ny511_api_key = settings.ny511_api_key.trim().to_owned();
+        self.eyes_on_enabled = settings.eyes_on_enabled;
+        self.eyes_on_country_code = settings.eyes_on_country_code;
+        self.eyes_on_max_pages = settings.eyes_on_max_pages;
         self.aisstream_api_key = settings.aisstream_api_key.trim().to_owned();
 
         self.terrain_inventory = TerrainInventory::detect_from(self.selected_root.as_deref());
         let osm_runtime_store = osm_ingest::ensure_runtime_store(self.selected_root.as_deref());
         self.osm_inventory = OsmInventory::detect_from(self.selected_root.as_deref());
-        self.camera_registry_status = if self.has_camera_source_keys() {
+        self.camera_registry_status = if self.has_enabled_camera_sources() {
             "configured".into()
         } else {
             "demo".into()
@@ -837,6 +869,15 @@ impl AppModel {
         }
     }
 
+    pub fn open_camera_feed(&mut self, camera_id: &str) {
+        if !self.cameras.iter().any(|camera| camera.id == camera_id) {
+            return;
+        }
+        self.select_camera(camera_id);
+        self.attempt_connect(camera_id);
+        self.camera_feed_window_open = true;
+    }
+
     pub fn attempt_connect(&mut self, camera_id: &str) {
         let updated = self
             .cameras
@@ -1040,6 +1081,21 @@ mod tests {
                 .iter()
                 .map(|camera| &camera.id)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn opening_camera_feed_selects_camera_and_opens_window() {
+        let mut model = AppModel::seed_demo();
+        let camera_id = model.cameras[0].id.clone();
+
+        model.open_camera_feed(&camera_id);
+
+        assert_eq!(model.selected_camera_id.as_deref(), Some(camera_id.as_str()));
+        assert!(model.camera_feed_window_open);
+        assert_eq!(
+            model.selected_camera().map(|camera| camera.status),
+            Some(CameraConnectionState::Attempted)
         );
     }
 

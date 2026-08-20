@@ -20,6 +20,8 @@ pub(crate) const MIN_CONTOUR_STROKE_WIDTH_PX: f32 = 1.0;
 /// The new pixel-width control supports a comfortably wider range than the
 /// former multiplier without changing any legacy saved appearance.
 pub(crate) const MAX_CONTOUR_STROKE_WIDTH_PX: f32 = 16.0;
+pub(crate) const DEFAULT_EYES_ON_MAX_PAGES: u8 = 1;
+pub(crate) const MAX_EYES_ON_MAX_PAGES: u8 = 5;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -29,6 +31,17 @@ pub struct AppSettings {
     pub windy_webcams_api_key: String,
     #[serde(default)]
     pub ny511_api_key: String,
+    /// Explicit opt-in for the Project Eyes On-compatible Insecam directory
+    /// pipeline. Disabled by default because it performs live public-network
+    /// requests to directory-listed feeds.
+    #[serde(default)]
+    pub eyes_on_enabled: bool,
+    /// Optional ISO alpha-2 country code used to scope directory discovery.
+    #[serde(default)]
+    pub eyes_on_country_code: String,
+    /// Maximum directory pages fetched per poll. Normalized to a small bound.
+    #[serde(default = "default_eyes_on_max_pages")]
+    pub eyes_on_max_pages: u8,
     #[serde(default)]
     pub aisstream_api_key: String,
     #[serde(default)]
@@ -68,6 +81,9 @@ impl Default for AppSettings {
             factal_api_key: String::new(),
             windy_webcams_api_key: String::new(),
             ny511_api_key: String::new(),
+            eyes_on_enabled: false,
+            eyes_on_country_code: String::new(),
+            eyes_on_max_pages: DEFAULT_EYES_ON_MAX_PAGES,
             aisstream_api_key: String::new(),
             asset_root: None,
             data_root: None,
@@ -85,6 +101,23 @@ impl Default for AppSettings {
 
 fn default_contour_stroke_scale() -> f32 {
     DEFAULT_CONTOUR_STROKE_SCALE
+}
+
+fn default_eyes_on_max_pages() -> u8 {
+    DEFAULT_EYES_ON_MAX_PAGES
+}
+
+pub(crate) fn normalize_eyes_on_country_code(value: &str) -> String {
+    let normalized = value.trim().to_ascii_uppercase();
+    if normalized.len() == 2 && normalized.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        normalized
+    } else {
+        String::new()
+    }
+}
+
+pub(crate) fn normalize_eyes_on_max_pages(value: u8) -> u8 {
+    value.clamp(1, MAX_EYES_ON_MAX_PAGES)
 }
 
 /// Clamp persisted/operator input to the supported visual range. Invalid
@@ -290,6 +323,8 @@ fn normalize_settings(mut settings: AppSettings) -> AppSettings {
     settings.factal_api_key = settings.factal_api_key.trim().to_owned();
     settings.windy_webcams_api_key = settings.windy_webcams_api_key.trim().to_owned();
     settings.ny511_api_key = settings.ny511_api_key.trim().to_owned();
+    settings.eyes_on_country_code = normalize_eyes_on_country_code(&settings.eyes_on_country_code);
+    settings.eyes_on_max_pages = normalize_eyes_on_max_pages(settings.eyes_on_max_pages);
     settings.aisstream_api_key = settings.aisstream_api_key.trim().to_owned();
     settings.asset_root = normalize_asset_root_owned(settings.asset_root);
     settings.data_root = normalize_named_root_owned(settings.data_root, &["Data", "data"]);
@@ -396,6 +431,18 @@ mod tests {
         let settings: AppSettings = serde_json::from_str("{}").expect("valid legacy settings");
         assert_eq!(settings.contour_stroke_scale, DEFAULT_CONTOUR_STROKE_SCALE);
         assert_eq!(settings.contour_stroke_width_px, None);
+        assert!(!settings.eyes_on_enabled);
+        assert_eq!(settings.eyes_on_country_code, "");
+        assert_eq!(settings.eyes_on_max_pages, DEFAULT_EYES_ON_MAX_PAGES);
+    }
+
+    #[test]
+    fn eyes_on_scope_is_normalized_to_safe_small_values() {
+        assert_eq!(normalize_eyes_on_country_code(" us "), "US");
+        assert_eq!(normalize_eyes_on_country_code("USA"), "");
+        assert_eq!(normalize_eyes_on_country_code("1!"), "");
+        assert_eq!(normalize_eyes_on_max_pages(0), 1);
+        assert_eq!(normalize_eyes_on_max_pages(99), MAX_EYES_ON_MAX_PAGES);
     }
 
     #[test]

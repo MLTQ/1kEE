@@ -16,6 +16,18 @@ application with the map-oriented window configuration.
 - **Does**: Declares the cache-first public DeFlock-compatible ALPR adapter.
 - **Interacts with**: `model.rs`, `app.rs`, and map overlays.
 
+### `camera_directory_pipeline`
+
+- **Does**: Declares the opt-in Project Eyes On-compatible public-directory
+  discovery, verification, and geolocation pipeline.
+- **Interacts with**: `camera_registry.rs` and the shared camera model.
+
+### `camera_feed_viewer`
+
+- **Does**: Declares the non-blocking snapshot/MJPEG reader and floating egui
+  live-feed window.
+- **Interacts with**: `app.rs` and camera selection in `model/mod.rs`.
+
 ### `main`
 - **Does**: Configures the native window and constructs `DashboardApp`.
 - **Interacts with**: `app.rs` and eframe.

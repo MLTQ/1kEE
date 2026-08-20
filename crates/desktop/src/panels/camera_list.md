@@ -11,7 +11,8 @@ Presents the right sidebar for nearby cameras and map-item sources. It now owns 
 
 ### `tab_cameras`
 - **Does**: Shows sorted nearby cameras with provider, type, distance, health, and action buttons
-- **Interacts with**: `AppModel::nearby_camera_snapshot`, `select_camera`, and `attempt_connect` in `model.rs`
+- **Interacts with**: `AppModel::nearby_camera_snapshot`, `select_camera`, and
+  `open_camera_feed` in `model/mod.rs`
 - **Rationale**: Iterating the immutable shared snapshot avoids cloning and
   re-sorting the same nearby camera list during a map frame.
 

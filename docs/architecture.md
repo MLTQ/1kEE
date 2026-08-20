@@ -11,8 +11,8 @@ modules move.
 1. Render the global operations canvas (GPU globe, terrain, layers).
 2. Surface live events (Factal) with severity and location.
 3. Let an analyst select an event.
-4. Show nearby camera records for the selection.
-5. Attempt a feed connection from the camera list.
+4. Show geolocated camera pips from the normalized registry.
+5. Open a selected snapshot/MJPEG feed in a separate egui window.
 
 Live tracks (vessels, flights) and user-imported geodata (ArcGIS / GeoJSON / KML) layer
 onto the same canvas, with a replay timeline over the event history.
@@ -75,8 +75,11 @@ table above the struct is the source of truth for both sides.
 - Open work: retry/backoff tuning, dedupe, TTL/aging (see `.beads`).
 
 ### Camera registry
-- Input: openly published camera metadata and feed URLs (registries + provider scrapers).
+- Input: openly published camera metadata and feed URLs (registries + provider scrapers),
+  including an explicit opt-in, bounded Project Eyes On-compatible Insecam directory adapter.
 - Output: normalized camera records with provider, location, type, reachability.
+- Interaction: clicking a map pip starts a bounded background image/MJPEG reader;
+  the UI thread only uploads the latest decoded frame to an egui texture.
 - Open work: more provider adapters, geocoding, provenance, health checks, legal flags.
 
 ### Map / globe layer
@@ -98,6 +101,9 @@ table above the struct is the source of truth for both sides.
 ## Safety / scope notes
 
 - Real feed connectors should stay inside an allowlisted, provenance-aware adapter layer.
+- The Project Eyes On integration intentionally excludes broad search-engine dorking;
+  it accepts only public-IP feed URLs advertised by the configured directory and rejects
+  loopback, LAN, link-local, credentialed, documentation, and reserved targets.
 - Source-specific terms, licensing, and jurisdictional constraints must be tracked
   before enabling any live ingestion path.
 - The Factal API key lives in `.1kee_factal_api_key` (gitignored) — keep secrets out of

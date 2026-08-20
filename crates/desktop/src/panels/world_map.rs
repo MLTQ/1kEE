@@ -166,7 +166,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
                     .iter()
                     .find(|(_, marker)| marker.distance(pointer) <= 9.0)
                 {
-                    model.select_camera(camera_id);
+                    model.open_camera_feed(camera_id);
                 } else if let Some((event_id, _)) = scene
                     .event_markers
                     .iter()
@@ -190,6 +190,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
 
         super::render_replay_controls(ui, model);
         map_tooltips::draw_event_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
+        map_tooltips::draw_camera_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
         map_tooltips::draw_ship_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
         map_tooltips::draw_flight_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
         map_detail_panels::draw_ship_detail_panel(ui.ctx(), model);
@@ -270,6 +271,19 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                         .clicked()
                     {
                         model.show_event_list = !model.show_event_list;
+                    }
+                }
+
+                // ── CAMERAS badge / layer toggle ─────────────────────────
+                let camera_count = model.cameras.len();
+                if camera_count > 0 && model.active_body == crate::model::ActiveBody::Earth {
+                    let camera_fill = if model.show_camera_markers { active_fill } else { egui::Color32::TRANSPARENT };
+                    let camera_text = if model.show_camera_markers { active_text } else { inactive_text };
+                    if ui.add(egui::Button::new(egui::RichText::new(format!("Cameras  {camera_count}")).color(camera_text).small()).fill(camera_fill).corner_radius(4.0))
+                        .on_hover_text("Show / hide geolocated camera dots")
+                        .clicked()
+                    {
+                        model.show_camera_markers = !model.show_camera_markers;
                     }
                 }
 

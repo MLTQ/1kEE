@@ -79,6 +79,14 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 - **Rationale**: Raw SRTM samples and the interpolated visible mesh can differ;
   using the latter prevents indicators from appearing above or below topology.
 
+### Viewport camera dots
+
+- **Does**: Pre-culls and projects every normalized Earth camera inside the
+  local viewport, while drawing event link lines only to the 250 km nearby
+  subset.
+- **Interacts with**: `AppModel::cameras`, `show_camera_markers`, and the local
+  projection/elevation surface.
+
 ## Contracts
 
 | Dependent | Expects | Breaking changes |

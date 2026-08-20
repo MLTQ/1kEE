@@ -30,6 +30,20 @@ source pollers.
 - **Interacts with**: camera list, event list, source pollers, and world map
   panels.
 
+### `AppModel::open_camera_feed`
+
+- **Does**: Selects a valid camera, records the connection attempt, and opens
+  the floating live-feed window.
+- **Interacts with**: map pip clicks, the camera list, and
+  `camera_feed_viewer.rs`.
+
+### Project Eyes On settings and camera visibility
+
+- **Does**: Holds the explicit directory-pipeline opt-in, bounded country/page
+  scope, and the camera-dot layer visibility toggle.
+- **Interacts with**: `settings_store.rs`, `camera_registry.rs`,
+  `factal_settings.rs`, and both world-map scenes.
+
 ### `nearby_cameras` / `nearby_camera_snapshot`
 - **Does**: Returns cameras within a radius of the selected event, sorted by
   haversine distance; map call sites share an immutable cached snapshot.
@@ -57,6 +71,8 @@ source pollers.
 | Map scenes | Selection, display toggles, and live data form a consistent immutable snapshot per paint pass | Renaming fields or changing selection semantics |
 | Source pollers | `replace_*` methods retain valid selection and report source state | Removing replacement methods or changing their ownership contracts |
 | Camera sidebar | Nearby records are sorted ascending by exact `haversine_km` results | Changing distance calculation, inclusion boundary, or sort order |
+| Camera registry | `has_enabled_camera_sources` includes both keyed adapters and the explicit Project Eyes On opt-in | Ignoring the keyless directory setting |
+| Camera feed viewer | `selected_camera_id` and `camera_feed_window_open` identify the one requested feed | Changing window-state semantics without updating the viewer |
 | Map renderers | `contour_stroke_width_px()` is at least one physical pixel; local scale conversion preserves existing major/minor relationships | Bypassing the setter or mixing physical width with logical-point stroke math |
 | Gruve bridge | Public model fields can be snapshotted and commands can update supported selection state | Removing required state or thread-affecting changes |
 

@@ -149,12 +149,6 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         crate::model::ActiveBody::Earth => Some(contour_load.status),
     };
 
-    let nearby = if model.focused_city().is_none() {
-        model.nearby_camera_snapshot(250.0)
-    } else {
-        std::sync::Arc::new(Vec::new())
-    };
-
     // Pulsing tile-grid glow: only draw cells that are NOT yet ready in the cache.
     let still_loading = contour_load.status.ready_assets < contour_load.status.total_assets
         || contours.is_none();
@@ -538,12 +532,21 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     // Nearby cameras are Earth data, so never project them into lunar or
     // Martian terrain (nor ask the Earth SRTM cache for an alien-body point).
     let camera_markers: Vec<(String, egui::Pos2)> =
-        if model.active_body != crate::model::ActiveBody::Earth {
+        if model.active_body != crate::model::ActiveBody::Earth || !model.show_camera_markers {
             Vec::new()
         } else {
-            nearby
+            model
+                .cameras
                 .iter()
                 .filter_map(|camera| {
+                    let dlat = (camera.location.lat - viewport_center.lat).abs();
+                    let dlon = {
+                        let delta = (camera.location.lon - viewport_center.lon).abs();
+                        delta.min(360.0 - delta)
+                    };
+                    if dlat > half_extent_deg * 2.5 || dlon > half_extent_deg * 2.5 {
+                        return None;
+                    }
                     let elev = markers::marker_surface_elevation_m(
                         model.active_body,
                         model.selected_root.as_deref(),
@@ -589,7 +592,13 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         .find(|(id, _)| model.selected_event_id.as_deref() == Some(id.as_str()))
         .or_else(|| event_markers.first())
         .map(|(_, pos)| *pos);
-    markers::draw_camera_links(painter, anchor, &camera_markers);
+    let nearby = model.nearby_camera_snapshot(250.0);
+    let nearby_markers: Vec<_> = camera_markers
+        .iter()
+        .filter(|(camera_id, _)| nearby.iter().any(|camera| camera.id == *camera_id))
+        .cloned()
+        .collect();
+    markers::draw_camera_links(painter, anchor, &nearby_markers);
     if model.show_coastlines && model.active_body == crate::model::ActiveBody::Earth {
         geography::draw_coastlines_local(
             painter,

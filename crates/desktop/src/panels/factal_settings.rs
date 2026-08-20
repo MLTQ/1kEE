@@ -103,6 +103,10 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
         model.factal_api_key = model.factal_api_key.trim().to_owned();
         model.ny511_api_key = model.ny511_api_key.trim().to_owned();
         model.windy_webcams_api_key = model.windy_webcams_api_key.trim().to_owned();
+        model.eyes_on_country_code =
+            settings_store::normalize_eyes_on_country_code(&model.eyes_on_country_code);
+        model.eyes_on_max_pages =
+            settings_store::normalize_eyes_on_max_pages(model.eyes_on_max_pages);
         model.aisstream_api_key = model.aisstream_api_key.trim().to_owned();
         moving_tracks::invalidate();
         match model.save_settings() {
@@ -140,6 +144,13 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
         } else {
             model.push_log("Factal live poll skipped because no API key is configured.".into());
         }
+        if model.has_enabled_camera_sources() {
+            camera_registry::invalidate();
+            model.camera_registry_status = "syncing".into();
+            model.push_log("Camera registry poll requested manually.".into());
+        } else {
+            model.push_log("Camera poll skipped because no live source is configured.".into());
+        }
     }
 
     if clear_requested {
@@ -151,7 +162,11 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
         match model.save_settings() {
             Ok(()) => {
                 model.factal_stream_status = "demo".into();
-                model.camera_registry_status = "demo".into();
+                model.camera_registry_status = if model.eyes_on_enabled {
+                    "configured".into()
+                } else {
+                    "demo".into()
+                };
                 factal_stream::invalidate();
                 camera_registry::invalidate();
                 model.push_log("API keys cleared; streams returned to demo mode.".into());
@@ -260,6 +275,37 @@ fn tab_apis(ui: &mut egui::Ui, model: &mut AppModel) {
         "Optional no-key sources can be declared in Data/camera_sources/public_sources.json \
          and Data/camera_sources/scrape_sources.json under the asset root.",
     );
+
+    ui.add_space(10.0);
+    ui.separator();
+    ui.add_space(8.0);
+    ui.heading("Project Eyes On Directory");
+    ui.colored_label(
+        theme::text_muted(),
+        "Opt in to a bounded Insecam directory sync adapted from Project Eyes On. \
+         It reads public listing/detail metadata and briefly probes only the \
+         directory-advertised public-IP feed URLs; broad search-engine scanning is excluded.",
+    );
+    ui.add_space(6.0);
+    ui.checkbox(
+        &mut model.eyes_on_enabled,
+        "Enable public-directory camera discovery",
+    );
+    ui.horizontal(|ui| {
+        ui.label("Country");
+        ui.add_sized(
+            [64.0, 26.0],
+            egui::TextEdit::singleline(&mut model.eyes_on_country_code)
+                .char_limit(2)
+                .hint_text("ALL"),
+        );
+        ui.label("Pages");
+        ui.add(
+            egui::DragValue::new(&mut model.eyes_on_max_pages)
+                .range(1..=settings_store::MAX_EYES_ON_MAX_PAGES),
+        );
+    });
+    ui.small("Blank country means the global popularity listing; coordinates are approximate source metadata.");
 
     ui.add_space(14.0);
     ui.separator();

@@ -291,10 +291,13 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             .collect()
     };
 
-    let camera_markers: Vec<_> = if model.active_body != crate::model::ActiveBody::Earth {
+    let camera_markers: Vec<_> = if model.active_body != crate::model::ActiveBody::Earth
+        || !model.show_camera_markers
+    {
         Vec::new()
     } else {
-        nearby
+        model
+            .cameras
             .iter()
             .filter_map(|camera| {
                 projection::project_geo_unit_surface(&layout, &model.globe_view, camera.location)
@@ -379,7 +382,12 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         .iter()
         .find(|(event_id, _)| selected_event_id == Some(event_id.as_str()))
     {
-        markers::draw_camera_links(painter, *event_marker, &camera_markers);
+        let nearby_markers: Vec<_> = camera_markers
+            .iter()
+            .filter(|(camera_id, _)| nearby.iter().any(|camera| camera.id == *camera_id))
+            .cloned()
+            .collect();
+        markers::draw_camera_links(painter, *event_marker, &nearby_markers);
     }
     draw_legend(painter, rect, &layout, &model.globe_view, &lod);
 
