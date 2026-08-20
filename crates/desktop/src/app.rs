@@ -1,3 +1,4 @@
+use crate::camera_feed_viewer::CameraFeedViewer;
 use crate::camera_registry;
 use crate::deflock_source;
 use crate::factal_stream;
@@ -32,6 +33,7 @@ pub fn request_repaint() {
 
 pub struct DashboardApp {
     model: AppModel,
+    camera_feed_viewer: CameraFeedViewer,
     last_theme: theme::MapTheme,
     _puffin_server: Option<puffin_http::Server>,
     /// Gruve mesh bridge: serves the companion web view + announces to the local
@@ -73,6 +75,7 @@ impl DashboardApp {
         Self {
             last_theme: model.map_theme,
             model,
+            camera_feed_viewer: CameraFeedViewer::default(),
             _puffin_server: puffin_server,
             gruve,
         }
@@ -158,6 +161,8 @@ impl eframe::App for DashboardApp {
             .show(ctx, |ui| {
                 panels::render_world_map(ui, &mut self.model);
             });
+
+        self.camera_feed_viewer.render(ctx, &mut self.model);
 
         // Refresh the snapshot the companion web view polls, now that this frame's
         // interaction has been folded into the model.

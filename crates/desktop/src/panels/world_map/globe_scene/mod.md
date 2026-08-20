@@ -34,6 +34,15 @@ model and viewport into an egui-painted `GlobeScene` each frame.
   sphere, so negative synthetic terrain offsets must not pull indicators
   inside the visible globe.
 
+### Global camera-dot layer
+
+- **Does**: Projects every normalized registry camera on Earth while retaining
+  event-to-camera links only for the selected event's 250 km nearby subset.
+- **Interacts with**: `AppModel::cameras`, `show_camera_markers`, and
+  `nearby_camera_snapshot`.
+- **Rationale**: Directory-discovered cameras should remain visible globally
+  without turning the selected-event relationship into an all-world spiderweb.
+
 ### `screen_to_latlon`
 - **Does**: Maps a globe screen position back to geographic coordinates for the
   coordinate overlay.
@@ -65,6 +74,7 @@ model and viewport into an egui-painted `GlobeScene` each frame.
 | `markers.rs` | Projection results use the same view/layout that produced the frame | Reprojecting with different geometry or dropping front-facing state |
 | `map_tooltips.rs` | Hit-test vectors contain only visible, interactive marker positions | Returning hidden or differently positioned markers |
 | Globe event/camera overlays | Bases stay on the visible unit sphere and tips extend outward from those bases | Reintroducing inward terrain-radius displacement |
+| Camera layer | Every visible dot and returned hit-test entry refers to the same normalized camera id | Filtering drawing and hit testing differently |
 | Layer drawer | The Contours toggle gates globe terrain contours just as it gates local terrain contours | Rendering terrain contours while the toggle is off |
 
 ## Notes

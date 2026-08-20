@@ -1,7 +1,7 @@
 # camera_registry.rs
 
 ## Purpose
-Runs the live camera registry polling loop for the desktop app. This module owns provider-specific adapters and normalizes them into the shared `CameraFeed` model so the rest of the UI can stay source-agnostic.
+Runs the live camera registry polling loop for the desktop app. This module owns provider-specific adapters, including the opt-in Project Eyes On directory pipeline, and normalizes them into the shared `CameraFeed` model so the rest of the UI can stay source-agnostic.
 
 ## Components
 
@@ -24,6 +24,14 @@ Runs the live camera registry polling loop for the desktop app. This module owns
 - **Interacts with**: `reqwest`, `serde_json`
 - **Rationale**: Windy gives much broader geographic coverage than traffic-only feeds, but the query is intentionally focus-bounded so the first implementation stays cheap
 
+### Project Eyes On directory adapter
+
+- **Does**: Invokes the bounded Insecam discovery, detail-page geolocation, feed
+  classification, and deduplication pipeline when explicitly enabled.
+- **Interacts with**: `camera_directory_pipeline.rs` and persisted camera settings.
+- **Rationale**: Keeps the Project Eyes On integration inside the same
+  non-blocking registry worker and source-normalization boundary as keyed feeds.
+
 ## Contracts
 
 | Dependent | Expects | Breaking changes |
@@ -34,9 +42,13 @@ Runs the live camera registry polling loop for the desktop app. This module owns
 
 ## Notes
 - The registry currently supports a concrete 511NY adapter and a best-effort Windy Webcams adapter.
+- Project Eyes On directory discovery is an explicit opt-in and does not include the upstream search-engine dorking path.
 - The registry now also supports declarative no-key public sources loaded from `Data/camera_sources/public_sources.json` under the asset root.
 - The registry also supports curated scraped webcam-directory seeds loaded from `Data/camera_sources/scrape_sources.json` under the asset root.
 - Generic no-key adapters currently support three shapes: plain JSON arrays, GeoJSON feature collections, and ArcGIS feature service query responses.
 - Curated scrape adapters still prefer operator-supplied coordinates, but they can now fall back to lightweight embedded-map coordinate extraction for pages that expose stable map URLs.
-- The app stays in demo camera mode until at least one camera-source key is configured.
-- This is intentionally a metadata registry sync, not a live video probe; stream URLs are passed through for later connection attempts.
+- The app stays in demo camera mode until a keyed adapter, declarative public
+  source, curated scrape seed, or the explicit Project Eyes On opt-in is active.
+- Registry adapters remain metadata-oriented. The Project Eyes On adapter adds
+  a bounded header/reachability probe; actual snapshot/MJPEG reading starts
+  only after a user opens a pip in `camera_feed_viewer.rs`.

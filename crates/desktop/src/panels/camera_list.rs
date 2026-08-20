@@ -115,8 +115,8 @@ fn tab_cameras(ui: &mut egui::Ui, model: &mut AppModel) {
                         if ui.button("Select").clicked() {
                             model.select_camera(&camera.id);
                         }
-                        if ui.button("Attempt feed").clicked() {
-                            model.attempt_connect(&camera.id);
+                        if ui.button("Open feed").clicked() {
+                            model.open_camera_feed(&camera.id);
                         }
                     });
                 });

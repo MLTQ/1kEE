@@ -1,3 +1,4 @@
+use crate::camera_registry;
 use crate::model::{ActiveBody, AppModel, GeoJsonLayer};
 use crate::osm_ingest;
 use crate::panels::world_map::contour_asset;
@@ -24,6 +25,30 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
                 metric_chip(ui, "Factal stream", &model.factal_stream_status);
                 metric_chip(ui, "USGS quakes", &model.usgs_stream_status);
                 metric_chip(ui, "Camera registry", &model.camera_registry_status);
+                if model.camera_registry_status == "demo" && !model.eyes_on_enabled {
+                    if ui
+                        .small_button("Enable live cameras")
+                        .on_hover_text(
+                            "Enable the bounded Project Eyes On public-directory source and refresh now",
+                        )
+                        .clicked()
+                    {
+                        model.eyes_on_enabled = true;
+                        model.camera_registry_status = "configured".into();
+                        match model.save_settings() {
+                            Ok(()) => {
+                                model.push_log(
+                                    "Live public-camera discovery enabled; syncing directory…"
+                                        .into(),
+                                );
+                                camera_registry::invalidate();
+                            }
+                            Err(error) => model.push_log(format!(
+                                "Live cameras enabled for this run, but settings could not be saved: {error}"
+                            )),
+                        }
+                    }
+                }
                 metric_chip(ui, "Terrain", model.terrain_inventory.status_label());
                 metric_chip(ui, "OSM", model.osm_inventory.status_label());
                 metric_chip(ui, "Events", &model.events.len().to_string());

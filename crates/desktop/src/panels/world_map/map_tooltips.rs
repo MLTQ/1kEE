@@ -41,6 +41,53 @@ pub(super) fn draw_event_hover_tooltip(
         });
 }
 
+pub(super) fn draw_camera_hover_tooltip(
+    ctx: &egui::Context,
+    model: &AppModel,
+    scene: &globe_scene::GlobeScene,
+    hover_pos: Option<egui::Pos2>,
+) {
+    let Some(pointer) = hover_pos else {
+        return;
+    };
+    let Some((camera_id, marker_pos)) = scene
+        .camera_markers
+        .iter()
+        .find(|(_, marker)| marker.distance(pointer) <= 10.0)
+    else {
+        return;
+    };
+    let Some(camera) = model.cameras.iter().find(|camera| camera.id == *camera_id) else {
+        return;
+    };
+
+    egui::Area::new("camera_hover_tooltip".into())
+        .fixed_pos(*marker_pos + egui::vec2(14.0, -8.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(theme::panel_fill(238))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    theme::camera_color().gamma_multiply(0.6),
+                ))
+                .corner_radius(8.0)
+                .inner_margin(egui::Margin::same(8))
+                .show(ui, |ui| {
+                    ui.colored_label(camera.status.color(), camera.status.label());
+                    ui.strong(&camera.label);
+                    ui.small(format!("{} · {}", camera.provider, camera.kind));
+                    ui.small(format!(
+                        "{:.4}°, {:.4}°",
+                        camera.location.lat, camera.location.lon
+                    ));
+                    ui.small(
+                        egui::RichText::new("click to open live feed").color(theme::text_muted()),
+                    );
+                });
+        });
+}
+
 pub(super) fn draw_ship_hover_tooltip(
     ctx: &egui::Context,
     model: &AppModel,

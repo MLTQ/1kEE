@@ -1,3 +1,4 @@
+use crate::camera_directory_pipeline::{self, EyesOnPipelineConfig};
 use crate::camera_scrape_catalog::{self, ScrapedCameraSource, ScrapedCameraSourceKind};
 use crate::camera_source_catalog::{self, PublicCameraSource, PublicCameraSourceKind};
 use crate::model::{AppModel, CameraConnectionState, CameraFeed, GeoPoint};
@@ -72,7 +73,8 @@ pub fn tick(model: &mut AppModel) {
 
     let public_sources = camera_source_catalog::load_public_sources(model.selected_root.as_deref());
     let scrape_sources = camera_scrape_catalog::load_scrape_sources(model.selected_root.as_deref());
-    if !model.has_camera_source_keys() && public_sources.is_empty() && scrape_sources.is_empty() {
+    if !model.has_enabled_camera_sources() && public_sources.is_empty() && scrape_sources.is_empty()
+    {
         if model.camera_registry_status != "demo" {
             model.camera_registry_status = "demo".into();
         }
@@ -96,6 +98,11 @@ pub fn tick(model: &mut AppModel) {
     if should_spawn {
         let windy_key = model.windy_webcams_api_key.trim().to_owned();
         let ny511_key = model.ny511_api_key.trim().to_owned();
+        let eyes_on_config = model.eyes_on_enabled.then(|| EyesOnPipelineConfig {
+            country_code: (!model.eyes_on_country_code.trim().is_empty())
+                .then(|| model.eyes_on_country_code.trim().to_owned()),
+            max_pages: model.eyes_on_max_pages,
+        });
         let focus = model.terrain_focus_location();
         let public_sources = public_sources;
         let scrape_sources = scrape_sources;
@@ -104,6 +111,7 @@ pub fn tick(model: &mut AppModel) {
             fetch_camera_registry(
                 &windy_key,
                 &ny511_key,
+                eyes_on_config.as_ref(),
                 focus,
                 &public_sources,
                 &scrape_sources,
@@ -170,9 +178,12 @@ fn poll_signature(model: &AppModel) -> String {
     let public_sources = camera_source_catalog::load_public_sources(model.selected_root.as_deref());
     let scrape_sources = camera_scrape_catalog::load_scrape_sources(model.selected_root.as_deref());
     format!(
-        "windy:{}|511ny:{}|public:{}|scrape:{}|focus:{}",
+        "windy:{}|511ny:{}|eyes-on:{}:{}:{}|public:{}|scrape:{}|focus:{}",
         !model.windy_webcams_api_key.trim().is_empty(),
         !model.ny511_api_key.trim().is_empty(),
+        model.eyes_on_enabled,
+        model.eyes_on_country_code.trim(),
+        model.eyes_on_max_pages,
         source_signature(&public_sources),
         scrape_source_signature(&scrape_sources),
         focus
@@ -182,6 +193,7 @@ fn poll_signature(model: &AppModel) -> String {
 fn fetch_camera_registry(
     windy_key: &str,
     ny511_key: &str,
+    eyes_on_config: Option<&EyesOnPipelineConfig>,
     focus: Option<GeoPoint>,
     public_sources: &[PublicCameraSource],
     scrape_sources: &[ScrapedCameraSource],
@@ -216,6 +228,20 @@ fn fetch_camera_registry(
                 Err(error) => {
                     return PollOutcome::Error(format!("Windy adapter failed: {error}"));
                 }
+            }
+        }
+    }
+
+    if let Some(config) = eyes_on_config {
+        match camera_directory_pipeline::fetch(&client, config) {
+            Ok(mut fetched) => {
+                source_parts.push("Project Eyes On · Insecam".to_owned());
+                cameras.append(&mut fetched);
+            }
+            Err(error) => {
+                return PollOutcome::Error(format!(
+                    "Project Eyes On directory adapter failed: {error}"
+                ));
             }
         }
     }

@@ -6,7 +6,7 @@ Implements the main geographic canvas for the demo. The current version wraps an
 ## Components
 
 ### `render_world_map`
- - **Does**: Draws the globe panel, renders the top layer bar, applies pointer interaction to the persistent camera state, delegates rendering to `globe_scene.rs`, handles click-based selection, and shows event hover tooltips
+ - **Does**: Draws the globe panel, renders the top layer bar including the camera-dot toggle/count, applies pointer interaction to the persistent camera state, delegates rendering to `globe_scene.rs`, handles click-based selection, and shows event/camera hover tooltips
 - **Interacts with**: `AppModel` in `model.rs`, `apply_interaction` in `camera.rs`, `paint` in `globe_scene.rs`, theme helpers in `theme.rs`
 - **Rationale**: Centralizes repaint policy so the globe does not redraw at full speed when the scene is idle
 
@@ -42,3 +42,6 @@ Implements the main geographic canvas for the demo. The current version wraps an
 - While a road layer is enabled, the panel now keeps repainting during active OSM jobs and re-queues focused road imports around the current terrain focus / local viewport instead of leaving the renderer pointed at a stale older region.
 - Mock geography has been removed; if the terrain pipeline has no real data to show for a view, the globe stays minimal.
 - Preserve the same event-selection and nearby-camera interaction semantics if the renderer is upgraded again.
+- Camera dots now represent the whole normalized registry; selected-event link
+  lines remain limited to nearby cameras. Clicking a dot opens the separate
+  live-feed egui window.
