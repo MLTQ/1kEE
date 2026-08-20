@@ -20,8 +20,8 @@ pub(crate) const MIN_CONTOUR_STROKE_WIDTH_PX: f32 = 1.0;
 /// The new pixel-width control supports a comfortably wider range than the
 /// former multiplier without changing any legacy saved appearance.
 pub(crate) const MAX_CONTOUR_STROKE_WIDTH_PX: f32 = 16.0;
-pub(crate) const DEFAULT_EYES_ON_MAX_PAGES: u8 = 1;
 pub(crate) const MAX_EYES_ON_MAX_PAGES: u8 = 5;
+pub(crate) const DEFAULT_EYES_ON_MAX_PAGES: u8 = MAX_EYES_ON_MAX_PAGES;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppSettings {

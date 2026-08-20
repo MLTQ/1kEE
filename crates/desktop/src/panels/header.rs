@@ -2,6 +2,7 @@ use crate::camera_registry;
 use crate::model::{ActiveBody, AppModel, GeoJsonLayer};
 use crate::osm_ingest;
 use crate::panels::world_map::contour_asset;
+use crate::settings_store;
 use crate::terrain_assets;
 use crate::theme;
 
@@ -33,20 +34,22 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
                         )
                         .clicked()
                     {
-                        model.eyes_on_enabled = true;
-                        model.camera_registry_status = "configured".into();
-                        match model.save_settings() {
-                            Ok(()) => {
-                                model.push_log(
-                                    "Live public-camera discovery enabled; syncing directory…"
-                                        .into(),
-                                );
-                                camera_registry::invalidate();
-                            }
-                            Err(error) => model.push_log(format!(
-                                "Live cameras enabled for this run, but settings could not be saved: {error}"
-                            )),
-                        }
+                        request_broad_camera_scan(model);
+                    }
+                } else if model.eyes_on_enabled
+                    && !model.camera_registry_scanning
+                    && model.eyes_on_max_pages < settings_store::MAX_EYES_ON_MAX_PAGES
+                {
+                    if ui
+                        .small_button("Scan more cameras")
+                        .on_hover_text(format!(
+                            "Increase the bounded directory scan from {} to {} pages and refresh now",
+                            model.eyes_on_max_pages,
+                            settings_store::MAX_EYES_ON_MAX_PAGES
+                        ))
+                        .clicked()
+                    {
+                        request_broad_camera_scan(model);
                     }
                 }
                 metric_chip(ui, "Terrain", model.terrain_inventory.status_label());
@@ -94,7 +97,7 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
                         ActiveBody::Moon => ActiveBody::Mars,
                         ActiveBody::Mars => ActiveBody::Earth,
                     };
-                    
+
                     // Non-Earth modes have no local terrain view — always return to globe.
                     if model.active_body != ActiveBody::Earth {
                         model.globe_view.local_mode = false;
@@ -151,8 +154,47 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
                     ui.colored_label(theme::text_muted(), root.display().to_string());
                 }
             });
+            if model.camera_registry_scanning {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    let label = if model.camera_registry_progress_label.is_empty() {
+                        "Searching for cameras…".to_owned()
+                    } else {
+                        model.camera_registry_progress_label.clone()
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(model.camera_registry_progress.clamp(0.0, 1.0))
+                            .desired_width(ui.available_width().min(720.0))
+                            .text(label),
+                    );
+                });
+            }
             ui.add_space(4.0);
         });
+}
+
+fn request_broad_camera_scan(model: &mut AppModel) {
+    model.eyes_on_enabled = true;
+    model.eyes_on_max_pages = settings_store::MAX_EYES_ON_MAX_PAGES;
+    model.camera_registry_status = "syncing".into();
+    model.camera_registry_scanning = true;
+    model.camera_registry_progress = 0.0;
+    model.camera_registry_progress_label = format!(
+        "Queued a {}-page camera scan…",
+        settings_store::MAX_EYES_ON_MAX_PAGES
+    );
+
+    match model.save_settings() {
+        Ok(()) => model.push_log(format!(
+            "Live public-camera discovery enabled; scanning up to {} directory pages…",
+            settings_store::MAX_EYES_ON_MAX_PAGES
+        )),
+        Err(error) => model.push_log(format!(
+            "Live camera scan started for this run, but settings could not be saved: {error}"
+        )),
+    }
+    camera_registry::invalidate();
 }
 
 fn import_layer(model: &mut AppModel) {

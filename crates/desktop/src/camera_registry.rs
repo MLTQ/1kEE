@@ -1,7 +1,8 @@
-use crate::camera_directory_pipeline::{self, EyesOnPipelineConfig};
+use crate::camera_directory_pipeline::{self, EyesOnPipelineConfig, EyesOnPipelineProgress};
 use crate::camera_scrape_catalog::{self, ScrapedCameraSource, ScrapedCameraSourceKind};
 use crate::camera_source_catalog::{self, PublicCameraSource, PublicCameraSourceKind};
 use crate::model::{AppModel, CameraConnectionState, CameraFeed, GeoPoint};
+use crossbeam_channel::{Receiver, Sender};
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::Value;
@@ -25,6 +26,13 @@ struct PollManager {
 struct ActivePoll {
     generation: u64,
     handle: JoinHandle<PollOutcome>,
+    progress: Receiver<PollProgress>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PollProgress {
+    fraction: f32,
+    label: String,
 }
 
 enum PollOutcome {
@@ -39,6 +47,7 @@ pub fn tick(model: &mut AppModel) {
     let signature = poll_signature(model);
     let now = Instant::now();
     let mut finished = None;
+    let mut progress_update = None;
 
     {
         let mut manager = manager().lock().unwrap();
@@ -50,6 +59,10 @@ pub fn tick(model: &mut AppModel) {
         }
 
         if let Some(active) = manager.active.as_ref() {
+            let newest_progress = active.progress.try_iter().last();
+            if active.generation == manager.generation {
+                progress_update = newest_progress;
+            }
             if active.handle.is_finished() {
                 finished = manager
                     .active
@@ -59,12 +72,19 @@ pub fn tick(model: &mut AppModel) {
         }
     }
 
+    if let Some(progress) = progress_update {
+        model.camera_registry_scanning = true;
+        model.camera_registry_progress = progress.fraction.clamp(0.0, 1.0);
+        model.camera_registry_progress_label = progress.label;
+    }
+
     if let Some((generation, handle)) = finished {
         match handle.join() {
             Ok(outcome) => apply_outcome(model, generation, outcome),
             Err(_) => {
                 if generation == current_generation() {
                     model.camera_registry_status = "error".into();
+                    clear_progress(model);
                     model.push_log("Camera registry worker panicked before returning data.".into());
                 }
             }
@@ -78,6 +98,7 @@ pub fn tick(model: &mut AppModel) {
         if model.camera_registry_status != "demo" {
             model.camera_registry_status = "demo".into();
         }
+        clear_progress(model);
         return;
     }
 
@@ -106,6 +127,7 @@ pub fn tick(model: &mut AppModel) {
         let focus = model.terrain_focus_location();
         let public_sources = public_sources;
         let scrape_sources = scrape_sources;
+        let (progress_sender, progress_receiver) = crossbeam_channel::unbounded();
 
         let handle = thread::spawn(move || {
             fetch_camera_registry(
@@ -115,6 +137,7 @@ pub fn tick(model: &mut AppModel) {
                 focus,
                 &public_sources,
                 &scrape_sources,
+                &progress_sender,
             )
         });
 
@@ -123,8 +146,12 @@ pub fn tick(model: &mut AppModel) {
             manager.active = Some(ActivePoll {
                 generation: spawn_generation,
                 handle,
+                progress: progress_receiver,
             });
             model.camera_registry_status = "syncing".into();
+            model.camera_registry_scanning = true;
+            model.camera_registry_progress = 0.01;
+            model.camera_registry_progress_label = "Starting camera discovery…".into();
         }
     }
 }
@@ -149,6 +176,7 @@ fn apply_outcome(model: &mut AppModel, generation: u64, outcome: PollOutcome) {
         return;
     }
 
+    clear_progress(model);
     match outcome {
         PollOutcome::Success {
             cameras,
@@ -166,6 +194,49 @@ fn apply_outcome(model: &mut AppModel, generation: u64, outcome: PollOutcome) {
         PollOutcome::Error(error) => {
             model.camera_registry_status = "error".into();
             model.push_log(format!("Camera registry sync failed: {error}"));
+        }
+    }
+}
+
+fn clear_progress(model: &mut AppModel) {
+    model.camera_registry_scanning = false;
+    model.camera_registry_progress = 0.0;
+    model.camera_registry_progress_label.clear();
+}
+
+fn report_progress(progress: &Sender<PollProgress>, fraction: f32, label: impl Into<String>) {
+    let _ = progress.send(PollProgress {
+        fraction: fraction.clamp(0.0, 1.0),
+        label: label.into(),
+    });
+}
+
+fn eyes_on_poll_progress(scope: &str, progress: EyesOnPipelineProgress) -> PollProgress {
+    match progress {
+        EyesOnPipelineProgress::DirectoryPages { completed, total } => {
+            let denominator = total.max(1) as f32;
+            PollProgress {
+                fraction: 0.15 + 0.25 * completed as f32 / denominator,
+                label: format!("Scanning {scope} camera directory pages · {completed}/{total}"),
+            }
+        }
+        EyesOnPipelineProgress::Candidates { found } => PollProgress {
+            fraction: 0.42,
+            label: format!("Found {found} camera listing(s) · checking locations and feeds…"),
+        },
+        EyesOnPipelineProgress::FeedChecks {
+            completed,
+            total,
+            geolocated,
+            reachable,
+        } => {
+            let denominator = total.max(1) as f32;
+            PollProgress {
+                fraction: 0.42 + 0.53 * completed as f32 / denominator,
+                label: format!(
+                    "Checking cameras {completed}/{total} · {geolocated} geolocated · {reachable} reachable"
+                ),
+            }
         }
     }
 }
@@ -197,7 +268,9 @@ fn fetch_camera_registry(
     focus: Option<GeoPoint>,
     public_sources: &[PublicCameraSource],
     scrape_sources: &[ScrapedCameraSource],
+    progress: &Sender<PollProgress>,
 ) -> PollOutcome {
+    report_progress(progress, 0.02, "Preparing camera sources…");
     let client = match Client::builder().timeout(REQUEST_TIMEOUT).build() {
         Ok(client) => client,
         Err(error) => return PollOutcome::Error(error.to_string()),
@@ -207,6 +280,7 @@ fn fetch_camera_registry(
     let mut source_parts = Vec::new();
 
     if !ny511_key.trim().is_empty() {
+        report_progress(progress, 0.08, "Querying 511NY cameras…");
         match fetch_511ny_cameras(&client, ny511_key.trim()) {
             Ok(mut fetched) => {
                 source_parts.push("511NY".to_owned());
@@ -220,6 +294,7 @@ fn fetch_camera_registry(
 
     if !windy_key.trim().is_empty() {
         if let Some(focus) = focus {
+            report_progress(progress, 0.12, "Querying Windy Webcams…");
             match fetch_windy_cameras(&client, windy_key.trim(), focus) {
                 Ok(mut fetched) => {
                     source_parts.push("Windy Webcams".to_owned());
@@ -233,7 +308,16 @@ fn fetch_camera_registry(
     }
 
     if let Some(config) = eyes_on_config {
-        match camera_directory_pipeline::fetch(&client, config) {
+        let scope = config
+            .country_code
+            .as_deref()
+            .filter(|scope| !scope.trim().is_empty())
+            .unwrap_or("global")
+            .to_owned();
+        match camera_directory_pipeline::fetch(&client, config, |update| {
+            let update = eyes_on_poll_progress(&scope, update);
+            let _ = progress.send(update);
+        }) {
             Ok(mut fetched) => {
                 source_parts.push("Project Eyes On · Insecam".to_owned());
                 cameras.append(&mut fetched);
@@ -281,6 +365,11 @@ fn fetch_camera_registry(
     }
 
     dedupe_cameras(&mut cameras);
+    report_progress(
+        progress,
+        0.98,
+        format!("Finalizing {} geolocated camera(s)…", cameras.len()),
+    );
 
     PollOutcome::Success {
         cameras,
@@ -965,4 +1054,42 @@ fn manager() -> &'static Mutex<PollManager> {
             shutdown: false,
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn eyes_on_directory_progress_includes_page_counts() {
+        let progress = eyes_on_poll_progress(
+            "US",
+            EyesOnPipelineProgress::DirectoryPages {
+                completed: 3,
+                total: 5,
+            },
+        );
+
+        assert!((progress.fraction - 0.30).abs() < f32::EPSILON);
+        assert_eq!(progress.label, "Scanning US camera directory pages · 3/5");
+    }
+
+    #[test]
+    fn eyes_on_feed_progress_explains_filtered_results() {
+        let progress = eyes_on_poll_progress(
+            "global",
+            EyesOnPipelineProgress::FeedChecks {
+                completed: 4,
+                total: 10,
+                geolocated: 2,
+                reachable: 1,
+            },
+        );
+
+        assert!((progress.fraction - 0.632).abs() < 0.000_1);
+        assert_eq!(
+            progress.label,
+            "Checking cameras 4/10 · 2 geolocated · 1 reachable"
+        );
+    }
 }

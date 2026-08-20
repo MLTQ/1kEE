@@ -44,6 +44,12 @@ source pollers.
 - **Interacts with**: `settings_store.rs`, `camera_registry.rs`,
   `factal_settings.rs`, and both world-map scenes.
 
+### Camera registry progress
+
+- **Does**: Holds the active scan flag, normalized completion fraction, and
+  current discovery/checking counters for the top-bar progress indicator.
+- **Interacts with**: `camera_registry.rs` and `panels/header.rs`.
+
 ### `nearby_cameras` / `nearby_camera_snapshot`
 - **Does**: Returns cameras within a radius of the selected event, sorted by
   haversine distance; map call sites share an immutable cached snapshot.
@@ -72,6 +78,7 @@ source pollers.
 | Source pollers | `replace_*` methods retain valid selection and report source state | Removing replacement methods or changing their ownership contracts |
 | Camera sidebar | Nearby records are sorted ascending by exact `haversine_km` results | Changing distance calculation, inclusion boundary, or sort order |
 | Camera registry | `has_enabled_camera_sources` includes both keyed adapters and the explicit Project Eyes On opt-in | Ignoring the keyless directory setting |
+| Header | Camera scan progress is UI-thread state updated only by drained worker messages | Mutating egui state from registry workers |
 | Camera feed viewer | `selected_camera_id` and `camera_feed_window_open` identify the one requested feed | Changing window-state semantics without updating the viewer |
 | Map renderers | `contour_stroke_width_px()` is at least one physical pixel; local scale conversion preserves existing major/minor relationships | Bypassing the setter or mixing physical width with logical-point stroke math |
 | Gruve bridge | Public model fields can be snapshotted and commands can update supported selection state | Removing required state or thread-affecting changes |

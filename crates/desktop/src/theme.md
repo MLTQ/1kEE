@@ -14,7 +14,7 @@ Centralizes the visual language for the 1kEE desktop demo. It installs the activ
 - **Interacts with**: `DashboardApp::new` in `app.rs`
 
 ### Color helper functions
-- **Does**: Provide consistent panel, grid, road, camera, muted-text, and globe/HUD accent colors
+- **Does**: Provide consistent panel, grid, road, camera, muted-text, and globe/HUD accent colors. Camera pips and selection rings use a stable green identity across themes.
 - **Interacts with**: panel renderers in `panels/`, especially `world_map.rs` and `road_layer.rs`
 
 ## Contracts

@@ -24,6 +24,14 @@ dorking path.
 - **Rationale**: Network work remains off the UI thread and bounded to one
   explicitly allowlisted directory.
 
+### `EyesOnPipelineProgress`
+
+- **Does**: Reports completed directory pages, discovered candidates, completed
+  feed checks, geolocated records, and reachable feeds from parallel workers.
+- **Interacts with**: the registry progress channel in `camera_registry.rs`.
+- **Rationale**: Operators can distinguish a narrow/low-yield scan from a scan
+  that is still working.
+
 ### Directory parsing and enrichment
 
 - **Does**: Extracts camera id, feed URL, brand, location hint, and detail page;
@@ -42,7 +50,7 @@ dorking path.
 
 | Dependent | Expects | Breaking changes |
 |---|---|---|
-| `camera_registry.rs` | `fetch` is blocking but runs only inside the registry worker | Calling it on the UI thread |
+| `camera_registry.rs` | `fetch` is blocking but runs only inside the registry worker and reports progress through a thread-safe callback | Calling it on the UI thread or blocking the progress callback |
 | Map/model consumers | Every returned camera has valid geographic coordinates and a stable `eyes-on-*` id | Returning ungeolocated records or unstable ids |
 | Settings UI | Page scope remains within `1..=5` and the pipeline is off by default | Unbounded crawling or implicit enablement |
 
