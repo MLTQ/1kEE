@@ -7,11 +7,12 @@
 
 use crate::model::{CameraConnectionState, CameraFeed, GeoPoint};
 use rayon::prelude::*;
+use reqwest::Url;
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, USER_AGENT};
-use reqwest::Url;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const INSECAM_ORIGIN: &str = "http://www.insecam.org";
@@ -28,6 +29,23 @@ pub struct EyesOnPipelineConfig {
     pub max_pages: u8,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EyesOnPipelineProgress {
+    DirectoryPages {
+        completed: usize,
+        total: usize,
+    },
+    Candidates {
+        found: usize,
+    },
+    FeedChecks {
+        completed: usize,
+        total: usize,
+        geolocated: usize,
+        reachable: usize,
+    },
+}
+
 #[derive(Clone, Debug)]
 struct DirectoryCandidate {
     camera_id: String,
@@ -37,11 +55,32 @@ struct DirectoryCandidate {
     location_hint: String,
 }
 
-pub fn fetch(client: &Client, config: &EyesOnPipelineConfig) -> Result<Vec<CameraFeed>, String> {
+pub fn fetch<F>(
+    client: &Client,
+    config: &EyesOnPipelineConfig,
+    on_progress: F,
+) -> Result<Vec<CameraFeed>, String>
+where
+    F: Fn(EyesOnPipelineProgress) + Sync,
+{
     let max_pages = config.max_pages.clamp(1, 5);
+    let total_pages = max_pages as usize;
+    let completed_pages = AtomicUsize::new(0);
+    on_progress(EyesOnPipelineProgress::DirectoryPages {
+        completed: 0,
+        total: total_pages,
+    });
     let page_results: Vec<_> = (1..=max_pages)
         .into_par_iter()
-        .map(|page| fetch_directory_page(client, config.country_code.as_deref(), page))
+        .map(|page| {
+            let result = fetch_directory_page(client, config.country_code.as_deref(), page);
+            let completed = completed_pages.fetch_add(1, Ordering::AcqRel) + 1;
+            on_progress(EyesOnPipelineProgress::DirectoryPages {
+                completed,
+                total: total_pages,
+            });
+            result
+        })
         .collect();
 
     let successful_pages = page_results.iter().filter(|result| result.is_ok()).count();
@@ -65,9 +104,33 @@ pub fn fetch(client: &Client, config: &EyesOnPipelineConfig) -> Result<Vec<Camer
         }
     }
 
+    on_progress(EyesOnPipelineProgress::Candidates {
+        found: candidates.len(),
+    });
+
+    let total_candidates = candidates.len();
+    let completed_checks = AtomicUsize::new(0);
+    let geolocated = AtomicUsize::new(0);
+    let reachable = AtomicUsize::new(0);
     let mut cameras: Vec<_> = candidates
         .into_par_iter()
-        .filter_map(|candidate| enrich_candidate(client, candidate))
+        .filter_map(|candidate| {
+            let camera = enrich_candidate(client, candidate);
+            if let Some(camera) = &camera {
+                geolocated.fetch_add(1, Ordering::AcqRel);
+                if camera.status == CameraConnectionState::Reachable {
+                    reachable.fetch_add(1, Ordering::AcqRel);
+                }
+            }
+            let completed = completed_checks.fetch_add(1, Ordering::AcqRel) + 1;
+            on_progress(EyesOnPipelineProgress::FeedChecks {
+                completed,
+                total: total_candidates,
+                geolocated: geolocated.load(Ordering::Acquire),
+                reachable: reachable.load(Ordering::Acquire),
+            });
+            camera
+        })
         .collect();
     cameras.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(cameras)

@@ -164,6 +164,12 @@ pub struct AppModel {
     pub factal_stream_status: String,
     pub usgs_stream_status: String,
     pub camera_registry_status: String,
+    /// True while a background camera registry poll is discovering or checking feeds.
+    pub camera_registry_scanning: bool,
+    /// Normalized progress for the active camera scan.
+    pub camera_registry_progress: f32,
+    /// Human-readable phase/counter text shown beside the scan progress bar.
+    pub camera_registry_progress_label: String,
     // ── Replay mode ──────────────────────────────────────────────────────────
     pub replay_mode: bool,
     /// Start of the replay window (unix seconds).
@@ -488,6 +494,9 @@ impl AppModel {
             } else {
                 "configured".into()
             },
+            camera_registry_scanning: false,
+            camera_registry_progress: 0.0,
+            camera_registry_progress_label: String::new(),
             terrain_inventory,
             osm_inventory,
         };

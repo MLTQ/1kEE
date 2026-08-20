@@ -305,7 +305,11 @@ fn tab_apis(ui: &mut egui::Ui, model: &mut AppModel) {
                 .range(1..=settings_store::MAX_EYES_ON_MAX_PAGES),
         );
     });
-    ui.small("Blank country means the global popularity listing; coordinates are approximate source metadata.");
+    ui.small(
+        "Blank country means the global popularity listing. Each page contains only a handful \
+         of listings; use 5 pages for the broadest bounded scan. Coordinates are approximate \
+         source metadata.",
+    );
 
     ui.add_space(14.0);
     ui.separator();

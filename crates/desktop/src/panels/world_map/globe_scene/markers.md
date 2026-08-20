@@ -20,8 +20,8 @@ marker styling from scene composition and geographic projection.
   `FlightTrack::category`.
 
 ### Event and camera marker helpers
-- **Does**: Paints event beams/flares, camera pins, and links between selected
-  events and cameras.
+- **Does**: Paints event beams/flares, green camera pips, and links between
+  selected events and cameras.
 - **Interacts with**: `globe_scene/mod.rs` and `ProjectedPoint`.
 
 ## Contracts

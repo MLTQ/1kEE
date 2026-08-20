@@ -65,9 +65,11 @@ All keys are entered in-app under **Settings → APIs** and saved locally to
 
 The Project Eyes On adapter is enabled with **Enable live cameras** beside the
 top-bar Demo status, or under **Settings → APIs**. It is off by default, accepts
-an optional two-letter country scope, and reads at most five directory pages per
-poll. Once the registry says **live**, enable the Cameras layer and click a
-camera pip to open its feed window. 1kEE ports the public-directory discovery,
+an optional two-letter country scope, and fresh configurations scan the bounded
+maximum of five directory pages per poll. The top bar reports directory-page,
+candidate, geolocation, and reachability progress while it searches. Once the
+registry says **live**, enable the Cameras layer and click a green camera pip to
+open its feed window. 1kEE ports the public-directory discovery,
 deduplication, metadata geolocation, and feed-type verification stages; it does
 not include the upstream search-engine dorking path.
 

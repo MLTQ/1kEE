@@ -24,4 +24,6 @@ Renders the app settings window for the desktop app. This file is the user-facin
   explicit Project Eyes On discovery or declarative no-key camera sources.
 - No-key public camera sources can be declared in `Data/camera_sources/public_sources.json`, and curated scraped webcam-directory seeds can be declared in `Data/camera_sources/scrape_sources.json` under the asset root.
 - Project Eyes On directory discovery is off by default and must be explicitly enabled; the UI caps it at five pages per poll and accepts an optional two-letter country scope.
+- Fresh configurations default to all five bounded pages; the UI explains that
+  a one-page scan contains only a handful of directory listings.
 - Asset/data/derived/SRTM/planet/GDAL overrides are intentionally optional; leaving them blank means “use the executable folder defaults and PATH-based GDAL tools.”

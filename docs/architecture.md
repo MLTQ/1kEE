@@ -78,6 +78,8 @@ table above the struct is the source of truth for both sides.
 - Input: openly published camera metadata and feed URLs (registries + provider scrapers),
   including an explicit opt-in, bounded Project Eyes On-compatible Insecam directory adapter.
 - Output: normalized camera records with provider, location, type, reachability.
+- Progress: the background registry reports directory pages, candidates,
+  geolocated cameras, and reachable feeds to a non-blocking top-bar indicator.
 - Interaction: clicking a map pip starts a bounded background image/MJPEG reader;
   the UI thread only uploads the latest decoded frame to an egui texture.
 - Open work: more provider adapters, geocoding, provenance, health checks, legal flags.

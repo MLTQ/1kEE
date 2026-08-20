@@ -29,7 +29,7 @@ pub enum MapTheme {
     /// bone-white.  Designed for SLDEM2015 lunar topology data.
     Lunar,
     /// Hematite red / terra cotta orange / rusted black — warm dusty palette
-    /// scaled explicitly matching MRO Mars Context Camera DTM mappings. 
+    /// scaled explicitly matching MRO Mars Context Camera DTM mappings.
     Mars,
     /// Deep crimson / dark iron / pitch black — high-contrast low-light Mars mode.
     MarsDark,
@@ -279,17 +279,7 @@ pub fn grid_color() -> egui::Color32 {
 }
 
 pub fn camera_color() -> egui::Color32 {
-    match current() {
-        MapTheme::Sodium => egui::Color32::from_rgb(255, 196, 112),
-        MapTheme::Topo => egui::Color32::from_rgb(126, 208, 229),
-        MapTheme::Phosphor => egui::Color32::from_rgb(120, 210, 120),
-        MapTheme::Thermal => egui::Color32::from_rgb(175, 120, 240),
-        MapTheme::Ghost => egui::Color32::from_rgb(190, 205, 215),
-        MapTheme::Akira => egui::Color32::from_rgb(0, 215, 255), // electric cyan
-        MapTheme::Lunar => egui::Color32::from_rgb(155, 200, 248), // ice-blue mission control
-        MapTheme::Mars => egui::Color32::from_rgb(200, 150, 100), 
-        MapTheme::MarsDark => egui::Color32::from_rgb(255, 80, 80),
-    }
+    egui::Color32::from_rgb(74, 222, 128)
 }
 
 pub fn text_muted() -> egui::Color32 {
@@ -343,7 +333,7 @@ pub fn hot_color() -> egui::Color32 {
         MapTheme::Ghost => egui::Color32::from_rgb(228, 238, 245),
         MapTheme::Akira => egui::Color32::from_rgb(210, 18, 35), // cherry red
         MapTheme::Lunar => egui::Color32::from_rgb(215, 210, 188), // sunlit regolith
-        MapTheme::Mars => egui::Color32::from_rgb(255, 145, 80), 
+        MapTheme::Mars => egui::Color32::from_rgb(255, 145, 80),
         MapTheme::MarsDark => egui::Color32::from_rgb(255, 60, 60),
     }
 }
@@ -518,17 +508,7 @@ pub fn marker_glow_warm() -> egui::Color32 {
 
 /// Outer ring color for camera markers.
 pub fn marker_camera_ring() -> egui::Color32 {
-    match current() {
-        MapTheme::Sodium => egui::Color32::from_rgb(255, 224, 176),
-        MapTheme::Topo => egui::Color32::from_rgb(215, 245, 252),
-        MapTheme::Phosphor => egui::Color32::from_rgb(195, 240, 195),
-        MapTheme::Thermal => egui::Color32::from_rgb(230, 210, 252),
-        MapTheme::Ghost => egui::Color32::from_rgb(230, 238, 245),
-        MapTheme::Akira => egui::Color32::from_rgb(180, 245, 255),
-        MapTheme::Lunar => egui::Color32::from_rgb(205, 220, 240),
-        MapTheme::Mars => egui::Color32::from_rgb(245, 215, 180),
-        MapTheme::MarsDark => egui::Color32::from_rgb(255, 100, 100),
-    }
+    egui::Color32::from_rgb(187, 247, 208)
 }
 
 // ── ADS-B flight category colours ────────────────────────────────────────────

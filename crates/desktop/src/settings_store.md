@@ -31,7 +31,7 @@ Persists the desktop app's local configuration so it survives restarts. That now
 |-----------|---------|------------------|
 | `model.rs` | Settings loading is cheap enough to use at startup and returns executable-directory defaults when unset | Making settings resolution expensive or removing the default asset-root fallback |
 | `factal_settings.rs` | Saving an empty key clears the on-disk value and blank path fields revert to auto-detect/default behavior | Changing clear semantics or making blank path fields invalid |
-| `camera_registry.rs` | Project Eyes On is disabled by default; country codes are blank or ISO-like and page counts stay within `1..=5` | Enabling network discovery by default or removing bounds |
+| `camera_registry.rs` | Project Eyes On is disabled by default; country codes are blank or ISO-like and fresh configurations use the bounded five-page scan | Enabling network discovery by default or removing bounds |
 | Map renderers | Older files retain their multiplier-derived visual width when it is already visible; new physical widths stay within the 1–16 px range | Dropping the legacy fallback or allowing invalid pixel widths through normalization |
 
 ## Notes
