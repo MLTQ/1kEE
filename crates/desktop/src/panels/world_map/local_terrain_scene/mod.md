@@ -138,3 +138,20 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 - Earth contour requests use `prefetch_radius_for_zoom`, which tightens the
   envelope for the network-sourced tiers. Moon and Mars keep the full radius —
   they have their own spec ladders and local sources.
+
+### Contour budget selection
+
+- **Does**: `select_contours_within_budget` trims the culled set to
+  `MAX_CONTOUR_RENDER_POINTS` by keeping the longest contours, then the caller
+  restores elevation order for drawing.
+- **Interacts with**: `draw_contour_stack`, and mirrors the length-ordered
+  decimation in `contour_asset::query_local_contours_batch`.
+- **Rationale**: A 3DEP tile is ~4.3 M points, so the frame budget is always
+  binding at deep zoom and *what* it keeps matters more than how much. Length is
+  a good proxy for visual importance — the longest 10% of contours hold ~73% of
+  all points — and it is stable as the camera moves, which is what stops
+  contours flickering in and out at the budget boundary.
+- The AABB cull margin is `OBLIQUE_VISIBLE_EXTENT_FACTOR`, not the nominal half
+  extent. A tighter margin culls terrain that is still on screen, which no cache
+  or tile size can compensate for.
+
