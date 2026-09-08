@@ -13,8 +13,10 @@ pub mod gdal;
 pub mod zoom; // pub so ui_overlays can access lunar_spec_for_zoom
 
 pub use zoom::{
+    OBLIQUE_VISIBLE_EXTENT_FACTOR, THREEDEP_PREFETCH_RADIUS,
     bucket_radius_for_target_radius_miles, contour_interval_for_zoom, feature_budget_for_zoom,
-    half_extent_for_zoom, prefetch_radius_for_zoom, zoom_bucket_for_zoom,
+    half_extent_for_zoom, prefetch_radius_for_zoom, region_coverage_half_extent_deg,
+    zoom_bucket_for_zoom,
 };
 
 /// Half-extent in degrees for the lunar zoom spec at a given zoom level.
