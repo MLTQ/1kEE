@@ -14,7 +14,7 @@ pub mod zoom; // pub so ui_overlays can access lunar_spec_for_zoom
 
 pub use zoom::{
     bucket_radius_for_target_radius_miles, contour_interval_for_zoom, feature_budget_for_zoom,
-    half_extent_for_zoom, zoom_bucket_for_zoom,
+    half_extent_for_zoom, prefetch_radius_for_zoom, zoom_bucket_for_zoom,
 };
 
 /// Half-extent in degrees for the lunar zoom spec at a given zoom level.
@@ -132,7 +132,9 @@ pub struct LocalContourRegionState {
 pub struct FocusContourSpec {
     pub half_extent_deg: f32,
     pub raster_size: u32,
-    pub interval_m: i32,
+    /// Contour interval in metres. Fractional below one metre, which the
+    /// 3DEP tiers rely on.
+    pub interval_m: f32,
     pub simplify_step: usize,
     pub feature_budget: usize,
     pub zoom_bucket: i32,

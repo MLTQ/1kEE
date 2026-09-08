@@ -36,6 +36,20 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                 ui.checkbox(&mut model.show_reticle, "Reticle");
                 ui.checkbox(&mut model.fill_elevation, "Terrain fill");
                 {
+                    // 3DEP publishes only for the United States, and the drape
+                    // is a local-scene layer.
+                    let hillshade_available = model.globe_view.local_mode
+                        && model.active_body == crate::model::ActiveBody::Earth
+                        && model.settings_threedep_enabled;
+                    ui.add_enabled(
+                        hillshade_available,
+                        egui::Checkbox::new(&mut model.show_hillshade, "Hillshade (3DEP)"),
+                    )
+                    .on_disabled_hover_text(
+                        "Local Earth view with 3DEP enabled in Settings",
+                    );
+                }
+                {
                     let ships_enabled = !model.aisstream_api_key.is_empty();
                     ui.add_enabled(
                         ships_enabled,

@@ -74,6 +74,8 @@ pub struct AppModel {
     pub show_beam: bool,
     pub fill_elevation: bool,
     pub show_bathymetry: bool,
+    /// Server-rendered USGS 3DEP hillshade draped over the local terrain.
+    pub show_hillshade: bool,
     pub show_contours: bool,
     /// Saved multiplier used only when an older settings file has no physical
     /// pixel-width value. Keeping it preserves pre-slider visual output.
@@ -156,6 +158,8 @@ pub struct AppModel {
     pub settings_gdal_bin_dir: String,
     pub settings_osmium_bin_dir: String,
     pub settings_prefer_overpass: bool,
+    pub settings_threedep_enabled: bool,
+    pub settings_threedep_cache_budget_gb: f32,
     pub terrain_library_open: bool,
     pub city_filter: String,
     pub selected_city_ids: BTreeSet<String>,
@@ -371,6 +375,7 @@ impl AppModel {
             show_major_roads: false,
             show_minor_roads: false,
             show_water: false,
+            show_hillshade: false,
             show_beam: true,
             fill_elevation: false,
             show_bathymetry: true,
@@ -436,6 +441,8 @@ impl AppModel {
             settings_gdal_bin_dir: app_settings.gdal_bin_dir.unwrap_or_default(),
             settings_osmium_bin_dir: app_settings.osmium_bin_dir.unwrap_or_default(),
             settings_prefer_overpass: app_settings.prefer_overpass,
+            settings_threedep_enabled: app_settings.threedep_enabled,
+            settings_threedep_cache_budget_gb: app_settings.threedep_cache_budget_gb,
             terrain_library_open: false,
             city_filter: String::new(),
             selected_city_ids: BTreeSet::new(),
@@ -613,6 +620,10 @@ impl AppModel {
             prefer_overpass: self.settings_prefer_overpass,
             contour_stroke_scale: self.legacy_contour_stroke_scale,
             contour_stroke_width_px: self.contour_stroke_width_px,
+            threedep_enabled: self.settings_threedep_enabled,
+            threedep_cache_budget_gb: settings_store::normalize_threedep_cache_budget_gb(
+                self.settings_threedep_cache_budget_gb,
+            ),
         };
         settings_store::save_app_settings(&settings)
     }
@@ -633,6 +644,9 @@ impl AppModel {
         self.settings_gdal_bin_dir = settings.gdal_bin_dir.unwrap_or_default();
         self.settings_osmium_bin_dir = settings.osmium_bin_dir.unwrap_or_default();
         self.settings_prefer_overpass = settings.prefer_overpass;
+        self.settings_threedep_enabled = settings.threedep_enabled;
+        self.settings_threedep_cache_budget_gb =
+            settings_store::normalize_threedep_cache_budget_gb(settings.threedep_cache_budget_gb);
         self.legacy_contour_stroke_scale =
             settings_store::normalize_contour_stroke_scale(settings.contour_stroke_scale);
         self.contour_stroke_width_px = settings.contour_stroke_width_px;

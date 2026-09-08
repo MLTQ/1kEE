@@ -27,3 +27,15 @@ Renders the app settings window for the desktop app. This file is the user-facin
 - Fresh configurations default to all five bounded pages; the UI explains that
   a one-page scan contains only a handful of directory listings.
 - Asset/data/derived/SRTM/planet/GDAL overrides are intentionally optional; leaving them blank means “use the executable folder defaults and PATH-based GDAL tools.”
+
+### USGS 3DEP section
+
+- **Does**: Toggles on-demand 3DEP 1 m streaming and sets the chunk cache
+  ceiling, with a live readout of how much of that budget is in use.
+- **Interacts with**: `settings_store::threedep_enabled`,
+  `settings_store::threedep_cache_budget_gb`, `threedep::cache_bytes`.
+- **Rationale**: The feature performs live network requests and consumes disk,
+  so both need to be visible and adjustable rather than implicit. The budget is
+  a ceiling on cached elevation chunks only — contours already extracted from
+  them are kept in the focus cache and survive eviction.
+

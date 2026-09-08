@@ -15,12 +15,19 @@ pub(super) fn draw_legend(
         crate::model::ActiveBody::Mars => super::super::srtm_focus_cache::zoom::mars_spec_for_zoom(render_zoom).interval_m,
         crate::model::ActiveBody::Earth => srtm_focus_cache::contour_interval_for_zoom(render_zoom),
     };
+    // Sub-metre 3DEP tiers need a decimal; whole-metre tiers keep their
+    // existing integer legend text.
+    let interval_label = if (interval_m - interval_m.round()).abs() < f32::EPSILON {
+        format!("{}", interval_m.round() as i64)
+    } else {
+        format!("{interval_m}")
+    };
     let half_extent_km = visual_half_extent_for_zoom(render_zoom) * 111.32;
     painter.text(
         egui::pos2(rect.left() + 24.0, rect.bottom() - 86.0),
         egui::Align2::LEFT_TOP,
         format!(
-            "{title}\nFIXED OBLIQUE CAMERA\n{interval_m}M CONTOURS · {half_extent_km:.0}KM HALF-SPAN"
+            "{title}\nFIXED OBLIQUE CAMERA\n{interval_label}M CONTOURS · {half_extent_km:.0}KM HALF-SPAN"
         ),
         egui::FontId::monospace(12.0),
         theme::text_muted(),

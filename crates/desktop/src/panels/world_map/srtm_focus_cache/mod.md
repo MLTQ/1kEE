@@ -61,3 +61,11 @@ on-demand Earth, lunar, and Mars tile builds.
 - Latitude coverage and ocean coverage are separate exclusions: the former is a
   static per-body bound (lunar/Mars), the latter is discovered per bucket from
   the SRTM source layout.
+- Earth zoom buckets 7 and above source USGS 3DEP 1 m rather than SRTM, because
+  SRTM's ~30 m posting cannot support their sub-5 m intervals. Those buckets
+  need no local source root; they are gated on published 3DEP coverage instead,
+  and a bucket with no 1 m source joins `ready_buckets` for the same reason an
+  ocean bucket does. `FocusContourSpec::interval_m` is `f32` so those tiers can
+  ask for sub-metre intervals.
+- 3DEP tiles cost a network request each, so `prefetch_radius_for_zoom` tightens
+  their envelope to a 5×5 grid instead of the local SRTM tiers' 13×13.

@@ -92,7 +92,10 @@ pub fn apply_interaction(
     if scroll_y.abs() > f32::EPSILON {
         if view.local_mode {
             view.local_zoom = (view.local_zoom * (scroll_y * 0.0055).exp())
-                .clamp(local_terrain_scene::LOCAL_ZOOM_MIN, 60.0);
+                .clamp(
+                    local_terrain_scene::LOCAL_ZOOM_MIN,
+                    local_terrain_scene::LOCAL_ZOOM_MAX,
+                );
         } else {
             view.zoom = (view.zoom * (scroll_y * 0.0055).exp()).clamp(0.6, 50.0);
         }

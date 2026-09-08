@@ -75,3 +75,13 @@ SQLite assets immediately.
   all build slots; a per-body gate also pauses the next outer-ring batch after
   a failure. A successful build or manual cache reset clears the gate, while a
   manifest hit clears the matching tile's cooldown.
+
+## 3DEP routing
+
+`ensure_bucket_asset` dispatches on `zoom::spec_uses_threedep`. SRTM buckets keep
+their existing source-root requirement and ocean memo; 3DEP buckets skip both and
+are gated on `threedep::coverage_at` instead. A resolved negative probe is
+recorded in a separate uncovered-tile memo — kept apart from the SRTM one, which
+is invalidated per source root, because 3DEP coverage is a property of the
+service rather than a local directory. An unprobed bucket stays outstanding so it
+is retried once its probe lands.

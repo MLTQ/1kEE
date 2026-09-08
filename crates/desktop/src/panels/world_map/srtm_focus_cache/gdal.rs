@@ -895,7 +895,7 @@ pub fn build_focus_contours(
         return None;
     }
 
-    run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m, Some(-32768)).ok()?;
+    run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m, Some(-32768.0)).ok()?;
     import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path).ok()?;
 
     // Piggyback: extract 0m coastline from the same warped TIF while we have it.
@@ -909,6 +909,58 @@ pub fn build_focus_contours(
     let _ = fs::remove_file(&tmp_coast_gpkg_path);
 
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
+    Some(())
+}
+
+/// Build one contour tile from USGS 3DEP 1 m bare-earth elevation.
+///
+/// Unlike the SRTM path there is no local tile mosaic to warp: the image
+/// service clips and resamples server-side, so a whole tile arrives as one
+/// GeoTIFF already in the requested bounds and pixel size. Only the resulting
+/// contour geometry is kept; the downloaded raster is a build temporary.
+pub fn build_threedep_contours(
+    cache_root: &Path,
+    cache_db_path: &Path,
+    tile: TileKey,
+    bounds: GeoBounds,
+    spec: FocusContourSpec,
+) -> Option<()> {
+    if shutdown_requested().load(Ordering::Relaxed) {
+        return None;
+    }
+
+    let (tmp_tif_path, tmp_gpkg_path) = temp_tile_paths(cache_root, tile);
+    cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
+    if let Some(parent) = tmp_tif_path.parent() {
+        fs::create_dir_all(parent).ok()?;
+    }
+
+    let fetched = crate::threedep::fetch_tile_raster(
+        bounds.min_lat,
+        bounds.min_lon,
+        bounds.max_lat,
+        bounds.max_lon,
+        spec.raster_size,
+        &tmp_tif_path,
+    );
+    if !fetched {
+        cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
+        return None;
+    }
+
+    if shutdown_requested().load(Ordering::Relaxed) {
+        cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
+        return None;
+    }
+
+    let nodata = crate::threedep::nodata_sentinel();
+    if run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m, Some(nodata)).is_err() {
+        cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
+        return None;
+    }
+    let imported = import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path);
+    cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
+    imported.ok()?;
     Some(())
 }
 
@@ -975,7 +1027,7 @@ pub fn build_lunar_contour_tile(
         return None;
     }
 
-    run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m, Some(-32768)).ok()?;
+    run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m, Some(-32768.0)).ok()?;
     import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path).ok()?;
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
     Some(())
@@ -1050,7 +1102,7 @@ fn build_mars_mola_contour_tile(
         return None;
     }
 
-    run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m, Some(-32767)).ok()?;
+    run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m, Some(-32767.0)).ok()?;
     import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path).ok()?;
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
     Some(())
@@ -1134,7 +1186,7 @@ pub fn build_mars_contour_tile(
         return None;
     }
 
-    run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m, Some(-32767)).ok()?;
+    run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m, Some(-32767.0)).ok()?;
     import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path).ok()?;
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
     Some(())
@@ -1208,7 +1260,18 @@ fn run_gdalwarp(
     run_command(command, "gdalwarp")
 }
 
-fn run_gdal_contour(input_path: &Path, output_path: &Path, interval_m: i32, nodata: Option<i32>) -> std::io::Result<()> {
+/// Format a float for a GDAL command line. Whole values keep their historical
+/// integer form so existing tiers emit byte-identical commands; the 3DEP tiers
+/// add the fractional form their sub-metre intervals need.
+fn format_gdal_number(interval_m: f32) -> String {
+    if (interval_m - interval_m.round()).abs() < f32::EPSILON {
+        format!("{}", interval_m.round() as i64)
+    } else {
+        format!("{interval_m}")
+    }
+}
+
+fn run_gdal_contour(input_path: &Path, output_path: &Path, interval_m: f32, nodata: Option<f32>) -> std::io::Result<()> {
     let mut command = Command::new(gdal_tool_path("gdal_contour"));
     command.args([
         "-q",
@@ -1217,10 +1280,10 @@ fn run_gdal_contour(input_path: &Path, output_path: &Path, interval_m: i32, noda
         "-a",
         "elevation_m",
         "-i",
-        &interval_m.to_string(),
+        &format_gdal_number(interval_m),
     ]);
     if let Some(nd) = nodata {
-        command.args(["-snodata", &nd.to_string()]);
+        command.args(["-snodata", &format_gdal_number(nd)]);
     }
     command.args([
         "-nln",
@@ -1255,6 +1318,66 @@ fn run_gdal_coastline_0m(input_path: &Path, output_path: &Path) -> std::io::Resu
 mod tests {
     use super::*;
     use crate::model::GeoPoint;
+
+    /// End-to-end check of the deep-zoom path: fetch a 3DEP tile from the live
+    /// service, contour it, and import the result into a real cache database.
+    /// Ignored by default because it needs the network.
+    #[test]
+    #[ignore = "hits the live USGS 3DEP service"]
+    fn live_threedep_tile_builds_contours_into_the_cache() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after Unix epoch")
+            .as_nanos();
+        let cache_root = std::env::temp_dir().join(format!(
+            "1kee-threedep-build-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&cache_root).expect("temporary cache root");
+        let cache_db_path = cache_root.join("threedep_focus_cache.sqlite");
+        super::super::db::open_cache_db(&cache_db_path).expect("cache schema");
+
+        // Deepest tier, over Front Range relief with 1 m coverage.
+        let spec = super::super::zoom::spec_for_zoom(50.0);
+        assert!(super::super::zoom::spec_uses_threedep(&spec));
+        let tile = TileKey {
+            zoom_bucket: spec.zoom_bucket,
+            lat_bucket: 0,
+            lon_bucket: 0,
+        };
+        let bounds = GeoBounds::around(
+            GeoPoint {
+                lat: 40.020,
+                lon: -105.290,
+            },
+            spec.half_extent_deg,
+        );
+
+        assert!(
+            build_threedep_contours(&cache_root, &cache_db_path, tile, bounds, spec).is_some(),
+            "3DEP contour build failed"
+        );
+
+        let connection =
+            super::super::db::open_cache_db_read_only(&cache_db_path).expect("read cache");
+        let manifest = super::super::db::contour_manifest_window(
+            &connection,
+            spec.zoom_bucket,
+            -1,
+            1,
+            -1,
+            1,
+        )
+        .expect("manifest window");
+        let count = manifest.get(&(0, 0)).copied().expect("tile in manifest");
+        assert!(
+            count > 100,
+            "expected sub-metre contours over real relief, got {count}"
+        );
+
+        drop(connection);
+        let _ = fs::remove_dir_all(&cache_root);
+    }
 
     /// SRTM ships land cells only, so source presence is what separates a
     /// bucket that is still loading from open ocean that never will.

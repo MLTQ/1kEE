@@ -40,6 +40,7 @@ Detects the locally available terrain datasets for the app, including repository
 ## Notes
 - This module intentionally stops at inventory. Real terrain ingestion should consume preprocessed outputs rather than opening the raw source rasters directly from the UI thread.
 - The current preferred runtime path is streamed SRTM land tiles with GEBCO fallback for everywhere else.
+- Below the SRTM resolution floor the deep local zoom tiers source USGS 3DEP 1 m over the network instead; see `threedep.md`. Its chunk cache lives under the derived root this module resolves, so `find_derived_root` is now on that path too.
 - The executable directory is now the default asset root, and the app will create `Data/` and `Derived/` there if they do not already exist.
 - External-drive assumptions have been removed from automatic discovery; anything outside the asset root should now be configured explicitly in the app settings UI.
 - Configured path overrides are now forgiving: if the operator points `Data Root` or `Derived Root` at a parent folder, discovery will still prefer the nested `Data/` or `Derived/` child when present, and SRTM root resolution now searches for `srtm_gl1/SRTM_GL1_srtm` under that configured folder instead of treating the parent as the tile root itself.

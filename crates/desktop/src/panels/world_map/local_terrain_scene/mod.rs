@@ -1,6 +1,7 @@
 pub(super) mod deflock_layer;
 pub(super) mod dissolve;
 pub(super) mod geography;
+pub(crate) mod hillshade_layer;
 pub(super) mod markers;
 pub(super) mod projection;
 pub(super) mod ui_overlays;
@@ -54,6 +55,9 @@ pub(super) const BASE_VERTICAL_EXAGGERATION: f32 = 2.1;
 
 // Minimum local zoom value — allows zooming out to ~500 km half-span.
 pub const LOCAL_ZOOM_MIN: f32 = 1.0;
+/// Upper end of the local zoom range. The visual scale and the contour tile
+/// spec now both run to this value.
+pub const LOCAL_ZOOM_MAX: f32 = 60.0;
 
 #[derive(Clone, Copy)]
 pub(super) struct LocalLayout {
@@ -113,6 +117,12 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 
     let viewport_center = model.globe_view.local_center;
     let render_zoom = local_render_zoom(model.globe_view.local_zoom);
+    // The 3DEP tiers fetch each tile over the network, so they take a smaller
+    // envelope than the local SRTM tiers' 13x13 grid.
+    let prefetch_radius =
+        srtm_focus_cache::prefetch_radius_for_zoom(render_zoom, LOCAL_CONTOUR_PREFETCH_RADIUS);
+    let build_radius =
+        srtm_focus_cache::prefetch_radius_for_zoom(render_zoom, LOCAL_CONTOUR_BUILD_RADIUS);
 
     let contour_load = match model.active_body {
         crate::model::ActiveBody::Moon => contour_asset::load_lunar_region_for_view(
@@ -138,8 +148,8 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             focus,
             viewport_center,
             render_zoom,
-            LOCAL_CONTOUR_PREFETCH_RADIUS,
-            LOCAL_CONTOUR_BUILD_RADIUS,
+            prefetch_radius,
+            build_radius,
             painter.ctx().clone(),
         ),
     };
@@ -188,7 +198,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                     &model.globe_view,
                     viewport_center,
                     render_zoom,
-                    LOCAL_CONTOUR_BUILD_RADIUS,
+                    build_radius,
                     time,
                     &contour_load.ready_buckets,
                     None,
@@ -235,6 +245,25 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     } else {
         None
     };
+
+    // ── 3DEP hillshade drape (between fill and surface contours) ─────────────
+    // Sits above the fill so its relief detail is visible, and below the
+    // contour pass so the lines stay readable over it.
+    if model.show_hillshade && model.active_body == crate::model::ActiveBody::Earth {
+        let half_extent_deg = visual_half_extent_for_zoom(model.globe_view.local_zoom);
+        let km_per_deg_lat = 111.32f32;
+        let km_per_deg_lon =
+            km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
+        hillshade_layer::draw_hillshade(
+            painter,
+            &layout,
+            &model.globe_view,
+            viewport_center,
+            elevation_surface.as_ref(),
+            (half_extent_deg * km_per_deg_lon).max(1.0),
+            (half_extent_deg * km_per_deg_lat).max(1.0),
+        );
+    }
 
     // ── Surface contour pass (drawn after fill so lines on top are visible) ───
     if !contours_slice.is_empty() && model.show_contours {
@@ -793,8 +822,8 @@ pub fn paint_transition_overlay(
         focus,
         viewport_center,
         render_zoom,
-        LOCAL_CONTOUR_PREFETCH_RADIUS,
-        LOCAL_CONTOUR_BUILD_RADIUS,
+        srtm_focus_cache::prefetch_radius_for_zoom(render_zoom, LOCAL_CONTOUR_PREFETCH_RADIUS),
+        srtm_focus_cache::prefetch_radius_for_zoom(render_zoom, LOCAL_CONTOUR_BUILD_RADIUS),
         painter.ctx().clone(),
     )
     .contours
@@ -845,17 +874,18 @@ pub fn has_pending_cache(model: &AppModel) -> bool {
 }
 
 pub fn local_render_zoom(local_zoom: f32) -> f32 {
-    // local_zoom lives in [LOCAL_ZOOM_MIN, 60].
-    // Tile-spec resolution is capped at 20 (finest bucket); above 20 only
-    // the visual scale continues to change.  Below ~4 the coarsest bucket
-    // (zoom_bucket=0, half_extent=3.6°) handles the wide-area view.
-    local_zoom.clamp(LOCAL_ZOOM_MIN, 20.0)
+    // local_zoom lives in [LOCAL_ZOOM_MIN, 60] and now drives the tile spec
+    // across its whole range: the 3DEP tiers (zoom_bucket >= 7) continue the
+    // ladder past the point where SRTM stops resolving anything new, so the
+    // former clamp at 20 would have frozen tile detail two thirds of the way
+    // down the zoom range.  Below ~4 the coarsest bucket (zoom_bucket=0,
+    // half_extent=3.6°) still handles the wide-area view.
+    local_zoom.clamp(LOCAL_ZOOM_MIN, LOCAL_ZOOM_MAX)
 }
 
 pub fn visual_half_extent_for_zoom(view_zoom: f32) -> f32 {
     // Continuous logarithmic progression from widest (~500 km) to narrowest (~0.6 km).
-    // local_zoom ∈ [1, 20] also shifts the tile-spec bucket; above 20 only
-    // the visual scale changes (finest tiles stay loaded).
+    // local_zoom shifts the tile-spec bucket across this whole range.
     const KNOTS: &[(f32, f32)] = &[
         (1.0, 4.50),   // ~500 km
         (2.0, 2.80),   // ~311 km
@@ -872,7 +902,7 @@ pub fn visual_half_extent_for_zoom(view_zoom: f32) -> f32 {
         (60.0, 0.005), // ~0.6 km
     ];
 
-    let zoom = view_zoom.clamp(LOCAL_ZOOM_MIN, 60.0);
+    let zoom = view_zoom.clamp(LOCAL_ZOOM_MIN, LOCAL_ZOOM_MAX);
     for window in KNOTS.windows(2) {
         let (start_zoom, start_extent) = window[0];
         let (end_zoom, end_extent) = window[1];

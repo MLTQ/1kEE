@@ -21,6 +21,12 @@ pub(crate) const MIN_CONTOUR_STROKE_WIDTH_PX: f32 = 1.0;
 /// former multiplier without changing any legacy saved appearance.
 pub(crate) const MAX_CONTOUR_STROKE_WIDTH_PX: f32 = 16.0;
 pub(crate) const MAX_EYES_ON_MAX_PAGES: u8 = 5;
+/// Default ceiling for the on-demand USGS 3DEP 1 m chunk cache. The full 1 m
+/// holding is hundreds of terabytes, so the cache is bounded and evicts
+/// least-recently-used chunks rather than growing without limit.
+pub(crate) const DEFAULT_THREEDEP_CACHE_BUDGET_GB: f32 = 20.0;
+pub(crate) const MIN_THREEDEP_CACHE_BUDGET_GB: f32 = 1.0;
+pub(crate) const MAX_THREEDEP_CACHE_BUDGET_GB: f32 = 512.0;
 pub(crate) const DEFAULT_EYES_ON_MAX_PAGES: u8 = MAX_EYES_ON_MAX_PAGES;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -73,6 +79,14 @@ pub struct AppSettings {
     /// `contour_stroke_scale` as a backwards-compatible legacy fallback.
     #[serde(default)]
     pub contour_stroke_width_px: Option<f32>,
+    /// Enables on-demand USGS 3DEP 1 m elevation fetches for the deep local
+    /// zoom tiers. Only requests data for the small area under the viewport,
+    /// and only inside the United States where 1 m source exists.
+    #[serde(default = "default_threedep_enabled")]
+    pub threedep_enabled: bool,
+    /// Ceiling in gigabytes for the cached 3DEP chunk store.
+    #[serde(default = "default_threedep_cache_budget_gb")]
+    pub threedep_cache_budget_gb: f32,
 }
 
 impl Default for AppSettings {
@@ -95,6 +109,8 @@ impl Default for AppSettings {
             prefer_overpass: false,
             contour_stroke_scale: DEFAULT_CONTOUR_STROKE_SCALE,
             contour_stroke_width_px: None,
+            threedep_enabled: true,
+            threedep_cache_budget_gb: DEFAULT_THREEDEP_CACHE_BUDGET_GB,
         }
     }
 }
@@ -105,6 +121,30 @@ fn default_contour_stroke_scale() -> f32 {
 
 fn default_eyes_on_max_pages() -> u8 {
     DEFAULT_EYES_ON_MAX_PAGES
+}
+
+fn default_threedep_enabled() -> bool {
+    true
+}
+
+fn default_threedep_cache_budget_gb() -> f32 {
+    DEFAULT_THREEDEP_CACHE_BUDGET_GB
+}
+
+pub(crate) fn normalize_threedep_cache_budget_gb(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(MIN_THREEDEP_CACHE_BUDGET_GB, MAX_THREEDEP_CACHE_BUDGET_GB)
+    } else {
+        DEFAULT_THREEDEP_CACHE_BUDGET_GB
+    }
+}
+
+pub fn threedep_enabled() -> bool {
+    load_app_settings().threedep_enabled
+}
+
+pub fn threedep_cache_budget_gb() -> f32 {
+    normalize_threedep_cache_budget_gb(load_app_settings().threedep_cache_budget_gb)
 }
 
 pub(crate) fn normalize_eyes_on_country_code(value: &str) -> String {
@@ -331,6 +371,8 @@ fn normalize_settings(mut settings: AppSettings) -> AppSettings {
     settings.derived_root =
         normalize_named_root_owned(settings.derived_root, &["Derived", "derived"]);
     settings.srtm_root = normalize_srtm_root_owned(settings.srtm_root);
+    settings.threedep_cache_budget_gb =
+        normalize_threedep_cache_budget_gb(settings.threedep_cache_budget_gb);
     settings.planet_path = normalize_optional_owned(settings.planet_path);
     settings.gdal_bin_dir = normalize_optional_owned(settings.gdal_bin_dir);
     settings.contour_stroke_scale = normalize_contour_stroke_scale(settings.contour_stroke_scale);
