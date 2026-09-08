@@ -149,3 +149,51 @@ When the full SRTM mirror is available:
 - SRTM is higher resolution over land but should be treated as a second-stage enhancement, not the primary global source.
 - The TID grid should be preserved for later provenance overlays or confidence masking.
 - `gdal_contour` emitted repeated GeoPackage RTree warnings during generation, but the resulting files are valid and queryable with `ogrinfo`.
+
+## USGS 3DEP 1 m (on demand, not mirrored)
+
+The 3DEP 1 m bare-earth holding is hundreds of terabytes — a single state runs
+500 GB to 1 TB — so it is deliberately **not** part of the `Data/` mirror. It is
+consumed live from the dynamic image service:
+
+`https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer`
+
+### Why this rather than the S3 COGs
+
+`s3://prd-tnm/StagedProducts/Elevation/1m/Projects/` holds the raw source COGs
+and is readable through `/vsicurl/` range requests, but the tiles are organised
+per lidar project in mixed UTM zones. Using them means solving project discovery
+and cross-projection mosaicking locally. The image service already does both,
+server-side, for an arbitrary bounding box.
+
+### What is fetched, and what is kept
+
+| Path | Request | Persisted product |
+|---|---|---|
+| Deep-zoom contours | One `exportImage` clip per contour tile at the tile's raster size | Contour geometry in `srtm_focus_cache.sqlite`; the GeoTIFF is deleted |
+| Elevation sampling | 0.02° chunks, cached as DEFLATE Float32 COGs | `Derived/terrain/3dep_1m/`, LRU-evicted against a configurable budget |
+| Hillshade | `exportImage` with the `Hillshade Multidirectional` rendering rule | Nothing on disk; an in-memory texture |
+
+The contour path is the important one: contours are perhaps two orders of
+magnitude smaller than the raster they came from, so the durable cost of visiting
+an area is contour geometry, not elevation data.
+
+### Measured service behaviour
+
+- `exportImage` returns HTTP 500 once the encoded response passes roughly 32 MB.
+  2400×2400 Float32 (~22 MB) is comfortably inside that; 3000×3000 is not.
+- Failures come back as an HTML page, not an error status, so responses are
+  validated by magic number.
+- The catalog `query` endpoint reports the finest available pixel size under a
+  point, which is a free availability probe. `LowPS: 1` means 1 m source exists.
+- Coverage is wider than expected — rural Nevada is 1 m — but Alaska is mostly
+  3 m or coarser and nothing outside the US is served.
+
+### Zoom tiers
+
+Buckets 0–6 keep their SRTM sources unchanged. Buckets 7–10 are new and source
+3DEP, extending the ladder from 0.16° half-extent down to 0.006° (~1.3 km
+across) at a 0.5 m interval. Before this, `local_render_zoom` clamped the tile
+spec at zoom 20 while the visual scale kept going to 60, so everything below
+~19 km across was interpolated from a 40 m/px raster.
+

@@ -1,7 +1,8 @@
 use super::gdal::{
     bounds_have_srtm_source, build_focus_contours, build_lunar_contour_tile,
-    build_mars_contour_tile, shutdown_requested,
+    build_mars_contour_tile, build_threedep_contours, shutdown_requested,
 };
+use super::zoom::spec_uses_threedep;
 use super::{FocusContourAsset, FocusContourSpec, GeoBounds, TileKey};
 use crate::model::GeoPoint;
 use std::collections::{HashMap, HashSet};
@@ -104,13 +105,38 @@ fn sourceless_tiles() -> &'static Mutex<SourcelessTiles> {
     SOURCELESS.get_or_init(|| Mutex::new(SourcelessTiles::default()))
 }
 
-/// Tiles known to have no SRTM source. Region state treats them as resolved
-/// terrain rather than tiles that are still loading.
+/// Deep-tier buckets where 3DEP publishes no 1 m source. Kept apart from the
+/// SRTM memo because that one is invalidated per source root, while 3DEP
+/// coverage is a property of the service rather than a local directory.
+fn threedep_uncovered_tiles() -> &'static Mutex<HashSet<TileKey>> {
+    static UNCOVERED: OnceLock<Mutex<HashSet<TileKey>>> = OnceLock::new();
+    UNCOVERED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Record a deep-tier bucket that 3DEP cannot serve at 1 m. Only a resolved
+/// negative probe reaches here; an unprobed bucket stays outstanding so it is
+/// retried once its probe lands.
+fn record_threedep_uncovered(tile: TileKey) {
+    if let Ok(mut guard) = threedep_uncovered_tiles().lock() {
+        if guard.len() >= MAX_TRACKED_SOURCELESS_TILES {
+            guard.clear();
+        }
+        guard.insert(tile);
+    }
+}
+
+/// Tiles known to have no source terrain, from either SRTM's local mirror or
+/// 3DEP's published coverage. Region state treats them as resolved terrain
+/// rather than tiles that are still loading.
 pub fn sourceless_tile_set() -> HashSet<TileKey> {
-    sourceless_tiles()
+    let mut tiles = sourceless_tiles()
         .lock()
         .map(|guard| guard.tiles.clone())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Ok(guard) = threedep_uncovered_tiles().lock() {
+        tiles.extend(guard.iter().copied());
+    }
+    tiles
 }
 
 /// Memoized "no source file overlaps this bucket" check.
@@ -145,6 +171,9 @@ fn tile_lacks_srtm_source(srtm_root: &Path, tile: TileKey, bounds: GeoBounds) ->
 /// after a user fixes storage or source availability, so a bucket that was
 /// sourceless because its volume was unmounted must be re-checked.
 pub fn clear_sourceless_tiles() {
+    if let Ok(mut guard) = threedep_uncovered_tiles().lock() {
+        guard.clear();
+    }
     if let Ok(mut guard) = sourceless_tiles().lock() {
         guard.root = None;
         guard.tiles.clear();
@@ -329,20 +358,41 @@ pub fn ensure_bucket_asset(
         return None;
     }
 
+    // The deep tiers source USGS 3DEP instead of SRTM, whose ~30 m posting
+    // cannot support their sub-5 m intervals.
+    let uses_threedep = spec_uses_threedep(&spec);
+
     // A bucket over open ocean has no SRTM source file to contour. That is a
     // permanent property of the terrain, not a build failure: schedule nothing,
     // record no cooldown, and let region state report the tile as resolved so
     // its loading pulse stops instead of cycling forever.
-    if srtm_root.is_some_and(|root| tile_lacks_srtm_source(root, tile, bounds)) {
+    if !uses_threedep && srtm_root.is_some_and(|root| tile_lacks_srtm_source(root, tile, bounds)) {
         return None;
+    }
+
+    // 3DEP only publishes 1 m coverage for parts of the United States. An
+    // uncovered bucket is the same kind of permanent absence as open ocean, and
+    // an unprobed one resolves on a later frame once its probe lands.
+    if uses_threedep {
+        match crate::threedep::coverage_at(bucket_center) {
+            crate::threedep::Coverage::Fine => {}
+            crate::threedep::Coverage::Coarse => {
+                record_threedep_uncovered(tile);
+                return None;
+            }
+            // Probe still in flight: leave the bucket outstanding so the next
+            // frame after it resolves can schedule the build.
+            crate::threedep::Coverage::Unknown => return None,
+        }
     }
 
     if !retry_gate_allows(failed_build_gate()) || !retry_allowed(failed_builds(), tile) {
         return None;
     }
 
-    // Cache miss — need SRTM root to build on-demand; skip silently if unavailable.
-    let srtm_root = srtm_root?;
+    // Cache miss — SRTM tiers need their root to build on-demand; skip silently
+    // if unavailable. 3DEP tiers stream their source and need no local root.
+    let srtm_root = if uses_threedep { None } else { Some(srtm_root?) };
 
     if is_pending(tile) {
         return None;
@@ -360,13 +410,17 @@ pub fn ensure_bucket_asset(
     }
     drop(guard);
 
-    let srtm_root = srtm_root.to_path_buf();
+    let srtm_root = srtm_root.map(|root| root.to_path_buf());
     let cache_root = cache_root.to_path_buf();
     let cache_db_path = cache_db_path.to_path_buf();
     std::thread::spawn(move || {
-        if build_focus_contours(&srtm_root, &cache_root, &cache_db_path, tile, bounds, spec)
-            .is_some()
-        {
+        let built = match srtm_root.as_deref() {
+            Some(root) => {
+                build_focus_contours(root, &cache_root, &cache_db_path, tile, bounds, spec)
+            }
+            None => build_threedep_contours(&cache_root, &cache_db_path, tile, bounds, spec),
+        };
+        if built.is_some() {
             bump_manifest_revision();
             clear_failed_build(failed_builds(), tile);
             clear_failed_build_gate(failed_build_gate());

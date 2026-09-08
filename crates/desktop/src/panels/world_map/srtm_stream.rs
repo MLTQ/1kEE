@@ -56,6 +56,13 @@ pub fn sample_normalized(selected_root: Option<&Path>, point: GeoPoint) -> Optio
 }
 
 pub fn sample_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> Option<f32> {
+    // Prefer 1 m 3DEP where a chunk is already cached. This never blocks on a
+    // download: an uncached chunk is fetched in the background and SRTM answers
+    // this call, so layer builders keep their current latency and pick up the
+    // finer source on a later rebuild.
+    if let Some(elevation) = peek_threedep_elevation_m(selected_root, point) {
+        return Some(elevation);
+    }
     let root = terrain_assets::find_srtm_root(selected_root)?;
     let path = tile_path(&root, point);
 
@@ -107,6 +114,9 @@ pub fn sample_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> Opti
 /// GDAL. Local marker paint uses this path, preserving the blocking sampler
 /// above for background layer builders that require an exact elevation.
 pub fn peek_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> Option<f32> {
+    if let Some(elevation) = peek_threedep_elevation_m(selected_root, point) {
+        return Some(elevation);
+    }
     let root = terrain_assets::find_srtm_root(selected_root)?;
     let path = tile_path(&root, point);
     let mut cache = tile_cache().lock().ok()?;
@@ -119,6 +129,14 @@ pub fn peek_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> Option
     let value = cached.tile.sample_elevation_m(point);
     cache.tiles.insert(0, cached);
     Some(value)
+}
+
+/// Nonblocking 1 m 3DEP lookup, resolving the derived-asset root the chunk
+/// cache lives under. Returns `None` whenever 3DEP is disabled, unavailable
+/// here, or simply not cached yet.
+fn peek_threedep_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> Option<f32> {
+    let derived_root = terrain_assets::find_derived_root(selected_root)?;
+    crate::threedep::peek_elevation_m(&derived_root, point)
 }
 
 /// Start a deduplicated background SRTM tile load. The first local marker in
@@ -240,17 +258,18 @@ fn load_tile_via_gdal(src: &Path) -> Option<SrtmTile> {
 
     // gdal_translate -ot Int16 -of ENVI produces a .img raw file + .hdr header.
     // We use -of EHdr (ESRI BIL) which generates a .bil + .hdr pair instead and
-    // is more reliably available.  The output stem is the raw_path without
-    // extension so gdal_translate appends its own extensions.
-    let stem = raw_path.with_extension("");
-    let hdr_path = stem.with_extension("hdr");
-    let bil_path = stem.with_extension("bil");
+    // is more reliably available.  The driver writes the raw band to exactly
+    // the path it is given and derives the header by swapping the extension,
+    // so the output must be named `.bil`; an extensionless stem makes GDAL
+    // write an extensionless binary that the read below never finds.
+    let bil_path = raw_path.with_extension("bil");
+    let hdr_path = raw_path.with_extension("hdr");
 
     let gdal_translate = crate::settings_store::resolve_gdal_tool("gdal_translate");
     let status = std::process::Command::new(&gdal_translate)
         .args(["-q", "-ot", "Int16", "-of", "EHdr"])
         .arg(src)
-        .arg(&stem)
+        .arg(&bil_path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -316,6 +335,8 @@ fn load_tile_via_gdal(src: &Path) -> Option<SrtmTile> {
     }
     let _ = std::fs::remove_file(&hdr_path);
     let _ = std::fs::remove_file(&bil_path);
+    let _ = std::fs::remove_file(raw_path.with_extension("prj"));
+    let _ = std::fs::remove_file(bil_path.with_extension("bil.aux.xml"));
 
     Some(SrtmTile {
         width,

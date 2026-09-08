@@ -124,3 +124,17 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 - Local contour line projection is chunked in source/elevation order. Rayon
   still handles point projection, while egui submission stays serial and
   stops before work the existing point budget would never draw.
+
+### 3DEP deep zoom
+
+- **Does**: `local_render_zoom` no longer clamps the tile spec at 20. The 3DEP
+  tiers continue the ladder to `LOCAL_ZOOM_MAX`, so tile detail keeps improving
+  across the whole visual zoom range instead of freezing two thirds of the way
+  down it.
+- **Interacts with**: `srtm_focus_cache::zoom`, `hillshade_layer`.
+- **Rationale**: The visual scale already reached ~0.6 km across while contours
+  were still being derived at ~40 m/px from 30 m SRTM. Everything below the old
+  clamp was interpolation.
+- Earth contour requests use `prefetch_radius_for_zoom`, which tightens the
+  envelope for the network-sourced tiers. Moon and Mars keep the full radius —
+  they have their own spec ladders and local sources.

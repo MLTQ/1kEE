@@ -40,6 +40,14 @@ markers, while background layer builders can continue to request exact samples.
 
 ## Notes
 
+- Both sampling entry points now try USGS 3DEP 1 m first via
+  `threedep::peek_elevation_m`, which answers only from an already cached
+  chunk. SRTM remains the answer for this call whenever 3DEP is disabled,
+  unavailable, or not yet downloaded, so neither path gained blocking work.
+- `load_tile_via_gdal` passes an explicit `.bil` output path. The EHdr driver
+  writes its raw band to exactly the path given and derives the header by
+  swapping the extension, so an extensionless stem produced a binary the reader
+  never found and silently failed the fallback.
 - A marker uses the existing zero-elevation fallback only until its preload
   completes; the next repaint restores its exact terrain-relative position.
 - The loading set is intentionally shared with all marker requests and allows

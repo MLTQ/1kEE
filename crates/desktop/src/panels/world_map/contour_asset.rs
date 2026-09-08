@@ -87,6 +87,7 @@ pub fn blast_tile_caches() {
         }
     }
     gebco_depth_fill::clear();
+    super::local_terrain_scene::hillshade_layer::clear();
 }
 
 /// Whether the most recently selected local manifest window still needs tiles.

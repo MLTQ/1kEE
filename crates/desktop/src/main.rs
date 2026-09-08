@@ -22,6 +22,7 @@ mod submarine_cables;
 mod stellar_catalog;
 mod stellar_time;
 mod terrain_assets;
+mod threedep;
 mod terrain_precompute;
 mod theme;
 mod usgs_stream;

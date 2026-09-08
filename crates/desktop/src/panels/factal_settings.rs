@@ -581,6 +581,58 @@ fn tab_paths(ui: &mut egui::Ui, model: &mut AppModel) {
              and a local planet file are available.  Faster for explored areas; \
              requires internet.",
         );
+
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(4.0);
+    ui.strong("USGS 3DEP 1 m Elevation");
+    ui.label(
+        egui::RichText::new(
+            "Streams 1 m bare-earth elevation for the deep local zoom tiers, on demand \
+             and only for the area in view.  United States coverage only; everywhere \
+             else keeps using SRTM.",
+        )
+        .small()
+        .color(theme::text_muted()),
+    );
+    ui.add_space(4.0);
+    ui.checkbox(
+        &mut model.settings_threedep_enabled,
+        "Enable 3DEP streaming",
+    )
+    .on_hover_text(
+        "Contours below the SRTM resolution floor, 1 m elevation for markers and \
+         layers, and the hillshade drape all depend on this.",
+    );
+
+    ui.horizontal(|ui| {
+        ui.label("Chunk cache budget");
+        ui.add(
+            egui::Slider::new(
+                &mut model.settings_threedep_cache_budget_gb,
+                settings_store::MIN_THREEDEP_CACHE_BUDGET_GB
+                    ..=settings_store::MAX_THREEDEP_CACHE_BUDGET_GB,
+            )
+            .suffix(" GB")
+            .logarithmic(true),
+        )
+        .on_hover_text(
+            "Ceiling for cached 1 m elevation chunks.  Least-recently-used chunks are \
+             evicted past this; contours already extracted from them are kept.",
+        );
+    });
+
+    if let Some(derived_root) = terrain_assets::find_derived_root(model.selected_root.as_deref()) {
+        let used_gb = crate::threedep::cache_bytes(&derived_root) as f64 / (1024.0 * 1024.0 * 1024.0);
+        ui.label(
+            egui::RichText::new(format!(
+                "Cache in use: {used_gb:.2} GB of {:.0} GB",
+                model.settings_threedep_cache_budget_gb
+            ))
+            .small()
+            .color(theme::text_muted()),
+        );
+    }
 }
 
 fn path_row(ui: &mut egui::Ui, label: &str, value: &mut String, folder: bool, allow_clear: bool) {
