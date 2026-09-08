@@ -2043,6 +2043,68 @@ mod tests {
         assert_eq!(LOCAL_CONTOUR_BUILD_RADIUS, LOCAL_CONTOUR_PREFETCH_RADIUS);
     }
 
+    /// The oblique camera shows ground well past `visual_half_extent_for_zoom`.
+    /// A 3DEP tier whose 5x5 envelope covers less than that leaves visible
+    /// terrain blank, which is exactly what shipping radius-2 tiles sized to
+    /// the *nominal* extent did: it drew about a quarter of the viewport.
+    ///
+    /// This sweeps the whole local zoom range rather than a list of tier
+    /// openings, so moving a tier boundary cannot quietly escape the check.
+    #[test]
+    fn threedep_tiers_cover_the_oblique_viewport() {
+        let mut checked_buckets = std::collections::BTreeSet::new();
+        let mut zoom = LOCAL_ZOOM_MIN;
+        while zoom <= LOCAL_ZOOM_MAX {
+            let spec = srtm_focus_cache::zoom::spec_for_zoom(zoom);
+            if srtm_focus_cache::zoom::spec_uses_threedep(&spec) {
+                let radius = srtm_focus_cache::prefetch_radius_for_zoom(
+                    zoom,
+                    LOCAL_CONTOUR_PREFETCH_RADIUS,
+                );
+                assert_eq!(radius, srtm_focus_cache::THREEDEP_PREFETCH_RADIUS);
+
+                let covered = srtm_focus_cache::region_coverage_half_extent_deg(&spec, radius);
+                let visible = visual_half_extent_for_zoom(zoom)
+                    * srtm_focus_cache::OBLIQUE_VISIBLE_EXTENT_FACTOR;
+                assert!(
+                    covered >= visible,
+                    "zoom {zoom} (bucket {}) covers {covered:.5}° but the oblique \
+                     viewport reaches {visible:.5}°",
+                    spec.zoom_bucket
+                );
+                checked_buckets.insert(spec.zoom_bucket);
+            }
+            zoom += 0.25;
+        }
+        assert!(
+            checked_buckets.len() >= 4,
+            "expected every 3DEP tier to be reachable from the local zoom \
+             range, only saw {checked_buckets:?}"
+        );
+    }
+
+    /// The renderer splits `feature_budget` across the assets in the envelope,
+    /// so a tier with fewer, larger tiles needs a proportionally larger budget
+    /// to draw a comparable number of contours.
+    #[test]
+    fn threedep_tiers_budget_enough_features_for_their_smaller_envelope() {
+        let assets_in_envelope =
+            ((srtm_focus_cache::THREEDEP_PREFETCH_RADIUS * 2 + 1) as usize).pow(2);
+        for zoom in [16.0_f32, 22.0, 32.0, 44.0, 60.0] {
+            let spec = srtm_focus_cache::zoom::spec_for_zoom(zoom);
+            if !srtm_focus_cache::zoom::spec_uses_threedep(&spec) {
+                continue;
+            }
+            let per_asset = spec.feature_budget / assets_in_envelope;
+            assert!(
+                per_asset >= 300,
+                "bucket {} gives only {per_asset} features per tile across \
+                 {assets_in_envelope} assets",
+                spec.zoom_bucket
+            );
+        }
+    }
+
     #[test]
     fn local_bounds_filter_keeps_near_contours_out_of_fill_workers() {
         let focus = GeoPoint { lat: 0.0, lon: 0.0 };

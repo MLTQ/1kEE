@@ -192,8 +192,29 @@ an area is contour geometry, not elevation data.
 ### Zoom tiers
 
 Buckets 0–6 keep their SRTM sources unchanged. Buckets 7–10 are new and source
-3DEP, extending the ladder from 0.16° half-extent down to 0.006° (~1.3 km
-across) at a 0.5 m interval. Before this, `local_render_zoom` clamped the tile
-spec at zoom 20 while the visual scale kept going to 60, so everything below
-~19 km across was interpolated from a 40 m/px raster.
+3DEP, extending the ladder from 0.16° half-extent down to 0.0148° at a 0.5 m
+interval. Before this, `local_render_zoom` clamped the tile spec at zoom 20
+while the visual scale kept going to 60, so everything below ~19 km across was
+interpolated from a 40 m/px raster.
+
+| Bucket | Opens at zoom | Tile box | Raster | Resolution | Interval |
+|---|---|---|---|---|---|
+| 7 | 13 | 46.7 km | 2048 | 22.8 m/px | 5 m |
+| 8 | 21 | 14.9 km | 2400 | 6.2 m/px | 2 m |
+| 9 | 31 | 6.8 km | 2400 | 2.8 m/px | 1 m |
+| 10 | 44 | 3.3 km | 2400 | 1.4 m/px | 0.5 m |
+
+**Sizing rule.** These tiers take a 5×5 envelope rather than the SRTM tiers'
+13×13, because each tile is a network request. The lost coverage is made back
+by enlarging the tiles: every tier must satisfy
+
+    half_extent * (1 + 0.45 * radius)  >=  2.5 * visual_half_extent_for_zoom
+
+at its opening zoom. The 2.5 factor is how far the oblique camera actually sees,
+matching the local marker cull distance. Fewer wide requests beat more narrow
+ones — radius 3 would allow only slightly smaller tiles for twice the downloads.
+
+**Cost.** A fully filled deepest-tier view is 25 tiles of ~22 MB, roughly two
+minutes at the interactive build concurrency of 2. That is paid once per area:
+the contours are cached permanently and the rasters are discarded.
 

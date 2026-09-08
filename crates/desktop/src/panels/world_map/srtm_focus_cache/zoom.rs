@@ -17,15 +17,39 @@ pub fn contour_interval_for_zoom(zoom: f32) -> f32 {
     spec_for_zoom(zoom).interval_m
 }
 
-/// Deep 3DEP tiers stream their source raster over the network, so their
-/// prefetch envelope is tightened. Their bucket step is small enough that a
-/// radius of 2 still covers roughly 1.9x the visible half-width.
+/// Envelope radius the 3DEP tiers use. Every one of their tiles is a network
+/// request, so they take a 5x5 grid rather than the local SRTM tiers' 13x13;
+/// their `half_extent_deg` is sized against this radius to still cover the
+/// oblique viewport. Changing this without resizing the tiers shrinks what the
+/// scene can draw.
+pub const THREEDEP_PREFETCH_RADIUS: i32 = 2;
+
+/// Fraction of `visual_half_extent_for_zoom` the oblique camera can actually
+/// show, matching the local marker cull distance. A tier that covers less than
+/// this leaves visible ground blank.
+///
+/// Only the coverage test reads this; it exists so the sizing rule the 3DEP
+/// tiers were built against is stated once rather than duplicated as a magic
+/// number in the spec comments and the test.
+#[allow(dead_code)]
+pub const OBLIQUE_VISIBLE_EXTENT_FACTOR: f32 = 2.5;
+
 pub fn prefetch_radius_for_zoom(zoom: f32, requested: i32) -> i32 {
     if spec_for_zoom(zoom).zoom_bucket >= FIRST_THREEDEP_BUCKET {
-        requested.min(2)
+        requested.min(THREEDEP_PREFETCH_RADIUS)
     } else {
         requested
     }
+}
+
+/// Half-width in degrees a region of `radius` tiles of `spec` actually covers.
+/// Tiles sit `half_extent * 0.45` apart, so the envelope reaches the outermost
+/// bucket centre plus that tile's own half extent.
+///
+/// Read only by the coverage test, for the same reason as the constant above.
+#[allow(dead_code)]
+pub fn region_coverage_half_extent_deg(spec: &FocusContourSpec, radius: i32) -> f32 {
+    spec.half_extent_deg * (1.0 + 0.45 * radius as f32)
 }
 
 /// Buckets at or above this index source from USGS 3DEP rather than SRTM.
@@ -113,45 +137,53 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
     //
     // Past this point SRTM's ~1 arc-second posting is the limit, not the
     // raster size, so these buckets stream 1 m bare-earth 3DEP instead.
-    // Each `half_extent_deg` is chosen to match `visual_half_extent_for_zoom`
-    // at the tier's opening zoom, so a prefetch radius of 2 already covers
-    // ~1.9x the visible half-width. That keeps the envelope at 5x5 tiles
-    // rather than the 13x13 the local SRTM tiers use, because every one of
-    // these tiles costs a network request rather than a local warp.
-    } else if zoom < 22.0 {
+    //
+    // Sizing rule, enforced by `threedep_tiers_cover_the_oblique_viewport` in
+    // `local_terrain_scene`: the oblique camera sees ground out to about 2.5x
+    // `visual_half_extent_for_zoom` — the same distance the local marker cull
+    // uses — so a tier must satisfy
+    //
+    //     half_extent * (1 + 0.45 * radius)  >=  2.5 * visual half extent
+    //
+    // at its opening zoom, where the visual extent is largest. Because every
+    // one of these tiles costs a network request, the envelope stays at the
+    // 5x5 grid `prefetch_radius_for_zoom` allows and the coverage comes from
+    // larger tiles instead. Fewer, wider requests beat more, narrower ones:
+    // radius 3 would need only slightly smaller tiles but twice the downloads.
+    } else if zoom < 21.0 {
         FocusContourSpec {
-            half_extent_deg: 0.09,
-            raster_size: 1536,
+            half_extent_deg: 0.210,
+            raster_size: 2048,
             interval_m: 5.0,
             simplify_step: 2,
-            feature_budget: 700,
+            feature_budget: 10_000,
             zoom_bucket: 7,
         }
-    } else if zoom < 32.0 {
+    } else if zoom < 31.0 {
         FocusContourSpec {
-            half_extent_deg: 0.035,
-            raster_size: 1536,
+            half_extent_deg: 0.067,
+            raster_size: 2400,
             interval_m: 2.0,
             simplify_step: 2,
-            feature_budget: 900,
+            feature_budget: 12_500,
             zoom_bucket: 8,
         }
     } else if zoom < 44.0 {
         FocusContourSpec {
-            half_extent_deg: 0.014,
-            raster_size: 1792,
+            half_extent_deg: 0.0305,
+            raster_size: 2400,
             interval_m: 1.0,
             simplify_step: 1,
-            feature_budget: 1100,
+            feature_budget: 15_000,
             zoom_bucket: 9,
         }
     } else {
         FocusContourSpec {
-            half_extent_deg: 0.006,
-            raster_size: 1792,
+            half_extent_deg: 0.0148,
+            raster_size: 2400,
             interval_m: 0.5,
             simplify_step: 1,
-            feature_budget: 1300,
+            feature_budget: 17_500,
             zoom_bucket: 10,
         }
     }
