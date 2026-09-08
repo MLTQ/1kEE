@@ -218,3 +218,33 @@ ones — radius 3 would allow only slightly smaller tiles for twice the download
 minutes at the interactive build concurrency of 2. That is paid once per area:
 the contours are cached permanently and the rasters are discarded.
 
+### Drawing this much geometry
+
+3DEP tiles carry far more geometry than SRTM ones. A measured bucket-10 tile
+holds **9 826 contours and 4.3 million points**, so a 25-tile envelope is on the
+order of 100 M points — orders of magnitude past what a frame can draw. Three
+limits govern what reaches the screen, and all three had to move together:
+
+1. **Cull margin** — `2.5 x visual_half_extent_for_zoom`, matching how far the
+   oblique camera sees. It was `1.5x`, which culled terrain that was still on
+   screen.
+2. **Reader budget** — `feature_budget / assets`, floored at 120. Controls how
+   much is resident in memory.
+3. **Frame budget** — `MAX_CONTOUR_RENDER_POINTS`, 1 000 000 points. Controls
+   how much is projected and tessellated per frame.
+
+**Selection is length-ordered at both budgets.** The point distribution is very
+skewed: the longest 10% of contours hold ~73% of all points, and the shortest
+75% hold under 3%. Stride decimation — every Nth contour — drops a 10 000-point
+shoreline trace and a 5-point speck at the same rate, so it spends the budget on
+noise and produces a scattered sample rather than a picture. Keeping the longest
+contours instead makes each budget buy far more visible structure, and it is
+**stable under camera motion**: a long contour stays long, so it keeps making the
+cut rather than flickering at the budget boundary.
+
+Raising `MAX_CONTOUR_RENDER_POINTS` is the knob for "more on screen at the cost
+of frame time"; egui tessellates strokes on the CPU, so cost is roughly linear
+in points. The original 300 000 was sized against a WGPU index-buffer limit hit
+when 1 600 globe tiles accumulated, which is a different path from the 25-tile
+local envelope.
+

@@ -976,6 +976,43 @@ fn contours_intersecting_local_bounds<'a>(
         .collect()
 }
 
+/// Trim a culled contour set to a point budget, keeping the longest lines.
+///
+/// Length is a good proxy for visual importance and, unlike a positional or
+/// elevation-ordered cut, it is stable as the camera moves: a long contour
+/// stays long, so it keeps making the cut instead of flickering in and out at
+/// the budget boundary.
+///
+/// Returns the input untouched when it already fits, so the common case costs
+/// one sum and no allocation.
+fn select_contours_within_budget(
+    culled: Vec<&contour_asset::ContourPath>,
+    max_points: usize,
+) -> Vec<&contour_asset::ContourPath> {
+    let total: usize = culled.iter().map(|contour| contour.points.len()).sum();
+    if total <= max_points {
+        return culled;
+    }
+
+    let mut by_length = culled;
+    by_length.sort_unstable_by(|left, right| right.points.len().cmp(&left.points.len()));
+
+    let mut spent = 0usize;
+    let mut kept = 0usize;
+    for contour in &by_length {
+        let cost = contour.points.len();
+        if spent + cost > max_points {
+            break;
+        }
+        spent += cost;
+        kept += 1;
+    }
+    // A single contour longer than the whole budget would otherwise leave the
+    // scene empty; draw it rather than nothing.
+    by_length.truncate(kept.max(1));
+    by_length
+}
+
 #[inline]
 fn should_show_local_event_indicators(
     active_body: crate::model::ActiveBody,
@@ -1639,9 +1676,22 @@ fn draw_contour_stack(
     contour_stroke_scale: f32,
 ) {
     puffin::profile_function!();
-    // 300_000 points prevents WGPU Validation Error index buffer overflow
-    // when 1600+ cached terrain tiles accumulate.
-    const MAX_CONTOUR_RENDER_POINTS: usize = 300_000;
+    // Ceiling on projected points per frame. This is a rendering cost budget,
+    // not a correctness limit: egui tessellates strokes on the CPU, so every
+    // point past this costs frame time.
+    //
+    // It was 300_000, sized when contours came from 30 m SRTM. A single 3DEP
+    // bucket-10 tile carries ~4.3 M points, so the old ceiling was exhausted by
+    // roughly the first tile of a 25-tile envelope — the rest of the screen
+    // stayed empty, and panning reshuffled which contours landed inside the
+    // budget, making them flicker.
+    //
+    // Raising it alone would be wasteful, because the point distribution is
+    // extremely skewed: the longest 10% of contours hold ~73% of all points,
+    // while the shortest 75% hold under 3%. `select_contours_within_budget`
+    // therefore spends this budget longest-first, so it buys the long shoreline
+    // and terrace traces that define the picture rather than a random sample.
+    const MAX_CONTOUR_RENDER_POINTS: usize = 1_000_000;
 
     // Major contour every 2× the minor interval. SRTM minor=5-50m so major at 50m rem.
     // Lunar minor=50-1000m so major at 1000m rem (two minor intervals up in any spec).
@@ -1655,10 +1705,16 @@ fn draw_contour_stack(
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
 
-    // AABB cull: skip contours with no points inside the viewport (+ generous
-    // margin so lines that cross the edge aren't clipped prematurely).
-    let margin_deg = half_extent_deg * 1.5;
-    let mut ordered = contours_intersecting_local_bounds(contours, focus, margin_deg);
+    // AABB cull. The margin has to match how far the oblique camera actually
+    // sees, which is `OBLIQUE_VISIBLE_EXTENT_FACTOR` times the nominal half
+    // extent — the same distance the local marker cull and the 3DEP tile
+    // envelope are sized against. A tighter margin here culls terrain that is
+    // still on screen, which no cache or tile size can compensate for.
+    let margin_deg = half_extent_deg * srtm_focus_cache::OBLIQUE_VISIBLE_EXTENT_FACTOR;
+    let culled = contours_intersecting_local_bounds(contours, focus, margin_deg);
+    // Choose what to draw by importance, then restore elevation order so the
+    // major/minor stacking and draw order are unchanged.
+    let mut ordered = select_contours_within_budget(culled, MAX_CONTOUR_RENDER_POINTS);
     ordered.sort_by(|left, right| left.elevation_m.total_cmp(&right.elevation_m));
 
     // Pre-compute colors — theme functions may touch global state and must
@@ -2043,6 +2099,73 @@ mod tests {
         assert_eq!(LOCAL_CONTOUR_BUILD_RADIUS, LOCAL_CONTOUR_PREFETCH_RADIUS);
     }
 
+    fn contour_of(elevation_m: f32, points: usize) -> contour_asset::ContourPath {
+        contour_asset::ContourPath {
+            elevation_m,
+            points: (0..points)
+                .map(|i| GeoPoint {
+                    lat: 40.0 + i as f32 * 1e-5,
+                    lon: -105.0 + i as f32 * 1e-5,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_set_within_the_point_budget_is_drawn_whole() {
+        let contours = vec![contour_of(1.0, 50), contour_of(2.0, 60)];
+        let culled: Vec<_> = contours.iter().collect();
+        let kept = select_contours_within_budget(culled, 1_000);
+        assert_eq!(kept.len(), 2);
+    }
+
+    #[test]
+    fn an_over_budget_set_keeps_the_longest_contours() {
+        let contours = vec![
+            contour_of(1.0, 5),
+            contour_of(2.0, 400),
+            contour_of(3.0, 8),
+            contour_of(4.0, 300),
+        ];
+        let culled: Vec<_> = contours.iter().collect();
+        let kept = select_contours_within_budget(culled, 700);
+        let lengths: Vec<usize> = kept.iter().map(|c| c.points.len()).collect();
+        assert_eq!(lengths, vec![400, 300]);
+        assert!(lengths.iter().sum::<usize>() <= 700);
+    }
+
+    /// The reason selection is length-ordered rather than positional: panning
+    /// changes which *short* contours are in view, and that must not disturb
+    /// which long ones are drawn. A positional or elevation-ordered cut let
+    /// them swap places at the budget boundary every frame, which is what made
+    /// contours flicker.
+    #[test]
+    fn adding_short_contours_does_not_evict_the_long_ones() {
+        let base = vec![contour_of(1.0, 500), contour_of(2.0, 450)];
+        let before: Vec<usize> = select_contours_within_budget(base.iter().collect(), 1_000)
+            .iter()
+            .map(|c| c.points.len())
+            .collect();
+
+        // A pan brings a crowd of small specks into view.
+        let mut panned = base.clone();
+        panned.extend((0..200).map(|i| contour_of(10.0 + i as f32, 6)));
+        let after: Vec<usize> = select_contours_within_budget(panned.iter().collect(), 1_000)
+            .iter()
+            .map(|c| c.points.len())
+            .collect();
+
+        assert!(after.contains(&500) && after.contains(&450));
+        assert_eq!(before, vec![500, 450]);
+    }
+
+    #[test]
+    fn a_contour_larger_than_the_whole_budget_still_draws() {
+        let contours = vec![contour_of(1.0, 5_000)];
+        let kept = select_contours_within_budget(contours.iter().collect(), 100);
+        assert_eq!(kept.len(), 1, "an empty scene is worse than one long line");
+    }
+
     /// The oblique camera shows ground well past `visual_half_extent_for_zoom`.
     /// A 3DEP tier whose 5x5 envelope covers less than that leaves visible
     /// terrain blank, which is exactly what shipping radius-2 tiles sized to
@@ -2083,9 +2206,14 @@ mod tests {
         );
     }
 
-    /// The renderer splits `feature_budget` across the assets in the envelope,
-    /// so a tier with fewer, larger tiles needs a proportionally larger budget
-    /// to draw a comparable number of contours.
+    /// `feature_budget` is split across the assets in the envelope, and the
+    /// reader floors the result at 120. These tiers must clear that floor with
+    /// real margin, or the budget stops being the thing that controls them.
+    ///
+    /// The number does not need to be large: the reader keeps the *longest*
+    /// contours, so a few hundred per tile already carry most of the geometry.
+    /// It is bounded above by memory — every loaded point is resident whether
+    /// or not the frame budget lets it be drawn.
     #[test]
     fn threedep_tiers_budget_enough_features_for_their_smaller_envelope() {
         let assets_in_envelope =
@@ -2097,9 +2225,11 @@ mod tests {
             }
             let per_asset = spec.feature_budget / assets_in_envelope;
             assert!(
-                per_asset >= 300,
-                "bucket {} gives only {per_asset} features per tile across \
-                 {assets_in_envelope} assets",
+                (200..=1_000).contains(&per_asset),
+                "bucket {} gives {per_asset} features per tile across \
+                 {assets_in_envelope} assets; below ~200 the reader's floor \
+                 takes over, above ~1000 the envelope's resident points grow \
+                 far past what a frame can draw",
                 spec.zoom_bucket
             );
         }
