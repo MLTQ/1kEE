@@ -44,6 +44,7 @@ rebuilt only when source contours or their palette changes.
 | Globe geography | Changing physical width updates only uniforms, never contour instance caches | Moving width into the instance version or baked geometry |
 | Globe contour cache | A stable unchanged contour Arc is a cache hit; changing tiles does not fan out simultaneous full rebuilds | Starting a rebuild for every intermediate version while one is active |
 | WGSL shader | `stroke_half_px` remains a physical-pixel half-width and `feather_px` remains a physical-pixel edge margin in the unchanged uniform layout | Reordering or resizing `ContourUniforms` without matching WGSL |
+| Any caller | A layer of any size uploads without exceeding the device buffer limit | Allocating one buffer per layer again |
 
 ## Notes
 
@@ -55,3 +56,19 @@ rebuilt only when source contours or their palette changes.
   relevant work category instead of reporting only an unknown thread.
 - A failed instance build is recoverable: it leaves stale geometry visible,
   clears the in-flight marker, and asks the next repaint to retry.
+
+### `split_instance_buffers`
+
+- **Does**: Splits an instance slice across as many vertex buffers as the
+  device's `max_buffer_size` requires, and `paint` draws each in order.
+- **Interacts with**: `local_contour_pass`, which reuses it for its per-tile
+  uploads.
+- **Rationale**: A dense layer can exceed the limit in one allocation. wgpu's
+  default is 256 MiB and a global contour layer reached 287 MB, which is a hard
+  `Device::create_buffer` validation panic rather than a degraded frame.
+  Instances are independent, so N buffers drawn in order render exactly as one
+  would.
+- `main.rs` separately raises `max_buffer_size` to whatever the adapter
+  reports, which reduces how often the split is needed but is not what makes it
+  safe — the split has to hold on any device.
+

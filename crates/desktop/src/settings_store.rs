@@ -14,9 +14,14 @@ pub(crate) const MAX_CONTOUR_STROKE_SCALE: f32 = 3.0;
 /// egui logical points. New pixel-width selections convert through this value
 /// so the local renderer keeps its established major/minor hierarchy.
 pub(crate) const LEGACY_CONTOUR_STROKE_WIDTH_POINTS: f32 = 1.15;
-/// A full GPU contour stroke must retain at least one physical pixel of core
-/// width so the anti-aliased line does not disappear at the lower endpoint.
-pub(crate) const MIN_CONTOUR_STROKE_WIDTH_PX: f32 = 1.0;
+/// Lower bound on contour stroke width, in physical pixels.
+///
+/// This was one pixel, on the reasoning that a thinner line would break up. In
+/// dense 3DEP terrain a one-pixel floor is itself the problem: every contour
+/// renders at the same minimum weight and the image fills in solid. Sub-pixel
+/// strokes do shimmer slightly under camera motion, which is the accepted cost
+/// of being able to draw terrain this dense legibly.
+pub(crate) const MIN_CONTOUR_STROKE_WIDTH_PX: f32 = 0.25;
 /// The new pixel-width control supports a comfortably wider range than the
 /// former multiplier without changing any legacy saved appearance.
 pub(crate) const MAX_CONTOUR_STROKE_WIDTH_PX: f32 = 16.0;
@@ -560,8 +565,11 @@ mod tests {
             normalize_contour_stroke_width_px(f32::NAN),
             MIN_CONTOUR_STROKE_WIDTH_PX
         );
+        // Sub-pixel widths are deliberately allowed: dense terrain is
+        // unreadable when every contour is floored at a full pixel.
+        assert_eq!(normalize_contour_stroke_width_px(0.5), 0.5);
         assert_eq!(
-            normalize_contour_stroke_width_px(0.5),
+            normalize_contour_stroke_width_px(0.05),
             MIN_CONTOUR_STROKE_WIDTH_PX
         );
         assert_eq!(

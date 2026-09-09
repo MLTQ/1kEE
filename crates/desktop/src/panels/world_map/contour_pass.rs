@@ -154,6 +154,10 @@ fn contour_stroke_half_px(stroke_width_px: f32) -> f32 {
 #[inline]
 pub(crate) fn contour_feather_px(stroke_width_px: f32) -> f32 {
     const MIN_FEATHER_PX: f32 = 0.5;
+    /// Floor for sub-pixel strokes. A half-pixel fringe either side of a
+    /// quarter-pixel line is mostly fringe, which is what made thin contours
+    /// read as heavy rather than fine.
+    const MIN_SUBPIXEL_FEATHER_PX: f32 = 0.25;
     const MAX_FEATHER_PX: f32 = 1.0;
     const FEATHER_FRACTION: f32 = 0.1;
 
@@ -162,7 +166,67 @@ pub(crate) fn contour_feather_px(stroke_width_px: f32) -> f32 {
     } else {
         1.0
     };
-    (width * FEATHER_FRACTION).clamp(MIN_FEATHER_PX, MAX_FEATHER_PX)
+    // The fringe floor only relaxes below one pixel, so every width at or above
+    // one pixel keeps exactly the fringe it had before sub-pixel strokes existed.
+    let min_feather = (width * 0.5).clamp(MIN_SUBPIXEL_FEATHER_PX, MIN_FEATHER_PX);
+    (width * FEATHER_FRACTION).clamp(min_feather, MAX_FEATHER_PX)
+}
+
+#[cfg(test)]
+mod buffer_split_tests {
+    use super::instances_per_buffer;
+
+    /// wgpu's default limit is 256 MiB. A global contour layer reached 287 MB
+    /// in one allocation, which is a hard `create_buffer` validation panic, so
+    /// the split has to actually land under the limit.
+    #[test]
+    fn a_layer_past_the_default_limit_splits_into_bounded_buffers() {
+        const DEFAULT_LIMIT: u64 = 256 << 20;
+        const STRIDE: usize = 28;
+        let per_buffer = instances_per_buffer(DEFAULT_LIMIT, STRIDE);
+        assert!((per_buffer * STRIDE) as u64 <= DEFAULT_LIMIT);
+
+        // The crash was 287_775_376 bytes of 28-byte instances.
+        let crashing_instances = 287_775_376 / STRIDE;
+        let buffers = crashing_instances.div_ceil(per_buffer);
+        assert!(buffers >= 2, "expected the crashing layer to split");
+        for index in 0..buffers {
+            let in_this_buffer = per_buffer.min(crashing_instances - index * per_buffer);
+            assert!((in_this_buffer * STRIDE) as u64 <= DEFAULT_LIMIT);
+        }
+    }
+
+    /// A stride larger than the whole budget must still make progress rather
+    /// than dividing to zero and splitting forever.
+    #[test]
+    fn an_oversized_stride_still_yields_one_instance_per_buffer() {
+        assert_eq!(instances_per_buffer(1024, 1 << 30), 1);
+        assert_eq!(instances_per_buffer(0, 32), 1);
+    }
+}
+
+#[cfg(test)]
+mod feather_tests {
+    use super::contour_feather_px;
+
+    /// Sub-pixel support must not silently restyle every existing width.
+    #[test]
+    fn widths_of_a_pixel_and_up_keep_their_original_fringe() {
+        for width in [1.0_f32, 1.15, 2.0, 4.0, 8.0] {
+            let expected = (width * 0.1).clamp(0.5, 1.0);
+            assert!((contour_feather_px(width) - expected).abs() < 1e-6, "{width}");
+        }
+    }
+
+    /// Below a pixel the fringe shrinks with the stroke, so the drawn footprint
+    /// actually gets thinner instead of staying fringe-dominated.
+    #[test]
+    fn sub_pixel_widths_shrink_their_fringe_and_footprint() {
+        let footprint = |w: f32| w + 2.0 * contour_feather_px(w);
+        assert!(footprint(0.5) < footprint(1.0));
+        assert!(footprint(0.25) < footprint(0.5));
+        assert!(contour_feather_px(0.25) >= 0.25);
+    }
 }
 
 /// Cheap identity for a contour set + palette combination. The `Arc` pointer
@@ -302,8 +366,54 @@ pub struct ContourPassResources {
 
 struct LayerGpu {
     version: u64,
-    instances: wgpu::Buffer,
-    count: u32,
+    chunks: Vec<InstanceChunk>,
+}
+
+/// One vertex buffer's worth of instances.
+pub(crate) struct InstanceChunk {
+    pub buffer: wgpu::Buffer,
+    pub count: u32,
+}
+
+/// Split an instance slice across as many vertex buffers as the device's
+/// `max_buffer_size` requires.
+///
+/// A dense layer can exceed that limit in a single allocation — wgpu's default
+/// is 256 MiB, and a global contour layer reached 287 MB, which is a hard
+/// `Device::create_buffer` validation panic rather than a degraded frame. The
+/// split is invisible downstream: instances are independent, so N buffers drawn
+/// in order render exactly as one would.
+/// How many instances of `stride` bytes fit in one vertex buffer.
+///
+/// Leaves a megabyte of headroom under the reported limit, because some
+/// backends account for alignment padding on top of the requested size, and
+/// never returns zero — a stride larger than the whole budget still has to
+/// produce one instance per buffer rather than an infinite split.
+fn instances_per_buffer(max_buffer_size: u64, stride: usize) -> usize {
+    let stride = stride.max(1);
+    let budget = (max_buffer_size as usize).saturating_sub(1 << 20);
+    (budget / stride).max(1)
+}
+
+pub(crate) fn split_instance_buffers<T: bytemuck::Pod>(
+    device: &wgpu::Device,
+    label: &str,
+    instances: &[T],
+) -> Vec<InstanceChunk> {
+    let per_buffer =
+        instances_per_buffer(device.limits().max_buffer_size, std::mem::size_of::<T>());
+
+    instances
+        .chunks(per_buffer)
+        .map(|chunk| InstanceChunk {
+            buffer: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: bytemuck::cast_slice(chunk),
+                usage: wgpu::BufferUsages::VERTEX,
+            }),
+            count: chunk.len() as u32,
+        })
+        .collect()
 }
 
 impl ContourPassResources {
@@ -513,12 +623,7 @@ impl egui_wgpu::CallbackTrait for ContourCallback {
                 self.layer,
                 LayerGpu {
                     version: self.version,
-                    instances: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("contour_instances"),
-                        contents: bytemuck::cast_slice(&self.instances),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    }),
-                    count: self.instances.len() as u32,
+                    chunks: split_instance_buffers(device, "contour_instances", &self.instances),
                 },
             );
         }
@@ -537,7 +642,7 @@ impl egui_wgpu::CallbackTrait for ContourCallback {
         let Some(gpu) = res.layers.get(&self.layer) else {
             return;
         };
-        if gpu.count == 0 {
+        if gpu.chunks.is_empty() {
             return;
         }
         render_pass.set_pipeline(&res.pipeline);
@@ -546,8 +651,13 @@ impl egui_wgpu::CallbackTrait for ContourCallback {
             &res.bind_group,
             &[self.layer.slot() * UNIFORM_STRIDE as u32],
         );
-        render_pass.set_vertex_buffer(0, gpu.instances.slice(..));
-        render_pass.draw(0..6, 0..gpu.count);
+        for chunk in &gpu.chunks {
+            if chunk.count == 0 {
+                continue;
+            }
+            render_pass.set_vertex_buffer(0, chunk.buffer.slice(..));
+            render_pass.draw(0..6, 0..chunk.count);
+        }
     }
 }
 

@@ -38,6 +38,11 @@ const EMPTY_MARKER_EXT: &str = "empty";
 
 const NODATA: f32 = -999_999.0;
 
+/// How long a caller waits for another thread's in-flight download of the same
+/// chunk before falling back. Comfortably longer than the HTTP timeout, so the
+/// fallback only happens if that thread died.
+const CHUNK_WAIT_TIMEOUT: Duration = Duration::from_secs(240);
+
 /// 3DEP only publishes for the United States and its territories. Screening on
 /// this box first means panning over Europe or Asia never touches the network.
 fn within_service_area(point: GeoPoint) -> bool {
@@ -264,13 +269,34 @@ pub fn ensure_chunk(derived_root: &Path, key: ChunkKey) -> Option<PathBuf> {
         return None;
     }
 
-    // One download per chunk even when several builders converge on it.
-    {
-        let mut guard = downloading_set().lock().ok()?;
-        if !guard.insert(key) {
+    // One download per chunk even when several builders converge on it. A
+    // caller that loses the race *waits* rather than giving up: returning
+    // `None` here would let one road vertex resolve against 3DEP and the next
+    // against SRTM purely on download timing, which bakes a jagged mix of two
+    // terrain models into whatever geometry is being built.
+    let deadline = std::time::Instant::now() + CHUNK_WAIT_TIMEOUT;
+    loop {
+        {
+            let Ok(mut guard) = downloading_set().lock() else {
+                return None;
+            };
+            if guard.insert(key) {
+                break;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+        if let Some(path) = peek_chunk(derived_root, key) {
+            touch(&path);
+            return Some(path);
+        }
+        if chunk_known_empty(derived_root, key) {
             return None;
         }
     }
+
     let result = download_chunk(derived_root, key);
     if let Ok(mut guard) = downloading_set().lock() {
         guard.remove(&key);
@@ -425,7 +451,10 @@ fn raster_is_empty(path: &Path) -> bool {
 // `gdal_translate` into a compact Float32 sidecar, mirroring how
 // `srtm_stream` normalises awkward SRTM GeoTIFFs.
 
-const MAX_CACHED_SAMPLE_TILES: usize = 6;
+/// Decoded chunks held in memory. A road or building build walks a polyline
+/// across several chunks, so this has to be deep enough that spatial locality
+/// actually pays; each is ~19 MB of Float32.
+const MAX_CACHED_SAMPLE_TILES: usize = 12;
 /// One chunk fetch at a time so a dense marker cluster cannot saturate the
 /// machine, or the public service, with concurrent downloads.
 const MAX_CONCURRENT_SAMPLE_FETCHES: usize = 1;
@@ -514,6 +543,60 @@ pub fn peek_elevation_m(derived_root: &Path, point: GeoPoint) -> Option<f32> {
 
     request_sample_preload(derived_root, key);
     None
+}
+
+/// Blocking 1 m elevation lookup for background layer builders.
+///
+/// Unlike `peek_elevation_m` this downloads and decodes the covering chunk if
+/// necessary, so it returns the same answer for the same point regardless of
+/// cache state. That determinism is the point: road, building and tree geometry
+/// bakes one elevation per vertex at build time, and a sampler that silently
+/// alternates between 3DEP and SRTM writes the difference between two terrain
+/// models into the geometry permanently.
+///
+/// Returns `None` where 3DEP publishes no 1 m source, leaving SRTM to answer.
+pub fn blocking_elevation_m(derived_root: &Path, point: GeoPoint) -> Option<f32> {
+    if !is_enabled() {
+        return None;
+    }
+    let key = chunk_key_for(point);
+
+    {
+        let mut guard = sample_cache().lock().ok()?;
+        if guard.missing.contains(&key) {
+            return None;
+        }
+        if let Some(index) = guard.tiles.iter().position(|tile| tile.key == key) {
+            let tile = guard.tiles.remove(index);
+            let value = tile.sample(point);
+            guard.tiles.insert(0, tile);
+            return value;
+        }
+    }
+
+    // Not resident — fetch and decode on this thread. Callers are background
+    // workers whose contract already allows blocking.
+    let tile = ensure_chunk(derived_root, key).and_then(|path| load_sample_tile(&path, key));
+
+    let mut guard = sample_cache().lock().ok()?;
+    match tile {
+        Some(tile) => {
+            let value = tile.sample(point);
+            if !guard.tiles.iter().any(|cached| cached.key == key) {
+                guard.tiles.insert(0, tile);
+                if guard.tiles.len() > MAX_CACHED_SAMPLE_TILES {
+                    guard.tiles.pop();
+                }
+            }
+            value
+        }
+        None => {
+            // Remember the miss so the rest of this build resolves against
+            // SRTM consistently instead of retrying per vertex.
+            guard.missing.insert(key);
+            None
+        }
+    }
 }
 
 /// Schedule a deduplicated background fetch and decode of one chunk.

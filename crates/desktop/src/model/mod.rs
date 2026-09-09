@@ -1176,19 +1176,25 @@ mod tests {
         );
     }
 
+    /// Sub-pixel strokes are allowed, but there is still a floor — a width that
+    /// rounds to nothing would drop contours entirely rather than draw them
+    /// faintly.
     #[test]
-    fn legacy_thin_scale_is_raised_to_the_one_pixel_floor() {
+    fn thin_widths_are_held_at_the_stroke_floor() {
         let mut model = AppModel::seed_demo();
-        model.legacy_contour_stroke_scale = settings_store::MIN_CONTOUR_STROKE_SCALE;
-        model.contour_stroke_width_px = None;
-
+        model.contour_stroke_width_px = Some(0.01);
         assert_eq!(
             model.contour_stroke_width_px(1.0),
             settings_store::MIN_CONTOUR_STROKE_WIDTH_PX
         );
-        assert_eq!(
-            model.contour_stroke_width_px(2.0),
-            settings_store::MIN_CONTOUR_STROKE_WIDTH_PX
-        );
+
+        // A legacy multiplier now lands above the floor rather than being
+        // clamped up to a full pixel, which is the point of allowing sub-pixel
+        // widths at all.
+        model.contour_stroke_width_px = None;
+        model.legacy_contour_stroke_scale = settings_store::MIN_CONTOUR_STROKE_SCALE;
+        let legacy_1x = model.contour_stroke_width_px(1.0);
+        assert!(legacy_1x >= settings_store::MIN_CONTOUR_STROKE_WIDTH_PX);
+        assert!(legacy_1x < 1.0, "expected a sub-pixel legacy width, got {legacy_1x}");
     }
 }

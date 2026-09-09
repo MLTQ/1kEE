@@ -27,6 +27,28 @@ mod usgs_stream;
 
 use app::DashboardApp;
 
+/// Ask the adapter for the largest buffer it will give us.
+///
+/// wgpu's default `max_buffer_size` is 256 MiB, which a dense contour layer can
+/// exceed in one allocation. The passes split across buffers regardless, so
+/// this is not what keeps them safe — it just means far fewer, larger buffers
+/// and correspondingly fewer draw calls on hardware that allows it.
+fn contour_buffer_wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
+    let mut setup = match eframe::egui_wgpu::WgpuConfiguration::default().wgpu_setup {
+        eframe::egui_wgpu::WgpuSetup::CreateNew(create_new) => create_new,
+        // An externally supplied device is not ours to reconfigure.
+        existing => return existing,
+    };
+    let base = setup.device_descriptor;
+    setup.device_descriptor = std::sync::Arc::new(move |adapter| {
+        let mut descriptor = base(adapter);
+        let adapter_limits = adapter.limits();
+        descriptor.required_limits.max_buffer_size = adapter_limits.max_buffer_size;
+        descriptor
+    });
+    eframe::egui_wgpu::WgpuSetup::CreateNew(setup)
+}
+
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -34,6 +56,10 @@ fn main() -> eframe::Result<()> {
             .with_min_inner_size([1100.0, 720.0])
             .with_title("1kEE | One Thousand Electric Eye"),
         renderer: eframe::Renderer::Wgpu,
+        wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
+            wgpu_setup: contour_buffer_wgpu_setup(),
+            ..Default::default()
+        },
         ..Default::default()
     };
 

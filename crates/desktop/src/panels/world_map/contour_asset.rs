@@ -89,6 +89,12 @@ pub fn blast_tile_caches() {
     gebco_depth_fill::clear();
     super::local_terrain_scene::hillshade_layer::clear();
     super::local_contour_pass::clear_instances();
+    // Road, water and building geometry bakes one terrain elevation per vertex
+    // at build time, so it is as much a terrain cache as the contours are.
+    // Dropping contours without dropping these leaves the two disagreeing about
+    // where the ground is.
+    super::local_terrain_scene::invalidate_road_cache();
+    super::local_terrain_scene::invalidate_water_cache();
 }
 
 /// Whether the most recently selected local manifest window still needs tiles.

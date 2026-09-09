@@ -81,6 +81,9 @@ the CPU projection and egui tessellation could not keep up with.
   change invalidates the baked colours.
 - Uploads are capped per frame so a jump into a fully-cached area spreads its
   envelope over consecutive frames instead of stalling on one.
+- A single tile can exceed the device's `max_buffer_size` on its own — a dense
+  bucket-10 tile is ~4.3 M segments — so uploads go through
+  `contour_pass::split_instance_buffers` rather than one allocation per tile.
 - Two tests guard the CPU/GPU boundary: `the_shader_declares_the_same_uniform_fields_in_the_same_order`
   parses the WGSL and compares it to the Rust struct, and
   `local_projection_matches_the_shader` in `local_terrain_scene/projection.rs`

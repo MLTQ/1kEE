@@ -29,7 +29,6 @@
 
 use eframe::egui_wgpu;
 use eframe::wgpu;
-use eframe::wgpu::util::DeviceExt;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -250,8 +249,10 @@ pub fn clear_instances() {
 
 struct TileGpu {
     version: u64,
-    instances: wgpu::Buffer,
-    count: u32,
+    /// One tile can exceed the device's `max_buffer_size` on its own — a dense
+    /// bucket-10 tile is ~4.3 M segments — so its geometry is split across as
+    /// many vertex buffers as the limit requires.
+    chunks: Vec<super::contour_pass::InstanceChunk>,
     bytes: u64,
     last_used: u64,
 }
@@ -549,19 +550,17 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
                 }
                 uploads += 1;
                 puffin::profile_scope!("local_contour_tile_upload");
-                let contents: &[u8] = bytemuck::cast_slice(&batch.instances);
-                let bytes = contents.len() as u64;
-                let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("local_contour_tile_instances"),
-                    contents,
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
+                let bytes = std::mem::size_of_val(&batch.instances[..]) as u64;
+                let chunks = super::contour_pass::split_instance_buffers(
+                    device,
+                    "local_contour_tile_instances",
+                    &batch.instances,
+                );
                 if let Some(previous) = res.tiles.insert(
                     batch.id,
                     TileGpu {
                         version: batch.version,
-                        instances: buffer,
-                        count: batch.instances.len() as u32,
+                        chunks,
                         bytes,
                         last_used: frame,
                     },
@@ -599,11 +598,13 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
             let Some(gpu) = res.tiles.get(&batch.id) else {
                 continue;
             };
-            if gpu.count == 0 {
-                continue;
+            for chunk in &gpu.chunks {
+                if chunk.count == 0 {
+                    continue;
+                }
+                render_pass.set_vertex_buffer(0, chunk.buffer.slice(..));
+                render_pass.draw(0..6, 0..chunk.count);
             }
-            render_pass.set_vertex_buffer(0, gpu.instances.slice(..));
-            render_pass.draw(0..6, 0..gpu.count);
         }
     }
 }

@@ -56,11 +56,14 @@ pub fn sample_normalized(selected_root: Option<&Path>, point: GeoPoint) -> Optio
 }
 
 pub fn sample_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> Option<f32> {
-    // Prefer 1 m 3DEP where a chunk is already cached. This never blocks on a
-    // download: an uncached chunk is fetched in the background and SRTM answers
-    // this call, so layer builders keep their current latency and pick up the
-    // finer source on a later rebuild.
-    if let Some(elevation) = peek_threedep_elevation_m(selected_root, point) {
+    // Prefer 1 m 3DEP, downloading the covering chunk if necessary.
+    //
+    // This deliberately blocks, unlike the marker path below. Callers bake one
+    // elevation per vertex into cached geometry, so a sampler that answers from
+    // 3DEP or SRTM depending on what happened to be resident would freeze the
+    // difference between two terrain models into a road or building outline.
+    // The API's contract is already "exact, may block".
+    if let Some(elevation) = blocking_threedep_elevation_m(selected_root, point) {
         return Some(elevation);
     }
     let root = terrain_assets::find_srtm_root(selected_root)?;
@@ -134,9 +137,19 @@ pub fn peek_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> Option
 /// Nonblocking 1 m 3DEP lookup, resolving the derived-asset root the chunk
 /// cache lives under. Returns `None` whenever 3DEP is disabled, unavailable
 /// here, or simply not cached yet.
+///
+/// Only marker paint uses this. A marker is a single point that re-resolves
+/// every frame, so it converges on the finer source without ever recording a
+/// mixed result.
 fn peek_threedep_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> Option<f32> {
     let derived_root = terrain_assets::find_derived_root(selected_root)?;
     crate::threedep::peek_elevation_m(&derived_root, point)
+}
+
+/// Blocking 1 m 3DEP lookup for background layer builders.
+fn blocking_threedep_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> Option<f32> {
+    let derived_root = terrain_assets::find_derived_root(selected_root)?;
+    crate::threedep::blocking_elevation_m(&derived_root, point)
 }
 
 /// Start a deduplicated background SRTM tile load. The first local marker in

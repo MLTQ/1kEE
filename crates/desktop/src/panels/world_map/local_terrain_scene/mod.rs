@@ -2335,12 +2335,12 @@ mod tests {
         }
     }
 
-    /// The minimum width setting has to produce exactly one physical pixel of
-    /// solid line, on any display density. The CPU path gets this from the
-    /// `max()` floor in `local_stroke_width_points`; the GPU path has to land on
-    /// the same number after conversion.
+    /// The minimum width setting has to land on exactly the stroke floor in
+    /// physical pixels, on any display density. The CPU path gets this from the
+    /// `max()` in `local_stroke_width_points`; the GPU path has to reach the
+    /// same number after its points-to-pixels conversion.
     #[test]
-    fn the_minimum_width_setting_is_one_physical_pixel() {
+    fn the_minimum_width_setting_reaches_the_stroke_floor_in_physical_pixels() {
         for pixels_per_point in [1.0_f32, 2.0, 3.0] {
             // The scale the model derives for a 1 physical px selection.
             let scale = crate::settings_store::MIN_CONTOUR_STROKE_WIDTH_PX
@@ -2349,7 +2349,7 @@ mod tests {
             let minor = gpu_contour_stroke_width_px(0.7, 1.0, scale, pixels_per_point);
             assert!(
                 (minor - crate::settings_store::MIN_CONTOUR_STROKE_WIDTH_PX).abs() < 1e-4,
-                "{pixels_per_point}x gave {minor} px, expected 1"
+                "{pixels_per_point}x gave {minor} px, expected the stroke floor"
             );
         }
     }
@@ -2523,15 +2523,20 @@ mod tests {
     }
 
     #[test]
-    fn primary_contour_width_preserves_local_weights_above_the_pixel_floor() {
+    fn primary_contour_width_preserves_local_weights_above_the_stroke_floor() {
         assert_eq!(local_contour_stroke_width(1.35, 1.0, 1.0, 2.0), 1.35);
         assert_eq!(local_contour_stroke_width(0.7, 1.0, 1.0, 2.0), 0.7);
-        assert_eq!(local_contour_stroke_width(0.7, 1.0, 1.0, 1.0), 1.0);
+        // The major/minor ratio survives at 1x too, now that 0.7 is no longer
+        // clamped up to a full pixel and flattened against 1.35.
+        assert_eq!(local_contour_stroke_width(0.7, 1.0, 1.0, 1.0), 0.7);
         // Bathymetry minor lines and coastlines share this helper, so they
         // receive the same physical-pixel floor as the terrain stack.
-        assert_eq!(local_stroke_width_points(0.3, 2.0), 0.5);
-        assert_eq!(local_stroke_width_points(0.7, 1.0), 1.0);
+        let floor_px = crate::settings_store::MIN_CONTOUR_STROKE_WIDTH_PX;
+        assert_eq!(local_stroke_width_points(0.3, 2.0), 0.3);
         assert_eq!(local_stroke_width_points(1.0, 1.0), 1.0);
+        // Below the floor it still clamps, in points for the given density.
+        assert_eq!(local_stroke_width_points(0.01, 1.0), floor_px);
+        assert_eq!(local_stroke_width_points(0.01, 2.0), floor_px / 2.0);
     }
 
     #[test]
