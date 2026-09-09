@@ -146,11 +146,14 @@ fn vs_main(in: VsIn) -> VsOut {
     }
     let normal = vec2<f32>(-dir.y, dir.x);
     let half_extent = stroke_half_px + feather_px;
-    // Extend endpoints lengthwise by the feather only: enough to hide joint
-    // cracks on smooth contours without visibly double-blending translucent
-    // strokes where consecutive segments overlap.
+    // Extend endpoints lengthwise by the feather to hide joint cracks on smooth
+    // contours — but never by more than half the segment, or a segment shorter
+    // than its own feather inflates into a blob roughly `2 * feather` across.
+    // Densely sampled contours are mostly such segments, which is what made
+    // them read as far heavier than an isolated line at the same width.
+    let extend = min(feather_px, len * 0.5);
     let px = mix(pa.xy, pb.xy, t)
-        + dir * (t * 2.0 - 1.0) * feather_px
+        + dir * (t * 2.0 - 1.0) * extend
         + normal * side * half_extent;
 
     let rel = (px - vec2<f32>(u.viewport_min_x, u.viewport_min_y))
@@ -172,6 +175,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         0.0,
         1.0,
     );
+    // A stroke narrower than a pixel cannot be drawn narrower than a pixel; it
+    // has to be drawn *fainter*. Taken from the per-instance width so major and
+    // minor contours each get their own factor. At a pixel and above it is 1.0.
+    let sub_pixel = clamp(2.0 * in.stroke_half_px, 0.0, 1.0);
     // Colour is premultiplied — scale the whole vector by coverage x pass fade.
-    return in.color * (edge * u.alpha);
+    return in.color * (edge * u.alpha * sub_pixel);
 }

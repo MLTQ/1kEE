@@ -100,11 +100,14 @@ fn vs_main(in: VsIn) -> VsOut {
     }
     let normal = vec2<f32>(-dir.y, dir.x);
     let half_extent = u.stroke_half_px + u.feather_px;
-    // Extend endpoints lengthwise by the feather only: enough to hide joint
-    // cracks on smooth contours without visibly double-blending translucent
-    // strokes where consecutive segments overlap.
+    // Extend endpoints lengthwise by the feather to hide joint cracks on smooth
+    // contours — but never by more than half the segment, or a segment shorter
+    // than its own feather inflates into a blob roughly `2 * feather` across.
+    // Densely sampled contours are mostly such segments, which is what made
+    // them read as far heavier than an isolated line at the same width.
+    let extend = min(u.feather_px, len * 0.5);
     let px = mix(pa.xy, pb.xy, t)
-        + dir * (t * 2.0 - 1.0) * u.feather_px
+        + dir * (t * 2.0 - 1.0) * extend
         + normal * side * half_extent;
 
     let rel = (px - u.viewport_min) / u.viewport_size;
@@ -119,6 +122,12 @@ fn vs_main(in: VsIn) -> VsOut {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let d = abs(in.dist_px);
     let edge = clamp((u.stroke_half_px + u.feather_px - d) / max(u.feather_px, 0.001), 0.0, 1.0);
+    // A stroke narrower than a pixel cannot be drawn narrower than a pixel; it
+    // has to be drawn *fainter*, which is how sub-pixel line rendering works.
+    // Without this a 0.25 px setting still paints whichever pixels the quad
+    // happens to cover at full opacity, giving a broken one-pixel line rather
+    // than a fine one. At a pixel and above this is exactly 1.0.
+    let sub_pixel = clamp(2.0 * u.stroke_half_px, 0.0, 1.0);
     // Colour is premultiplied — scale the whole vector by coverage × layer fade.
-    return in.color * (edge * u.alpha);
+    return in.color * (edge * u.alpha * sub_pixel);
 }

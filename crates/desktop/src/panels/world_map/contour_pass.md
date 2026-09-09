@@ -52,6 +52,24 @@ rebuilt only when source contours or their palette changes.
 - The GPU width test protects the one-pixel minimum's direct half-width mapping.
 - The feather is intentionally narrower than the former fixed 1 px margin so
   dense global contour layers do not visually balloon at small widths.
+- Three things decide how heavy a stroke actually looks, and only the first is
+  the width uniform:
+  1. **Width.** `stroke_half_px`, straightforward.
+  2. **Fringe.** Below one pixel `contour_feather_px` is `width * 0.5`, so the
+     drawn footprint is twice the selected width. A flat fringe floor made a
+     quarter-pixel stroke two-thirds fringe, which is why thin settings stopped
+     getting thinner. At one pixel and above the fringe is unchanged.
+  3. **Sub-pixel coverage.** A stroke narrower than a pixel cannot be drawn
+     narrower than a pixel; it has to be drawn fainter. The fragment shader
+     scales by `clamp(2 * stroke_half_px, 0, 1)`, which is exactly 1.0 at a
+     pixel and above. Without it a 0.25 px setting still painted whichever
+     pixels the quad covered at full opacity — a broken one-pixel line rather
+     than a fine one.
+- The lengthwise feather extension is capped at half the segment length.
+  A segment shorter than its own feather would otherwise inflate into a blob
+  roughly `2 * feather` across, and densely sampled contours are mostly such
+  segments — which is why they read as far heavier than an isolated coastline
+  at the same width setting.
 - Instance worker threads are named so a future native failure identifies the
   relevant work category instead of reporting only an unknown thread.
 - A failed instance build is recoverable: it leaves stale geometry visible,
