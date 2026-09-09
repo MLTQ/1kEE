@@ -154,10 +154,12 @@ fn contour_stroke_half_px(stroke_width_px: f32) -> f32 {
 #[inline]
 pub(crate) fn contour_feather_px(stroke_width_px: f32) -> f32 {
     const MIN_FEATHER_PX: f32 = 0.5;
-    /// Floor for sub-pixel strokes. A half-pixel fringe either side of a
-    /// quarter-pixel line is mostly fringe, which is what made thin contours
-    /// read as heavy rather than fine.
-    const MIN_SUBPIXEL_FEATHER_PX: f32 = 0.25;
+    /// Floor for sub-pixel strokes. A quarter-pixel fringe either side of a
+    /// quarter-pixel line is still two thirds fringe, so this goes low enough
+    /// that the fringe tracks the stroke rather than dominating it. Below one
+    /// pixel `min_feather` is simply `width * 0.5`, making the drawn footprint
+    /// twice the selected width — continuous with the one-pixel case.
+    const MIN_SUBPIXEL_FEATHER_PX: f32 = 0.125;
     const MAX_FEATHER_PX: f32 = 1.0;
     const FEATHER_FRACTION: f32 = 0.1;
 
@@ -225,7 +227,17 @@ mod feather_tests {
         let footprint = |w: f32| w + 2.0 * contour_feather_px(w);
         assert!(footprint(0.5) < footprint(1.0));
         assert!(footprint(0.25) < footprint(0.5));
-        assert!(contour_feather_px(0.25) >= 0.25);
+        // Below a pixel the fringe tracks the stroke, so the footprint is
+        // twice the selected width rather than being pinned by a fringe floor.
+        for width in [0.25_f32, 0.5, 0.75] {
+            assert!(
+                (footprint(width) - width * 2.0).abs() < 1e-6,
+                "{width}: {}",
+                footprint(width)
+            );
+        }
+        // The one-pixel case is unchanged, so the two regimes meet cleanly.
+        assert!((footprint(1.0) - 2.0).abs() < 1e-6);
     }
 }
 
