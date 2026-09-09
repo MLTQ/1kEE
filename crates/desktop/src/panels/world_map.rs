@@ -8,6 +8,7 @@ pub(crate) mod contour_asset;
 pub(crate) mod contour_pass;
 pub(crate) mod gebco_depth_fill;
 pub(crate) mod globe_pass;
+pub(crate) mod local_contour_pass;
 #[path = "world_map/globe_scene/mod.rs"]
 mod globe_scene;
 mod graticule;

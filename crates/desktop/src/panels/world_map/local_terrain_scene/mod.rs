@@ -3,7 +3,7 @@ pub(super) mod dissolve;
 pub(super) mod geography;
 pub(crate) mod hillshade_layer;
 pub(super) mod markers;
-pub(super) mod projection;
+pub(crate) mod projection;
 pub(super) mod ui_overlays;
 
 // Re-export project_local so sibling modules (road_layer, water_layer) can
@@ -38,6 +38,7 @@ use std::sync::Arc;
 
 use super::contour_asset;
 use super::globe_scene::GlobeScene;
+use super::local_contour_pass;
 use super::srtm_focus_cache;
 
 #[allow(dead_code)]
@@ -58,6 +59,9 @@ pub const LOCAL_ZOOM_MIN: f32 = 1.0;
 /// Upper end of the local zoom range. The visual scale and the contour tile
 /// spec now both run to this value.
 pub const LOCAL_ZOOM_MAX: f32 = 60.0;
+/// A contour is major every 50 m on Earth. Shared by the CPU stack and the GPU
+/// pass so both classify the same lines the same way.
+const EARTH_MAJOR_REM: i32 = 50;
 
 #[derive(Clone, Copy)]
 pub(super) struct LocalLayout {
@@ -154,6 +158,10 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         ),
     };
     let contours = contour_load.contours.clone();
+    // Earth draws contours on the GPU when the pass has geometry ready; the CPU
+    // stack stays as the fallback and remains the only path for Moon and Mars.
+    let gpu_contour_batches = gpu_contour_batches(model, &contour_load, painter);
+    let use_gpu_contours = !gpu_contour_batches.is_empty();
     let cache_status = match model.active_body {
         crate::model::ActiveBody::Moon | crate::model::ActiveBody::Mars => None,
         crate::model::ActiveBody::Earth => Some(contour_load.status),
@@ -214,7 +222,18 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         model.contour_stroke_scale_for_pixels_per_point(painter.ctx().pixels_per_point());
 
     // ── Background contour pass (drawn before fill so opaque fill covers them) ─
-    if model.fill_elevation && !contours_slice.is_empty() && model.show_contours {
+    if model.fill_elevation && model.show_contours && use_gpu_contours {
+        draw_gpu_contour_pass(
+            painter,
+            &layout,
+            &model.globe_view,
+            viewport_center,
+            local_contour_pass::LocalContourPass::Background,
+            &gpu_contour_batches,
+            1.0,
+            contour_stroke_scale,
+        );
+    } else if model.fill_elevation && !contours_slice.is_empty() && model.show_contours {
         draw_contour_stack(
             painter,
             &layout,
@@ -266,7 +285,18 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     }
 
     // ── Surface contour pass (drawn after fill so lines on top are visible) ───
-    if !contours_slice.is_empty() && model.show_contours {
+    if model.show_contours && use_gpu_contours {
+        draw_gpu_contour_pass(
+            painter,
+            &layout,
+            &model.globe_view,
+            viewport_center,
+            local_contour_pass::LocalContourPass::Surface,
+            &gpu_contour_batches,
+            1.0,
+            contour_stroke_scale,
+        );
+    } else if !contours_slice.is_empty() && model.show_contours {
         draw_contour_stack(
             painter,
             &layout,
@@ -1664,6 +1694,94 @@ fn draw_elevation_fill(
     }
 }
 
+/// Build (or pick up) GPU instance batches for the visible Earth contour tiles.
+///
+/// Returns empty for Moon and Mars, which keep the CPU renderer, and while the
+/// first background instance build is still running — the scene then draws the
+/// CPU stack, so there is never a blank frame during the handover.
+fn gpu_contour_batches(
+    model: &AppModel,
+    load: &contour_asset::LocalContourLoad,
+    painter: &egui::Painter,
+) -> Vec<local_contour_pass::LocalTileBatch> {
+    if model.active_body != crate::model::ActiveBody::Earth || load.tiles.is_empty() {
+        return Vec::new();
+    }
+
+    let major_color = theme::hot_color();
+    let minor_color = theme::contour_color();
+    // Baked colours must be rebuilt when the palette changes, so the instance
+    // version folds in the two colours the style function can produce.
+    let palette = u64::from(major_color.to_array().iter().fold(0u32, |acc, &c| {
+        acc.wrapping_mul(31).wrapping_add(u32::from(c))
+    }))
+        ^ (u64::from(minor_color.to_array().iter().fold(0u32, |acc, &c| {
+            acc.wrapping_mul(31).wrapping_add(u32::from(c))
+        })) << 32);
+
+    let ctx = painter.ctx().clone();
+    load.tiles
+        .iter()
+        .filter_map(|tile| {
+            local_contour_pass::instances_for_tile(
+                tile.id,
+                &tile.contours,
+                palette,
+                &ctx,
+                move |contour| {
+                    // Identical major/minor rule to the CPU stack.
+                    let major =
+                        (contour.elevation_m.round() as i32).rem_euclid(EARTH_MAJOR_REM) == 0;
+                    let color = if major { major_color } else { minor_color };
+                    // The pass fade is a uniform, so only the fixed major/minor
+                    // weighting is baked here.
+                    (
+                        color.gamma_multiply(if major { 1.0 } else { 0.78 }),
+                        major,
+                    )
+                },
+            )
+        })
+        .collect()
+}
+
+/// Submit one GPU contour pass for this frame.
+fn draw_gpu_contour_pass(
+    painter: &egui::Painter,
+    layout: &LocalLayout,
+    view: &GlobeViewState,
+    focus: GeoPoint,
+    pass: local_contour_pass::LocalContourPass,
+    batches: &[local_contour_pass::LocalTileBatch],
+    alpha: f32,
+    contour_stroke_scale: f32,
+) {
+    let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
+    let km_per_deg_lat = 111.32f32;
+    let km_per_deg_lon = km_per_deg_lat * focus.lat.to_radians().cos().abs().max(0.2);
+    let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
+    let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
+
+    let params =
+        projection::local_projection_params(layout, view, focus, extent_x_km, extent_y_km);
+    let pixels_per_point = painter.ctx().pixels_per_point();
+
+    painter.add(
+        local_contour_pass::LocalContourCallback::new(
+            pass,
+            batches.to_vec(),
+            &params,
+            alpha,
+            // Same two widths the CPU stack derives, so the major/minor
+            // hierarchy is preserved exactly.
+            local_contour_stroke_width(0.7, alpha, contour_stroke_scale, pixels_per_point),
+            local_contour_stroke_width(1.35, alpha, contour_stroke_scale, pixels_per_point),
+            pixels_per_point,
+        )
+        .into_paint_callback(painter.clip_rect()),
+    );
+}
+
 fn draw_contour_stack(
     painter: &egui::Painter,
     layout: &LocalLayout,
@@ -1676,9 +1794,13 @@ fn draw_contour_stack(
     contour_stroke_scale: f32,
 ) {
     puffin::profile_function!();
-    // Ceiling on projected points per frame. This is a rendering cost budget,
-    // not a correctness limit: egui tessellates strokes on the CPU, so every
-    // point past this costs frame time.
+    // Ceiling on projected points per frame for the CPU fallback path. Earth
+    // now draws through `local_contour_pass` on the GPU and is not subject to
+    // this at all; it still governs Moon and Mars, and Earth whenever the GPU
+    // pass has no geometry ready yet.
+    //
+    // This is a rendering cost budget, not a correctness limit: egui tessellates
+    // strokes on the CPU, so every point past this costs frame time.
     //
     // It was 300_000, sized when contours came from 30 m SRTM. A single 3DEP
     // bucket-10 tile carries ~4.3 M points, so the old ceiling was exhausted by
@@ -1697,7 +1819,7 @@ fn draw_contour_stack(
     // Lunar minor=50-1000m so major at 1000m rem (two minor intervals up in any spec).
     let major_rem: i32 = match active_body {
         crate::model::ActiveBody::Moon | crate::model::ActiveBody::Mars => 1_000,
-        crate::model::ActiveBody::Earth => 50,
+        crate::model::ActiveBody::Earth => EARTH_MAJOR_REM,
     };
     let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
     let km_per_deg_lat = 111.32f32;
@@ -2206,16 +2328,17 @@ mod tests {
         );
     }
 
-    /// `feature_budget` is split across the assets in the envelope, and the
-    /// reader floors the result at 120. These tiers must clear that floor with
-    /// real margin, or the budget stops being the thing that controls them.
+    /// `feature_budget` is split across the assets in the envelope and decides
+    /// how much of a tile the reader keeps.
     ///
-    /// The number does not need to be large: the reader keeps the *longest*
-    /// contours, so a few hundred per tile already carry most of the geometry.
-    /// It is bounded above by memory — every loaded point is resident whether
-    /// or not the frame budget lets it be drawn.
+    /// Before the GPU pass this was bounded above by what a frame could
+    /// tessellate. It no longer is: `local_contour_pass` uploads a tile once and
+    /// redraws it for free, so these tiers must not decimate at all. A measured
+    /// bucket-10 tile holds ~9 800 contours, so the per-tile share has to clear
+    /// that with room to spare or the deepest tier silently loses geometry
+    /// again.
     #[test]
-    fn threedep_tiers_budget_enough_features_for_their_smaller_envelope() {
+    fn threedep_tiers_do_not_decimate_their_tiles() {
         let assets_in_envelope =
             ((srtm_focus_cache::THREEDEP_PREFETCH_RADIUS * 2 + 1) as usize).pow(2);
         for zoom in [16.0_f32, 22.0, 32.0, 44.0, 60.0] {
@@ -2225,15 +2348,15 @@ mod tests {
             }
             let per_asset = spec.feature_budget / assets_in_envelope;
             assert!(
-                (200..=1_000).contains(&per_asset),
-                "bucket {} gives {per_asset} features per tile across \
-                 {assets_in_envelope} assets; below ~200 the reader's floor \
-                 takes over, above ~1000 the envelope's resident points grow \
-                 far past what a frame can draw",
+                per_asset >= 10_000,
+                "bucket {} allows {per_asset} contours per tile, under the \
+                 ~9 800 a dense 3DEP tile carries",
                 spec.zoom_bucket
             );
         }
     }
+
+
 
     #[test]
     fn local_bounds_filter_keeps_near_contours_out_of_fill_workers() {

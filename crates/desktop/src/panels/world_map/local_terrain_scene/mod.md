@@ -155,3 +155,20 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
   extent. A tighter margin culls terrain that is still on screen, which no cache
   or tile size can compensate for.
 
+### GPU contour rendering
+
+- **Does**: `gpu_contour_batches` picks up per-tile instance batches from
+  `local_contour_pass`, and `draw_gpu_contour_pass` submits one paint callback
+  per contour pass. When no batch is ready the scene falls through to
+  `draw_contour_stack`.
+- **Interacts with**: `local_contour_pass`, `projection::local_projection_params`.
+- **Rationale**: The CPU stack projects and tessellates every point every frame,
+  which is what forced `MAX_CONTOUR_RENDER_POINTS`. Geometry uploaded once per
+  source tile is redrawn for free, so Earth is no longer subject to a per-frame
+  point budget at all — the ceiling became a resident-memory budget instead.
+- `MAX_CONTOUR_RENDER_POINTS` and `select_contours_within_budget` now govern
+  only the fallback path and the Moon/Mars scenes.
+- `EARTH_MAJOR_REM` is shared by both renderers so they classify major contours
+  identically; the GPU path bakes the resulting colour and a major flag into
+  each instance.
+

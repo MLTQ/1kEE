@@ -622,6 +622,46 @@ fn tab_paths(ui: &mut egui::Ui, model: &mut AppModel) {
         );
     });
 
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(4.0);
+    ui.strong("Local Contour GPU Budget");
+    ui.label(
+        egui::RichText::new(
+            "Local contours are drawn from geometry uploaded to the GPU once per source \
+             tile, so this is a ceiling on resident geometry rather than a per-frame \
+             drawing limit.  Least-recently-drawn tiles are evicted past it and \
+             re-uploaded if revisited.",
+        )
+        .small()
+        .color(theme::text_muted()),
+    );
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("GPU geometry budget");
+        ui.add(
+            egui::Slider::new(
+                &mut model.settings_local_contour_vram_budget_gb,
+                settings_store::MIN_LOCAL_CONTOUR_VRAM_BUDGET_GB
+                    ..=settings_store::MAX_LOCAL_CONTOUR_VRAM_BUDGET_GB,
+            )
+            .suffix(" GB")
+            .logarithmic(true),
+        );
+    });
+    {
+        let resident_gb = crate::panels::world_map::local_contour_pass::resident_bytes() as f64
+            / (1024.0 * 1024.0 * 1024.0);
+        ui.label(
+            egui::RichText::new(format!(
+                "Resident contour geometry: {resident_gb:.2} GB of {:.2} GB",
+                model.settings_local_contour_vram_budget_gb
+            ))
+            .small()
+            .color(theme::text_muted()),
+        );
+    }
+
     if let Some(derived_root) = terrain_assets::find_derived_root(model.selected_root.as_deref()) {
         let used_gb = crate::threedep::cache_bytes(&derived_root) as f64 / (1024.0 * 1024.0 * 1024.0);
         ui.label(

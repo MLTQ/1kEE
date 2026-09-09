@@ -160,6 +160,7 @@ pub struct AppModel {
     pub settings_prefer_overpass: bool,
     pub settings_threedep_enabled: bool,
     pub settings_threedep_cache_budget_gb: f32,
+    pub settings_local_contour_vram_budget_gb: f32,
     pub terrain_library_open: bool,
     pub city_filter: String,
     pub selected_city_ids: BTreeSet<String>,
@@ -443,6 +444,7 @@ impl AppModel {
             settings_prefer_overpass: app_settings.prefer_overpass,
             settings_threedep_enabled: app_settings.threedep_enabled,
             settings_threedep_cache_budget_gb: app_settings.threedep_cache_budget_gb,
+            settings_local_contour_vram_budget_gb: app_settings.local_contour_vram_budget_gb,
             terrain_library_open: false,
             city_filter: String::new(),
             selected_city_ids: BTreeSet::new(),
@@ -624,6 +626,10 @@ impl AppModel {
             threedep_cache_budget_gb: settings_store::normalize_threedep_cache_budget_gb(
                 self.settings_threedep_cache_budget_gb,
             ),
+            local_contour_vram_budget_gb:
+                settings_store::normalize_local_contour_vram_budget_gb(
+                    self.settings_local_contour_vram_budget_gb,
+                ),
         };
         settings_store::save_app_settings(&settings)
     }
@@ -647,6 +653,10 @@ impl AppModel {
         self.settings_threedep_enabled = settings.threedep_enabled;
         self.settings_threedep_cache_budget_gb =
             settings_store::normalize_threedep_cache_budget_gb(settings.threedep_cache_budget_gb);
+        self.settings_local_contour_vram_budget_gb =
+            settings_store::normalize_local_contour_vram_budget_gb(
+                settings.local_contour_vram_budget_gb,
+            );
         self.legacy_contour_stroke_scale =
             settings_store::normalize_contour_stroke_scale(settings.contour_stroke_scale);
         self.contour_stroke_width_px = settings.contour_stroke_width_px;

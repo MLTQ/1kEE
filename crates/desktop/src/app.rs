@@ -52,9 +52,15 @@ impl DashboardApp {
                 &wgpu_state.device,
                 wgpu_state.target_format,
             );
+            let local_contour_res =
+                panels::world_map::local_contour_pass::LocalContourPassResources::new(
+                    &wgpu_state.device,
+                    wgpu_state.target_format,
+                );
             let mut renderer = wgpu_state.renderer.write();
             renderer.callback_resources.insert(globe_res);
             renderer.callback_resources.insert(contour_res);
+            renderer.callback_resources.insert(local_contour_res);
         }
 
         // Open the event history store (creates DB if not present).

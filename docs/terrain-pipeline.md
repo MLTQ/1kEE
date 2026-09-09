@@ -242,9 +242,33 @@ contours instead makes each budget buy far more visible structure, and it is
 **stable under camera motion**: a long contour stays long, so it keeps making the
 cut rather than flickering at the budget boundary.
 
-Raising `MAX_CONTOUR_RENDER_POINTS` is the knob for "more on screen at the cost
-of frame time"; egui tessellates strokes on the CPU, so cost is roughly linear
-in points. The original 300 000 was sized against a WGPU index-buffer limit hit
+### Moving it to the GPU
+
+Those three limits were all consequences of drawing contours on the CPU. Earth
+now renders them through `local_contour_pass`, an instanced segment pass in the
+mould of the globe's `contour_pass`, and the per-frame budget stops applying:
+
+- Instances are keyed **per source tile** and uploaded once. A tile's contour
+  `Arc` is stable after loading, so panning, rotating and zooming never rebuild
+  or re-upload anything — the vertex shader applies the whole local transform to
+  raw `(lon, lat, elevation_m)` endpoints.
+- Per frame the cost is one uniform write and one instanced draw per resident
+  tile, regardless of how many points those tiles hold.
+- The AABB cull disappears; off-screen segments are discarded by the rasterizer.
+- The reader stops decimating: `feature_budget` for these tiers is now larger
+  than a dense tile's contour count.
+
+The remaining ceiling is a **resident-memory budget**, not a point count —
+`local_contour_vram_budget_gb`, default 10 GB, evicting least-recently-drawn
+tiles. At 32 bytes per segment a full 25-tile bucket-10 envelope is roughly
+3.4 GB, so in practice the budget rarely evicts anything.
+
+Above that the real limits are legibility rather than throughput: ~100 M
+segments drawn into ~2 M screen pixels is heavy overdraw, and the thing to tune
+there is the contour interval, not the geometry budget.
+
+`MAX_CONTOUR_RENDER_POINTS` survives for the CPU fallback and the Moon and Mars
+scenes. Its original 300 000 was sized against a WGPU index-buffer limit hit
 when 1 600 globe tiles accumulated, which is a different path from the 25-tile
 local envelope.
 
