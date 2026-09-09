@@ -38,14 +38,18 @@ exists under a point, and pulls only the small area currently in view.
 - **Rationale**: Point sampling needs a local raster, unlike the contour path.
   A fixed grid means neighbouring queries reuse the same download.
 
-### `peek_elevation_m`
+### `peek_elevation_m` / `blocking_elevation_m`
 
-- **Does**: Nonblocking 1 m elevation lookup. Answers only from an already
-  decoded chunk, otherwise schedules the fetch and returns `None`.
-- **Interacts with**: `srtm_stream::sample_elevation_m` and `peek_elevation_m`.
-- **Rationale**: Layer builders keep their current latency and fall back to
-  SRTM rather than blocking on a download; the finer source is picked up on a
-  later rebuild.
+- **Does**: 1 m elevation under a point. The peek answers only from an already
+  decoded chunk and otherwise schedules the fetch; the blocking form downloads
+  and decodes on the calling thread.
+- **Interacts with**: `srtm_stream::peek_elevation_m` (marker paint) and
+  `srtm_stream::sample_elevation_m` (background layer builders) respectively.
+- **Rationale**: The two callers need opposite things. Marker paint must never
+  block and can afford to be approximate for a frame. Layer builders bake one
+  elevation per vertex into cached geometry, so they need the *same answer for
+  the same point every time* — a cache-dependent source writes the difference
+  between two terrain models permanently into a road outline.
 
 ### `fetch_hillshade_png`
 
@@ -66,7 +70,8 @@ exists under a point, and pulls only the small area currently in view.
 | Dependent | Expects | Breaking changes |
 |---|---|---|
 | `srtm_focus_cache::builders` | `coverage_at` is cheap and never blocks a frame | Making the nonblocking probe synchronous |
-| `srtm_stream` | `peek_elevation_m` never performs network or GDAL work inline | Blocking on a fetch in the peek path |
+| `srtm_stream` (markers) | `peek_elevation_m` never performs network or GDAL work inline | Blocking on a fetch in the peek path |
+| `srtm_stream` (layer builders) | `blocking_elevation_m` is deterministic for a given point and coverage | Returning `None` on a lost download race, which silently reverts that vertex to SRTM |
 | `hillshade_layer` | `fetch_hillshade_png` returns PNG bytes or `None`, never an error page | Returning the service's HTML error body |
 | Cache volume | Total footprint stays under the configured budget | Writing chunks without calling `enforce_cache_budget` |
 
@@ -81,6 +86,10 @@ exists under a point, and pulls only the small area currently in view.
 - 1 m coverage is broader than the "urban only" reputation suggests — rural
   Nevada probes as 1 m — but Alaska is largely 3 m or coarser, and nothing
   outside the United States is served at all.
+- `ensure_chunk` waits for another thread's in-flight download of the same
+  chunk rather than returning `None`. Giving up would make the result depend on
+  download timing, which is exactly the nondeterminism the blocking sampler
+  exists to avoid.
 - The EHdr driver writes its raw band to exactly the path it is given and
   derives the header by swapping the extension, so decode output must be named
   `.bil`. An extensionless stem silently produces a file nothing can find.
