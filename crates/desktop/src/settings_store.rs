@@ -25,6 +25,12 @@ pub(crate) const MAX_EYES_ON_MAX_PAGES: u8 = 5;
 /// holding is hundreds of terabytes, so the cache is bounded and evicts
 /// least-recently-used chunks rather than growing without limit.
 pub(crate) const DEFAULT_THREEDEP_CACHE_BUDGET_GB: f32 = 20.0;
+/// Ceiling on contour geometry the local scene keeps resident on the GPU.
+/// This is a ceiling, not a reservation: buffers are allocated per source tile
+/// as tiles load, and least-recently-drawn tiles are evicted past it.
+pub(crate) const DEFAULT_LOCAL_CONTOUR_VRAM_BUDGET_GB: f32 = 10.0;
+pub(crate) const MIN_LOCAL_CONTOUR_VRAM_BUDGET_GB: f32 = 0.25;
+pub(crate) const MAX_LOCAL_CONTOUR_VRAM_BUDGET_GB: f32 = 24.0;
 pub(crate) const MIN_THREEDEP_CACHE_BUDGET_GB: f32 = 1.0;
 pub(crate) const MAX_THREEDEP_CACHE_BUDGET_GB: f32 = 512.0;
 pub(crate) const DEFAULT_EYES_ON_MAX_PAGES: u8 = MAX_EYES_ON_MAX_PAGES;
@@ -87,6 +93,9 @@ pub struct AppSettings {
     /// Ceiling in gigabytes for the cached 3DEP chunk store.
     #[serde(default = "default_threedep_cache_budget_gb")]
     pub threedep_cache_budget_gb: f32,
+    /// Ceiling in gigabytes for local contour geometry resident on the GPU.
+    #[serde(default = "default_local_contour_vram_budget_gb")]
+    pub local_contour_vram_budget_gb: f32,
 }
 
 impl Default for AppSettings {
@@ -111,6 +120,7 @@ impl Default for AppSettings {
             contour_stroke_width_px: None,
             threedep_enabled: true,
             threedep_cache_budget_gb: DEFAULT_THREEDEP_CACHE_BUDGET_GB,
+            local_contour_vram_budget_gb: DEFAULT_LOCAL_CONTOUR_VRAM_BUDGET_GB,
         }
     }
 }
@@ -145,6 +155,31 @@ pub fn threedep_enabled() -> bool {
 
 pub fn threedep_cache_budget_gb() -> f32 {
     normalize_threedep_cache_budget_gb(load_app_settings().threedep_cache_budget_gb)
+}
+
+fn default_local_contour_vram_budget_gb() -> f32 {
+    DEFAULT_LOCAL_CONTOUR_VRAM_BUDGET_GB
+}
+
+pub(crate) fn normalize_local_contour_vram_budget_gb(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(
+            MIN_LOCAL_CONTOUR_VRAM_BUDGET_GB,
+            MAX_LOCAL_CONTOUR_VRAM_BUDGET_GB,
+        )
+    } else {
+        DEFAULT_LOCAL_CONTOUR_VRAM_BUDGET_GB
+    }
+}
+
+pub fn local_contour_vram_budget_gb() -> f32 {
+    normalize_local_contour_vram_budget_gb(load_app_settings().local_contour_vram_budget_gb)
+}
+
+/// The GPU budget in bytes. Read once per frame by the local contour pass, so
+/// it stays a plain settings lookup rather than plumbing through the scene.
+pub fn local_contour_vram_budget_bytes() -> u64 {
+    (local_contour_vram_budget_gb() as f64 * 1024.0 * 1024.0 * 1024.0) as u64
 }
 
 pub(crate) fn normalize_eyes_on_country_code(value: &str) -> String {
@@ -373,6 +408,8 @@ fn normalize_settings(mut settings: AppSettings) -> AppSettings {
     settings.srtm_root = normalize_srtm_root_owned(settings.srtm_root);
     settings.threedep_cache_budget_gb =
         normalize_threedep_cache_budget_gb(settings.threedep_cache_budget_gb);
+    settings.local_contour_vram_budget_gb =
+        normalize_local_contour_vram_budget_gb(settings.local_contour_vram_budget_gb);
     settings.planet_path = normalize_optional_owned(settings.planet_path);
     settings.gdal_bin_dir = normalize_optional_owned(settings.gdal_bin_dir);
     settings.contour_stroke_scale = normalize_contour_stroke_scale(settings.contour_stroke_scale);

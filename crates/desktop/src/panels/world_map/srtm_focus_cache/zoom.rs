@@ -142,13 +142,12 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
     // bucket-10 tile is ~4.3 M points, where a whole SRTM tile is a small
     // fraction of that. Two consequences.
     //
-    // `feature_budget` is 7 500 across a 25-tile envelope, so 300 contours per
-    // tile. That looks small next to the raw count, but the reader now keeps
-    // the *longest* contours rather than every Nth: 300 longest hold roughly a
-    // third of a tile's geometry, where 300 strided held about 3%. It is also
-    // what keeps memory sane — the envelope holds ~150 MB of points at this
-    // budget and ~400 MB at 2 500 per tile, to feed a renderer that draws at
-    // most 1 M points a frame.
+    // `feature_budget` is effectively uncapped — 250 000 across a 25-tile
+    // envelope is 10 000 per tile, more than a bucket-10 tile's ~9 800 contours
+    // — because `local_contour_pass` draws these on the GPU. Geometry is
+    // uploaded once per tile and redrawn for free, so the reader no longer has
+    // to ration what a frame can tessellate. It stays a finite number so the
+    // CPU fallback path degrades rather than reading without bound.
     //
     // `simplify_step` is 2 throughout because source vertex spacing is already
     // below one screen pixel at these scales, so halving the points costs
@@ -172,7 +171,7 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             raster_size: 2048,
             interval_m: 5.0,
             simplify_step: 2,
-            feature_budget: 7_500,
+            feature_budget: 250_000,
             zoom_bucket: 7,
         }
     } else if zoom < 31.0 {
@@ -181,7 +180,7 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             raster_size: 2400,
             interval_m: 2.0,
             simplify_step: 2,
-            feature_budget: 7_500,
+            feature_budget: 250_000,
             zoom_bucket: 8,
         }
     } else if zoom < 44.0 {
@@ -190,7 +189,7 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             raster_size: 2400,
             interval_m: 1.0,
             simplify_step: 2,
-            feature_budget: 7_500,
+            feature_budget: 250_000,
             zoom_bucket: 9,
         }
     } else {
@@ -199,7 +198,7 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             raster_size: 2400,
             interval_m: 0.5,
             simplify_step: 2,
-            feature_budget: 7_500,
+            feature_budget: 250_000,
             zoom_bucket: 10,
         }
     }

@@ -88,6 +88,7 @@ pub fn blast_tile_caches() {
     }
     gebco_depth_fill::clear();
     super::local_terrain_scene::hillshade_layer::clear();
+    super::local_contour_pass::clear_instances();
 }
 
 /// Whether the most recently selected local manifest window still needs tiles.
@@ -126,6 +127,22 @@ pub struct LocalContourLoad {
     pub contours: Option<Arc<Vec<ContourPath>>>,
     pub ready_buckets: HashSet<(i32, i32)>,
     pub status: srtm_focus_cache::FocusContourRegionStatus,
+    /// The same tiles the merge flattens, handed out unflattened for the GPU
+    /// contour pass. Each `Arc` is stable once loaded, which is what lets the
+    /// pass build and upload a tile's geometry exactly once.
+    ///
+    /// Populated for Earth only. Lunar and Mars merges apply exclusive midpoint
+    /// ownership to de-overlap their tiles, which the per-tile path would have
+    /// to reproduce; they keep the CPU renderer, where geometry volume is not a
+    /// problem.
+    pub tiles: Vec<LocalTileGeometry>,
+}
+
+/// One source tile's contours, identified for the GPU pass's buffer cache.
+#[derive(Clone)]
+pub struct LocalTileGeometry {
+    pub id: super::local_contour_pass::LocalTileId,
+    pub contours: Arc<Vec<ContourPath>>,
 }
 
 #[derive(Clone, Hash, PartialEq, Eq)]
@@ -1089,8 +1106,24 @@ pub fn load_srtm_region_for_view(
     // Flattening the complete source envelope is intentionally asynchronous:
     // decode arrivals can contain thousands of paths, and cloning them on the
     // paint thread caused the visible tile-arrival hitch.
-    let (contours, merge) = if let Ok(mut guard) = cache.lock() {
+    let (contours, merge, tiles) = if let Ok(mut guard) = cache.lock() {
         retain_local_entries(&mut guard, center_lat_bucket, center_lon_bucket);
+        let tiles = guard
+            .entries
+            .iter()
+            .filter(|(tile, _)| {
+                local_tile_distance(tile, center_lat_bucket, center_lon_bucket)
+                    <= prefetch_radius
+            })
+            .map(|(tile, contours)| LocalTileGeometry {
+                id: super::local_contour_pass::LocalTileId {
+                    zoom_bucket: tile.zoom_bucket,
+                    lat_bucket: tile.lat_bucket,
+                    lon_bucket: tile.lon_bucket,
+                },
+                contours: Arc::clone(contours),
+            })
+            .collect();
         let merge = begin_local_merge(
             &mut guard,
             LocalMergeSpec {
@@ -1100,9 +1133,9 @@ pub fn load_srtm_region_for_view(
                 partition_bucket_step: None,
             },
         );
-        (guard.merged.clone(), merge)
+        (guard.merged.clone(), merge, tiles)
     } else {
-        (None, None)
+        (None, None, Vec::new())
     };
     if let Some(work) = merge {
         spawn_local_merge(cache, work, ctx.clone(), "earth-local-contour-merge");
@@ -1111,6 +1144,7 @@ pub fn load_srtm_region_for_view(
         contours,
         ready_buckets: state.ready_buckets,
         status: state.status,
+        tiles,
     }
 }
 
@@ -1238,6 +1272,8 @@ pub fn load_lunar_region_for_view(
         contours,
         ready_buckets: state.ready_buckets,
         status: state.status,
+        // Lunar and Mars keep the CPU renderer; see `LocalContourLoad::tiles`.
+        tiles: Vec::new(),
     }
 }
 
@@ -1363,6 +1399,8 @@ pub fn load_mars_region_for_view(
         contours,
         ready_buckets: state.ready_buckets,
         status: state.status,
+        // Lunar and Mars keep the CPU renderer; see `LocalContourLoad::tiles`.
+        tiles: Vec::new(),
     }
 }
 
