@@ -438,8 +438,12 @@ pub struct LocalContourCallback {
 impl LocalContourCallback {
     /// Build a callback for one of the scene's two contour passes.
     ///
-    /// `stroke_width_px` and `alpha` land only in uniforms, so changing either
-    /// never rebuilds or re-uploads geometry.
+    /// Widths are **physical pixels**, matching `contour_pass`. The scene's CPU
+    /// stroke helpers return logical points, so callers must scale by
+    /// `pixels_per_point`; `gpu_contour_stroke_width_px` does that.
+    ///
+    /// Width and `alpha` land only in uniforms, so changing either never
+    /// rebuilds or re-uploads geometry.
     pub fn new(
         pass: LocalContourPass,
         batches: Vec<LocalTileBatch>,
@@ -476,8 +480,10 @@ impl LocalContourCallback {
                 viewport_size_y: 1.0,
                 stroke_half_px_minor: stroke_width_px_minor * 0.5,
                 stroke_half_px_major: stroke_width_px_major * 0.5,
-                feather_px_minor: feather_px(stroke_width_px_minor),
-                feather_px_major: feather_px(stroke_width_px_major),
+                // Shared with the globe pass so equal widths render at equal
+                // weight in both views.
+                feather_px_minor: super::contour_pass::contour_feather_px(stroke_width_px_minor),
+                feather_px_major: super::contour_pass::contour_feather_px(stroke_width_px_major),
                 pixels_per_point,
                 // Same gamma-space→linear-space correction the CPU path applied
                 // through `gamma_multiply`.
@@ -498,13 +504,6 @@ impl LocalContourCallback {
         self.uniforms.viewport_size_y = (rect.height() * ppp).max(1.0);
         egui_wgpu::Callback::new_paint_callback(rect, self)
     }
-}
-
-/// Match `contour_pass`'s narrow anti-alias fringe so GPU-drawn local contours
-/// keep the same weight as the globe's at equal widths.
-#[inline]
-fn feather_px(stroke_width_px: f32) -> f32 {
-    (stroke_width_px * 0.25).clamp(0.5, 1.0)
 }
 
 impl egui_wgpu::CallbackTrait for LocalContourCallback {

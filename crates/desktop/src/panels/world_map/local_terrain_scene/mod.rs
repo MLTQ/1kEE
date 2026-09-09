@@ -1773,9 +1773,10 @@ fn draw_gpu_contour_pass(
             &params,
             alpha,
             // Same two widths the CPU stack derives, so the major/minor
-            // hierarchy is preserved exactly.
-            local_contour_stroke_width(0.7, alpha, contour_stroke_scale, pixels_per_point),
-            local_contour_stroke_width(1.35, alpha, contour_stroke_scale, pixels_per_point),
+            // hierarchy is preserved exactly — converted to physical pixels,
+            // which is what the pass expects.
+            gpu_contour_stroke_width_px(0.7, alpha, contour_stroke_scale, pixels_per_point),
+            gpu_contour_stroke_width_px(1.35, alpha, contour_stroke_scale, pixels_per_point),
             pixels_per_point,
         )
         .into_paint_callback(painter.clip_rect()),
@@ -1913,6 +1914,34 @@ pub(super) fn local_stroke_width_points(width_points: f32, pixels_per_point: f32
         1.0
     };
     width_points.max(crate::settings_store::MIN_CONTOUR_STROKE_WIDTH_PX / pixels_per_point)
+}
+
+/// The CPU stroke width in **physical pixels**, for the GPU pass.
+///
+/// `local_contour_stroke_width` returns logical points, because it feeds
+/// `egui::Stroke`, whose widths are points. The contour passes take physical
+/// pixels — `contour_pass` is handed `AppModel::contour_stroke_width_px`
+/// directly. Passing points straight through drew a thin core inside a
+/// full-width feather, so a 1 px setting came out soft and roughly half a pixel
+/// of solid line.
+#[inline]
+fn gpu_contour_stroke_width_px(
+    base_width: f32,
+    alpha: f32,
+    contour_stroke_scale: f32,
+    pixels_per_point: f32,
+) -> f32 {
+    let points = local_contour_stroke_width(base_width, alpha, contour_stroke_scale, pixels_per_point);
+    points * normalized_pixels_per_point(pixels_per_point)
+}
+
+#[inline]
+fn normalized_pixels_per_point(pixels_per_point: f32) -> f32 {
+    if pixels_per_point.is_finite() && pixels_per_point > 0.0 {
+        pixels_per_point
+    } else {
+        1.0
+    }
 }
 
 #[inline]
@@ -2286,6 +2315,43 @@ mod tests {
         let contours = vec![contour_of(1.0, 5_000)];
         let kept = select_contours_within_budget(contours.iter().collect(), 100);
         assert_eq!(kept.len(), 1, "an empty scene is worse than one long line");
+    }
+
+    /// The GPU pass takes physical pixels; the CPU stroke helpers return
+    /// logical points. Passing points straight through drew a half-pixel core
+    /// inside a full-width feather, so a 1 px setting rendered soft and too
+    /// heavy. This pins the conversion at both common display densities.
+    #[test]
+    fn the_gpu_pass_receives_stroke_widths_in_physical_pixels() {
+        for pixels_per_point in [1.0_f32, 2.0] {
+            let points =
+                local_contour_stroke_width(0.7, 1.0, 0.4348, pixels_per_point);
+            let physical =
+                gpu_contour_stroke_width_px(0.7, 1.0, 0.4348, pixels_per_point);
+            assert!(
+                (physical - points * pixels_per_point).abs() < 1e-5,
+                "{pixels_per_point}x: {physical} px from {points} pt"
+            );
+        }
+    }
+
+    /// The minimum width setting has to produce exactly one physical pixel of
+    /// solid line, on any display density. The CPU path gets this from the
+    /// `max()` floor in `local_stroke_width_points`; the GPU path has to land on
+    /// the same number after conversion.
+    #[test]
+    fn the_minimum_width_setting_is_one_physical_pixel() {
+        for pixels_per_point in [1.0_f32, 2.0, 3.0] {
+            // The scale the model derives for a 1 physical px selection.
+            let scale = crate::settings_store::MIN_CONTOUR_STROKE_WIDTH_PX
+                / (crate::settings_store::LEGACY_CONTOUR_STROKE_WIDTH_POINTS
+                    * pixels_per_point);
+            let minor = gpu_contour_stroke_width_px(0.7, 1.0, scale, pixels_per_point);
+            assert!(
+                (minor - crate::settings_store::MIN_CONTOUR_STROKE_WIDTH_PX).abs() < 1e-4,
+                "{pixels_per_point}x gave {minor} px, expected 1"
+            );
+        }
     }
 
     /// The oblique camera shows ground well past `visual_half_extent_for_zoom`.
