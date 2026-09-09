@@ -66,6 +66,16 @@ the CPU projection and egui tessellation could not keep up with.
   formula ends in a `max()` floor. Both widths are therefore computed host-side
   and selected per instance, rather than derived from one width by a multiplier
   that the floor would break.
+- **Widths crossing this boundary are physical pixels**, matching
+  `contour_pass`, which is handed `AppModel::contour_stroke_width_px` directly.
+  The scene's own stroke helpers return logical *points* because they feed
+  `egui::Stroke`, so `gpu_contour_stroke_width_px` scales by
+  `pixels_per_point` on the way in. Passing points straight through drew a
+  half-pixel core inside a full-width feather, which read as soft, too-heavy
+  lines at the 1 px setting. `the_minimum_width_setting_is_one_physical_pixel`
+  pins it.
+- The anti-alias fringe is `contour_pass::contour_feather_px`, shared rather
+  than reimplemented, so equal widths render at equal weight in both views.
 - `version_key` folds the tile's `Arc` pointer with the palette. Contours are
   immutable once loaded, so pointer identity is a sound cache key, and a theme
   change invalidates the baked colours.

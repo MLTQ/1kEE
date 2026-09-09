@@ -152,7 +152,7 @@ fn contour_stroke_half_px(stroke_width_px: f32) -> f32 {
 /// one-pixel minimum; wider strokes receive a little more edge coverage while
 /// never exceeding the old one-pixel fringe.
 #[inline]
-fn contour_feather_px(stroke_width_px: f32) -> f32 {
+pub(crate) fn contour_feather_px(stroke_width_px: f32) -> f32 {
     const MIN_FEATHER_PX: f32 = 0.5;
     const MAX_FEATHER_PX: f32 = 1.0;
     const FEATHER_FRACTION: f32 = 0.1;
