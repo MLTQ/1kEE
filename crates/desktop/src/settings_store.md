@@ -1,12 +1,12 @@
 # settings_store.rs
 
 ## Purpose
-Persists the desktop app's local configuration so it survives restarts. That now includes the Factal API key, live camera-source keys, the opt-in Project Eyes On directory scope, path overrides for the asset root, data roots, GDAL tool discovery, and the operator-selected contour line thickness.
+Persists the desktop app's local configuration so it survives restarts. That now includes the Factal API key, live camera-source keys, the opt-in Project Eyes On directory scope and request rate, path overrides for the asset root, data roots, GDAL tool discovery, and the operator-selected contour line thickness.
 
 ## Components
 
 ### `AppSettings`
-- **Does**: Holds the app-managed settings payload for Factal, live camera sources, bounded Project Eyes On directory settings, filesystem/tool paths, a legacy contour multiplier, and an optional physical contour width
+- **Does**: Holds the app-managed settings payload for Factal, live camera sources, paced Project Eyes On directory settings, filesystem/tool paths, a legacy contour multiplier, and an optional physical contour width
 - **Interacts with**: `model.rs`, `terrain_assets.rs`, `osm_ingest.rs`, `srtm_focus_cache.rs`, `factal_settings.rs`, `camera_registry.rs`
 
 ### `load_app_settings` / `save_app_settings`
@@ -31,7 +31,7 @@ Persists the desktop app's local configuration so it survives restarts. That now
 |-----------|---------|------------------|
 | `model.rs` | Settings loading is cheap enough to use at startup and returns executable-directory defaults when unset | Making settings resolution expensive or removing the default asset-root fallback |
 | `factal_settings.rs` | Saving an empty key clears the on-disk value and blank path fields revert to auto-detect/default behavior | Changing clear semantics or making blank path fields invalid |
-| `camera_registry.rs` | Project Eyes On is disabled by default; country codes are blank or ISO-like and fresh configurations use the bounded five-page scan | Enabling network discovery by default or removing bounds |
+| `camera_registry.rs` | Project Eyes On is disabled by default; country codes are blank or ISO-like and request starts default to 250/min within the supported 10–3,000 range | Enabling network discovery by default or bypassing request-rate normalization |
 | Map renderers | Older files retain their multiplier-derived visual width when it is already visible; new physical widths stay within the 1–16 px range | Dropping the legacy fallback or allowing invalid pixel widths through normalization |
 
 ## Notes
@@ -46,3 +46,5 @@ Persists the desktop app's local configuration so it survives restarts. That now
   visible output. Older sub-pixel values are raised to the new 1 px floor.
   Once an operator moves the new control, its physical width is persisted in
   the visible `1..=16 px` range.
+- Legacy `eyes_on_max_pages` JSON fields are ignored. Saving settings replaces
+  that obsolete fixed page count with `eyes_on_requests_per_minute`.

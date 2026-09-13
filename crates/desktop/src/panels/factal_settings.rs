@@ -105,8 +105,9 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
         model.windy_webcams_api_key = model.windy_webcams_api_key.trim().to_owned();
         model.eyes_on_country_code =
             settings_store::normalize_eyes_on_country_code(&model.eyes_on_country_code);
-        model.eyes_on_max_pages =
-            settings_store::normalize_eyes_on_max_pages(model.eyes_on_max_pages);
+        model.eyes_on_requests_per_minute = settings_store::normalize_eyes_on_requests_per_minute(
+            model.eyes_on_requests_per_minute,
+        );
         model.aisstream_api_key = model.aisstream_api_key.trim().to_owned();
         moving_tracks::invalidate();
         match model.save_settings() {
@@ -282,7 +283,7 @@ fn tab_apis(ui: &mut egui::Ui, model: &mut AppModel) {
     ui.heading("Project Eyes On Directory");
     ui.colored_label(
         theme::text_muted(),
-        "Opt in to a bounded Insecam directory sync adapted from Project Eyes On. \
+        "Opt in to a paced Insecam directory sync adapted from Project Eyes On. \
          It reads public listing/detail metadata and briefly probes only the \
          directory-advertised public-IP feed URLs; broad search-engine scanning is excluded.",
     );
@@ -299,16 +300,19 @@ fn tab_apis(ui: &mut egui::Ui, model: &mut AppModel) {
                 .char_limit(2)
                 .hint_text("ALL"),
         );
-        ui.label("Pages");
+        ui.label("Requests/min");
         ui.add(
-            egui::DragValue::new(&mut model.eyes_on_max_pages)
-                .range(1..=settings_store::MAX_EYES_ON_MAX_PAGES),
+            egui::DragValue::new(&mut model.eyes_on_requests_per_minute).range(
+                settings_store::MIN_EYES_ON_REQUESTS_PER_MINUTE
+                    ..=settings_store::MAX_EYES_ON_REQUESTS_PER_MINUTE,
+            ),
         );
     });
     ui.small(
-        "Blank country means the global popularity listing. Each page contains only a handful \
-         of listings; use 5 pages for the broadest bounded scan. Coordinates are approximate \
-         source metadata.",
+        "Blank country means the global popularity listing. Scanning follows the directory's \
+         advertised page count, with empty/repeated-page fallbacks. Request starts are paced \
+         globally; recent directory, location, and feed results are reused. Coordinates are \
+         approximate source metadata.",
     );
 
     ui.add_space(14.0);

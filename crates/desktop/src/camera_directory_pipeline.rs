@@ -3,46 +3,59 @@
 //! The original tool combines directory scraping with broad search-engine
 //! dorking. 1kEE intentionally ports only the allowlisted directory pipeline:
 //! discover advertised feeds, deduplicate them, read coordinates from the
-//! directory's own detail pages, and perform a bounded reachability probe.
+//! directory's own detail pages, and perform a paced reachability probe.
+
+mod runtime;
 
 use crate::model::{CameraConnectionState, CameraFeed, GeoPoint};
+use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
+use reqwest::StatusCode;
 use reqwest::Url;
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, USER_AGENT};
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use runtime::RequestPacer;
 
 const INSECAM_ORIGIN: &str = "http://www.insecam.org";
 const DIRECTORY_TIMEOUT: Duration = Duration::from_secs(12);
 const DETAIL_TIMEOUT: Duration = Duration::from_secs(10);
 const FEED_PROBE_TIMEOUT: Duration = Duration::from_secs(6);
-const MAX_CAMERAS_PER_POLL: usize = 60;
+const ENRICHMENT_WORKERS: usize = 16;
 const BROWSER_USER_AGENT: &str =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EyesOnPipelineConfig {
     pub country_code: Option<String>,
-    pub max_pages: u8,
+    pub requests_per_minute: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EyesOnPipelineProgress {
     DirectoryPages {
         completed: usize,
-        total: usize,
+        total: Option<usize>,
+        candidates: usize,
+    },
+    DirectoryCache {
+        candidates: usize,
+        age_seconds: u64,
     },
     Candidates {
         found: usize,
+        reused: usize,
     },
     FeedChecks {
         completed: usize,
         total: usize,
         geolocated: usize,
         reachable: usize,
+        reused: usize,
     },
 }
 
@@ -55,92 +68,196 @@ struct DirectoryCandidate {
     location_hint: String,
 }
 
+struct DirectoryPage {
+    candidates: Vec<DirectoryCandidate>,
+    advertised_total_pages: Option<u32>,
+}
+
 pub fn fetch<F>(
     client: &Client,
     config: &EyesOnPipelineConfig,
+    cancelled: &AtomicBool,
     on_progress: F,
 ) -> Result<Vec<CameraFeed>, String>
 where
     F: Fn(EyesOnPipelineProgress) + Sync,
 {
-    let max_pages = config.max_pages.clamp(1, 5);
-    let total_pages = max_pages as usize;
-    let completed_pages = AtomicUsize::new(0);
-    on_progress(EyesOnPipelineProgress::DirectoryPages {
-        completed: 0,
-        total: total_pages,
-    });
-    let page_results: Vec<_> = (1..=max_pages)
-        .into_par_iter()
-        .map(|page| {
-            let result = fetch_directory_page(client, config.country_code.as_deref(), page);
-            let completed = completed_pages.fetch_add(1, Ordering::AcqRel) + 1;
-            on_progress(EyesOnPipelineProgress::DirectoryPages {
-                completed,
-                total: total_pages,
-            });
-            result
-        })
-        .collect();
-
-    let successful_pages = page_results.iter().filter(|result| result.is_ok()).count();
-    if successful_pages == 0 {
-        let detail = page_results
-            .into_iter()
-            .filter_map(Result::err)
-            .next()
-            .unwrap_or_else(|| "directory returned no readable pages".to_owned());
-        return Err(detail);
+    runtime::prune_expired();
+    let pacer = RequestPacer::new(config.requests_per_minute);
+    let candidates = discover_candidates(client, config, cancelled, &pacer, &on_progress)?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err("camera scan cancelled".into());
     }
 
-    let mut seen_urls = HashSet::new();
-    let mut candidates = Vec::new();
-    for candidate in page_results.into_iter().filter_map(Result::ok).flatten() {
-        if seen_urls.insert(candidate.feed_url.clone()) {
-            candidates.push(candidate);
-        }
-        if candidates.len() >= MAX_CAMERAS_PER_POLL {
-            break;
+    let total_candidates = candidates.len();
+    let mut cameras = Vec::new();
+    let mut pending = Vec::new();
+    let mut reused = 0;
+    for candidate in candidates {
+        if let Some(cached) = runtime::cached_enrichment(&candidate) {
+            reused += 1;
+            if let Some(camera) = cached {
+                cameras.push(camera);
+            }
+        } else {
+            pending.push(candidate);
         }
     }
 
     on_progress(EyesOnPipelineProgress::Candidates {
-        found: candidates.len(),
+        found: total_candidates,
+        reused,
     });
 
-    let total_candidates = candidates.len();
-    let completed_checks = AtomicUsize::new(0);
-    let geolocated = AtomicUsize::new(0);
-    let reachable = AtomicUsize::new(0);
-    let mut cameras: Vec<_> = candidates
-        .into_par_iter()
-        .filter_map(|candidate| {
-            let camera = enrich_candidate(client, candidate);
-            if let Some(camera) = &camera {
-                geolocated.fetch_add(1, Ordering::AcqRel);
-                if camera.status == CameraConnectionState::Reachable {
-                    reachable.fetch_add(1, Ordering::AcqRel);
+    let completed_checks = AtomicUsize::new(reused);
+    let geolocated = AtomicUsize::new(cameras.len());
+    let reachable = AtomicUsize::new(
+        cameras
+            .iter()
+            .filter(|camera| camera.status == CameraConnectionState::Reachable)
+            .count(),
+    );
+    on_progress(EyesOnPipelineProgress::FeedChecks {
+        completed: reused,
+        total: total_candidates,
+        geolocated: cameras.len(),
+        reachable: reachable.load(Ordering::Acquire),
+        reused,
+    });
+
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(ENRICHMENT_WORKERS)
+        .thread_name(|index| format!("camera-enrichment-{index}"))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let fresh: Vec<Option<CameraFeed>> = pool.install(|| {
+        pending
+            .into_par_iter()
+            .map(|candidate| {
+                if cancelled.load(Ordering::Acquire) {
+                    return None;
                 }
-            }
-            let completed = completed_checks.fetch_add(1, Ordering::AcqRel) + 1;
-            on_progress(EyesOnPipelineProgress::FeedChecks {
-                completed,
-                total: total_candidates,
-                geolocated: geolocated.load(Ordering::Acquire),
-                reachable: reachable.load(Ordering::Acquire),
-            });
-            camera
-        })
-        .collect();
+                let camera = enrich_candidate(client, &candidate, &pacer, cancelled);
+                if cancelled.load(Ordering::Acquire) {
+                    return None;
+                }
+                runtime::store_enrichment(&candidate, camera.clone());
+                if let Some(camera) = &camera {
+                    geolocated.fetch_add(1, Ordering::AcqRel);
+                    if camera.status == CameraConnectionState::Reachable {
+                        reachable.fetch_add(1, Ordering::AcqRel);
+                    }
+                }
+                let completed = completed_checks.fetch_add(1, Ordering::AcqRel) + 1;
+                on_progress(EyesOnPipelineProgress::FeedChecks {
+                    completed,
+                    total: total_candidates,
+                    geolocated: geolocated.load(Ordering::Acquire),
+                    reachable: reachable.load(Ordering::Acquire),
+                    reused,
+                });
+                camera
+            })
+            .collect()
+    });
+
+    if cancelled.load(Ordering::Acquire) {
+        return Err("camera scan cancelled".into());
+    }
+    cameras.extend(fresh.into_iter().flatten());
     cameras.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(cameras)
+}
+
+fn discover_candidates<F>(
+    client: &Client,
+    config: &EyesOnPipelineConfig,
+    cancelled: &AtomicBool,
+    pacer: &RequestPacer,
+    on_progress: &F,
+) -> Result<Vec<DirectoryCandidate>, String>
+where
+    F: Fn(EyesOnPipelineProgress) + Sync,
+{
+    let scope = runtime::directory_scope_key(config.country_code.as_deref());
+    if let Some((candidates, age)) = runtime::cached_directory(&scope) {
+        on_progress(EyesOnPipelineProgress::DirectoryCache {
+            candidates: candidates.len(),
+            age_seconds: age.as_secs(),
+        });
+        return Ok(candidates);
+    }
+
+    let mut seen_urls = HashSet::new();
+    let mut candidates = Vec::new();
+    let mut page = 1_u32;
+    let mut advertised_total_pages = None;
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            return Err("camera scan cancelled".into());
+        }
+
+        let directory_page = fetch_directory_page(
+            client,
+            config.country_code.as_deref(),
+            page,
+            pacer,
+            cancelled,
+        )?;
+        if directory_page.advertised_total_pages.is_some() {
+            advertised_total_pages = directory_page.advertised_total_pages;
+        }
+        let page_was_empty = directory_page.candidates.is_empty();
+        let new_candidates =
+            append_unique_candidates(directory_page.candidates, &mut seen_urls, &mut candidates);
+        on_progress(EyesOnPipelineProgress::DirectoryPages {
+            completed: page as usize,
+            total: advertised_total_pages.map(|total| total as usize),
+            candidates: candidates.len(),
+        });
+
+        if page_was_empty
+            || new_candidates == 0
+            || advertised_total_pages.is_some_and(|total| page >= total)
+        {
+            break;
+        }
+        page = page
+            .checked_add(1)
+            .ok_or_else(|| "directory page number overflowed".to_owned())?;
+    }
+
+    if cancelled.load(Ordering::Acquire) {
+        return Err("camera scan cancelled".into());
+    }
+    runtime::store_directory(scope, candidates.clone());
+    Ok(candidates)
+}
+
+fn append_unique_candidates(
+    page_candidates: Vec<DirectoryCandidate>,
+    seen_urls: &mut HashSet<String>,
+    candidates: &mut Vec<DirectoryCandidate>,
+) -> usize {
+    let previous_count = candidates.len();
+    for candidate in page_candidates {
+        if seen_urls.insert(candidate.feed_url.clone()) {
+            candidates.push(candidate);
+        }
+    }
+    candidates.len() - previous_count
 }
 
 fn fetch_directory_page(
     client: &Client,
     country_code: Option<&str>,
-    page: u8,
-) -> Result<Vec<DirectoryCandidate>, String> {
+    page: u32,
+    pacer: &RequestPacer,
+    cancelled: &AtomicBool,
+) -> Result<DirectoryPage, String> {
+    if !pacer.wait(cancelled) {
+        return Err("camera scan cancelled".into());
+    }
     let url = directory_url(country_code, page);
     let response = client
         .get(&url)
@@ -149,14 +266,23 @@ fn fetch_directory_page(
         .timeout(DIRECTORY_TIMEOUT)
         .send()
         .map_err(|error| format!("{url}: {error}"))?;
+    if matches!(response.status(), StatusCode::NOT_FOUND | StatusCode::GONE) {
+        return Ok(DirectoryPage {
+            candidates: Vec::new(),
+            advertised_total_pages: None,
+        });
+    }
     if !response.status().is_success() {
         return Err(format!("{url}: unexpected status {}", response.status()));
     }
     let body = response.text().map_err(|error| format!("{url}: {error}"))?;
-    Ok(parse_directory_page(&body))
+    Ok(DirectoryPage {
+        candidates: parse_directory_page(&body),
+        advertised_total_pages: parse_advertised_page_count(&body),
+    })
 }
 
-fn directory_url(country_code: Option<&str>, page: u8) -> String {
+fn directory_url(country_code: Option<&str>, page: u32) -> String {
     match country_code.filter(|code| !code.trim().is_empty()) {
         Some(code) => format!(
             "{INSECAM_ORIGIN}/en/bycountry/{}/?page={}",
@@ -229,6 +355,20 @@ fn parse_directory_page(html: &str) -> Vec<DirectoryCandidate> {
     out
 }
 
+fn parse_advertised_page_count(html: &str) -> Option<u32> {
+    let lower = html.to_ascii_lowercase();
+    let marker = "pagenavigator(";
+    let start = lower.find(marker)? + marker.len();
+    let end = lower[start..].find(')')? + start;
+    html[start..end]
+        .split(',')
+        .nth(1)?
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|pages| *pages > 0)
+}
+
 fn parse_camera_title(title: &str) -> Option<(String, String)> {
     let normalized = title.split_whitespace().collect::<Vec<_>>().join(" ");
     let lower = normalized.to_ascii_lowercase();
@@ -263,9 +403,14 @@ fn camera_id_from_detail_url(url: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn enrich_candidate(client: &Client, candidate: DirectoryCandidate) -> Option<CameraFeed> {
-    let location = fetch_directory_point(client, &candidate.detail_url)?;
-    let (kind, status) = probe_feed(client, &candidate.feed_url);
+fn enrich_candidate(
+    client: &Client,
+    candidate: &DirectoryCandidate,
+    pacer: &RequestPacer,
+    cancelled: &AtomicBool,
+) -> Option<CameraFeed> {
+    let location = fetch_directory_point(client, &candidate.detail_url, pacer, cancelled)?;
+    let (kind, status) = probe_feed(client, &candidate.feed_url, pacer, cancelled)?;
     let last_seen = match status {
         CameraConnectionState::Reachable => "verified during Eyes On sync",
         CameraConnectionState::Unreachable => "directory listed; feed probe failed",
@@ -279,13 +424,19 @@ fn enrich_candidate(client: &Client, candidate: DirectoryCandidate) -> Option<Ca
         provider: "Project Eyes On · Insecam".into(),
         kind,
         location,
-        stream_url: candidate.feed_url,
+        stream_url: candidate.feed_url.clone(),
         last_seen: last_seen.into(),
         status,
     })
 }
 
-fn fetch_directory_point(client: &Client, detail_url: &str) -> Option<GeoPoint> {
+fn fetch_directory_point(
+    client: &Client,
+    detail_url: &str,
+    pacer: &RequestPacer,
+    cancelled: &AtomicBool,
+) -> Option<GeoPoint> {
+    pacer.wait(cancelled).then_some(())?;
     let response = client
         .get(detail_url)
         .header(USER_AGENT, BROWSER_USER_AGENT)
@@ -329,7 +480,13 @@ fn parse_coordinate_pair_prefix(text: &str) -> Option<(f32, f32)> {
     Some((lat, lon))
 }
 
-fn probe_feed(client: &Client, advertised_url: &str) -> (String, CameraConnectionState) {
+fn probe_feed(
+    client: &Client,
+    advertised_url: &str,
+    pacer: &RequestPacer,
+    cancelled: &AtomicBool,
+) -> Option<(String, CameraConnectionState)> {
+    pacer.wait(cancelled).then_some(())?;
     let url = materialize_feed_url(advertised_url);
     let response = client
         .get(&url)
@@ -339,16 +496,16 @@ fn probe_feed(client: &Client, advertised_url: &str) -> (String, CameraConnectio
         .send();
 
     let Ok(response) = response else {
-        return (
+        return Some((
             kind_from_url(&url).into(),
             CameraConnectionState::Unreachable,
-        );
+        ));
     };
     if !response.status().is_success() {
-        return (
+        return Some((
             kind_from_url(&url).into(),
             CameraConnectionState::Unreachable,
-        );
+        ));
     }
 
     let content_type = response
@@ -362,7 +519,7 @@ fn probe_feed(client: &Client, advertised_url: &str) -> (String, CameraConnectio
     } else {
         CameraConnectionState::Reachable
     };
-    (kind.into(), status)
+    Some((kind.into(), status))
 }
 
 fn classify_feed(content_type: &str, url: &str) -> &'static str {
@@ -486,15 +643,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn directory_urls_are_bounded_and_country_scoped() {
+    fn directory_urls_support_unbounded_country_scoped_pagination() {
         assert_eq!(
             directory_url(None, 0),
             "http://www.insecam.org/en/byrating/?page=1"
         );
         assert_eq!(
-            directory_url(Some(" us "), 3),
-            "http://www.insecam.org/en/bycountry/US/?page=3"
+            directory_url(Some(" us "), 9_999),
+            "http://www.insecam.org/en/bycountry/US/?page=9999"
         );
+    }
+
+    #[test]
+    fn repeated_directory_page_adds_no_new_candidates() {
+        let candidate = DirectoryCandidate {
+            camera_id: "42".into(),
+            feed_url: "http://8.8.8.8/camera.jpg".into(),
+            detail_url: "http://www.insecam.org/en/view/42/".into(),
+            brand: "Test".into(),
+            location_hint: "Somewhere".into(),
+        };
+        let mut seen_urls = HashSet::new();
+        let mut candidates = Vec::new();
+
+        assert_eq!(
+            append_unique_candidates(vec![candidate.clone()], &mut seen_urls, &mut candidates),
+            1
+        );
+        assert_eq!(
+            append_unique_candidates(vec![candidate], &mut seen_urls, &mut candidates),
+            0
+        );
+        assert_eq!(candidates.len(), 1);
+    }
+
+    #[test]
+    fn directory_parser_reads_the_source_advertised_page_count() {
+        let html = r#"<script>pagenavigator("?page=", 286, 1);</script>"#;
+        assert_eq!(parse_advertised_page_count(html), Some(286));
+        assert_eq!(parse_advertised_page_count("<html></html>"), None);
     }
 
     #[test]

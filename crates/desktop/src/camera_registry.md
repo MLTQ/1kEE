@@ -11,7 +11,7 @@ Runs the live camera registry polling loop for the desktop app. This module owns
 - **Rationale**: Keeps network fetches off the UI thread while letting the app refresh camera metadata around the current focus
 
 ### `invalidate`
-- **Does**: Forces the next app tick to treat the current camera-source configuration and focus location as stale and refresh again immediately
+- **Does**: Cancels an active registry worker and forces the next app tick to treat the current camera-source configuration and focus location as stale and refresh again immediately
 - **Interacts with**: `factal_settings.rs`
 
 ### `fetch_511ny_cameras`
@@ -26,10 +26,10 @@ Runs the live camera registry polling loop for the desktop app. This module owns
 
 ### Project Eyes On directory adapter
 
-- **Does**: Invokes the bounded Insecam discovery, detail-page geolocation, feed
+- **Does**: Invokes the paced Insecam discovery, detail-page geolocation, feed
   classification, and deduplication pipeline when explicitly enabled. Directory
-  page, candidate, geolocation, and reachability counts are translated into
-  top-bar progress updates while the worker runs.
+  page, cache-reuse, candidate, geolocation, and reachability counts are
+  translated into top-bar progress updates while the worker runs.
 - **Interacts with**: `camera_directory_pipeline.rs` and persisted camera settings.
 - **Rationale**: Keeps the Project Eyes On integration inside the same
   non-blocking registry worker and source-normalization boundary as keyed feeds.
@@ -42,6 +42,7 @@ Runs the live camera registry polling loop for the desktop app. This module owns
 | `model.rs` | Successful polls arrive as normalized `CameraFeed` values and can replace the current camera registry atomically | Returning provider-specific camera types without normalization |
 | `factal_settings.rs` | `invalidate` triggers a fresh camera sync after camera-source settings change | Removing the invalidation hook |
 | `header.rs` | Progress arrives through a channel and never blocks the egui render loop | Updating the model directly from the registry worker |
+| Directory pipeline | Active work receives a cancellation flag so an end-of-directory crawl cannot delay a settings change or shutdown indefinitely | Dropping the cancellation token |
 
 ## Notes
 - The registry currently supports a concrete 511NY adapter and a best-effort Windy Webcams adapter.
@@ -53,5 +54,5 @@ Runs the live camera registry polling loop for the desktop app. This module owns
 - The app stays in demo camera mode until a keyed adapter, declarative public
   source, curated scrape seed, or the explicit Project Eyes On opt-in is active.
 - Registry adapters remain metadata-oriented. The Project Eyes On adapter adds
-  a bounded header/reachability probe; actual snapshot/MJPEG reading starts
+  a paced header/reachability probe; actual snapshot/MJPEG reading starts
   only after a user opens a pip in `camera_feed_viewer.rs`.

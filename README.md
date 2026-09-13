@@ -60,14 +60,17 @@ All keys are entered in-app under **Settings → APIs** and saved locally to
 | Vessels (AIS) | [AISStream](https://aisstream.io/) | Yes — free |
 | Webcams | [Windy Webcams](https://api.windy.com/webcams) | Yes — free tier |
 | New York traffic cams | [511NY](https://511ny.org/) | Yes — free |
-| Public camera directory | Project Eyes On / Insecam | No — explicit opt-in, bounded |
+| Public camera directory | Project Eyes On / Insecam | No — explicit opt-in, paced |
 | Flights (ADS-B) | [OpenSky](https://opensky-network.org/) | No — anonymous, rate-limited |
 
 The Project Eyes On adapter is enabled with **Enable live cameras** beside the
 top-bar Demo status, or under **Settings → APIs**. It is off by default, accepts
-an optional two-letter country scope, and fresh configurations scan the bounded
-maximum of five directory pages per poll. The top bar reports directory-page,
-candidate, geolocation, and reachability progress while it searches. Once the
+an optional two-letter country scope, and follows the directory's advertised
+page total with empty/repeated-page fallbacks. Request starts default to 250/min and are
+adjustable under **Settings → APIs**. Recent directory and camera metadata is
+reused so the five-minute registry tick does not repeat the full scan. The top
+bar reports directory-page, cache, candidate, geolocation, and reachability
+progress while it searches. Once the
 registry says **live**, enable the Cameras layer and click a green camera pip to
 open its feed window. 1kEE ports the public-directory discovery,
 deduplication, metadata geolocation, and feed-type verification stages; it does

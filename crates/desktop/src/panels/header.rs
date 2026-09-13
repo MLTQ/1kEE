@@ -2,7 +2,6 @@ use crate::camera_registry;
 use crate::model::{ActiveBody, AppModel, GeoJsonLayer};
 use crate::osm_ingest;
 use crate::panels::world_map::contour_asset;
-use crate::settings_store;
 use crate::terrain_assets;
 use crate::theme;
 
@@ -30,26 +29,11 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
                     if ui
                         .small_button("Enable live cameras")
                         .on_hover_text(
-                            "Enable the bounded Project Eyes On public-directory source and refresh now",
+                            "Enable the paced Project Eyes On public-directory source and refresh now",
                         )
                         .clicked()
                     {
-                        request_broad_camera_scan(model);
-                    }
-                } else if model.eyes_on_enabled
-                    && !model.camera_registry_scanning
-                    && model.eyes_on_max_pages < settings_store::MAX_EYES_ON_MAX_PAGES
-                {
-                    if ui
-                        .small_button("Scan more cameras")
-                        .on_hover_text(format!(
-                            "Increase the bounded directory scan from {} to {} pages and refresh now",
-                            model.eyes_on_max_pages,
-                            settings_store::MAX_EYES_ON_MAX_PAGES
-                        ))
-                        .clicked()
-                    {
-                        request_broad_camera_scan(model);
+                        request_camera_scan(model);
                     }
                 }
                 metric_chip(ui, "Terrain", model.terrain_inventory.status_label());
@@ -174,21 +158,17 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
         });
 }
 
-fn request_broad_camera_scan(model: &mut AppModel) {
+fn request_camera_scan(model: &mut AppModel) {
     model.eyes_on_enabled = true;
-    model.eyes_on_max_pages = settings_store::MAX_EYES_ON_MAX_PAGES;
     model.camera_registry_status = "syncing".into();
     model.camera_registry_scanning = true;
     model.camera_registry_progress = 0.0;
-    model.camera_registry_progress_label = format!(
-        "Queued a {}-page camera scan…",
-        settings_store::MAX_EYES_ON_MAX_PAGES
-    );
+    model.camera_registry_progress_label = "Queued a full camera-directory scan…".into();
 
     match model.save_settings() {
         Ok(()) => model.push_log(format!(
-            "Live public-camera discovery enabled; scanning up to {} directory pages…",
-            settings_store::MAX_EYES_ON_MAX_PAGES
+            "Live public-camera discovery enabled; scanning the directory at {} requests/min…",
+            model.eyes_on_requests_per_minute
         )),
         Err(error) => model.push_log(format!(
             "Live camera scan started for this run, but settings could not be saved: {error}"
