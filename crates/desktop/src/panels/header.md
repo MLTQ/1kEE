@@ -9,8 +9,8 @@ Renders the top operational banner for the desktop app. It gives the analyst imm
 - **Does**: Builds the top bar, exposes settings and asset controls, displays
   source status, and offers a one-click explicit opt-in when the camera registry
   is still in Demo mode. While discovery runs, it shows a spinner and progress
-  bar with directory-page, listing, geolocation, and reachability counts. Older
-  one-page configurations also get a `Scan more cameras` action.
+  bar with directory-page, cache reuse, listing, geolocation, and reachability
+  counts.
 - **Interacts with**: mutable `AppModel` in `model/mod.rs`,
   `camera_registry::invalidate`, terrain/OSM inventories, uploaded layers,
   file/folder pickers, and theme helpers.

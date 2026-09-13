@@ -39,8 +39,8 @@ source pollers.
 
 ### Project Eyes On settings and camera visibility
 
-- **Does**: Holds the explicit directory-pipeline opt-in, bounded country/page
-  scope, and the camera-dot layer visibility toggle.
+- **Does**: Holds the explicit directory-pipeline opt-in, optional country
+  scope, configurable requests-per-minute pace, and camera-dot visibility.
 - **Interacts with**: `settings_store.rs`, `camera_registry.rs`,
   `factal_settings.rs`, and both world-map scenes.
 

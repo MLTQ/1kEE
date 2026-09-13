@@ -2,12 +2,14 @@ use crate::camera_directory_pipeline::{self, EyesOnPipelineConfig, EyesOnPipelin
 use crate::camera_scrape_catalog::{self, ScrapedCameraSource, ScrapedCameraSourceKind};
 use crate::camera_source_catalog::{self, PublicCameraSource, PublicCameraSourceKind};
 use crate::model::{AppModel, CameraConnectionState, CameraFeed, GeoPoint};
+use crate::settings_store;
 use crossbeam_channel::{Receiver, Sender};
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -27,6 +29,7 @@ struct ActivePoll {
     generation: u64,
     handle: JoinHandle<PollOutcome>,
     progress: Receiver<PollProgress>,
+    cancel: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -52,6 +55,9 @@ pub fn tick(model: &mut AppModel) {
     {
         let mut manager = manager().lock().unwrap();
         if manager.tracked_signature != signature {
+            if let Some(active) = manager.active.as_ref() {
+                active.cancel.store(true, Ordering::Release);
+            }
             manager.tracked_signature = signature.clone();
             manager.generation = manager.generation.wrapping_add(1);
             manager.next_poll_at = Some(now);
@@ -122,12 +128,16 @@ pub fn tick(model: &mut AppModel) {
         let eyes_on_config = model.eyes_on_enabled.then(|| EyesOnPipelineConfig {
             country_code: (!model.eyes_on_country_code.trim().is_empty())
                 .then(|| model.eyes_on_country_code.trim().to_owned()),
-            max_pages: model.eyes_on_max_pages,
+            requests_per_minute: settings_store::normalize_eyes_on_requests_per_minute(
+                model.eyes_on_requests_per_minute,
+            ),
         });
         let focus = model.terrain_focus_location();
         let public_sources = public_sources;
         let scrape_sources = scrape_sources;
         let (progress_sender, progress_receiver) = crossbeam_channel::unbounded();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
 
         let handle = thread::spawn(move || {
             fetch_camera_registry(
@@ -138,6 +148,7 @@ pub fn tick(model: &mut AppModel) {
                 &public_sources,
                 &scrape_sources,
                 &progress_sender,
+                &worker_cancel,
             )
         });
 
@@ -147,6 +158,7 @@ pub fn tick(model: &mut AppModel) {
                 generation: spawn_generation,
                 handle,
                 progress: progress_receiver,
+                cancel,
             });
             model.camera_registry_status = "syncing".into();
             model.camera_registry_scanning = true;
@@ -159,6 +171,9 @@ pub fn tick(model: &mut AppModel) {
 pub fn invalidate() {
     let now = Instant::now();
     let mut manager = manager().lock().unwrap();
+    if let Some(active) = manager.active.as_ref() {
+        active.cancel.store(true, Ordering::Release);
+    }
     manager.generation = manager.generation.wrapping_add(1);
     manager.next_poll_at = Some(now);
     manager.shutdown = false;
@@ -166,6 +181,9 @@ pub fn invalidate() {
 
 pub fn shutdown() {
     let mut manager = manager().lock().unwrap();
+    if let Some(active) = manager.active.as_ref() {
+        active.cancel.store(true, Ordering::Release);
+    }
     manager.generation = manager.generation.wrapping_add(1);
     manager.shutdown = true;
     manager.next_poll_at = None;
@@ -213,28 +231,50 @@ fn report_progress(progress: &Sender<PollProgress>, fraction: f32, label: impl I
 
 fn eyes_on_poll_progress(scope: &str, progress: EyesOnPipelineProgress) -> PollProgress {
     match progress {
-        EyesOnPipelineProgress::DirectoryPages { completed, total } => {
-            let denominator = total.max(1) as f32;
+        EyesOnPipelineProgress::DirectoryPages {
+            completed,
+            total,
+            candidates,
+        } => {
+            let fraction = total
+                .map(|total| 0.15 + 0.25 * completed as f32 / total.max(1) as f32)
+                .unwrap_or_else(|| 0.15 + 0.25 * (1.0 - (-(completed as f32) / 25.0).exp()));
+            let page_label = total
+                .map(|total| format!("{completed}/{total}"))
+                .unwrap_or_else(|| completed.to_string());
             PollProgress {
-                fraction: 0.15 + 0.25 * completed as f32 / denominator,
-                label: format!("Scanning {scope} camera directory pages · {completed}/{total}"),
+                fraction,
+                label: format!(
+                    "Scanning {scope} camera directory · page {page_label} · {candidates} candidates"
+                ),
             }
         }
-        EyesOnPipelineProgress::Candidates { found } => PollProgress {
+        EyesOnPipelineProgress::DirectoryCache {
+            candidates,
+            age_seconds,
+        } => PollProgress {
+            fraction: 0.40,
+            label: format!(
+                "Reusing {scope} directory snapshot · {candidates} candidates · {} min old",
+                age_seconds / 60
+            ),
+        },
+        EyesOnPipelineProgress::Candidates { found, reused } => PollProgress {
             fraction: 0.42,
-            label: format!("Found {found} camera listing(s) · checking locations and feeds…"),
+            label: format!("Found {found} camera listing(s) · reusing {reused} cached result(s)…"),
         },
         EyesOnPipelineProgress::FeedChecks {
             completed,
             total,
             geolocated,
             reachable,
+            reused,
         } => {
             let denominator = total.max(1) as f32;
             PollProgress {
                 fraction: 0.42 + 0.53 * completed as f32 / denominator,
                 label: format!(
-                    "Checking cameras {completed}/{total} · {geolocated} geolocated · {reachable} reachable"
+                    "Checking cameras {completed}/{total} · {geolocated} geolocated · {reachable} reachable · {reused} cached"
                 ),
             }
         }
@@ -249,12 +289,12 @@ fn poll_signature(model: &AppModel) -> String {
     let public_sources = camera_source_catalog::load_public_sources(model.selected_root.as_deref());
     let scrape_sources = camera_scrape_catalog::load_scrape_sources(model.selected_root.as_deref());
     format!(
-        "windy:{}|511ny:{}|eyes-on:{}:{}:{}|public:{}|scrape:{}|focus:{}",
+        "windy:{}|511ny:{}|eyes-on:{}:{}:{}rpm|public:{}|scrape:{}|focus:{}",
         !model.windy_webcams_api_key.trim().is_empty(),
         !model.ny511_api_key.trim().is_empty(),
         model.eyes_on_enabled,
         model.eyes_on_country_code.trim(),
-        model.eyes_on_max_pages,
+        settings_store::normalize_eyes_on_requests_per_minute(model.eyes_on_requests_per_minute),
         source_signature(&public_sources),
         scrape_source_signature(&scrape_sources),
         focus
@@ -269,6 +309,7 @@ fn fetch_camera_registry(
     public_sources: &[PublicCameraSource],
     scrape_sources: &[ScrapedCameraSource],
     progress: &Sender<PollProgress>,
+    cancelled: &AtomicBool,
 ) -> PollOutcome {
     report_progress(progress, 0.02, "Preparing camera sources…");
     let client = match Client::builder().timeout(REQUEST_TIMEOUT).build() {
@@ -314,7 +355,7 @@ fn fetch_camera_registry(
             .filter(|scope| !scope.trim().is_empty())
             .unwrap_or("global")
             .to_owned();
-        match camera_directory_pipeline::fetch(&client, config, |update| {
+        match camera_directory_pipeline::fetch(&client, config, cancelled, |update| {
             let update = eyes_on_poll_progress(&scope, update);
             let _ = progress.send(update);
         }) {
@@ -1066,12 +1107,16 @@ mod tests {
             "US",
             EyesOnPipelineProgress::DirectoryPages {
                 completed: 3,
-                total: 5,
+                total: Some(30),
+                candidates: 18,
             },
         );
 
-        assert!((progress.fraction - 0.30).abs() < f32::EPSILON);
-        assert_eq!(progress.label, "Scanning US camera directory pages · 3/5");
+        assert!((progress.fraction - 0.175).abs() < f32::EPSILON);
+        assert_eq!(
+            progress.label,
+            "Scanning US camera directory · page 3/30 · 18 candidates"
+        );
     }
 
     #[test]
@@ -1083,13 +1128,31 @@ mod tests {
                 total: 10,
                 geolocated: 2,
                 reachable: 1,
+                reused: 3,
             },
         );
 
         assert!((progress.fraction - 0.632).abs() < 0.000_1);
         assert_eq!(
             progress.label,
-            "Checking cameras 4/10 · 2 geolocated · 1 reachable"
+            "Checking cameras 4/10 · 2 geolocated · 1 reachable · 3 cached"
+        );
+    }
+
+    #[test]
+    fn eyes_on_cached_directory_progress_reports_snapshot_age() {
+        let progress = eyes_on_poll_progress(
+            "global",
+            EyesOnPipelineProgress::DirectoryCache {
+                candidates: 512,
+                age_seconds: 754,
+            },
+        );
+
+        assert_eq!(progress.fraction, 0.40);
+        assert_eq!(
+            progress.label,
+            "Reusing global directory snapshot · 512 candidates · 12 min old"
         );
     }
 }

@@ -166,7 +166,7 @@ pub struct AppModel {
     pub ny511_api_key: String,
     pub eyes_on_enabled: bool,
     pub eyes_on_country_code: String,
-    pub eyes_on_max_pages: u8,
+    pub eyes_on_requests_per_minute: u16,
     pub aisstream_api_key: String,
     pub settings_asset_root: String,
     pub settings_data_root: String,
@@ -237,7 +237,7 @@ impl AppModel {
         let ny511_api_key = app_settings.ny511_api_key.trim().to_owned();
         let eyes_on_enabled = app_settings.eyes_on_enabled;
         let eyes_on_country_code = app_settings.eyes_on_country_code.clone();
-        let eyes_on_max_pages = app_settings.eyes_on_max_pages;
+        let eyes_on_requests_per_minute = app_settings.eyes_on_requests_per_minute;
         let aisstream_api_key = app_settings.aisstream_api_key.trim().to_owned();
 
         let events = vec![
@@ -455,7 +455,7 @@ impl AppModel {
             ny511_api_key: ny511_api_key.clone(),
             eyes_on_enabled,
             eyes_on_country_code,
-            eyes_on_max_pages,
+            eyes_on_requests_per_minute,
             aisstream_api_key: aisstream_api_key.clone(),
             settings_asset_root: settings_store::effective_asset_root()
                 .map(|path| path.display().to_string())
@@ -651,7 +651,9 @@ impl AppModel {
             eyes_on_country_code: settings_store::normalize_eyes_on_country_code(
                 &self.eyes_on_country_code,
             ),
-            eyes_on_max_pages: settings_store::normalize_eyes_on_max_pages(self.eyes_on_max_pages),
+            eyes_on_requests_per_minute: settings_store::normalize_eyes_on_requests_per_minute(
+                self.eyes_on_requests_per_minute,
+            ),
             aisstream_api_key: self.aisstream_api_key.trim().to_owned(),
             asset_root: optional_path_field(&self.settings_asset_root),
             data_root: optional_path_field(&self.settings_data_root),
@@ -705,7 +707,7 @@ impl AppModel {
         self.ny511_api_key = settings.ny511_api_key.trim().to_owned();
         self.eyes_on_enabled = settings.eyes_on_enabled;
         self.eyes_on_country_code = settings.eyes_on_country_code;
-        self.eyes_on_max_pages = settings.eyes_on_max_pages;
+        self.eyes_on_requests_per_minute = settings.eyes_on_requests_per_minute;
         self.aisstream_api_key = settings.aisstream_api_key.trim().to_owned();
 
         self.terrain_inventory = TerrainInventory::detect_from(self.selected_root.as_deref());

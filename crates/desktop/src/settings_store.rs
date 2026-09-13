@@ -25,7 +25,9 @@ pub(crate) const MIN_CONTOUR_STROKE_WIDTH_PX: f32 = 0.25;
 /// The new pixel-width control supports a comfortably wider range than the
 /// former multiplier without changing any legacy saved appearance.
 pub(crate) const MAX_CONTOUR_STROKE_WIDTH_PX: f32 = 16.0;
-pub(crate) const MAX_EYES_ON_MAX_PAGES: u8 = 5;
+pub(crate) const DEFAULT_EYES_ON_REQUESTS_PER_MINUTE: u16 = 250;
+pub(crate) const MIN_EYES_ON_REQUESTS_PER_MINUTE: u16 = 10;
+pub(crate) const MAX_EYES_ON_REQUESTS_PER_MINUTE: u16 = 3_000;
 /// Default ceiling for the on-demand USGS 3DEP 1 m chunk cache. The full 1 m
 /// holding is hundreds of terabytes, so the cache is bounded and evicts
 /// least-recently-used chunks rather than growing without limit.
@@ -38,7 +40,6 @@ pub(crate) const MIN_LOCAL_CONTOUR_VRAM_BUDGET_GB: f32 = 0.25;
 pub(crate) const MAX_LOCAL_CONTOUR_VRAM_BUDGET_GB: f32 = 24.0;
 pub(crate) const MIN_THREEDEP_CACHE_BUDGET_GB: f32 = 1.0;
 pub(crate) const MAX_THREEDEP_CACHE_BUDGET_GB: f32 = 512.0;
-pub(crate) const DEFAULT_EYES_ON_MAX_PAGES: u8 = MAX_EYES_ON_MAX_PAGES;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -56,9 +57,10 @@ pub struct AppSettings {
     /// Optional ISO alpha-2 country code used to scope directory discovery.
     #[serde(default)]
     pub eyes_on_country_code: String,
-    /// Maximum directory pages fetched per poll. Normalized to a small bound.
-    #[serde(default = "default_eyes_on_max_pages")]
-    pub eyes_on_max_pages: u8,
+    /// Maximum Project Eyes On request starts per minute across directory,
+    /// detail-page, and feed-probe traffic.
+    #[serde(default = "default_eyes_on_requests_per_minute")]
+    pub eyes_on_requests_per_minute: u16,
     #[serde(default)]
     pub aisstream_api_key: String,
     #[serde(default)]
@@ -111,7 +113,7 @@ impl Default for AppSettings {
             ny511_api_key: String::new(),
             eyes_on_enabled: false,
             eyes_on_country_code: String::new(),
-            eyes_on_max_pages: DEFAULT_EYES_ON_MAX_PAGES,
+            eyes_on_requests_per_minute: DEFAULT_EYES_ON_REQUESTS_PER_MINUTE,
             aisstream_api_key: String::new(),
             asset_root: None,
             data_root: None,
@@ -134,8 +136,8 @@ fn default_contour_stroke_scale() -> f32 {
     DEFAULT_CONTOUR_STROKE_SCALE
 }
 
-fn default_eyes_on_max_pages() -> u8 {
-    DEFAULT_EYES_ON_MAX_PAGES
+fn default_eyes_on_requests_per_minute() -> u16 {
+    DEFAULT_EYES_ON_REQUESTS_PER_MINUTE
 }
 
 fn default_threedep_enabled() -> bool {
@@ -196,8 +198,11 @@ pub(crate) fn normalize_eyes_on_country_code(value: &str) -> String {
     }
 }
 
-pub(crate) fn normalize_eyes_on_max_pages(value: u8) -> u8 {
-    value.clamp(1, MAX_EYES_ON_MAX_PAGES)
+pub(crate) fn normalize_eyes_on_requests_per_minute(value: u16) -> u16 {
+    value.clamp(
+        MIN_EYES_ON_REQUESTS_PER_MINUTE,
+        MAX_EYES_ON_REQUESTS_PER_MINUTE,
+    )
 }
 
 /// Clamp persisted/operator input to the supported visual range. Invalid
@@ -404,7 +409,8 @@ fn normalize_settings(mut settings: AppSettings) -> AppSettings {
     settings.windy_webcams_api_key = settings.windy_webcams_api_key.trim().to_owned();
     settings.ny511_api_key = settings.ny511_api_key.trim().to_owned();
     settings.eyes_on_country_code = normalize_eyes_on_country_code(&settings.eyes_on_country_code);
-    settings.eyes_on_max_pages = normalize_eyes_on_max_pages(settings.eyes_on_max_pages);
+    settings.eyes_on_requests_per_minute =
+        normalize_eyes_on_requests_per_minute(settings.eyes_on_requests_per_minute);
     settings.aisstream_api_key = settings.aisstream_api_key.trim().to_owned();
     settings.asset_root = normalize_asset_root_owned(settings.asset_root);
     settings.data_root = normalize_named_root_owned(settings.data_root, &["Data", "data"]);
@@ -517,16 +523,37 @@ mod tests {
         assert_eq!(settings.contour_stroke_width_px, None);
         assert!(!settings.eyes_on_enabled);
         assert_eq!(settings.eyes_on_country_code, "");
-        assert_eq!(settings.eyes_on_max_pages, DEFAULT_EYES_ON_MAX_PAGES);
+        assert_eq!(
+            settings.eyes_on_requests_per_minute,
+            DEFAULT_EYES_ON_REQUESTS_PER_MINUTE
+        );
     }
 
     #[test]
-    fn eyes_on_scope_is_normalized_to_safe_small_values() {
+    fn legacy_camera_page_limit_migrates_to_the_default_request_rate() {
+        let settings: AppSettings =
+            serde_json::from_str(r#"{"eyes_on_max_pages": 5}"#).expect("valid legacy settings");
+
+        assert_eq!(
+            settings.eyes_on_requests_per_minute,
+            DEFAULT_EYES_ON_REQUESTS_PER_MINUTE
+        );
+    }
+
+    #[test]
+    fn eyes_on_scope_and_request_rate_are_normalized() {
         assert_eq!(normalize_eyes_on_country_code(" us "), "US");
         assert_eq!(normalize_eyes_on_country_code("USA"), "");
         assert_eq!(normalize_eyes_on_country_code("1!"), "");
-        assert_eq!(normalize_eyes_on_max_pages(0), 1);
-        assert_eq!(normalize_eyes_on_max_pages(99), MAX_EYES_ON_MAX_PAGES);
+        assert_eq!(
+            normalize_eyes_on_requests_per_minute(0),
+            MIN_EYES_ON_REQUESTS_PER_MINUTE
+        );
+        assert_eq!(normalize_eyes_on_requests_per_minute(250), 250);
+        assert_eq!(
+            normalize_eyes_on_requests_per_minute(u16::MAX),
+            MAX_EYES_ON_REQUESTS_PER_MINUTE
+        );
     }
 
     #[test]
