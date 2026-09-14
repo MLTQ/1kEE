@@ -10,7 +10,8 @@ UI-thread coordinator for `AppModel`.
 
 ### `DashboardApp::new`
 - **Does**: Installs the theme, starts GPU callbacks and local services, then
-  constructs the initial model and companion bridge.
+  constructs an empty operational model and companion bridge. Domain records
+  arrive only from live or imported sources.
 - **Interacts with**: `model.rs`, GPU world-map passes, event storage, and
   `GruveBridge`.
 

@@ -6,7 +6,9 @@ Runs the live Factal event polling loop for the desktop app. This file translate
 ## Components
 
 ### `tick`
-- **Does**: Advances the background polling lifecycle, joins finished work, applies fresh events to the `AppModel`, and spawns the next minute poll when needed
+- **Does**: Advances the background polling lifecycle, joins finished work,
+  applies fresh events to the `AppModel`, spawns the next minute poll when
+  needed, and reports an inactive state when no key is configured
 - **Interacts with**: `AppModel` in `model.rs`, `fetch_latest_events`
 - **Rationale**: Keeps the network call off the UI thread while still letting the app poll on a predictable cadence
 
@@ -38,4 +40,5 @@ Runs the live Factal event polling loop for the desktop app. This file translate
 ## Notes
 - This first pass only consumes the latest page of events because that is the lowest-risk interpretation of the private API and keeps polling lightweight.
 - The app ignores stale results when the key changes while a request is still in flight.
+- No configured key means inactive; the source never substitutes local events.
 - In addition to headline/summary/location fields, the parser now preserves the raw pretty-printed JSON item, vertical/subvertical topic tags, topic names, point WKT, and numeric severity when Factal provides them.

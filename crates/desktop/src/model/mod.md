@@ -9,11 +9,13 @@ source pollers.
 
 ## Components
 
-### `AppModel::seed_demo`
-- **Does**: Initializes settings, asset inventories, demo records, map state,
-  and source status for a usable first frame.
+### `AppModel::new`
+- **Does**: Initializes settings, asset inventories, empty event/camera
+  collections, neutral map state, and honest source status.
 - **Interacts with**: settings, terrain/OSM inventories, and the model domain
   modules.
+- **Rationale**: Runtime domain records must come from live or imported sources;
+  the application initializer never fabricates operational data.
 
 ### Contour stroke width
 
@@ -26,7 +28,8 @@ source pollers.
 
 ### Selection and replacement methods
 - **Does**: Maintain valid event/camera selection while focus, event feeds, and
-  camera registries change.
+  camera registries change. The first authentic event becomes the initial map
+  focus unless the operator has already selected a city.
 - **Interacts with**: camera list, event list, source pollers, and world map
   panels.
 
@@ -75,6 +78,7 @@ source pollers.
 | Dependent | Expects | Breaking changes |
 |---|---|---|
 | Map scenes | Selection, display toggles, and live data form a consistent immutable snapshot per paint pass | Renaming fields or changing selection semantics |
+| `app.rs` | `AppModel::new` starts with no events, cameras, or selections | Seeding runtime domain records or restoring placeholder URLs |
 | Source pollers | `replace_*` methods retain valid selection and report source state | Removing replacement methods or changing their ownership contracts |
 | Camera sidebar | Nearby records are sorted ascending by exact `haversine_km` results | Changing distance calculation, inclusion boundary, or sort order |
 | Camera registry | `has_enabled_camera_sources` includes both keyed adapters and the explicit Project Eyes On opt-in | Ignoring the keyless directory setting |
@@ -87,6 +91,8 @@ source pollers.
 
 - `AppModel` is UI-owned; background pollers return outcomes that the UI thread
   applies through the replacement methods.
+- Startup contains no synthetic event or camera records. Inactive sources leave
+  their lists empty until authentic data arrives.
 - Camera/event data may update independently, so derived nearby-camera data is
   keyed by selected-event coordinates, radius, and an internal camera-registry
   revision before it can be reused.

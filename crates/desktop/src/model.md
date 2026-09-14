@@ -1,7 +1,7 @@
 # model.rs
 
 ## Purpose
-Defines the shared domain and UI state for the 1kEE desktop demo. This file holds normalized event and camera records plus the selection and logging logic that the panels consume.
+Defines the shared domain and UI state for the 1kEE desktop application. This file holds normalized event and camera records plus the selection and logging logic that the panels consume.
 
 ## Components
 
@@ -19,7 +19,7 @@ Defines the shared domain and UI state for the 1kEE desktop demo. This file hold
 - **Interacts with**: `event_list.rs`, `world_map.rs`
 
 ### `EventRecord`
-- **Does**: Represents one curated event shown in the analyst UI, whether seeded locally or synced from Factal
+- **Does**: Represents one event received from a live or imported source
 - **Interacts with**: `AppModel`, `event_list.rs`, `factal_stream.rs`
 
 ### `FactalBrief`
@@ -35,7 +35,7 @@ Defines the shared domain and UI state for the 1kEE desktop demo. This file hold
 - **Interacts with**: `AppModel::nearby_cameras`, `AppModel::replace_camera_registry`, `world_map.rs`, `camera_list.rs`, `camera_registry.rs`
 
 ### `AppModel`
-- **Does**: Owns all shared demo state and handles live Factal event replacement, live camera-registry replacement, settings-window UI state, manual city focus, terrain-library UI state, road-layer visibility state, OSM source/runtime status, and simulated feed actions
+- **Does**: Owns shared operational state and handles live Factal event replacement, live camera-registry replacement, settings-window UI state, manual city focus, terrain-library UI state, road-layer visibility state, OSM source/runtime status, and feed actions
 - **Interacts with**: `app.rs`, every renderer in `panels/`, `TerrainInventory` in `terrain_assets.rs`, `OsmInventory` in `osm_ingest.rs`, `GlobeViewState`, `city_catalog.rs`, `settings_store.rs`, user-selected asset roots
 - **Rationale**: Keeps the current scaffold simple while preserving a clear seam for background workers like the Factal poller
 
@@ -51,7 +51,7 @@ Defines the shared domain and UI state for the 1kEE desktop demo. This file hold
 ### `AppModel::replace_camera_registry`
 - **Does**: Swaps in a fresh live camera registry while retaining the current camera selection when possible
 - **Interacts with**: `camera_registry.rs`, `camera_list.rs`, `world_map.rs`
-- **Rationale**: Lets live camera-source sync replace the mock/demo catalog without resetting the operator’s current context
+- **Rationale**: Lets live camera-source sync refresh the registry without resetting the operator’s current context
 
 ### `haversine_km`
 - **Does**: Computes distance between two coordinates
@@ -61,7 +61,7 @@ Defines the shared domain and UI state for the 1kEE desktop demo. This file hold
 
 | Dependent | Expects | Breaking changes |
 |-----------|---------|------------------|
-| `app.rs` | `AppModel::seed_demo` returns a ready state | Constructor removal or signature change |
+| `app.rs` | `AppModel::new` returns a ready state with empty event and camera collections | Constructor removal, signature change, or seeded runtime records |
 | `camera_list.rs` | `nearby_cameras` returns distance-sorted items | Changing sort order or field names |
 | `world_map.rs` | `selected_event`, `nearby_cameras`, and `cameras` remain available | Renaming state accessors or moving map data out |
 | `header.rs` | `terrain_inventory` is available for top-level dataset status | Removing or relocating terrain status state |
@@ -73,15 +73,15 @@ Defines the shared domain and UI state for the 1kEE desktop demo. This file hold
 | `factal_stream.rs` | `replace_factal_events` swaps in fresh event lists without destroying other app state | Removing the method or changing its selection-retention semantics |
 
 ## Notes
-- This is still a single-threaded demo model.
-- Real event and camera ingest should eventually populate this state through dedicated adapter layers instead of `seed_demo`.
+- Event and camera records enter the model only through live or imported source adapters.
 - Terrain inventory is deliberately lightweight and should eventually point at preprocessed runtime assets, not raw source rasters.
-- The seeded default focus now starts in San Francisco so the local terrain renderer can be tuned against steeper urban relief.
-- Manual city focus now coexists with the event demo: selecting a city re-centers terrain without destroying the seeded event list, and selecting an event clears the manual city focus again.
+- With no source records, the globe starts at a neutral zero-degree focus. The
+  first authentic event becomes the map focus unless a city is already selected.
+- Manual city focus coexists with live events: selecting a city re-centers terrain without destroying the event list, and selecting an event clears the manual city focus again.
 - Manual city focus labels now use region-qualified city names when the GeoNames catalog can resolve an admin1/state entry, so repeated place names are less ambiguous in the header, logs, and terrain library.
 - Factal API key persistence is intentionally lightweight for now: the key is loaded into the model at startup and the live poller swaps in fresh events once authenticated.
 - Factal-backed events now preserve an optional raw-detail payload so the operator can inspect the original API item from a brief window without bloating the normalized event list UI.
-- Live camera-source keys now also persist in the model/settings path, and the camera registry status is explicit about `demo` vs `configured` vs `live` instead of treating mock cameras as a loaded source.
+- Live camera-source keys persist in the model/settings path, and the camera registry status distinguishes `inactive`, `configured`, and `live` without fallback records.
 - The globe now starts in manual mode instead of auto-spin so the app does not enter a continuous repaint loop before the analyst touches anything.
 - The model now initializes and tracks a separate OSM runtime store so the planet-scale roads/buildings pipeline can evolve independently from terrain caching.
 - Coastline and major/minor road layer toggles now live in the model because both the map UI and the renderers need the same persistent visibility state.

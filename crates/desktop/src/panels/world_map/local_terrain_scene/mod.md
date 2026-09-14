@@ -24,6 +24,8 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 ### Local scene tests
 - **Does**: Exercise the contour-loading/projection path against cached focus data so the local terrain stack keeps a working end-to-end sanity check
 - **Interacts with**: `contour_asset::load_srtm_region_for_view`, egui layout helpers
+- **Rationale**: Tests choose an explicit geographic focus rather than depending
+  on runtime-seeded event data.
 
 ### Contour width routing
 
@@ -171,4 +173,3 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 - `EARTH_MAJOR_REM` is shared by both renderers so they classify major contours
   identically; the GPU path bakes the resulting colour and a major flag into
   each instance.
-

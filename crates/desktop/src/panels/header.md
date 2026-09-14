@@ -1,14 +1,14 @@
 # header.rs
 
 ## Purpose
-Renders the top operational banner for the desktop app. It gives the analyst immediate status context for the demo feeds and current focus area.
+Renders the top operational banner for the desktop app. It gives the analyst immediate status context for live feeds and the current focus area.
 
 ## Components
 
 ### `render_header`
 - **Does**: Builds the top bar, exposes settings and asset controls, displays
   source status, and offers a one-click explicit opt-in when the camera registry
-  is still in Demo mode. While discovery runs, it shows a spinner and progress
+  is inactive. While discovery runs, it shows a spinner and progress
   bar with directory-page, cache reuse, listing, geolocation, and reachability
   counts.
 - **Interacts with**: mutable `AppModel` in `model/mod.rs`,

@@ -2448,14 +2448,18 @@ mod tests {
 
     #[test]
     fn local_projection_expands_paris_contour_stack() {
-        let model = crate::model::AppModel::seed_demo();
-        let event = model.selected_event().expect("selected event");
+        let mut model = crate::model::AppModel::new();
+        let focus = GeoPoint {
+            lat: 48.8566,
+            lon: 2.3522,
+        };
+        model.globe_view.focus_on(focus);
         let render_zoom = 6.0;
         let Some(contours) = (0..20).find_map(|_| {
             let contours = contour_asset::load_srtm_region_for_view(
                 model.selected_root.as_deref(),
-                event.location,
-                event.location,
+                focus,
+                focus,
                 render_zoom,
                 2,
                 2,
@@ -2475,7 +2479,7 @@ mod tests {
         ));
         let half_extent_deg = srtm_focus_cache::half_extent_for_zoom(render_zoom);
         let km_per_deg_lat = 111.32f32;
-        let km_per_deg_lon = km_per_deg_lat * event.location.lat.to_radians().cos().abs().max(0.2);
+        let km_per_deg_lon = km_per_deg_lat * focus.lat.to_radians().cos().abs().max(0.2);
         let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
         let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
 
@@ -2491,7 +2495,7 @@ mod tests {
                 projection::project_local(
                     &layout,
                     &model.globe_view,
-                    event.location,
+                    focus,
                     point,
                     elevation_m,
                     extent_x_km,
@@ -2580,7 +2584,7 @@ mod tests {
 
     #[test]
     fn elevation_fill_key_keeps_planetary_surfaces_distinct() {
-        let view = crate::model::AppModel::seed_demo().globe_view;
+        let view = crate::model::AppModel::new().globe_view;
         let layout = layout(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
             egui::vec2(800.0, 600.0),

@@ -101,8 +101,8 @@ pub fn tick(model: &mut AppModel) {
     let scrape_sources = camera_scrape_catalog::load_scrape_sources(model.selected_root.as_deref());
     if !model.has_enabled_camera_sources() && public_sources.is_empty() && scrape_sources.is_empty()
     {
-        if model.camera_registry_status != "demo" {
-            model.camera_registry_status = "demo".into();
+        if model.camera_registry_status != "inactive" {
+            model.camera_registry_status = "inactive".into();
         }
         clear_progress(model);
         return;

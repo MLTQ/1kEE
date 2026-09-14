@@ -19,7 +19,9 @@ Renders the app settings window for the desktop app. This file is the user-facin
 | `settings_store.rs` | Saving empty path fields reverts to executable-directory defaults / PATH discovery and saving an empty Factal key clears the stored token | Changing blank-field semantics |
 
 ## Notes
-- The key is masked in the UI but still stored as plain text because this is still a local demo build.
+- The key is masked in the UI but still stored as plain text in the local desktop settings file.
+- Clearing keys changes keyed sources to inactive; it never activates fallback
+  records.
 - 511NY and Windy Webcams keys are optional; leaving them blank still permits
   explicit Project Eyes On discovery or declarative no-key camera sources.
 - No-key public camera sources can be declared in `Data/camera_sources/public_sources.json`, and curated scraped webcam-directory seeds can be declared in `Data/camera_sources/scrape_sources.json` under the asset root.
