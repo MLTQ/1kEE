@@ -16,7 +16,7 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
                     ui.heading("1kEE");
                     ui.colored_label(
                         theme::text_muted(),
-                        "One Thousand Electric Eye | global event-to-camera operations demo",
+                        "One Thousand Electric Eye | global event-to-camera operations",
                     );
                 });
 
@@ -25,7 +25,7 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
                 metric_chip(ui, "Factal stream", &model.factal_stream_status);
                 metric_chip(ui, "USGS quakes", &model.usgs_stream_status);
                 metric_chip(ui, "Camera registry", &model.camera_registry_status);
-                if model.camera_registry_status == "demo" && !model.eyes_on_enabled {
+                if model.camera_registry_status == "inactive" && !model.eyes_on_enabled {
                     if ui
                         .small_button("Enable live cameras")
                         .on_hover_text(

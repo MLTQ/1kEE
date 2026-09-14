@@ -225,7 +225,7 @@ struct NearbyCameraCache {
 }
 
 impl AppModel {
-    pub fn seed_demo() -> Self {
+    pub fn new() -> Self {
         let _ = settings_store::ensure_default_asset_layout();
         let app_settings = settings_store::load_app_settings();
         let selected_root = settings_store::effective_asset_root();
@@ -240,146 +240,17 @@ impl AppModel {
         let eyes_on_requests_per_minute = app_settings.eyes_on_requests_per_minute;
         let aisstream_api_key = app_settings.aisstream_api_key.trim().to_owned();
 
-        let events = vec![
-            EventRecord {
-                id: "evt-sf".into(),
-                title: "Utility outage near Twin Peaks".into(),
-                summary: "Curated alert placeholder representing a live urban disruption with confirmed location metadata.".into(),
-                severity: EventSeverity::Critical,
-                location_name: "San Francisco, USA".into(),
-                location: GeoPoint {
-                    lat: 37.7544,
-                    lon: -122.4477,
-                },
-                source: "Factal stream".into(),
-                occurred_at: "2026-03-15 05:42 UTC".into(),
-                factal_brief: None,
-            },
-            EventRecord {
-                id: "evt-nyc".into(),
-                title: "Large structure fire in lower Manhattan".into(),
-                summary: "Mock incident record used to validate event pinning and nearby camera discovery.".into(),
-                severity: EventSeverity::Elevated,
-                location_name: "New York City, USA".into(),
-                location: GeoPoint {
-                    lat: 40.7128,
-                    lon: -74.0060,
-                },
-                source: "Factal stream".into(),
-                occurred_at: "2026-03-15 05:50 UTC".into(),
-                factal_brief: None,
-            },
-            EventRecord {
-                id: "evt-tokyo".into(),
-                title: "Flooding reported across a rail corridor".into(),
-                summary: "Mock event with lower urgency to test sorting, selection, and globe overlays.".into(),
-                severity: EventSeverity::Advisory,
-                location_name: "Tokyo, Japan".into(),
-                location: GeoPoint {
-                    lat: 35.6764,
-                    lon: 139.6500,
-                },
-                source: "Factal stream".into(),
-                occurred_at: "2026-03-15 05:57 UTC".into(),
-                factal_brief: None,
-            },
-        ];
-
-        let cameras = vec![
-            CameraFeed {
-                id: "cam-sf-01".into(),
-                label: "Twin Peaks North".into(),
-                provider: "OpenCity SF".into(),
-                kind: "traffic".into(),
-                location: GeoPoint {
-                    lat: 37.7549,
-                    lon: -122.4471,
-                },
-                stream_url: "https://example.invalid/sf/twin-peaks-north".into(),
-                last_seen: "36s ago".into(),
-                status: CameraConnectionState::Idle,
-            },
-            CameraFeed {
-                id: "cam-sf-02".into(),
-                label: "Market Ridge".into(),
-                provider: "Bay Civic Feeds".into(),
-                kind: "public square".into(),
-                location: GeoPoint {
-                    lat: 37.7620,
-                    lon: -122.4347,
-                },
-                stream_url: "https://example.invalid/sf/market-ridge".into(),
-                last_seen: "1m ago".into(),
-                status: CameraConnectionState::Reachable,
-            },
-            CameraFeed {
-                id: "cam-nyc-01".into(),
-                label: "Broadway South".into(),
-                provider: "OpenStreetCam NY".into(),
-                kind: "street".into(),
-                location: GeoPoint {
-                    lat: 40.7102,
-                    lon: -74.0086,
-                },
-                stream_url: "https://example.invalid/nyc/broadway".into(),
-                last_seen: "14s ago".into(),
-                status: CameraConnectionState::Idle,
-            },
-            CameraFeed {
-                id: "cam-nyc-02".into(),
-                label: "Battery Overlook".into(),
-                provider: "Harbor Public View".into(),
-                kind: "harbor".into(),
-                location: GeoPoint {
-                    lat: 40.7041,
-                    lon: -74.0170,
-                },
-                stream_url: "https://example.invalid/nyc/battery".into(),
-                last_seen: "49s ago".into(),
-                status: CameraConnectionState::Unreachable,
-            },
-            CameraFeed {
-                id: "cam-tokyo-01".into(),
-                label: "Shinjuku Crossing".into(),
-                provider: "Tokyo Mobility Cams".into(),
-                kind: "traffic".into(),
-                location: GeoPoint {
-                    lat: 35.6897,
-                    lon: 139.7004,
-                },
-                stream_url: "https://example.invalid/tokyo/shinjuku".into(),
-                last_seen: "21s ago".into(),
-                status: CameraConnectionState::Idle,
-            },
-            CameraFeed {
-                id: "cam-tokyo-02".into(),
-                label: "Tokyo Station North".into(),
-                provider: "Transit Surface Network".into(),
-                kind: "station".into(),
-                location: GeoPoint {
-                    lat: 35.6828,
-                    lon: 139.7668,
-                },
-                stream_url: "https://example.invalid/tokyo/station".into(),
-                last_seen: "2m ago".into(),
-                status: CameraConnectionState::Attempted,
-            },
-        ];
-
-        let mut model = Self {
-            events,
-            cameras,
+        Self {
+            events: Vec::new(),
+            cameras: Vec::new(),
             tracks: Arc::new(Vec::new()),
             flights: Arc::new(Vec::new()),
-            selected_event_id: Some("evt-sf".into()),
+            selected_event_id: None,
             selected_camera_id: None,
             camera_feed_window_open: false,
             selected_track_mmsi: None,
             selected_flight_icao24: None,
-            globe_view: GlobeViewState::from_focus(GeoPoint {
-                lat: 37.7544,
-                lon: -122.4477,
-            }),
+            globe_view: GlobeViewState::from_focus(GeoPoint { lat: 0.0, lon: 0.0 }),
             focused_city_id: None,
             cinematic_mode: false,
             show_layer_drawer: false,
@@ -476,7 +347,7 @@ impl AppModel {
             activity_log: {
                 let mut lines = vec![
                     if factal_api_key.is_empty() {
-                        "Factal stream is in demo mode until an API key is configured.".into()
+                        "Factal stream inactive; configure an API key to enable it.".into()
                     } else {
                         "Factal API key loaded from local settings; live polling is ready.".into()
                     },
@@ -484,7 +355,7 @@ impl AppModel {
                         && ny511_api_key.is_empty()
                         && !eyes_on_enabled
                     {
-                        "Camera registry is in demo mode until a live source is configured.".into()
+                        "Camera registry inactive; enable a live source to populate it.".into()
                     } else if eyes_on_enabled {
                         "Project Eyes On public-directory sync is enabled.".into()
                     } else {
@@ -513,7 +384,7 @@ impl AppModel {
             replay_history_status: String::new(),
             log_collapsed: false,
             factal_stream_status: if factal_api_key.is_empty() {
-                "demo".into()
+                "inactive".into()
             } else {
                 "configured".into()
             },
@@ -524,7 +395,7 @@ impl AppModel {
                 && ny511_api_key.is_empty()
                 && !eyes_on_enabled
             {
-                "demo".into()
+                "inactive".into()
             } else {
                 "configured".into()
             },
@@ -533,13 +404,7 @@ impl AppModel {
             camera_registry_progress_label: String::new(),
             terrain_inventory,
             osm_inventory,
-        };
-
-        if let Some(camera) = model.nearby_cameras(250.0).first() {
-            model.selected_camera_id = Some(camera.id.clone());
         }
-
-        model
     }
 
     pub fn has_factal_api_key(&self) -> bool {
@@ -716,7 +581,7 @@ impl AppModel {
         self.camera_registry_status = if self.has_enabled_camera_sources() {
             "configured".into()
         } else {
-            "demo".into()
+            "inactive".into()
         };
 
         if let Some(root) = self.selected_root.clone() {
@@ -865,7 +730,7 @@ impl AppModel {
 
     pub fn replace_usgs_events(&mut self, events: Vec<EventRecord>) {
         // Replace only the USGS-prefixed events (quakes get magnitude
-        // revisions under the same id); Factal/demo events stay in front.
+        // revisions under the same id); Factal events stay in front.
         let mut merged: Vec<EventRecord> = self
             .events
             .drain(..)
@@ -892,6 +757,16 @@ impl AppModel {
 
         self.selected_event_id =
             retained_selection.or_else(|| self.events.first().map(|event| event.id.clone()));
+        let new_event_focus = if self.selected_event_id != previous_selected
+            && self.focused_city_id.is_none()
+        {
+            self.selected_event().map(|event| event.location)
+        } else {
+            None
+        };
+        if let Some(location) = new_event_focus {
+            self.globe_view.focus_on(location);
+        }
         self.selected_camera_id = self
             .nearby_cameras(250.0)
             .first()
@@ -1135,9 +1010,80 @@ fn normalized_pixels_per_point(pixels_per_point: f32) -> f32 {
 mod tests {
     use super::*;
 
+    fn model_with_event_and_camera() -> AppModel {
+        let mut model = AppModel::new();
+        model.replace_factal_events(vec![EventRecord {
+            id: "test-event".into(),
+            title: "Test event".into(),
+            summary: "Test fixture".into(),
+            severity: EventSeverity::Advisory,
+            location_name: "Test location".into(),
+            location: GeoPoint { lat: 1.0, lon: 2.0 },
+            source: "test".into(),
+            occurred_at: "test time".into(),
+            factal_brief: None,
+        }]);
+        model.replace_camera_registry(
+            vec![CameraFeed {
+                id: "test-camera".into(),
+                label: "Test camera".into(),
+                provider: "test".into(),
+                kind: "snapshot".into(),
+                location: GeoPoint { lat: 1.0, lon: 2.0 },
+                stream_url: "https://camera.test/frame.jpg".into(),
+                last_seen: "test time".into(),
+                status: CameraConnectionState::Idle,
+            }],
+            "test registry",
+        );
+        model
+    }
+
+    #[test]
+    fn initial_model_has_no_seeded_runtime_records() {
+        let model = AppModel::new();
+        assert!(model.events.is_empty());
+        assert!(model.cameras.is_empty());
+        assert!(model.selected_event_id.is_none());
+        assert!(model.selected_camera_id.is_none());
+        assert!(matches!(
+            model.factal_stream_status.as_str(),
+            "inactive" | "configured"
+        ));
+        assert!(matches!(
+            model.camera_registry_status.as_str(),
+            "inactive" | "configured"
+        ));
+    }
+
+    #[test]
+    fn first_source_event_becomes_the_real_initial_focus() {
+        let mut model = AppModel::new();
+        let location = GeoPoint {
+            lat: 48.8566,
+            lon: 2.3522,
+        };
+        model.replace_factal_events(vec![EventRecord {
+            id: "source-event".into(),
+            title: "Source event".into(),
+            summary: String::new(),
+            severity: EventSeverity::Advisory,
+            location_name: "Paris, France".into(),
+            location,
+            source: "source".into(),
+            occurred_at: "source time".into(),
+            factal_brief: None,
+        }]);
+
+        assert_eq!(model.selected_event_id.as_deref(), Some("source-event"));
+        let focused = model.globe_view.globe_center_latlon();
+        assert!((focused.lat - location.lat).abs() < 0.001);
+        assert!((focused.lon - location.lon).abs() < 0.001);
+    }
+
     #[test]
     fn nearby_camera_snapshot_reuses_matching_inputs_and_invalidates_on_registry_change() {
-        let mut model = AppModel::seed_demo();
+        let mut model = model_with_event_and_camera();
         let first = model.nearby_camera_snapshot(250.0);
         let second = model.nearby_camera_snapshot(250.0);
         assert!(Arc::ptr_eq(&first, &second));
@@ -1162,12 +1108,15 @@ mod tests {
 
     #[test]
     fn opening_camera_feed_selects_camera_and_opens_window() {
-        let mut model = AppModel::seed_demo();
+        let mut model = model_with_event_and_camera();
         let camera_id = model.cameras[0].id.clone();
 
         model.open_camera_feed(&camera_id);
 
-        assert_eq!(model.selected_camera_id.as_deref(), Some(camera_id.as_str()));
+        assert_eq!(
+            model.selected_camera_id.as_deref(),
+            Some(camera_id.as_str())
+        );
         assert!(model.camera_feed_window_open);
         assert_eq!(
             model.selected_camera().map(|camera| camera.status),
@@ -1177,7 +1126,7 @@ mod tests {
 
     #[test]
     fn contour_width_preserves_legacy_scale_then_uses_visible_pixel_bounds() {
-        let mut model = AppModel::seed_demo();
+        let mut model = AppModel::new();
         assert_eq!(
             model.contour_stroke_width_px(2.0),
             settings_store::LEGACY_CONTOUR_STROKE_WIDTH_POINTS * 2.0
@@ -1204,7 +1153,7 @@ mod tests {
 
     #[test]
     fn selected_contour_width_stays_physical_across_display_densities() {
-        let mut model = AppModel::seed_demo();
+        let mut model = AppModel::new();
         model.set_contour_stroke_width_px(2.5);
 
         assert_eq!(model.contour_stroke_width_px(1.0), 2.5);
@@ -1224,7 +1173,7 @@ mod tests {
     /// faintly.
     #[test]
     fn thin_widths_are_held_at_the_stroke_floor() {
-        let mut model = AppModel::seed_demo();
+        let mut model = AppModel::new();
         model.contour_stroke_width_px = Some(0.01);
         assert_eq!(
             model.contour_stroke_width_px(1.0),

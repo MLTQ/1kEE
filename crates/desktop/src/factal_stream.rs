@@ -70,8 +70,8 @@ pub fn tick(model: &mut AppModel) {
     }
 
     if key.is_empty() {
-        if model.factal_stream_status != "demo" {
-            model.factal_stream_status = "demo".into();
+        if model.factal_stream_status != "inactive" {
+            model.factal_stream_status = "inactive".into();
         }
         return;
     }

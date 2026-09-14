@@ -116,7 +116,7 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
                 model.factal_stream_status = if model.has_factal_api_key() {
                     "configured".into()
                 } else {
-                    "demo".into()
+                    "inactive".into()
                 };
                 if model.has_factal_api_key() {
                     model.push_log(
@@ -127,7 +127,7 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
                         factal_stream::invalidate();
                     }
                 } else if had_key {
-                    model.push_log("Factal API key cleared; stream returned to demo mode.".into());
+                    model.push_log("Factal API key cleared; stream is inactive.".into());
                 }
                 camera_registry::invalidate();
             }
@@ -162,15 +162,15 @@ pub fn render_factal_settings(ctx: &egui::Context, model: &mut AppModel) {
         moving_tracks::invalidate();
         match model.save_settings() {
             Ok(()) => {
-                model.factal_stream_status = "demo".into();
+                model.factal_stream_status = "inactive".into();
                 model.camera_registry_status = if model.eyes_on_enabled {
                     "configured".into()
                 } else {
-                    "demo".into()
+                    "inactive".into()
                 };
                 factal_stream::invalidate();
                 camera_registry::invalidate();
-                model.push_log("API keys cleared; streams returned to demo mode.".into());
+                model.push_log("API keys cleared; keyed streams are inactive.".into());
             }
             Err(error) => {
                 model.push_log(format!("Settings clear failed: {}", error));
@@ -234,7 +234,7 @@ fn tab_apis(ui: &mut egui::Ui, model: &mut AppModel) {
             .hint_text("Token ..."),
     );
     ui.add_space(4.0);
-    ui.small("Stored locally in the executable directory settings file for this demo build.");
+    ui.small("Stored locally in the executable directory settings file.");
     ui.small(format!("Stream status: {}", model.factal_stream_status));
 
     ui.add_space(14.0);

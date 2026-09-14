@@ -76,7 +76,7 @@ impl DashboardApp {
             eprintln!("puffin profiler server on 127.0.0.1:8585 — connect with `puffin_viewer`");
         }
 
-        let model = AppModel::seed_demo();
+        let model = AppModel::new();
         let gruve = crate::gruve::GruveBridge::start(&model);
         Self {
             last_theme: model.map_theme,

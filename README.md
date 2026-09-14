@@ -70,7 +70,7 @@ All keys are entered in-app under **Settings → APIs** and saved locally to
 | Active fires | [NASA FIRMS](https://firms.modaps.eosdis.nasa.gov/) | No |
 
 The Project Eyes On adapter is enabled with **Enable live cameras** beside the
-top-bar Demo status, or under **Settings → APIs**. It is off by default, accepts
+top-bar inactive status, or under **Settings → APIs**. It is off by default, accepts
 an optional two-letter country scope, and follows the directory's advertised
 page total with empty/repeated-page fallbacks. Request starts default to 250/min and are
 adjustable under **Settings → APIs**. Recent directory and camera metadata is
@@ -81,6 +81,9 @@ registry says **live**, enable the Cameras layer and click a green camera pip to
 open its feed window. 1kEE ports the public-directory discovery,
 deduplication, metadata geolocation, and feed-type verification stages; it does
 not include the upstream search-engine dorking path.
+
+1kEE does not seed events or cameras. Until a live source returns records, the
+corresponding map layers and lists remain empty.
 
 ### Terrain & map data
 

@@ -6,7 +6,10 @@ Runs the live camera registry polling loop for the desktop app. This module owns
 ## Components
 
 ### `tick`
-- **Does**: Advances the background polling lifecycle, drains non-blocking progress updates, joins finished work, applies fresh camera records to the `AppModel`, and spawns the next provider poll when needed
+- **Does**: Advances the background polling lifecycle, drains non-blocking
+  progress updates, joins finished work, applies fresh camera records to the
+  `AppModel`, spawns the next provider poll when needed, and reports inactive
+  when no source is configured
 - **Interacts with**: `AppModel` in `model.rs`, `fetch_camera_registry`
 - **Rationale**: Keeps network fetches off the UI thread while letting the app refresh camera metadata around the current focus
 
@@ -51,8 +54,8 @@ Runs the live camera registry polling loop for the desktop app. This module owns
 - The registry also supports curated scraped webcam-directory seeds loaded from `Data/camera_sources/scrape_sources.json` under the asset root.
 - Generic no-key adapters currently support three shapes: plain JSON arrays, GeoJSON feature collections, and ArcGIS feature service query responses.
 - Curated scrape adapters still prefer operator-supplied coordinates, but they can now fall back to lightweight embedded-map coordinate extraction for pages that expose stable map URLs.
-- The app stays in demo camera mode until a keyed adapter, declarative public
-  source, curated scrape seed, or the explicit Project Eyes On opt-in is active.
+- With no keyed adapter, declarative public source, curated scrape seed, or
+  Project Eyes On opt-in, the registry stays inactive and contains no cameras.
 - Registry adapters remain metadata-oriented. The Project Eyes On adapter adds
   a paced header/reachability probe; actual snapshot/MJPEG reading starts
   only after a user opens a pip in `camera_feed_viewer.rs`.
