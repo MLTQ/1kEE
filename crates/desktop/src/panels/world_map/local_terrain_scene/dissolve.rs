@@ -5,7 +5,7 @@ use super::super::srtm_focus_cache;
 use super::projection::project_local;
 use super::{LocalLayout, visual_half_extent_for_zoom};
 
-/// Each tile has 100 deterministically shuffled cells: one per percent of
+/// Each tile has 10,000 deterministically shuffled cells: one per 0.01% of
 /// measured workflow completion. Only real loading progress removes cells.
 /// Time affects brightness, never the completed-cell count or ordering.
 pub(super) fn draw_tile_pulse_grid(
@@ -23,6 +23,7 @@ pub(super) fn draw_tile_pulse_grid(
     puffin::profile_function!();
     const EDGE_BAND: f32 = 0.14; // fraction of remaining work that counts as "burning"
     const CELL_INSET: f32 = 0.10; // fractional gap between cells (10% each side)
+    const OPACITY: f32 = 0.75;
 
     let half_extent =
         half_extent_override.unwrap_or_else(|| srtm_focus_cache::half_extent_for_zoom(render_zoom));
@@ -98,74 +99,79 @@ pub(super) fn draw_tile_pulse_grid(
             if sc.len() < 4 {
                 continue;
             }
+            if !painter.clip_rect().intersects(egui::Rect::from_points(&sc)) {
+                continue;
+            }
             let (nw, ne, se, sw) = (sc[0], sc[1], sc[2], sc[3]);
 
             let removed = completed_cells(progress.get(&(lat_b, lon_b)).copied().unwrap_or(0.0));
+            if removed == GRID * GRID {
+                continue;
+            }
             let ranks = cell_ranks(tile_hash(lat_b, lon_b));
 
-            for row in 0..GRID {
-                for col in 0..GRID {
-                    let rank = ranks[row * GRID + col];
-                    if rank < removed {
-                        continue; // this cell has dissolved
-                    }
+            for (cell, rank) in ranks.enumerate() {
+                let row = cell / GRID;
+                let col = cell % GRID;
+                if rank < removed {
+                    continue; // this cell has dissolved
+                }
 
-                    // 1.0 = far from dissolving, 0.0 = about to vanish
-                    let edge = ((rank - removed) as f32 / (GRID * GRID) as f32 / EDGE_BAND)
-                        .clamp(0.0, 1.0);
+                // 1.0 = far from dissolving, 0.0 = about to vanish
+                let edge =
+                    ((rank - removed) as f32 / (GRID * GRID) as f32 / EDGE_BAND).clamp(0.0, 1.0);
 
-                    // Bilinear sub-quad with a tiny inset gap.
-                    let n = GRID as f32;
-                    let u0 = col as f32 / n + CELL_INSET / n;
-                    let u1 = (col as f32 + 1.0) / n - CELL_INSET / n;
-                    let v0 = row as f32 / n + CELL_INSET / n;
-                    let v1 = (row as f32 + 1.0) / n - CELL_INSET / n;
+                // Bilinear sub-quad with a tiny inset gap.
+                let n = GRID as f32;
+                let u0 = col as f32 / n + CELL_INSET / n;
+                let u1 = (col as f32 + 1.0) / n - CELL_INSET / n;
+                let v0 = row as f32 / n + CELL_INSET / n;
+                let v1 = (row as f32 + 1.0) / n - CELL_INSET / n;
 
-                    let p_nw = bilerp(nw, ne, sw, se, u0, v0);
-                    let p_ne = bilerp(nw, ne, sw, se, u1, v0);
-                    let p_se = bilerp(nw, ne, sw, se, u1, v1);
-                    let p_sw = bilerp(nw, ne, sw, se, u0, v1);
+                let p_nw = bilerp(nw, ne, sw, se, u0, v0);
+                let p_ne = bilerp(nw, ne, sw, se, u1, v0);
+                let p_se = bilerp(nw, ne, sw, se, u1, v1);
+                let p_sw = bilerp(nw, ne, sw, se, u0, v1);
 
-                    // Mix contour→hot as cell approaches its threshold.
-                    let mix = (1.0 - edge).powf(1.8);
-                    let r = lerp_u8(cr, hr, mix);
-                    let g = lerp_u8(cg, hg, mix);
-                    let b = lerp_u8(cb, hb, mix);
-                    let alpha = (lerp_f32(8.0, 80.0, 1.0 - edge) * breath) as u8;
+                // Mix contour→hot as cell approaches its threshold.
+                let mix = (1.0 - edge).powf(1.8);
+                let r = lerp_u8(cr, hr, mix);
+                let g = lerp_u8(cg, hg, mix);
+                let b = lerp_u8(cb, hb, mix);
+                let alpha = (lerp_f32(8.0, 80.0, 1.0 - edge) * breath * OPACITY) as u8;
+                quad(
+                    &mut mesh,
+                    p_nw,
+                    p_ne,
+                    p_se,
+                    p_sw,
+                    egui::Color32::from_rgba_unmultiplied(r, g, b, alpha),
+                );
+
+                // Chromatic-aberration fringe on burning-edge cells.
+                if edge < 0.4 {
+                    let t = 1.0 - edge / 0.4; // 0→1 as cell nears threshold
+                    let fa = (t * 40.0 * breath * OPACITY) as u8;
+                    let offset = egui::Vec2::new(t * 1.8, 0.0);
+
+                    // Hot ghost shifted one way
                     quad(
-                        &mut mesh,
-                        p_nw,
-                        p_ne,
-                        p_se,
-                        p_sw,
-                        egui::Color32::from_rgba_unmultiplied(r, g, b, alpha),
+                        &mut mesh_hot,
+                        p_nw + offset,
+                        p_ne + offset,
+                        p_se + offset,
+                        p_sw + offset,
+                        egui::Color32::from_rgba_unmultiplied(hr, hg, hb, fa),
                     );
-
-                    // Chromatic-aberration fringe on burning-edge cells.
-                    if edge < 0.4 {
-                        let t = 1.0 - edge / 0.4; // 0→1 as cell nears threshold
-                        let fa = (t * 40.0 * breath) as u8;
-                        let offset = egui::Vec2::new(t * 1.8, 0.0);
-
-                        // Hot ghost shifted one way
-                        quad(
-                            &mut mesh_hot,
-                            p_nw + offset,
-                            p_ne + offset,
-                            p_se + offset,
-                            p_sw + offset,
-                            egui::Color32::from_rgba_unmultiplied(hr, hg, hb, fa),
-                        );
-                        // Contour ghost shifted the other way
-                        quad(
-                            &mut mesh_cnt,
-                            p_nw - offset,
-                            p_ne - offset,
-                            p_se - offset,
-                            p_sw - offset,
-                            egui::Color32::from_rgba_unmultiplied(cr, cg, cb, fa),
-                        );
-                    }
+                    // Contour ghost shifted the other way
+                    quad(
+                        &mut mesh_cnt,
+                        p_nw - offset,
+                        p_ne - offset,
+                        p_se - offset,
+                        p_sw - offset,
+                        egui::Color32::from_rgba_unmultiplied(cr, cg, cb, fa),
+                    );
                 }
             }
         }
@@ -252,7 +258,7 @@ fn tile_hash(lat_b: i32, lon_b: i32) -> u64 {
         .wrapping_mul(6_364_136_223_846_793_005)
 }
 
-const GRID: usize = 10;
+const GRID: usize = 100;
 
 fn completed_cells(progress: f32) -> usize {
     if !progress.is_finite() {
@@ -263,19 +269,29 @@ fn completed_cells(progress: f32) -> usize {
 
 /// A permutation gives exactly N dissolved cells, unlike random float
 /// thresholds which only approximate a percentage and can finish early.
-fn cell_ranks(seed: u64) -> [usize; GRID * GRID] {
-    let mut order: [usize; GRID * GRID] = std::array::from_fn(|i| i);
-    order.sort_unstable_by_key(|&i| {
-        let mut x = seed.wrapping_add((i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
-        x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        x ^ (x >> 31)
+fn cell_ranks(seed: u64) -> impl Iterator<Item = usize> {
+    // Sort only once, rather than sorting 10,000 cells for every tile/frame.
+    // Rotating the ranks keeps each tile's pattern stable and the exact count
+    // of removed cells intact without allocating another per-tile array.
+    static RANKS: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+    let ranks = RANKS.get_or_init(|| {
+        let mut order: Vec<usize> = (0..GRID * GRID).collect();
+        order.sort_unstable_by_key(|&i| {
+            let mut x = (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            x ^ (x >> 31)
+        });
+        let mut ranks = vec![0; GRID * GRID];
+        for (rank, index) in order.into_iter().enumerate() {
+            ranks[index] = rank;
+        }
+        ranks
     });
-    let mut ranks = [0; GRID * GRID];
-    for (rank, index) in order.into_iter().enumerate() {
-        ranks[index] = rank;
-    }
+    let offset = (seed % (GRID * GRID) as u64) as usize;
     ranks
+        .iter()
+        .map(move |rank| (rank + offset) % (GRID * GRID))
 }
 
 #[cfg(test)]
@@ -321,19 +337,19 @@ mod tests {
                 .unwrap_or_default()
         };
         let stalled = paint(0.0, 0.5, false);
-        assert_eq!(stalled.len(), 50 * 4);
+        assert_eq!(stalled.len(), 5_000 * 4);
         assert_eq!(paint(6.9, 0.5, false), stalled);
         assert_eq!(paint(7.1, 0.5, false), stalled);
         assert_eq!(paint(100.0, 0.5, false), stalled);
-        assert_eq!(paint(100.0, 0.75, false).len(), 25 * 4);
-        assert_eq!(paint(100.0, 0.99, false).len(), 4);
+        assert_eq!(paint(100.0, 0.75, false).len(), 2_500 * 4);
+        assert_eq!(paint(100.0, 0.99, false).len(), 100 * 4);
         assert!(paint(100.0, 1.0, false).is_empty());
         assert!(paint(100.0, 0.0, true).is_empty());
     }
 
     #[test]
     fn dissolve_tracks_completed_work_exactly_without_reappearing() {
-        let ranks = cell_ranks(tile_hash(5467, -16911));
+        let ranks: Vec<_> = cell_ranks(tile_hash(5467, -16911)).collect();
         let mut previous = std::collections::HashSet::new();
         for progress in [0.0, 0.25, 0.50, 0.75, 0.99, 1.0] {
             let gone: std::collections::HashSet<_> = ranks
@@ -345,9 +361,15 @@ mod tests {
             assert!(previous.is_subset(&gone));
             previous = gone;
         }
-        assert_eq!(previous.len(), 100);
-        assert_eq!(cell_ranks(tile_hash(5467, -16911)), ranks);
-        assert_ne!(cell_ranks(tile_hash(5467, -16910)), ranks);
+        assert_eq!(previous.len(), 10_000);
+        assert_eq!(
+            cell_ranks(tile_hash(5467, -16911)).collect::<Vec<_>>(),
+            ranks
+        );
+        assert_ne!(
+            cell_ranks(tile_hash(5467, -16910)).collect::<Vec<_>>(),
+            ranks
+        );
     }
 
     #[test]
@@ -356,8 +378,8 @@ mod tests {
         assert_eq!(completed_cells(f32::NAN), 0);
         assert_eq!(completed_cells(f32::INFINITY), 0);
         assert_eq!(completed_cells(-1.0), 0);
-        assert_eq!(completed_cells(0.99), 99);
-        assert_eq!(completed_cells(5.0), 100);
+        assert_eq!(completed_cells(0.99), 9_900);
+        assert_eq!(completed_cells(5.0), 10_000);
     }
 }
 
