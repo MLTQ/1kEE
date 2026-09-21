@@ -182,7 +182,7 @@ pub fn import_tile_into_cache(
     tile: TileKey,
     gpkg_path: &Path,
 ) -> rusqlite::Result<()> {
-    let source = Connection::open(gpkg_path)?;
+    let source = Connection::open_with_flags(gpkg_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     source.busy_timeout(Duration::from_secs(30))?;
     let mut cache = open_cache_db(cache_db_path)?;
     let transaction = cache.transaction()?;
@@ -208,33 +208,29 @@ pub fn import_tile_into_cache(
 
     let mut contour_count = 0usize;
     if table_exists {
-        if let Ok(mut statement) = source.prepare("SELECT fid, geom, elevation_m FROM contour ORDER BY ABS(elevation_m), fid") {
-            if let Ok(mut rows) = statement.query([]) {
-                while let Some(row) = rows.next()? {
-                    let fid: i64 = row.get(0)?;
-                    let geometry: Vec<u8> = row.get(1)?;
-                    let elevation_m: f32 = row.get(2)?;
-                    transaction.execute(
-                        "INSERT INTO contour_tiles (
-                             zoom_bucket,
-                             lat_bucket,
-                             lon_bucket,
-                             fid,
-                             elevation_m,
-                             geom
-                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        params![
-                            tile.zoom_bucket,
-                            tile.lat_bucket,
-                            tile.lon_bucket,
-                            fid,
-                            elevation_m,
-                            geometry
-                        ],
-                    )?;
-                    contour_count += 1;
-                }
-            }
+        // Stream in primary-key order, without sorting/copying geometry blobs.
+        // Preparing once matters for the thousands of features in a 3DEP tile.
+        let mut source_rows =
+            source.prepare("SELECT fid, geom, elevation_m FROM contour ORDER BY fid")?;
+        let mut insert = transaction.prepare(
+            "INSERT INTO contour_tiles
+                (zoom_bucket, lat_bucket, lon_bucket, fid, elevation_m, geom)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        let mut rows = source_rows.query([])?;
+        while let Some(row) = rows.next()? {
+            let fid: i64 = row.get(0)?;
+            let geometry = row.get_ref(1)?.as_blob()?;
+            let elevation_m: f32 = row.get(2)?;
+            insert.execute(params![
+                tile.zoom_bucket,
+                tile.lat_bucket,
+                tile.lon_bucket,
+                fid,
+                elevation_m,
+                geometry
+            ])?;
+            contour_count += 1;
         }
     }
 
@@ -262,7 +258,7 @@ pub fn import_coastline_into_cache(
     tile: TileKey,
     gpkg_path: &Path,
 ) -> rusqlite::Result<()> {
-    let source = Connection::open(gpkg_path)?;
+    let source = Connection::open_with_flags(gpkg_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     source.busy_timeout(Duration::from_secs(30))?;
     // The gpkg may not have the contour table if no 0m crossings exist
     let table_exists: bool = source
@@ -288,21 +284,21 @@ pub fn import_coastline_into_cache(
     let mut line_count = 0usize;
     if table_exists {
         let mut stmt = source.prepare("SELECT fid, geom FROM contour ORDER BY fid")?;
+        let mut insert = transaction.prepare(
+            "INSERT INTO coastline_tiles (zoom_bucket, lat_bucket, lon_bucket, fid, geom)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             let fid: i64 = row.get(0)?;
-            let geometry: Vec<u8> = row.get(1)?;
-            transaction.execute(
-                "INSERT INTO coastline_tiles (zoom_bucket, lat_bucket, lon_bucket, fid, geom)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    tile.zoom_bucket,
-                    tile.lat_bucket,
-                    tile.lon_bucket,
-                    fid,
-                    geometry
-                ],
-            )?;
+            let geometry = row.get_ref(1)?.as_blob()?;
+            insert.execute(params![
+                tile.zoom_bucket,
+                tile.lat_bucket,
+                tile.lon_bucket,
+                fid,
+                geometry
+            ])?;
             line_count += 1;
         }
     }
@@ -396,6 +392,135 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tile_imports_replace_atomically_and_preserve_geometry() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("1kee-import-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("source.gpkg");
+        let cache_path = root.join("cache.sqlite");
+        let tile = TileKey {
+            zoom_bucket: 10,
+            lat_bucket: 1,
+            lon_bucket: -1,
+        };
+        let source = Connection::open(&source_path).unwrap();
+        source
+            .execute_batch(
+                "CREATE TABLE contour (fid INTEGER PRIMARY KEY, geom BLOB, elevation_m);
+             INSERT INTO contour VALUES (8, x'010203', -1.5), (2, x'040506', 40.0);",
+            )
+            .unwrap();
+        import_tile_into_cache(&cache_path, tile, &source_path).unwrap();
+        import_coastline_into_cache(&cache_path, tile, &source_path).unwrap();
+        let cache = open_cache_db_read_only(&cache_path).unwrap();
+        let original: Vec<(i64, Vec<u8>, f32)> = cache
+            .prepare("SELECT fid, geom, elevation_m FROM contour_tiles ORDER BY fid")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            original,
+            vec![(2, vec![4, 5, 6], 40.0), (8, vec![1, 2, 3], -1.5)]
+        );
+        assert_eq!(
+            cache
+                .query_row("SELECT line_count FROM coastline_tile_manifest", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .unwrap(),
+            2
+        );
+
+        // Failure after one successful row must roll back deletes, inserts,
+        // and the manifest rather than publishing a partial/empty tile.
+        source
+            .execute_batch(
+                "UPDATE contour SET geom=x'ff' WHERE fid=2;
+                              UPDATE contour SET elevation_m='invalid', geom=NULL WHERE fid=8;",
+            )
+            .unwrap();
+        assert!(import_tile_into_cache(&cache_path, tile, &source_path).is_err());
+        assert!(import_coastline_into_cache(&cache_path, tile, &source_path).is_err());
+        assert_eq!(
+            cache
+                .query_row("SELECT geom FROM contour_tiles WHERE fid=2", [], |r| r
+                    .get::<_, Vec<u8>>(0))
+                .unwrap(),
+            vec![4, 5, 6]
+        );
+        assert_eq!(
+            cache
+                .query_row("SELECT geom FROM coastline_tiles WHERE fid=2", [], |r| r
+                    .get::<_, Vec<u8>>(0))
+                .unwrap(),
+            vec![4, 5, 6]
+        );
+        assert_eq!(
+            cache
+                .query_row("SELECT contour_count FROM contour_tile_manifest", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+
+        source
+            .execute_batch("DELETE FROM contour WHERE fid=8")
+            .unwrap();
+        import_tile_into_cache(&cache_path, tile, &source_path).unwrap();
+        assert_eq!(
+            cache
+                .query_row("SELECT COUNT(*) FROM contour_tiles", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            cache
+                .query_row("SELECT contour_count FROM contour_tile_manifest", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+
+        source
+            .execute_batch("ALTER TABLE contour RENAME COLUMN elevation_m TO broken")
+            .unwrap();
+        assert!(import_tile_into_cache(&cache_path, tile, &source_path).is_err());
+        assert_eq!(
+            cache
+                .query_row("SELECT contour_count FROM contour_tile_manifest", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+
+        source.execute_batch("DROP TABLE contour").unwrap();
+        import_tile_into_cache(&cache_path, tile, &source_path).unwrap();
+        assert_eq!(
+            cache
+                .query_row("SELECT COUNT(*) FROM contour_tiles", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            cache
+                .query_row("SELECT contour_count FROM contour_tile_manifest", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop(cache);
+        drop(source);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn read_only_connection_reads_existing_manifest_without_write_access() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -435,9 +560,11 @@ mod tests {
 
         let read_only = open_cache_db_read_only(&path).expect("read-only cache connection");
         assert!(tile_exists(&read_only, tile).expect("read manifest entry"));
-        assert!(read_only
-            .execute("DELETE FROM contour_tile_manifest", [])
-            .is_err());
+        assert!(
+            read_only
+                .execute("DELETE FROM contour_tile_manifest", [])
+                .is_err()
+        );
         drop(read_only);
 
         let _ = fs::remove_file(path);
@@ -466,8 +593,8 @@ mod tests {
                 .expect("manifest entry");
         }
 
-        let manifest = contour_manifest_window(&connection, 3, -1, 1, -1, 1)
-            .expect("manifest window");
+        let manifest =
+            contour_manifest_window(&connection, 3, -1, 1, -1, 1).expect("manifest window");
         assert_eq!(manifest.len(), 2);
         assert_eq!(manifest.get(&(0, 0)), Some(&4));
         assert_eq!(manifest.get(&(1, -1)), Some(&7));

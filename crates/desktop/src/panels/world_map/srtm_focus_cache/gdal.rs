@@ -953,6 +953,13 @@ pub fn build_threedep_contours(
         return None;
     }
 
+    let Some(_processing) = super::work_slots::processing()
+        .acquire_until(|| shutdown_requested().load(Ordering::Relaxed))
+    else {
+        cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
+        return None;
+    };
+
     let nodata = crate::threedep::nodata_sentinel();
     if run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m, Some(nodata)).is_err() {
         cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
@@ -1273,6 +1280,10 @@ fn format_gdal_number(interval_m: f32) -> String {
 
 fn run_gdal_contour(input_path: &Path, output_path: &Path, interval_m: f32, nodata: Option<f32>) -> std::io::Result<()> {
     let mut command = Command::new(gdal_tool_path("gdal_contour"));
+    // This GeoPackage is disposable staging data. The durable cache still
+    // commits atomically with WAL/NORMAL. No spatial index is ever queried here.
+    command.env("OGR_SQLITE_SYNCHRONOUS", "OFF");
+    command.args(["-lco", "SPATIAL_INDEX=NO"]);
     command.args([
         "-q",
         "-f",
@@ -1296,6 +1307,10 @@ fn run_gdal_contour(input_path: &Path, output_path: &Path, interval_m: f32, noda
 
 fn run_gdal_coastline_0m(input_path: &Path, output_path: &Path) -> std::io::Result<()> {
     let mut command = Command::new(gdal_tool_path("gdal_contour"));
+    // This GeoPackage is disposable staging data. The durable cache still
+    // commits atomically with WAL/NORMAL. No spatial index is ever queried here.
+    command.env("OGR_SQLITE_SYNCHRONOUS", "OFF");
+    command.args(["-lco", "SPATIAL_INDEX=NO"]);
     command.args([
         "-q",
         "-f",

@@ -83,3 +83,7 @@ on-demand Earth, lunar, and Mars tile builds.
 - Changing a tier's `half_extent_deg` changes `bucket_step`, so cached tiles
   keyed on the old geometry now name different ground. Purge rows for the
   affected `zoom_bucket` values when retuning a tier.
+
+- `work_slots.rs` separates four hosted jobs from the shared two-job processing
+  budget. Existing cache identity, geometry, zoom tiers, and manifests are
+  unchanged; no cache rebuild or migration is needed for these optimizations.

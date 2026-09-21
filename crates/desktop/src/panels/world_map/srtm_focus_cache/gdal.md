@@ -42,3 +42,11 @@ Owns the desktop-side GDAL pipelines for terrain assets: SRTM focus contours, GE
 ## Notes
 - Lunar chunk files are persistent rather than temp files so the offline builder and desktop runtime can share them.
 - Chunk rasters are written as tiled, compressed GeoTIFFs because they are read many times after the initial JP2 decode.
+
+- Temporary contour/coastline GeoPackages disable their unused spatial index
+  and synchronous flushes. These options apply only to disposable GDAL output;
+  the persistent cache keeps WAL/NORMAL transactions. Failed output is never
+  imported after a failed GDAL exit. No newer GDAL transaction flag is required.
+- 3DEP downloads reserve remote-job capacity in `builders.rs`, then acquire a
+  shared processing permit here after fetching. Waiting is shutdown-aware;
+  at most four remote jobs and two active GDAL/import jobs exist.

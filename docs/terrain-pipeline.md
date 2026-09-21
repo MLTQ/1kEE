@@ -214,9 +214,12 @@ at its opening zoom. The 2.5 factor is how far the oblique camera actually sees,
 matching the local marker cull distance. Fewer wide requests beat more narrow
 ones — radius 3 would allow only slightly smaller tiles for twice the downloads.
 
-**Cost.** A fully filled deepest-tier view is 25 tiles of ~22 MB, roughly two
-minutes at the interactive build concurrency of 2. That is paid once per area:
-the contours are cached permanently and the rasters are discarded.
+**Cost.** A fully filled deepest-tier view is 25 tiles of ~22 MB. Four hosted
+jobs can now overlap downloads with processing; the shared GDAL/import budget
+remains two jobs (one on small CPUs). A hosted job retains its network-stage
+permit while waiting/processing, bounding temporary rasters as well as requests.
+Actual first-visit time depends on USGS response latency. Contours are cached
+permanently and the rasters are discarded.
 
 ### Drawing this much geometry
 
@@ -272,3 +275,56 @@ scenes. Its original 300 000 was sized against a WGPU index-buffer limit hit
 when 1 600 globe tiles accumulated, which is a different path from the 25-tile
 local envelope.
 
+
+## Terrain throughput improvements (September 2026)
+
+The runtime cache schema and tile grid are unchanged. Existing caches benefit
+immediately; no purge or rebuild is required.
+
+- Local SQLite reads stream in indexed fid order, decode borrowed geometry
+  blobs, then stably sort the much smaller contour records by absolute elevation.
+  Fid/part ordering, simplification, and longest-contour selection are preserved.
+- Imports stream source rows in fid order with one prepared destination insert,
+  borrowing blob storage rather than allocating another copy for every feature.
+  Geometry and manifest still commit atomically; malformed input rolls back.
+- Disposable GDAL contour/coastline GeoPackages skip unused spatial indexes and
+  synchronous flushes. Persistent cache writes still use WAL/NORMAL. These are
+  documented [GeoPackage driver options](https://gdal.org/en/stable/drivers/vector/gpkg.html),
+  applied only to staging files which can be regenerated after interruption.
+- Hosted jobs reserve download capacity separately from processing, allowing
+  local NVMe-backed work to proceed while USGS responses are in flight.
+
+### Measurements
+
+On the attached Hilbert volume, a real bucket-10 tile contained 6,451 contours
+and 244 MB of geometry blobs. In an optimized build, three alternating warm
+read/decode comparisons produced:
+
+| Operation | Before | After |
+|---|---:|---:|
+| Complete tile read + decode, run 1 | 143.9 ms | 96.5 ms |
+| Complete tile read + decode, run 2 | 146.0 ms | 90.9 ms |
+| Complete tile read + decode, run 3 | 125.9 ms | 85.8 ms |
+
+That is 32–38% less time for this stage. Every comparison checked exact contour
+geometry and order. These are warm-cache measurements, not a whole-app loading
+speed claim; first reads also depend on disk state and OS caching.
+
+A 2400×2400 raster cropped from local SRTM, contoured at 0.5 m solely for a dense
+benchmark, produced the same 4,244 contours with identical geometry hashes in
+both configurations. GDAL staging time decreased from 2.13–2.14 s to 2.05–2.07 s.
+This measures staging overhead, not SRTM accuracy at sub-metre intervals. The
+hosted pipeline's concurrency improvement is not a measured network speedup.
+
+Reproduce the read/decode benchmark against an existing cache:
+
+```bash
+ONEKEE_CONTOUR_BENCH_DB=/path/to/Derived/terrain/srtm_focus_cache.sqlite \
+  cargo test --release -p one-thousand-electric-eye-desktop \
+  benchmark_dense_cached_tile -- --ignored --nocapture
+```
+
+The benchmark opens the supplied database read-only and selects one dense
+bucket-10 tile. It is ignored in normal tests. At measurement time Hilbert had
+about 7.8 GiB free and the Earth cache was 257 GiB; these changes do not reclaim
+existing cache storage.
