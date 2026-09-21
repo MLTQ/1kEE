@@ -101,3 +101,8 @@ exists under a point, and pulls only the small area currently in view.
   reports real bytes with optional Content-Length. Missing length stays
   indeterminate; the caller reports source completion after TIFF validation and
   successful persistence. `fetch_tile_raster` is the no-observer test wrapper.
+
+- `threedep_raster.rs` streams directly through a 64 KiB buffer into a unique
+  partial file, validates length, and atomically publishes it. Errors preserve
+  existing destinations and remove partial files. A 64 MiB response ceiling
+  bounds staging; complete TIFF byte vectors are no longer retained in RAM.

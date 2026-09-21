@@ -216,10 +216,10 @@ matching the local marker cull distance. Fewer wide requests beat more narrow
 ones — radius 3 would allow only slightly smaller tiles for twice the downloads.
 
 **Cost.** A fully filled deepest-tier view is 25 source rasters of ~22 MB.
-Four downloads run independently of a CPU-scaled GDAL/import budget (half the
-available CPUs, capped at four). Eight staging slots bound downloading plus
+Four downloads run independently of a CPU-scaled GDAL/import budget (available
+CPUs minus two, capped at eight, at least one). Eight staging slots bound downloading plus
 queued rasters; each download releases its network permit on completion and
-its staging permit when processing takes ownership. Thus at most twelve
+its staging permit when processing takes ownership. Thus at most sixteen
 hosted jobs exist with the default maximum processing budget. Actual first-visit
 time depends on USGS response latency. Contours are cached permanently and the
 rasters are discarded.
@@ -335,16 +335,17 @@ existing cache storage.
 
 ## Bounded pipeline and stage measurements (September 2026)
 
-The scheduler now separates four active downloads from eight downloading/queued
-rasters and up to four processing jobs. Download slots are released when a
+The first measured configuration separated four active downloads from eight
+downloading/queued rasters and up to four processing jobs. Download slots are released when a
 validated raster has been saved, so a slow GDAL job does not stop the next
 request. Admission reserves staging space before a request starts. Permits
 release on errors, cancellation, and unwinding; no cache migration is needed.
 Capacity releases invalidate manifest scheduling immediately, and snapshots
 keep their selection-start revision so a wakeup during a query is not lost.
 `ONEKEE_TERRAIN_WORKERS=1..8` overrides the processing limit for experiments,
-while retaining one spare logical CPU on multicore machines. The default uses
-half the available CPUs, capped at four. Moon/Mars retain their additional
+while retaining one spare logical CPU on multicore machines. The initial default
+used half the available CPUs, capped at four; the full-view follow-up below raises
+this to available CPUs minus two, capped at eight. Moon/Mars retain their additional
 per-body source limits.
 
 Local cached geometry uses two readers per body cache on machines with at least
@@ -390,7 +391,7 @@ Stages include source/download, processing wait, contouring, cache setup,
 writer-lock wait, row copying/commit, SQLite read overhead, WKB decoding, and
 geometry selection. Profiling is off by default and does no per-row clock reads
 when disabled. GDAL stdout progress is suppressed only while profiling; errors
-on stderr remain visible. Nested stage times must not be summed across workers.
+on stderr remain visible with bounded diagnostics. Nested stage times must not be summed across workers.
 
 ```bash
 # One real raster download (or supply ONEKEE_TERRAIN_BENCH_RASTER).
@@ -411,3 +412,99 @@ ONEKEE_TERRAIN_TIMINGS=1 ONEKEE_CONTOUR_BENCH_DB=/path/to/srtm_focus_cache.sqlit
   cargo test --release -p one-thousand-electric-eye-desktop \
   benchmark_cached_reader_concurrency -- --ignored --nocapture --test-threads=1
 ```
+
+
+## Full-view concurrency and storage failures (September 2026)
+
+The default processing budget now reserves two available CPUs and caps at eight
+workers (at least one). This gives eight workers on the measured 10-core machine.
+The default remains four downloads with eight staging slots. Launch-time overrides
+are `ONEKEE_TERRAIN_WORKERS=1..8` and `ONEKEE_TERRAIN_DOWNLOADS=1..25`; invalid
+values retain the defaults. A processing override still leaves one spare CPU on
+multicore machines. These budgets count jobs, not pinned CPU cores.
+
+### Twenty-five-tile measurements
+
+Every processing round contoured the same 2400×2400 raster at 0.5 m intervals,
+then imported into a fresh shared SQLite cache. Order was 4/6/8/25/8/6/4 workers.
+All rounds committed 25 manifests, 245,650 contours, and 1,732,645,650 geometry
+bytes. The output was on internal temporary storage because Hilbert was full.
+
+| Processing workers | Complete batch | Peak sampled process-tree RSS |
+|---|---:|---:|
+| 4 | 16.08–17.30 s | 475–514 MiB |
+| 6 | 12.01–12.20 s | 721–740 MiB |
+| 8 | 9.96–10.94 s | 964–972 MiB |
+| 25 | 14.67 s | 2,881 MiB |
+
+Eight reduced processing wall time by roughly 35–42% versus four. Twenty-five
+was slower than eight, with about three times the sampled RSS. Mean GDAL time
+rose from 2.13–2.17 s per tile at eight workers to 6.55 s at 25. Mean wait for the
+single SQLite writer rose from 0.32–0.39 s to 3.46 s. More active processes cannot
+remove the shared writer or increase the machine's CPU/storage bandwidth.
+
+The live pipeline used 25 adjacent USGS clips, eight processing workers, and
+4/8/25/4/8 download limits in order. All runs downloaded 591,555,250 bytes and
+committed 25 manifests with 228,479 contours / 760,308,703 geometry bytes.
+
+| Downloads | Complete batch | Mean download time per tile | Peak sampled RSS |
+|---|---:|---:|---:|
+| 4, initial run | 28.25 s | 4.13 s | 384 MiB |
+| 8 | 17.74 s | 4.89 s | 549 MiB |
+| 25 | 18.94 s | 14.44 s | 700 MiB |
+| 4, repeat | 16.84 s | 2.41 s | 353 MiB |
+| 8, repeat | 17.84 s | 4.81 s | 589 MiB |
+
+This does not establish an eight-download speedup: service/cache warmth changed,
+and the warm four-download run was fastest. The default therefore stays at four.
+Twenty-five concurrent requests increased individual response latency without
+improving the total time. The bottleneck could be service or network throughput;
+these measurements do not isolate which. Buffered whole-raster downloads have
+been replaced with a 64 KiB streaming buffer, an atomic temporary-file rename,
+and a 64 MiB response bound, keeping byte progress tied to actual writes.
+
+These are headless results with the user's app still running in the background.
+RSS is sampled every 100 ms across the benchmark process and descendants; it
+excludes the existing app and may double-count shared pages. It is not whole-app
+physical memory, GPU memory, or a frame-rate measurement. No cold-cache controls
+were applied. Full-view external-drive measurements require free space first.
+
+```bash
+ONEKEE_TERRAIN_TIMINGS=1 ONEKEE_TERRAIN_BENCH_TILES=25 \
+  ONEKEE_TERRAIN_BENCH_WORKERS=4,6,8,25,8,6,4 \
+  cargo test --release -p one-thousand-electric-eye-desktop \
+  benchmark_contour_processing_concurrency -- --ignored --nocapture --test-threads=1
+
+# Repeat with DOWNLOADS=8 and 25, then repeat 4/8 to expose network variability.
+ONEKEE_TERRAIN_TIMINGS=1 ONEKEE_TERRAIN_BENCH_TILES=25 \
+  ONEKEE_TERRAIN_WORKERS=8 ONEKEE_TERRAIN_DOWNLOADS=4 \
+  cargo test --release -p one-thousand-electric-eye-desktop \
+  benchmark_live_threedep_pipeline -- --ignored --nocapture --test-threads=1
+```
+
+### Full-volume failure handling
+
+Hilbert had only 32 MiB free when GDAL reported `no such table: contour` and
+`cannot write linestring`. Those messages mean output table creation failed;
+disk exhaustion is the leading explanation here, although the original first
+GDAL error was not captured. Deleting the explicitly approved 252 temporary
+files older than seven days recovered 2.22 GiB, but ongoing builds consumed the
+space again. Source files and the persistent contour cache were not deleted.
+
+New builds now check for at least 1 GiB free before source work and contouring.
+This is a best-effort preflight, not a storage reservation; concurrent work can
+still fill the drive afterward. Existing cached tiles remain readable. Failed
+builds use the existing retry backoff, and the log explains the low-space pause.
+On systems where `df` is unavailable, normal I/O error handling remains in force.
+
+Temporary TIFF/GeoPackage paths now include process and attempt IDs. Scope guards
+remove each attempt's files and SQLite sidecars on success, errors, or unwinding.
+Partial downloads are also removed on failure. GDAL stderr is drained, the first
+eight lines and first fatal write error are preserved, and a fatal writer is
+stopped/reaped rather than allowed to repeat the same failure for every contour.
+A fatal write diagnostic rejects the output even if GDAL exits successfully.
+Hard process termination can still leave temporary files behind.
+
+Persistent contour-cache growth still needs a budget/reclamation policy
+(tracked in `1kee-8ce`). The safeguards prevent further futile builds on a full
+volume; they do not free existing cached geometry or guarantee indefinite space.

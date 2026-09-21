@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
+#[path = "threedep_raster.rs"]
+mod raster;
+
 const SERVICE: &str =
     "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer";
 
@@ -868,7 +871,7 @@ pub fn fetch_tile_raster_with_progress(
     max_lon: f32,
     raster_size: u32,
     destination: &Path,
-    mut on_bytes: impl FnMut(u64, Option<u64>),
+    on_bytes: impl FnMut(u64, Option<u64>),
 ) -> bool {
     if !is_enabled() {
         return false;
@@ -897,27 +900,8 @@ pub fn fetch_tile_raster_with_progress(
     if !response.status().is_success() {
         return false;
     }
-    use std::io::Read;
     let total = response.content_length();
-    let mut bytes = Vec::new();
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        match response.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(count) => {
-                bytes.extend_from_slice(&buffer[..count]);
-                on_bytes(bytes.len() as u64, total);
-            }
-            Err(_) => return false,
-        }
-    }
-    if !looks_like_tiff(&bytes) {
-        return false;
-    }
-    if let Some(parent) = destination.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    std::fs::write(destination, &bytes).is_ok()
+    raster::save(&mut response, destination, total, on_bytes).is_ok()
 }
 
 /// The nodata sentinel requested from the service, for callers that pass it on

@@ -74,3 +74,10 @@ contracts shared by on-demand terrain builders and render-time tile lookups.
   acquisition, and row copying/commit. `BEGIN IMMEDIATE` obtains the writer
   before mutations, keeping lock wait separate while preserving atomic import
   and the existing busy timeout. Successful writes report rows and blob bytes.
+
+- Tile temporary names include process/attempt IDs, isolating terrain bodies
+  and multiple app instances. `TempTileCleanup` removes each attempt’s TIFF,
+  GeoPackage, and SQLite sidecars on success, early return, or unwinding.
+
+- A regression unwinds one attempt with raster/GeoPackage/journal/WAL/SHM
+  files and verifies cleanup leaves a simultaneous same-tile attempt intact.

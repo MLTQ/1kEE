@@ -394,10 +394,15 @@ pub fn cleanup_temp_tile_artifacts(tif_path: &Path, gpkg_path: &Path) {
 }
 
 pub fn temp_tile_paths(cache_root: &Path, tile: TileKey) -> (PathBuf, PathBuf) {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let temp_root = cache_root.join(super::TEMP_DIR_NAME);
     let stem = format!(
-        "z{}_lat{}_lon{}",
-        tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket
+        "z{}_lat{}_lon{}_p{}_a{}",
+        tile.zoom_bucket,
+        tile.lat_bucket,
+        tile.lon_bucket,
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     );
     (
         temp_root.join(format!("{stem}.tmp.tif")),
@@ -405,9 +410,55 @@ pub fn temp_tile_paths(cache_root: &Path, tile: TileKey) -> (PathBuf, PathBuf) {
     )
 }
 
+/// Scoped to one build attempt; all error returns and unwinding remove its
+/// disposable output and SQLite sidecars without touching another worker.
+pub struct TempTileCleanup<'a>(pub &'a Path, pub &'a Path);
+
+impl Drop for TempTileCleanup<'_> {
+    fn drop(&mut self) {
+        cleanup_temp_tile_artifacts(self.0, self.1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_attempt_cleans_its_files_without_touching_another_attempt() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("1kee-attempt-cleanup-{nonce}"));
+        let tile = TileKey {
+            zoom_bucket: 10,
+            lat_bucket: 0,
+            lon_bucket: 0,
+        };
+        let (raster, contour) = temp_tile_paths(&root, tile);
+        let (other_raster, other_contour) = temp_tile_paths(&root, tile);
+        assert_ne!(contour, other_contour);
+        fs::create_dir_all(raster.parent().unwrap()).unwrap();
+        let journal = journal_path_for(&contour);
+        let wal = wal_path_for(&contour);
+        let shm = shm_path_for(&contour);
+        for path in [
+            &raster, &contour, &journal, &wal, &shm, &other_raster, &other_contour,
+        ] {
+            fs::write(path, b"test staging").unwrap();
+        }
+        let _ = std::panic::catch_unwind(|| {
+            let _cleanup = TempTileCleanup(&raster, &contour);
+            panic!("failed GDAL write");
+        });
+        for path in [&raster, &contour, &journal, &wal, &shm] {
+            assert!(!path.exists());
+        }
+        assert!(other_raster.exists());
+        assert!(other_contour.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn tile_imports_replace_atomically_and_preserve_geometry() {

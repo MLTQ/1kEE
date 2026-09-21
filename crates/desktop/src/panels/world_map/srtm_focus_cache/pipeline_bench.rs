@@ -2,6 +2,17 @@
 use super::*;
 use std::sync::atomic::AtomicUsize;
 
+#[path = "bench_resources.rs"]
+mod resources;
+
+fn tile_count(default: usize) -> usize {
+    std::env::var("ONEKEE_TERRAIN_BENCH_TILES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| (1..=25).contains(n))
+        .unwrap_or(default)
+}
+
 struct Scratch(PathBuf);
 impl Scratch {
     fn new(label: &str) -> Self {
@@ -13,7 +24,7 @@ impl Scratch {
             std::process::id(),
             unique_temp_token(),
         ));
-        fs::create_dir_all(&path).unwrap();
+        fs::create_dir(&path).unwrap();
         Self(path)
     }
 }
@@ -37,19 +48,29 @@ fn benchmark_contour_processing_concurrency() {
         path
     };
     let mut reference = None;
+    let tiles = tile_count(8);
+    let worker_counts = std::env::var("ONEKEE_TERRAIN_BENCH_WORKERS")
+        .map(|v| {
+            v.split(',')
+                .map(|n| n.parse::<usize>().expect("worker count"))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|_| vec![2, 4, 6, 1, 4, 2]);
+    assert!(worker_counts.iter().all(|n| (1..=25).contains(n)));
     // Alternate order to expose warm-cache/order bias. Every batch builds the
-    // same eight rasters and imports into a fresh, shared WAL database.
-    for (round, workers) in [2, 4, 6, 1, 4, 2].into_iter().enumerate() {
+    // same raster copies and imports into a fresh, shared WAL database.
+    for (round, workers) in worker_counts.into_iter().enumerate() {
         let cache = scratch.0.join(format!("run-{round}.sqlite"));
         super::super::db::open_cache_db(&cache).unwrap();
         let next = AtomicUsize::new(0);
+        let resources = resources::Sampler::start();
         let start = Instant::now();
         std::thread::scope(|scope| {
             for _ in 0..workers {
                 scope.spawn(|| {
                     loop {
                         let index = next.fetch_add(1, Ordering::Relaxed);
-                        if index >= 8 {
+                        if index >= tiles {
                             break;
                         }
                         let tile = TileKey {
@@ -74,21 +95,24 @@ fn benchmark_contour_processing_concurrency() {
             }
         });
         let elapsed = start.elapsed();
+        let peak = resources.finish();
         let db = super::super::db::open_cache_db_read_only(&cache).unwrap();
         let counts: (i64, i64, i64) = db.query_row(
             "SELECT count(*),sum(length(geom)),(SELECT count(*) FROM contour_tile_manifest) FROM contour_tiles",
             [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         ).unwrap();
-        assert_eq!(counts.2, 8);
+        assert_eq!(counts.2, tiles as i64);
         if let Some(expected) = reference {
             assert_eq!(counts, expected);
         }
         reference = Some(counts);
         eprintln!(
-            "PROCESSING workers={workers} tiles=8 wall_ms={:.1} rows={} bytes={}",
+            "PROCESSING workers={workers} tiles={tiles} wall_ms={:.1} rows={} bytes={} peak_rss_mib={:.1} peak_gdal={}",
             elapsed.as_secs_f64() * 1000.0,
             counts.0,
-            counts.1
+            counts.1,
+            peak.rss_kib as f64 / 1024.0,
+            peak.gdal_processes
         );
         // Keep storage bounded to one round, including on a nearly-full
         // external volume. Only this run's unique output files are removed.
@@ -106,9 +130,12 @@ fn benchmark_live_threedep_pipeline() {
     let old_jobs = super::super::work_slots::Slots::new(4);
     let legacy = std::env::var("ONEKEE_TERRAIN_BENCH_LEGACY").is_ok_and(|v| v == "1");
     let spec = super::super::zoom::spec_for_zoom(50.0);
+    let tiles = tile_count(12);
+    let columns = if tiles > 12 { 5 } else { 4 };
+    let resources = resources::Sampler::start();
     let start = Instant::now();
     std::thread::scope(|scope| {
-        for index in 0..12 {
+        for index in 0..tiles {
             let old_job = legacy.then(|| old_jobs.acquire_until(|| false).unwrap());
             let admission = loop {
                 if let Some(permit) = super::super::work_slots::remote_downloads().try_acquire() {
@@ -122,13 +149,13 @@ fn benchmark_live_threedep_pipeline() {
                 let _old_job = old_job;
                 let tile = TileKey {
                     zoom_bucket: spec.zoom_bucket,
-                    lat_bucket: index / 4,
-                    lon_bucket: index % 4,
+                    lat_bucket: (index / columns) as i32,
+                    lon_bucket: (index % columns) as i32,
                 };
                 let bounds = GeoBounds::around(
                     crate::model::GeoPoint {
-                        lat: 40.020 + (index / 4) as f32 * 0.00666,
-                        lon: -105.290 + (index % 4) as f32 * 0.00666,
+                        lat: 40.020 + (index / columns) as f32 * 0.00666,
+                        lon: -105.290 + (index % columns) as f32 * 0.00666,
                     },
                     spec.half_extent_deg,
                 );
@@ -139,15 +166,18 @@ fn benchmark_live_threedep_pipeline() {
         }
     });
     let elapsed = start.elapsed();
+    let peak = resources.finish();
     let db = super::super::db::open_cache_db_read_only(&cache).unwrap();
-    let tiles: i64 = db
+    let completed: i64 = db
         .query_row("SELECT count(*) FROM contour_tile_manifest", [], |r| {
             r.get(0)
         })
         .unwrap();
-    assert_eq!(tiles, 12);
+    assert_eq!(completed, tiles as i64);
     eprintln!(
-        "PIPELINE legacy={legacy} tiles={tiles} wall_ms={:.1}",
-        elapsed.as_secs_f64() * 1000.0
+        "PIPELINE legacy={legacy} tiles={tiles} wall_ms={:.1} peak_rss_mib={:.1} peak_gdal={}",
+        elapsed.as_secs_f64() * 1000.0,
+        peak.rss_kib as f64 / 1024.0,
+        peak.gdal_processes
     );
 }

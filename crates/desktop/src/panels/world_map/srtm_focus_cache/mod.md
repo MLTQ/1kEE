@@ -85,7 +85,8 @@ on-demand Earth, lunar, and Mars tile builds.
   affected `zoom_bucket` values when retuning a tier.
 
 - `work_slots.rs` separates four downloads, eight downloading/queued rasters,
-  and a CPU-scaled processing budget capped at four. Existing cache identity, geometry, zoom tiers, and manifests are
+  and a CPU-scaled processing budget capped at eight (available CPUs minus two,
+  at least one). Existing cache identity, geometry, zoom tiers, and manifests are
   unchanged; no cache rebuild or migration is needed for these optimizations.
 
 - `progress.rs` supplies path/zoom-scoped atomic build handles to background
@@ -96,3 +97,6 @@ on-demand Earth, lunar, and Mars tile builds.
 
 - `timings.rs` provides opt-in per-tile stage diagnostics; `TileKey` is visible
   within the crate so cached reads use the same diagnostic identity.
+
+- `storage.rs` provides best-effort low-space admission for build workers.
+  Cache readers remain independent and available on full volumes.
