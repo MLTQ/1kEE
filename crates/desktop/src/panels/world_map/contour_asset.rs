@@ -11,6 +11,10 @@ use std::time::{Duration, Instant};
 use super::gebco_depth_fill;
 use super::srtm_focus_cache;
 
+#[cfg(test)]
+#[path = "contour_read_tests.rs"]
+mod read_tests;
+
 // ── Module-level cache statics ────────────────────────────────────────────────
 // Lifted to module scope so blast_tile_caches() can clear them all at once.
 static LOCAL_CONTOUR_CACHE: OnceLock<Mutex<LocalRegionCache>> = OnceLock::new();
@@ -2086,7 +2090,7 @@ fn query_local_contours_batch(
         "SELECT geom, elevation_m
          FROM contour_tiles
          WHERE zoom_bucket = ?1 AND lat_bucket = ?2 AND lon_bucket = ?3
-         ORDER BY ABS(elevation_m), fid",
+         ORDER BY fid",
     )?;
 
     let mut results = Vec::with_capacity(requests.len());
@@ -2095,9 +2099,16 @@ fn query_local_contours_batch(
         let rows = match statement.query_map(
             params![key.zoom_bucket, key.lat_bucket, key.lon_bucket],
             |row| {
-                let geometry: Vec<u8> = row.get(0)?;
                 let elevation_m: f32 = row.get(1)?;
-                Ok((geometry, elevation_m))
+                let geometry = row.get_ref(0)?.as_blob()?;
+                Ok(parse_gpkg_lines(geometry)
+                    .into_iter()
+                    .filter(|line| line.len() >= 2)
+                    .map(|line| ContourPath {
+                        elevation_m,
+                        points: simplify_line(line, asset.simplify_step),
+                    })
+                    .collect::<Vec<_>>())
             },
         ) {
             Ok(rows) => rows,
@@ -2116,7 +2127,7 @@ fn query_local_contours_batch(
         let mut contours = Vec::new();
         let mut tile_failed = false;
         for row in rows {
-            let (geometry, elevation_m) = match row {
+            let decoded = match row {
                 Ok(row) => row,
                 Err(error) => {
                     eprintln!(
@@ -2130,19 +2141,18 @@ fn query_local_contours_batch(
                     break;
                 }
             };
-            for line in parse_gpkg_lines(&geometry) {
-                if line.len() < 2 {
-                    continue;
-                }
-                contours.push(ContourPath {
-                    elevation_m,
-                    points: simplify_line(line, asset.simplify_step),
-                });
-            }
+            contours.extend(decoded);
         }
         if tile_failed {
             continue;
         }
+
+        // Only move small Vec headers, not hundreds of MB of SQLite blobs.
+        // Stable sorting preserves fid order (including MultiLineString parts)
+        // for equal absolute elevations, exactly as the previous SQL sort did.
+        contours.sort_by(|left, right| {
+            left.elevation_m.abs().total_cmp(&right.elevation_m.abs())
+        });
 
         if contours.len() > feature_budget {
             // Keep the longest contours rather than every Nth one.

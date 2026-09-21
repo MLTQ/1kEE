@@ -2,12 +2,13 @@ use super::gdal::{
     bounds_have_srtm_source, build_focus_contours, build_lunar_contour_tile,
     build_mars_contour_tile, build_threedep_contours, shutdown_requested,
 };
+use super::work_slots;
 use super::zoom::spec_uses_threedep;
 use super::{FocusContourAsset, FocusContourSpec, GeoBounds, TileKey};
 use crate::model::GeoPoint;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -17,29 +18,11 @@ const MAX_TRACKED_FAILED_BUILDS: usize = 1_024;
 /// A long ocean pan can visit many sourceless buckets. Bound the memo and
 /// rebuild it on overflow; re-checking costs a handful of `exists()` calls.
 const MAX_TRACKED_SOURCELESS_TILES: usize = 4_096;
-/// Interactive contour creation invokes CPU- and I/O-heavy GDAL work. Keep a
-/// core free for egui/WGPU and one for readers/merges while a local 13×13
-/// envelope is filling; the companion cache builder remains the fast path for
-/// bulk precomputation.
-const MAX_INTERACTIVE_BACKGROUND_BUILDS: usize = 2;
 
 #[derive(Clone, Copy)]
 struct FailedBuildBackoff {
     retry_at: Instant,
     attempts: u8,
-}
-
-fn max_background_builds() -> usize {
-    let cpus = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-    cpus.saturating_sub(1)
-        .clamp(1, MAX_INTERACTIVE_BACKGROUND_BUILDS)
-}
-
-fn active_build_slots() -> &'static AtomicUsize {
-    static ACTIVE: OnceLock<AtomicUsize> = OnceLock::new();
-    ACTIVE.get_or_init(|| AtomicUsize::new(0))
 }
 
 fn manifest_revision_counter() -> &'static AtomicU64 {
@@ -56,22 +39,6 @@ pub fn manifest_revision() -> u64 {
 
 fn bump_manifest_revision() {
     manifest_revision_counter().fetch_add(1, Ordering::AcqRel);
-}
-
-pub fn try_acquire_build_slot() -> bool {
-    let limit = max_background_builds();
-    active_build_slots()
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-            (count < limit).then_some(count + 1)
-        })
-        .is_ok()
-}
-
-pub fn release_build_slot() {
-    let current = active_build_slots().load(Ordering::SeqCst);
-    if current > 0 {
-        active_build_slots().fetch_sub(1, Ordering::SeqCst);
-    }
 }
 
 pub fn pending_set() -> &'static Mutex<HashSet<TileKey>> {
@@ -398,14 +365,15 @@ pub fn ensure_bucket_asset(
         return None;
     }
 
-    if !try_acquire_build_slot() {
-        return None;
-    }
+    let permit = if uses_threedep {
+        work_slots::remote_jobs().try_acquire()?
+    } else {
+        work_slots::processing().try_acquire()?
+    };
 
     let pending = pending_set();
     let mut guard = pending.lock().ok()?;
     if !guard.insert(tile) {
-        release_build_slot();
         return None;
     }
     drop(guard);
@@ -414,6 +382,7 @@ pub fn ensure_bucket_asset(
     let cache_root = cache_root.to_path_buf();
     let cache_db_path = cache_db_path.to_path_buf();
     std::thread::spawn(move || {
+        let _permit = permit;
         let built = match srtm_root.as_deref() {
             Some(root) => {
                 build_focus_contours(root, &cache_root, &cache_db_path, tile, bounds, spec)
@@ -431,7 +400,7 @@ pub fn ensure_bucket_asset(
         if let Ok(mut guard) = pending_set().lock() {
             guard.remove(&tile);
         }
-        release_build_slot();
+        drop(_permit);
         crate::app::request_repaint();
     });
 
@@ -499,13 +468,10 @@ pub fn ensure_lunar_bucket_asset(
         }
     }
 
-    if !try_acquire_build_slot() {
-        return None; // also respect the global SRTM/misc slot budget
-    }
+    let permit = work_slots::processing().try_acquire()?;
 
     let mut guard = pending.lock().ok()?;
     if !guard.insert(tile) {
-        release_build_slot();
         return None;
     }
     drop(guard);
@@ -514,6 +480,7 @@ pub fn ensure_lunar_bucket_asset(
     let cache_root = cache_root.to_path_buf();
     let cache_db_path = cache_db_path.to_path_buf();
     std::thread::spawn(move || {
+        let _permit = permit;
         if build_lunar_contour_tile(&jp2_path, &cache_root, &cache_db_path, tile, bounds, spec)
             .is_some()
         {
@@ -527,7 +494,7 @@ pub fn ensure_lunar_bucket_asset(
         if let Ok(mut guard) = lunar_pending_set().lock() {
             guard.remove(&tile);
         }
-        release_build_slot();
+        drop(_permit);
         crate::app::request_repaint();
     });
 
@@ -615,13 +582,10 @@ pub fn ensure_mars_bucket_asset(
         }
     }
 
-    if !try_acquire_build_slot() {
-        return None;
-    }
+    let permit = work_slots::processing().try_acquire()?;
 
     let mut guard = pending.lock().ok()?;
     if !guard.insert(tile) {
-        release_build_slot();
         return None;
     }
     drop(guard);
@@ -631,6 +595,7 @@ pub fn ensure_mars_bucket_asset(
     let cache_root = cache_root.to_path_buf();
     let cache_db_path = cache_db_path.to_path_buf();
     std::thread::spawn(move || {
+        let _permit = permit;
         if build_mars_contour_tile(
             &data_root, &mola_tiles, &cache_root, &cache_db_path, tile, bounds, spec,
         )
@@ -646,7 +611,7 @@ pub fn ensure_mars_bucket_asset(
         if let Ok(mut guard) = mars_pending_set().lock() {
             guard.remove(&tile);
         }
-        release_build_slot();
+        drop(_permit);
         crate::app::request_repaint();
     });
 

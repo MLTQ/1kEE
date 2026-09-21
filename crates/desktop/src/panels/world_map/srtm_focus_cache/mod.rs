@@ -10,6 +10,7 @@ use std::time::Duration;
 pub mod builders;
 pub mod db;
 pub mod gdal;
+mod work_slots;
 pub mod zoom; // pub so ui_overlays can access lunar_spec_for_zoom
 
 pub use zoom::{

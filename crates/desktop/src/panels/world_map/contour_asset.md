@@ -128,3 +128,12 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 - WKB MultiLineString children are required to be direct LineStrings; rejecting
   invalid nesting and impossible count fields prevents a corrupt cache blob
   from overflowing a loader thread's stack or allocating unreasonable memory.
+
+- Local tile queries stream by indexed fid order and decode directly from
+  borrowed SQLite blobs. A stable absolute-elevation sort moves only decoded
+  path headers, preserving fid/part ordering for ties without copying/sorting
+  entire geometry blobs in SQLite. Length-budget selection remains unchanged.
+
+- `contour_read_tests.rs` verifies ordering/geometry against the previous
+  reader and provides an opt-in read-only benchmark via
+  `ONEKEE_CONTOUR_BENCH_DB`.

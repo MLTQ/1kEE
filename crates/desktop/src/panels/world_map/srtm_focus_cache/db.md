@@ -49,3 +49,15 @@ contracts shared by on-demand terrain builders and render-time tile lookups.
   surfacing later in a contour query.
 - Manifest-window snapshots are read-only and contain only tile identifiers
   and contour counts; geometry remains in the background WKB reader.
+
+- Contour/coastline imports prepare the destination insert once, borrow source
+  geometry blobs, and stream in fid order. No geometry sort is needed while
+  importing; display order is restored by the reader. Rows and manifests still
+  commit together, and malformed source schemas/rows roll back the transaction
+  instead of marking a broken tile as successfully empty.
+
+- Regression tests verify exact geometry, atomic replacement and rollback for
+  malformed rows/schemas, coastline parity, and valid empty-source imports.
+
+- Import sources open read-only; a missing temporary GeoPackage is an error,
+  so it cannot create an accidental empty manifest entry.
