@@ -87,3 +87,9 @@ on-demand Earth, lunar, and Mars tile builds.
 - `work_slots.rs` separates four hosted jobs from the shared two-job processing
   budget. Existing cache identity, geometry, zoom tiers, and manifests are
   unchanged; no cache rebuild or migration is needed for these optimizations.
+
+- `progress.rs` supplies path/zoom-scoped atomic build handles to background
+  manifest snapshots; the grid uses these plus measured loading progress.
+
+- Buckets outside a planetary latitude bound join the resolved bucket set as
+  well as being excluded from totals, so the grid cannot advertise work there.

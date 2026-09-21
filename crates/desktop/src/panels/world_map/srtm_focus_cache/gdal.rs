@@ -878,6 +878,10 @@ pub fn build_focus_contours(
         return None;
     }
 
+    let progress = super::progress::start(
+        cache_db_path, tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket,
+    );
+
     let (tmp_tif_path, tmp_gpkg_path) = temp_tile_paths(cache_root, tile);
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
     let tiles = tile_paths_for_bounds(srtm_root, bounds);
@@ -895,8 +899,10 @@ pub fn build_focus_contours(
         return None;
     }
 
+    progress.source_ready();
     run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m, Some(-32768.0)).ok()?;
-    import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path).ok()?;
+    progress.contours_ready();
+    import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path, Some(&progress)).ok()?;
 
     // Piggyback: extract 0m coastline from the same warped TIF while we have it.
     let tmp_coast_gpkg_path = cache_root.join(TEMP_DIR_NAME).join(format!(
@@ -929,19 +935,24 @@ pub fn build_threedep_contours(
         return None;
     }
 
+    let progress = super::progress::start(
+        cache_db_path, tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket,
+    );
+
     let (tmp_tif_path, tmp_gpkg_path) = temp_tile_paths(cache_root, tile);
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
     if let Some(parent) = tmp_tif_path.parent() {
         fs::create_dir_all(parent).ok()?;
     }
 
-    let fetched = crate::threedep::fetch_tile_raster(
+    let fetched = crate::threedep::fetch_tile_raster_with_progress(
         bounds.min_lat,
         bounds.min_lon,
         bounds.max_lat,
         bounds.max_lon,
         spec.raster_size,
         &tmp_tif_path,
+        |done, total| progress.source_bytes(done, total),
     );
     if !fetched {
         cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
@@ -953,6 +964,7 @@ pub fn build_threedep_contours(
         return None;
     }
 
+    progress.source_ready();
     let Some(_processing) = super::work_slots::processing()
         .acquire_until(|| shutdown_requested().load(Ordering::Relaxed))
     else {
@@ -965,7 +977,8 @@ pub fn build_threedep_contours(
         cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
         return None;
     }
-    let imported = import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path);
+    progress.contours_ready();
+    let imported = import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path, Some(&progress));
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
     imported.ok()?;
     Some(())
@@ -989,6 +1002,10 @@ pub fn build_lunar_contour_tile(
     if shutdown_requested().load(Ordering::Relaxed) {
         return None;
     }
+
+    let progress = super::progress::start(
+        cache_db_path, tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket,
+    );
 
     let (tmp_tif_path, tmp_gpkg_path) = temp_tile_paths(cache_root, tile);
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
@@ -1034,8 +1051,10 @@ pub fn build_lunar_contour_tile(
         return None;
     }
 
+    progress.source_ready();
     run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m, Some(-32768.0)).ok()?;
-    import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path).ok()?;
+    progress.contours_ready();
+    import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path, Some(&progress)).ok()?;
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
     Some(())
 }
@@ -1073,6 +1092,10 @@ fn build_mars_mola_contour_tile(
         return None;
     }
 
+    let progress = super::progress::start(
+        cache_db_path, tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket,
+    );
+
     let (tmp_tif_path, tmp_gpkg_path) = temp_tile_paths(cache_root, tile);
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
     if let Some(parent) = tmp_tif_path.parent() {
@@ -1109,8 +1132,10 @@ fn build_mars_mola_contour_tile(
         return None;
     }
 
+    progress.source_ready();
     run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m, Some(-32767.0)).ok()?;
-    import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path).ok()?;
+    progress.contours_ready();
+    import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path, Some(&progress)).ok()?;
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
     Some(())
 }
@@ -1134,6 +1159,10 @@ pub fn build_mars_contour_tile(
     if shutdown_requested().load(Ordering::Relaxed) {
         return None;
     }
+
+    let progress = super::progress::start(
+        cache_db_path, tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket,
+    );
 
     let (tmp_tif_path, tmp_gpkg_path) = temp_tile_paths(cache_root, tile);
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
@@ -1193,8 +1222,10 @@ pub fn build_mars_contour_tile(
         return None;
     }
 
+    progress.source_ready();
     run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m, Some(-32767.0)).ok()?;
-    import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path).ok()?;
+    progress.contours_ready();
+    import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path, Some(&progress)).ok()?;
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
     Some(())
 }

@@ -50,3 +50,11 @@ Owns the desktop-side GDAL pipelines for terrain assets: SRTM focus contours, GE
 - 3DEP downloads reserve remote-job capacity in `builders.rs`, then acquire a
   shared processing permit here after fetching. Waiting is shutdown-aware;
   at most four remote jobs and two active GDAL/import jobs exist.
+
+- Tile builds publish completed source and contour-generation stages through
+  `progress.rs`. Hosted rasters also report actual response bytes when the
+  server provides a length; source completion requires a validated saved TIFF.
+  GDAL stages without a progress count hold their last completed milestone.
+
+- The source milestone completes before waiting for a processing permit.
+  Imports receive that attempt's handle explicitly across resets and retries.

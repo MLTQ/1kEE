@@ -5,16 +5,9 @@ use super::super::srtm_focus_cache;
 use super::projection::project_local;
 use super::{LocalLayout, visual_half_extent_for_zoom};
 
-/// Draws a pulsing glow over every tile footprint in the expected load grid.
-/// Each tile is projected as a quadrilateral matching its actual geo-extent so
-/// the placeholder fills exactly the area that will be covered by contour lines
-/// once the tile finishes building.  Tiles with loaded geometry naturally cover
-/// their pulse; pending tiles keep glowing until data arrives.
-/// Spectral dissolve: each pending tile is subdivided into an 8×8 grid of
-/// cells.  A time-based "cursor" sweeps 0→1 over DISSOLVE_CYCLE seconds;
-/// each cell has a deterministic random threshold and disappears when the
-/// cursor passes it.  Cells near their threshold glow with `hot_color` and
-/// get a chromatic-aberration fringe drawn in the theme pair colors.
+/// Each tile has 100 deterministically shuffled cells: one per percent of
+/// measured workflow completion. Only real loading progress removes cells.
+/// Time affects brightness, never the completed-cell count or ordering.
 pub(super) fn draw_tile_pulse_grid(
     painter: &egui::Painter,
     layout: &LocalLayout,
@@ -24,12 +17,11 @@ pub(super) fn draw_tile_pulse_grid(
     radius: i32,
     time: f64,
     ready_buckets: &std::collections::HashSet<(i32, i32)>,
+    progress: &std::collections::HashMap<(i32, i32), f32>,
     half_extent_override: Option<f32>,
 ) {
     puffin::profile_function!();
-    const GRID: usize = 50; // 50×50 = 2 500 cells per tile
-    const DISSOLVE_CYCLE: f64 = 7.0; // seconds for one full sweep
-    const EDGE_BAND: f32 = 0.14; // fraction of cycle that counts as "burning"
+    const EDGE_BAND: f32 = 0.14; // fraction of remaining work that counts as "burning"
     const CELL_INSET: f32 = 0.10; // fractional gap between cells (10% each side)
 
     let half_extent =
@@ -45,10 +37,7 @@ pub(super) fn draw_tile_pulse_grid(
     let center_lon_b = (viewport_center.lon / bucket_step).round() as i32;
     let half = half_extent;
 
-    // Dissolve cursor: 0 (all cells visible) → 1 (all gone), then resets.
-    let cursor = ((time % DISSOLVE_CYCLE) / DISSOLVE_CYCLE) as f32;
-
-    // Gentle global breath layered on top so nothing ever feels static.
+    // Brightness indicates activity without advancing completion.
     let breath = ((time as f32 * std::f32::consts::TAU / 4.5).sin() * 0.5 + 0.5) * 0.35 + 0.65;
 
     // Theme colours — hot_color for the burning edge, contour_color for the
@@ -111,17 +100,19 @@ pub(super) fn draw_tile_pulse_grid(
             }
             let (nw, ne, se, sw) = (sc[0], sc[1], sc[2], sc[3]);
 
-            let seed = tile_hash(lat_b, lon_b);
+            let removed = completed_cells(progress.get(&(lat_b, lon_b)).copied().unwrap_or(0.0));
+            let ranks = cell_ranks(tile_hash(lat_b, lon_b));
 
             for row in 0..GRID {
                 for col in 0..GRID {
-                    let threshold = cell_rand(seed, row, col);
-                    if threshold < cursor {
+                    let rank = ranks[row * GRID + col];
+                    if rank < removed {
                         continue; // this cell has dissolved
                     }
 
                     // 1.0 = far from dissolving, 0.0 = about to vanish
-                    let edge = ((threshold - cursor) / EDGE_BAND).clamp(0.0, 1.0);
+                    let edge = ((rank - removed) as f32 / (GRID * GRID) as f32 / EDGE_BAND)
+                        .clamp(0.0, 1.0);
 
                     // Bilinear sub-quad with a tiny inset gap.
                     let n = GRID as f32;
@@ -261,21 +252,113 @@ fn tile_hash(lat_b: i32, lon_b: i32) -> u64 {
         .wrapping_mul(6_364_136_223_846_793_005)
 }
 
-/// Deterministic float in [0, 1) for a given tile seed + (row, col).
-///
-/// Uses a splitmix64-style finalizer: row and col are mixed into the seed
-/// with different primes *before* the avalanche pass, so adjacent cells
-/// produce completely uncorrelated values rather than an arithmetic sequence.
-#[inline]
-fn cell_rand(seed: u64, row: usize, col: usize) -> f32 {
-    let mut x = seed
-        .wrapping_add((row as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
-        .wrapping_add((col as u64).wrapping_mul(0x6c62_272e_07bb_0142));
-    // splitmix64 avalanche
-    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    x ^= x >> 31;
-    (x >> 40) as f32 / (1u64 << 24) as f32
+const GRID: usize = 10;
+
+fn completed_cells(progress: f32) -> usize {
+    if !progress.is_finite() {
+        return 0;
+    }
+    (progress.clamp(0.0, 1.0) * (GRID * GRID) as f32).floor() as usize
+}
+
+/// A permutation gives exactly N dissolved cells, unlike random float
+/// thresholds which only approximate a percentage and can finish early.
+fn cell_ranks(seed: u64) -> [usize; GRID * GRID] {
+    let mut order: [usize; GRID * GRID] = std::array::from_fn(|i| i);
+    order.sort_unstable_by_key(|&i| {
+        let mut x = seed.wrapping_add((i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        x ^ (x >> 31)
+    });
+    let mut ranks = [0; GRID * GRID];
+    for (rank, index) in order.into_iter().enumerate() {
+        ranks[index] = rank;
+    }
+    ranks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn painted_cells_hold_across_the_old_timer_cycle_and_clear_on_readiness() {
+        let paint = |time, fraction, ready| {
+            let ctx = egui::Context::default();
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+                let painter = ctx.layer_painter(egui::LayerId::background());
+                let focus = GeoPoint { lat: 0.0, lon: 0.0 };
+                let view = GlobeViewState::from_focus(focus);
+                let ready = if ready {
+                    std::collections::HashSet::from([(0, 0)])
+                } else {
+                    std::collections::HashSet::new()
+                };
+                draw_tile_pulse_grid(
+                    &painter,
+                    &super::super::layout(rect),
+                    &view,
+                    focus,
+                    25.0,
+                    0,
+                    time,
+                    &ready,
+                    &std::collections::HashMap::from([((0, 0), fraction)]),
+                    None,
+                );
+            });
+            output
+                .shapes
+                .into_iter()
+                .find_map(|shape| match shape.shape {
+                    egui::Shape::Mesh(mesh) => {
+                        Some(mesh.vertices.iter().map(|v| v.pos).collect::<Vec<_>>())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default()
+        };
+        let stalled = paint(0.0, 0.5, false);
+        assert_eq!(stalled.len(), 50 * 4);
+        assert_eq!(paint(6.9, 0.5, false), stalled);
+        assert_eq!(paint(7.1, 0.5, false), stalled);
+        assert_eq!(paint(100.0, 0.5, false), stalled);
+        assert_eq!(paint(100.0, 0.75, false).len(), 25 * 4);
+        assert_eq!(paint(100.0, 0.99, false).len(), 4);
+        assert!(paint(100.0, 1.0, false).is_empty());
+        assert!(paint(100.0, 0.0, true).is_empty());
+    }
+
+    #[test]
+    fn dissolve_tracks_completed_work_exactly_without_reappearing() {
+        let ranks = cell_ranks(tile_hash(5467, -16911));
+        let mut previous = std::collections::HashSet::new();
+        for progress in [0.0, 0.25, 0.50, 0.75, 0.99, 1.0] {
+            let gone: std::collections::HashSet<_> = ranks
+                .iter()
+                .enumerate()
+                .filter_map(|(cell, &rank)| (rank < completed_cells(progress)).then_some(cell))
+                .collect();
+            assert_eq!(gone.len(), completed_cells(progress));
+            assert!(previous.is_subset(&gone));
+            previous = gone;
+        }
+        assert_eq!(previous.len(), 100);
+        assert_eq!(cell_ranks(tile_hash(5467, -16911)), ranks);
+        assert_ne!(cell_ranks(tile_hash(5467, -16910)), ranks);
+    }
+
+    #[test]
+    fn queued_unknown_and_stalled_work_do_not_claim_completion() {
+        assert_eq!(completed_cells(0.0), 0);
+        assert_eq!(completed_cells(f32::NAN), 0);
+        assert_eq!(completed_cells(f32::INFINITY), 0);
+        assert_eq!(completed_cells(-1.0), 0);
+        assert_eq!(completed_cells(0.99), 99);
+        assert_eq!(completed_cells(5.0), 100);
+    }
 }
 
 #[inline]
