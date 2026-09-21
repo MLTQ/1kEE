@@ -10,7 +10,7 @@ pub struct Slots {
 }
 
 impl Slots {
-    const fn new(limit: usize) -> Self {
+    pub(super) const fn new(limit: usize) -> Self {
         Self {
             active: AtomicUsize::new(0),
             limit,
@@ -53,15 +53,66 @@ pub fn processing() -> &'static Slots {
         let cpus = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        Slots::new(cpus.saturating_sub(1).clamp(1, 2))
+        Slots::new(processing_limit(cpus))
     })
 }
 
-/// Covers download, waiting, and processing: at most four temporary rasters
-/// and network workers exist, even when processing is the slower stage.
-pub fn remote_jobs() -> &'static Slots {
-    static SLOTS: Slots = Slots::new(4);
-    &SLOTS
+fn processing_limit(cpus: usize) -> usize {
+    configured_processing_limit(
+        cpus,
+        std::env::var("ONEKEE_TERRAIN_WORKERS").ok().as_deref(),
+    )
+}
+
+fn configured_processing_limit(cpus: usize, value: Option<&str>) -> usize {
+    let default = (cpus / 2).clamp(1, 4);
+    value
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| (1..=8).contains(value))
+        .unwrap_or(default)
+        .min(cpus.saturating_sub(1).max(1))
+}
+
+/// Admission reserves space before downloading. Downloaded rasters wait on
+/// disk, not in memory; processing capacity is acquired separately.
+pub struct DownloadQueue {
+    downloads: Slots,
+    staging: Slots,
+}
+
+impl DownloadQueue {
+    const fn new(downloads: usize, staging: usize) -> Self {
+        Self {
+            downloads: Slots::new(downloads),
+            staging: Slots::new(staging),
+        }
+    }
+
+    pub fn try_acquire(&self) -> Option<DownloadPermit<'_>> {
+        let staging = self.staging.try_acquire()?;
+        let download = self.downloads.try_acquire()?;
+        Some(DownloadPermit { download, staging })
+    }
+}
+
+pub struct DownloadPermit<'a> {
+    download: Permit<'a>,
+    staging: Permit<'a>,
+}
+
+impl<'a> DownloadPermit<'a> {
+    /// Release network capacity immediately; the returned permit bounds the
+    /// downloaded queue until a processing worker takes ownership.
+    pub fn downloaded(self) -> Permit<'a> {
+        let Self { download, staging } = self;
+        drop(download);
+        staging
+    }
+}
+
+pub fn remote_downloads() -> &'static DownloadQueue {
+    static QUEUE: DownloadQueue = DownloadQueue::new(4, 8);
+    &QUEUE
 }
 
 #[cfg(test)]
@@ -69,19 +120,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn downloads_overlap_processing_without_exceeding_either_limit() {
-        let network = Slots::new(4);
+    fn processing_budget_scales_and_overrides_cannot_remove_bounds() {
+        for (cpus, expected) in [(1, 1), (2, 1), (4, 2), (8, 4), (10, 4), (64, 4)] {
+            assert_eq!(configured_processing_limit(cpus, None), expected);
+        }
+        assert_eq!(configured_processing_limit(10, Some("6")), 6);
+        assert_eq!(configured_processing_limit(4, Some("8")), 3);
+        for invalid in ["0", "9", "-1", "many"] {
+            assert_eq!(configured_processing_limit(10, Some(invalid)), 4);
+        }
+    }
+
+    #[test]
+    fn downloads_replenish_while_processing_is_busy_and_staging_stays_bounded() {
+        let network = DownloadQueue::new(4, 8);
         let cpu = Slots::new(2);
         let downloads: Vec<_> = (0..4).map(|_| network.try_acquire().unwrap()).collect();
         assert!(network.try_acquire().is_none());
         let processing: Vec<_> = (0..2).map(|_| cpu.try_acquire().unwrap()).collect();
         assert!(cpu.try_acquire().is_none());
         assert!(cpu.acquire_until(|| true).is_none());
+        let waiting: Vec<_> = downloads
+            .into_iter()
+            .map(DownloadPermit::downloaded)
+            .collect();
+        // The old whole-job limit stalled here. Four new downloads can now
+        // start without either processing job finishing.
+        let more: Vec<_> = (0..4).map(|_| network.try_acquire().unwrap()).collect();
+        let more: Vec<_> = more.into_iter().map(DownloadPermit::downloaded).collect();
+        assert!(network.try_acquire().is_none()); // all eight staging slots full
         drop(processing);
-        assert!(cpu.try_acquire().is_some());
-        assert!(network.try_acquire().is_none());
-        drop(downloads);
+        let _processing = cpu.try_acquire().unwrap();
+        drop(waiting); // handed to processing / cancelled
         assert!(network.try_acquire().is_some());
+        drop(more);
+        assert_eq!(network.staging.active.load(Ordering::Acquire), 0);
+        assert_eq!(network.downloads.active.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn failed_downloads_and_cancelled_waiters_release_both_budgets() {
+        let queue = DownloadQueue::new(1, 2);
+        let download = queue.try_acquire().unwrap();
+        for _ in 0..5 {
+            assert!(queue.try_acquire().is_none());
+        }
+        assert_eq!(queue.staging.active.load(Ordering::Acquire), 1);
+        drop(download);
+        let waiting = queue.try_acquire().unwrap().downloaded();
+        let _ = std::panic::catch_unwind(|| {
+            let _download = queue.try_acquire().unwrap();
+            panic!("download failed");
+        });
+        drop(waiting);
+        assert_eq!(queue.staging.active.load(Ordering::Acquire), 0);
+        assert_eq!(queue.downloads.active.load(Ordering::Acquire), 0);
     }
 
     #[test]

@@ -84,8 +84,8 @@ on-demand Earth, lunar, and Mars tile builds.
   keyed on the old geometry now name different ground. Purge rows for the
   affected `zoom_bucket` values when retuning a tier.
 
-- `work_slots.rs` separates four hosted jobs from the shared two-job processing
-  budget. Existing cache identity, geometry, zoom tiers, and manifests are
+- `work_slots.rs` separates four downloads, eight downloading/queued rasters,
+  and a CPU-scaled processing budget capped at four. Existing cache identity, geometry, zoom tiers, and manifests are
   unchanged; no cache rebuild or migration is needed for these optimizations.
 
 - `progress.rs` supplies path/zoom-scoped atomic build handles to background
@@ -93,3 +93,6 @@ on-demand Earth, lunar, and Mars tile builds.
 
 - Buckets outside a planetary latitude bound join the resolved bucket set as
   well as being excluded from totals, so the grid cannot advertise work there.
+
+- `timings.rs` provides opt-in per-tile stage diagnostics; `TileKey` is visible
+  within the crate so cached reads use the same diagnostic identity.

@@ -174,9 +174,10 @@ server-side, for an arbitrary bounding box.
 | Elevation sampling | 0.02° chunks, cached as DEFLATE Float32 COGs | `Derived/terrain/3dep_1m/`, LRU-evicted against a configurable budget |
 | Hillshade | `exportImage` with the `Hillshade Multidirectional` rendering rule | Nothing on disk; an in-memory texture |
 
-The contour path is the important one: contours are perhaps two orders of
-magnitude smaller than the raster they came from, so the durable cost of visiting
-an area is contour geometry, not elevation data.
+The contour path persists geometry rather than elevation rasters. Dense,
+sub-metre contour geometry can be much larger than its source raster: measured
+tiles range from 69 MB to 244 MB of geometry for a roughly 24 MB raster. This
+expansion is an important part of the storage and loading cost.
 
 ### Measured service behaviour
 
@@ -214,12 +215,14 @@ at its opening zoom. The 2.5 factor is how far the oblique camera actually sees,
 matching the local marker cull distance. Fewer wide requests beat more narrow
 ones — radius 3 would allow only slightly smaller tiles for twice the downloads.
 
-**Cost.** A fully filled deepest-tier view is 25 tiles of ~22 MB. Four hosted
-jobs can now overlap downloads with processing; the shared GDAL/import budget
-remains two jobs (one on small CPUs). A hosted job retains its network-stage
-permit while waiting/processing, bounding temporary rasters as well as requests.
-Actual first-visit time depends on USGS response latency. Contours are cached
-permanently and the rasters are discarded.
+**Cost.** A fully filled deepest-tier view is 25 source rasters of ~22 MB.
+Four downloads run independently of a CPU-scaled GDAL/import budget (half the
+available CPUs, capped at four). Eight staging slots bound downloading plus
+queued rasters; each download releases its network permit on completion and
+its staging permit when processing takes ownership. Thus at most twelve
+hosted jobs exist with the default maximum processing budget. Actual first-visit
+time depends on USGS response latency. Contours are cached permanently and the
+rasters are discarded.
 
 ### Drawing this much geometry
 
@@ -328,3 +331,83 @@ The benchmark opens the supplied database read-only and selects one dense
 bucket-10 tile. It is ignored in normal tests. At measurement time Hilbert had
 about 7.8 GiB free and the Earth cache was 257 GiB; these changes do not reclaim
 existing cache storage.
+
+
+## Bounded pipeline and stage measurements (September 2026)
+
+The scheduler now separates four active downloads from eight downloading/queued
+rasters and up to four processing jobs. Download slots are released when a
+validated raster has been saved, so a slow GDAL job does not stop the next
+request. Admission reserves staging space before a request starts. Permits
+release on errors, cancellation, and unwinding; no cache migration is needed.
+Capacity releases invalidate manifest scheduling immediately, and snapshots
+keep their selection-start revision so a wakeup during a query is not lost.
+`ONEKEE_TERRAIN_WORKERS=1..8` overrides the processing limit for experiments,
+while retaining one spare logical CPU on multicore machines. The default uses
+half the available CPUs, capped at four. Moon/Mars retain their additional
+per-body source limits.
+
+Local cached geometry uses two readers per body cache on machines with at least
+four available CPUs, otherwise one. Requests remain bounded to eight center-first
+tiles per batch. Each completed tile is published immediately for background
+merging. Reset epochs reject stale reads, and decoded nonempty tiles stay at
+99% in the real loading grid until an accepted merge contains them.
+
+### Results and limits
+
+Measured in an optimized build on the 10-core, 32 GiB machine. Fresh benchmark
+cache writes were compared on both system temporary storage and the attached
+Hilbert NVMe (USB, encrypted APFS); existing cached geometry was read from Hilbert. These are headless pipeline
+measurements, not whole-app frame-rate measurements.
+
+| Workload | Previous limit | New limit | Measured wall time |
+|---|---|---|---|
+| Eight identical 2400-pixel USGS rasters, 0.5 m contours and shared SQLite import | 2 processing workers | 4 workers | 9.77–9.86 s → 5.84–5.93 s (about 40% less) |
+| Same processing batch, internal temporary storage | 4 workers | 6 workers | 5.84–5.93 s → 5.38 s; smaller gain and more writer contention |
+| Eight-raster build/import on the attached NVMe | 2 processing workers | 4 workers | 10.19–10.35 s → 6.44–6.85 s (about 33–38% less) |
+| Twelve adjacent hosted tiles, repeated after responses warmed | 4 whole jobs / 2 processing workers | 4 downloads / 4 processing workers | 11.11 s → 8.73 s (about 21% less) |
+| Eight dense existing tiles, warm repeated reads | 1 reader | 2 readers | 0.81–0.83 s → 0.51–0.56 s (about 31–38% less) |
+
+The first live comparison was 31.51 s → 8.93 s, but mean download times changed
+from 8.50 s to 2.35 s per tile. That comparison is **not** an isolated software
+speedup. Initial reads of the eight NVMe tiles took 6.94–13.17 s before later
+warm reads fell below one second; OS cache warmth was not controlled or flushed.
+
+For the identical-raster workload, two workers spent about 1.9 s per tile in
+GDAL, 0.4 s copying/committing geometry, and 0.03 s waiting for a writer. Six
+workers increased mean writer wait to 0.56 s on internal storage. On the NVMe,
+six workers took 6.17 s, a small gain over four. Four was selected to improve
+throughput while leaving capacity for rendering/readers. Every processing round
+committed eight manifests and identical row/byte totals; live runs each produced
+115,536 rows / 420,472,032 geometry bytes. Cached-reader rounds require matching
+hashes of every selected coordinate, elevation, and order.
+
+### Diagnostics and reproduction
+
+Set `ONEKEE_TERRAIN_TIMINGS=1` before launching the app to log `[terrain]` records
+with tile identity, stage, milliseconds, row/byte counts, and success/abort.
+Stages include source/download, processing wait, contouring, cache setup,
+writer-lock wait, row copying/commit, SQLite read overhead, WKB decoding, and
+geometry selection. Profiling is off by default and does no per-row clock reads
+when disabled. GDAL stdout progress is suppressed only while profiling; errors
+on stderr remain visible. Nested stage times must not be summed across workers.
+
+```bash
+# One real raster download (or supply ONEKEE_TERRAIN_BENCH_RASTER).
+# Optional ONEKEE_TERRAIN_BENCH_OUTPUT=/volume/path selects the output drive;
+# only a unique disposable child directory is created and removed.
+ONEKEE_TERRAIN_TIMINGS=1 cargo test --release \
+  -p one-thousand-electric-eye-desktop benchmark_contour_processing_concurrency \
+  -- --ignored --nocapture --test-threads=1
+
+# Legacy admission and processing baseline; repeat with both extra variables
+# omitted for the new default pipeline. Outputs are disposable temporary files.
+ONEKEE_TERRAIN_TIMINGS=1 ONEKEE_TERRAIN_WORKERS=2 ONEKEE_TERRAIN_BENCH_LEGACY=1 \
+  cargo test --release -p one-thousand-electric-eye-desktop \
+  benchmark_live_threedep_pipeline -- --ignored --nocapture --test-threads=1
+
+# Read-only access to an existing cache; compares 1/2/4 readers.
+ONEKEE_TERRAIN_TIMINGS=1 ONEKEE_CONTOUR_BENCH_DB=/path/to/srtm_focus_cache.sqlite \
+  cargo test --release -p one-thousand-electric-eye-desktop \
+  benchmark_cached_reader_concurrency -- --ignored --nocapture --test-threads=1
+```

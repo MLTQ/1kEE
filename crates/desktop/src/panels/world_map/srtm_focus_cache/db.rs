@@ -183,10 +183,15 @@ pub fn import_tile_into_cache(
     gpkg_path: &Path,
     progress: Option<&super::progress::BuildProgress>,
 ) -> rusqlite::Result<()> {
+    let open_timer = super::timings::StageTimer::new(tile, "cache_open");
     let source = Connection::open_with_flags(gpkg_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     source.busy_timeout(Duration::from_secs(30))?;
     let mut cache = open_cache_db(cache_db_path)?;
-    let transaction = cache.transaction()?;
+    open_timer.finish(0, 0);
+    let wait_timer = super::timings::StageTimer::new(tile, "writer_wait");
+    let transaction = cache.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    wait_timer.finish(0, 0);
+    let write_timer = super::timings::StageTimer::new(tile, "cache_write");
     transaction.execute(
         "DELETE FROM contour_tiles
          WHERE zoom_bucket = ?1 AND lat_bucket = ?2 AND lon_bucket = ?3",
@@ -208,6 +213,7 @@ pub fn import_tile_into_cache(
         .unwrap_or(false);
 
     let mut contour_count = 0usize;
+    let mut geometry_bytes = 0u64;
     if table_exists {
         // Stream in primary-key order, without sorting/copying geometry blobs.
         // Preparing once matters for the thousands of features in a 3DEP tile.
@@ -223,6 +229,7 @@ pub fn import_tile_into_cache(
         while let Some(row) = rows.next()? {
             let fid: i64 = row.get(0)?;
             let geometry = row.get_ref(1)?.as_blob()?;
+            geometry_bytes += geometry.len() as u64;
             let elevation_m: f32 = row.get(2)?;
             insert.execute(params![
                 tile.zoom_bucket,
@@ -257,6 +264,7 @@ pub fn import_tile_into_cache(
         ],
     )?;
     transaction.commit()?;
+    write_timer.finish(contour_count as u64, geometry_bytes);
     if let Some(progress) = progress {
         progress.committed();
     }

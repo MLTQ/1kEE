@@ -47,14 +47,22 @@ Owns the desktop-side GDAL pipelines for terrain assets: SRTM focus contours, GE
   and synchronous flushes. These options apply only to disposable GDAL output;
   the persistent cache keeps WAL/NORMAL transactions. Failed output is never
   imported after a failed GDAL exit. No newer GDAL transaction flag is required.
-- 3DEP downloads reserve remote-job capacity in `builders.rs`, then acquire a
-  shared processing permit here after fetching. Waiting is shutdown-aware;
-  at most four remote jobs and two active GDAL/import jobs exist.
+- 3DEP takes an explicit download/staging permit from `builders.rs`. A valid
+  saved raster releases its download slot immediately, then waits for shared
+  processing capacity. Starting processing releases the staging slot. Both
+  transitions invalidate manifest scheduling and request repaint so available
+  capacity refills without waiting for the manifest refresh timeout.
+  Waiting is shutdown-aware, and every return releases owned permits.
 
 - Tile builds publish completed source and contour-generation stages through
   `progress.rs`. Hosted rasters also report actual response bytes when the
   server provides a length; source completion requires a validated saved TIFF.
   GDAL stages without a progress count hold their last completed milestone.
 
+- Opt-in stage timers measure SRTM source preparation, hosted downloads,
+  processing waits, contour generation, coastlines, and total build time.
+  `pipeline_bench.rs` contains ignored real-data concurrency comparisons.
+  Profiling suppresses child stdout progress dots to keep timing records intact;
+  child stderr remains visible for GDAL errors.
 - The source milestone completes before waiting for a processing permit.
   Imports receive that attempt's handle explicitly across resets and retries.

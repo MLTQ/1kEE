@@ -20,3 +20,14 @@ ordering as the prior SQLite blob-sort implementation, and measures real data.
 
 - The row-progress regression reads a real 300-row temporary SQLite tile and
   checks intermediate/final counts against its manifest, including empty blobs.
+
+- `benchmark_cached_reader_concurrency` compares eight distinct dense tiles
+  with 1/2/4 readers, repeats 1/2 to expose cache warmth, and requires identical
+  per-tile hashes of all selected geometry/order. It only reads the real cache.
+
+- Streaming regressions verify early tile publication while the batch remains
+  in flight, decoded-versus-rendered state, stale epoch rejection after reset,
+  old completion not clearing a new batch, and cancellation between tiles.
+
+- Manifest publication retains the selection-start revision, ensuring a queue
+  wakeup during an in-flight selection cannot be consumed by stale results.
