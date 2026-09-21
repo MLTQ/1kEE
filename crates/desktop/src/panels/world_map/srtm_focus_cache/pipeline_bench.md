@@ -30,3 +30,12 @@ Use release mode, `ONEKEE_TERRAIN_TIMINGS=1`, `--ignored --nocapture`, and
 no existing raster path is supplied. The pipeline benchmark always uses USGS.
 Network/cache warmth varies; compare repeated runs, not timing assertions.
 These headless measurements do not establish interactive frame rates.
+
+- `ONEKEE_TERRAIN_BENCH_TILES=1..25` sizes either batch (defaults remain 8/12).
+  `ONEKEE_TERRAIN_BENCH_WORKERS=4,8,25,4` selects processing sweep sizes;
+  `ONEKEE_TERRAIN_DOWNLOADS` varies the live pipeline download limit. The live
+  25-tile case uses a 5x5 window. `bench_resources.rs` samples process-tree RSS
+  and concurrent GDAL processes, excluding unrelated applications.
+- Scratch creation fails rather than reusing a pre-existing directory.
+- Full-view results, including repeated warm network runs and memory caveats,
+  are recorded in `docs/terrain-pipeline.md`.

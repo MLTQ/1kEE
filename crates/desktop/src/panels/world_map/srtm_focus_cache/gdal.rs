@@ -1,6 +1,6 @@
 use super::db::{
     cleanup_temp_tile_artifacts, import_coastline_into_cache, import_tile_into_cache,
-    journal_path_for, mark_tile_empty, shm_path_for, temp_tile_paths, wal_path_for,
+    journal_path_for, mark_tile_empty, shm_path_for, temp_tile_paths, wal_path_for, TempTileCleanup,
 };
 use super::{BUILD_TIMEOUT, FocusContourSpec, GeoBounds, TEMP_DIR_NAME, TileKey};
 use super::timings::StageTimer;
@@ -12,6 +12,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+#[path = "gdal_process.rs"]
+mod process;
 
 const LUNAR_SOURCE_CHUNK_CENTER_STEP_DEG: f32 = 4.0;
 const LUNAR_SOURCE_CHUNK_HALF_EXTENT_DEG: f32 = 6.0;
@@ -811,69 +814,11 @@ fn ensure_lunar_source_chunk(
 }
 
 pub fn run_command_with_timeout(
-    mut command: Command,
+    command: Command,
     label: &str,
     timeout: Duration,
 ) -> std::io::Result<()> {
-    if shutdown_requested().load(Ordering::Relaxed) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Interrupted,
-            format!("{label} cancelled during shutdown"),
-        ));
-    }
-
-    // GDAL's progress dots otherwise interleave with per-stage records in a
-    // redirected log. Preserve stderr so real tool errors remain visible.
-    if super::timings::enabled() {
-        command.stdout(std::process::Stdio::null());
-    }
-    let mut child = command.spawn()?;
-    let pid = child.id();
-    if let Ok(mut guard) = active_children().lock() {
-        guard.insert(pid);
-    }
-    let started = Instant::now();
-
-    loop {
-        if let Some(status) = child.try_wait()? {
-            if let Ok(mut guard) = active_children().lock() {
-                guard.remove(&pid);
-            }
-            return if status.success() {
-                Ok(())
-            } else {
-                Err(std::io::Error::other(format!(
-                    "{label} failed with status {status}"
-                )))
-            };
-        }
-
-        if shutdown_requested().load(Ordering::Relaxed) {
-            let _ = child.kill();
-            let _ = child.wait();
-            if let Ok(mut guard) = active_children().lock() {
-                guard.remove(&pid);
-            }
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                format!("{label} cancelled during shutdown"),
-            ));
-        }
-
-        if started.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            if let Ok(mut guard) = active_children().lock() {
-                guard.remove(&pid);
-            }
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!("{label} timed out after {:?}", timeout),
-            ));
-        }
-
-        std::thread::sleep(Duration::from_millis(150));
-    }
+    process::run(command, label, timeout, shutdown_requested(), active_children())
 }
 
 pub fn build_focus_contours(
@@ -893,7 +838,9 @@ pub fn build_focus_contours(
         cache_db_path, tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket,
     );
 
+    super::storage::require_room(cache_root).ok()?;
     let (tmp_tif_path, tmp_gpkg_path) = temp_tile_paths(cache_root, tile);
+    let _cleanup = TempTileCleanup(&tmp_tif_path, &tmp_gpkg_path);
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
     let tiles = tile_paths_for_bounds(srtm_root, bounds);
     if tiles.is_empty() {
@@ -920,10 +867,8 @@ pub fn build_focus_contours(
     import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path, Some(&progress)).ok()?;
 
     // Piggyback: extract 0m coastline from the same warped TIF while we have it.
-    let tmp_coast_gpkg_path = cache_root.join(TEMP_DIR_NAME).join(format!(
-        "z{}_lat{}_lon{}.coast.tmp.gpkg",
-        tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket
-    ));
+    let tmp_coast_gpkg_path = tmp_gpkg_path.with_extension("coast.gpkg");
+    let _coast_cleanup = TempTileCleanup(&tmp_coast_gpkg_path, &tmp_coast_gpkg_path);
     let coastline_timer = StageTimer::new(tile, "coastline");
     if run_gdal_coastline_0m(&tmp_tif_path, &tmp_coast_gpkg_path).is_ok() {
         let _ = import_coastline_into_cache(cache_db_path, tile, &tmp_coast_gpkg_path);
@@ -962,7 +907,9 @@ pub fn build_threedep_contours(
         tile.lon_bucket,
     );
 
+    super::storage::require_room(cache_root).ok()?;
     let (tmp_tif_path, tmp_gpkg_path) = temp_tile_paths(cache_root, tile);
+    let _cleanup = TempTileCleanup(&tmp_tif_path, &tmp_gpkg_path);
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
     if let Some(parent) = tmp_tif_path.parent() {
         fs::create_dir_all(parent).ok()?;
@@ -1049,7 +996,9 @@ pub fn build_lunar_contour_tile(
         cache_db_path, tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket,
     );
 
+    super::storage::require_room(cache_root).ok()?;
     let (tmp_tif_path, tmp_gpkg_path) = temp_tile_paths(cache_root, tile);
+    let _cleanup = TempTileCleanup(&tmp_tif_path, &tmp_gpkg_path);
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
 
     if let Some(parent) = tmp_tif_path.parent() {
@@ -1138,7 +1087,9 @@ fn build_mars_mola_contour_tile(
         cache_db_path, tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket,
     );
 
+    super::storage::require_room(cache_root).ok()?;
     let (tmp_tif_path, tmp_gpkg_path) = temp_tile_paths(cache_root, tile);
+    let _cleanup = TempTileCleanup(&tmp_tif_path, &tmp_gpkg_path);
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
     if let Some(parent) = tmp_tif_path.parent() {
         fs::create_dir_all(parent).ok()?;
@@ -1206,7 +1157,9 @@ pub fn build_mars_contour_tile(
         cache_db_path, tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket,
     );
 
+    super::storage::require_room(cache_root).ok()?;
     let (tmp_tif_path, tmp_gpkg_path) = temp_tile_paths(cache_root, tile);
+    let _cleanup = TempTileCleanup(&tmp_tif_path, &tmp_gpkg_path);
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
 
     if let Some(parent) = tmp_tif_path.parent() {
@@ -1352,6 +1305,7 @@ fn format_gdal_number(interval_m: f32) -> String {
 }
 
 fn run_gdal_contour(input_path: &Path, output_path: &Path, interval_m: f32, nodata: Option<f32>) -> std::io::Result<()> {
+    super::storage::require_room(output_path)?;
     let mut command = Command::new(gdal_tool_path("gdal_contour"));
     // This GeoPackage is disposable staging data. The durable cache still
     // commits atomically with WAL/NORMAL. No spatial index is ever queried here.

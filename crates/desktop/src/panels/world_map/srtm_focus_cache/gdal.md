@@ -66,3 +66,14 @@ Owns the desktop-side GDAL pipelines for terrain assets: SRTM focus contours, GE
   child stderr remains visible for GDAL errors.
 - The source milestone completes before waiting for a processing permit.
   Imports receive that attempt's handle explicitly across resets and retries.
+
+- Every tile build owns a `TempTileCleanup` guard; failed source, GDAL, or
+  import stages no longer leave temporary files filling the volume. Coastline
+  staging shares the unique attempt prefix and is scoped separately.
+- `storage.rs` requires 1 GiB headroom before source work and contouring. It runs
+  on workers only; failures follow existing backoff and cleanup.
+
+- `gdal_process.rs` drains diagnostics, stops/reaps fatal storage or contour
+  writers promptly, and rejects fatal write errors even with a zero exit.
+  Prints the first eight stderr lines, the first fatal write error even after
+  that limit, and a suppression count per command.

@@ -65,7 +65,9 @@ fn processing_limit(cpus: usize) -> usize {
 }
 
 fn configured_processing_limit(cpus: usize, value: Option<&str>) -> usize {
-    let default = (cpus / 2).clamp(1, 4);
+    // Eight workers won the full-view processing sweep on the 10-core host.
+    // Keep two CPUs outside this budget for rendering and cached readers.
+    let default = cpus.saturating_sub(2).clamp(1, 8);
     value
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| (1..=8).contains(value))
@@ -111,8 +113,18 @@ impl<'a> DownloadPermit<'a> {
 }
 
 pub fn remote_downloads() -> &'static DownloadQueue {
-    static QUEUE: DownloadQueue = DownloadQueue::new(4, 8);
-    &QUEUE
+    static QUEUE: OnceLock<DownloadQueue> = OnceLock::new();
+    QUEUE.get_or_init(|| {
+        let downloads = download_limit(std::env::var("ONEKEE_TERRAIN_DOWNLOADS").ok().as_deref());
+        DownloadQueue::new(downloads, downloads + 4)
+    })
+}
+
+fn download_limit(value: Option<&str>) -> usize {
+    value
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| (1..=25).contains(v))
+        .unwrap_or(4)
 }
 
 #[cfg(test)]
@@ -120,14 +132,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn download_override_keeps_full_view_requests_bounded() {
+        assert_eq!(download_limit(None), 4);
+        assert_eq!(download_limit(Some("25")), 25);
+        for invalid in ["0", "26", "many"] {
+            assert_eq!(download_limit(Some(invalid)), 4);
+        }
+    }
+
+    #[test]
     fn processing_budget_scales_and_overrides_cannot_remove_bounds() {
-        for (cpus, expected) in [(1, 1), (2, 1), (4, 2), (8, 4), (10, 4), (64, 4)] {
+        for (cpus, expected) in [(1, 1), (2, 1), (4, 2), (8, 6), (10, 8), (64, 8)] {
             assert_eq!(configured_processing_limit(cpus, None), expected);
         }
         assert_eq!(configured_processing_limit(10, Some("6")), 6);
         assert_eq!(configured_processing_limit(4, Some("8")), 3);
         for invalid in ["0", "9", "-1", "many"] {
-            assert_eq!(configured_processing_limit(10, Some(invalid)), 4);
+            assert_eq!(configured_processing_limit(10, Some(invalid)), 8);
         }
     }
 
