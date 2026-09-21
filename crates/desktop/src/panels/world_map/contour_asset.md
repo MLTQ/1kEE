@@ -137,3 +137,15 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 - `contour_read_tests.rs` verifies ordering/geometry against the previous
   reader and provides an opt-in read-only benchmark via
   `ONEKEE_CONTOUR_BENCH_DB`.
+
+- Manifest workers resolve the cache path and retain matching atomic build
+  handles. `contour_loading.rs` combines them with decoded-row counts and the
+  set of tiles in the last accepted merge. Disk-ready tiles begin at 75%,
+  decoding advances to 99%, and published (or decoded-empty) tiles complete.
+  Snapshot ready counts and repaint demand now include this loading work.
+- Reader progress and published-tile sets share existing root/zoom/epoch
+  invalidation. A failed or stale reader/merge never completes a replacement
+  scene; resetting caches also detaches old build observers.
+
+- Build observers are restricted to the selected tile window; snapshots cannot
+  keep every previously visited build handle alive while panning.

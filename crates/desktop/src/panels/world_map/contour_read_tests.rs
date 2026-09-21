@@ -103,6 +103,43 @@ fn streamed_reader_preserves_elevation_fid_part_and_budget_order() {
 }
 
 #[test]
+fn row_progress_uses_manifest_count_and_reaches_the_actual_decoded_count() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "1kee-row-progress-{}-{nonce}.sqlite",
+        std::process::id()
+    ));
+    let connection = srtm_focus_cache::db::open_cache_db(&path).unwrap();
+    // Empty geometry still counts as a decoded database row, not a drawn line.
+    connection
+        .execute_batch(
+            "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<300)
+         INSERT INTO contour_tiles SELECT 10,0,0,x,10.0,x'00' FROM n;
+         INSERT INTO contour_tile_manifest (zoom_bucket,lat_bucket,lon_bucket,contour_count)
+         VALUES (10,0,0,300);",
+        )
+        .unwrap();
+    drop(connection);
+    let mut updates = Vec::new();
+    let result = query_local_contours_with_progress(
+        &path,
+        &[request(&path, (10, 0, 0))],
+        100,
+        &mut |key, done, total| {
+            assert_eq!(key.path, path);
+            updates.push((done, total));
+        },
+    )
+    .unwrap();
+    assert_eq!(updates, vec![(128, 300), (256, 300), (300, 300)]);
+    assert!(result[0].1.is_empty());
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 #[ignore = "set ONEKEE_CONTOUR_BENCH_DB to a real contour cache; reads only"]
 fn benchmark_dense_cached_tile() {
     let path =

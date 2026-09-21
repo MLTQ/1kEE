@@ -173,3 +173,9 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 - `EARTH_MAJOR_REM` is shared by both renderers so they classify major contours
   identically; the GPU path bakes the resulting colour and a major flag into
   each instance.
+
+- The loading grid uses per-tile measured workflow fractions from
+  `contour_loading.rs` rather than a repeating timer. Mars supplies its own
+  half-extent, matching the tile identifiers in its progress snapshot.
+  Completed source/build stages, decoded rows, and accepted merge publication
+  govern the grid; brightness alone may breathe while work waits.

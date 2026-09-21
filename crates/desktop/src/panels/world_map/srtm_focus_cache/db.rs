@@ -181,6 +181,7 @@ pub fn import_tile_into_cache(
     cache_db_path: &Path,
     tile: TileKey,
     gpkg_path: &Path,
+    progress: Option<&super::progress::BuildProgress>,
 ) -> rusqlite::Result<()> {
     let source = Connection::open_with_flags(gpkg_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     source.busy_timeout(Duration::from_secs(30))?;
@@ -210,6 +211,7 @@ pub fn import_tile_into_cache(
     if table_exists {
         // Stream in primary-key order, without sorting/copying geometry blobs.
         // Preparing once matters for the thousands of features in a 3DEP tile.
+        let total: u64 = source.query_row("SELECT COUNT(*) FROM contour", [], |r| r.get(0))?;
         let mut source_rows =
             source.prepare("SELECT fid, geom, elevation_m FROM contour ORDER BY fid")?;
         let mut insert = transaction.prepare(
@@ -231,6 +233,11 @@ pub fn import_tile_into_cache(
                 geometry
             ])?;
             contour_count += 1;
+            if contour_count % 128 == 0 {
+                if let Some(progress) = &progress {
+                    progress.imported_rows(contour_count as u64, total);
+                }
+            }
         }
     }
 
@@ -250,6 +257,9 @@ pub fn import_tile_into_cache(
         ],
     )?;
     transaction.commit()?;
+    if let Some(progress) = progress {
+        progress.committed();
+    }
     Ok(())
 }
 
@@ -413,7 +423,16 @@ mod tests {
              INSERT INTO contour VALUES (8, x'010203', -1.5), (2, x'040506', 40.0);",
             )
             .unwrap();
-        import_tile_into_cache(&cache_path, tile, &source_path).unwrap();
+        let old_attempt = super::super::progress::start(&cache_path, 10, 1, -1);
+        old_attempt.contours_ready();
+        let replacement = super::super::progress::start(&cache_path, 10, 1, -1);
+        import_tile_into_cache(&cache_path, tile, &source_path, Some(&old_attempt)).unwrap();
+        assert_eq!(old_attempt.fraction(), 0.75);
+        assert_eq!(
+            replacement.fraction(),
+            0.0,
+            "old imports cannot advance new attempts"
+        );
         import_coastline_into_cache(&cache_path, tile, &source_path).unwrap();
         let cache = open_cache_db_read_only(&cache_path).unwrap();
         let original: Vec<(i64, Vec<u8>, f32)> = cache
@@ -444,7 +463,7 @@ mod tests {
                               UPDATE contour SET elevation_m='invalid', geom=NULL WHERE fid=8;",
             )
             .unwrap();
-        assert!(import_tile_into_cache(&cache_path, tile, &source_path).is_err());
+        assert!(import_tile_into_cache(&cache_path, tile, &source_path, None).is_err());
         assert!(import_coastline_into_cache(&cache_path, tile, &source_path).is_err());
         assert_eq!(
             cache
@@ -471,7 +490,7 @@ mod tests {
         source
             .execute_batch("DELETE FROM contour WHERE fid=8")
             .unwrap();
-        import_tile_into_cache(&cache_path, tile, &source_path).unwrap();
+        import_tile_into_cache(&cache_path, tile, &source_path, None).unwrap();
         assert_eq!(
             cache
                 .query_row("SELECT COUNT(*) FROM contour_tiles", [], |r| r
@@ -490,7 +509,7 @@ mod tests {
         source
             .execute_batch("ALTER TABLE contour RENAME COLUMN elevation_m TO broken")
             .unwrap();
-        assert!(import_tile_into_cache(&cache_path, tile, &source_path).is_err());
+        assert!(import_tile_into_cache(&cache_path, tile, &source_path, None).is_err());
         assert_eq!(
             cache
                 .query_row("SELECT contour_count FROM contour_tile_manifest", [], |r| r
@@ -500,7 +519,7 @@ mod tests {
         );
 
         source.execute_batch("DROP TABLE contour").unwrap();
-        import_tile_into_cache(&cache_path, tile, &source_path).unwrap();
+        import_tile_into_cache(&cache_path, tile, &source_path, None).unwrap();
         assert_eq!(
             cache
                 .query_row("SELECT COUNT(*) FROM contour_tiles", [], |r| r

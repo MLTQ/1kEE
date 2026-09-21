@@ -187,9 +187,8 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         crate::model::ActiveBody::Earth => Some(contour_load.status),
     };
 
-    // Pulsing tile-grid glow: only draw cells that are NOT yet ready in the cache.
-    let still_loading = contour_load.status.ready_assets < contour_load.status.total_assets
-        || contours.is_none();
+    // The grid tracks build, decode, and publication; disk presence alone is not completion.
+    let still_loading = contour_load.status.ready_assets < contour_load.status.total_assets;
     if still_loading {
         match model.active_body {
             crate::model::ActiveBody::Moon => {
@@ -203,6 +202,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                     LOCAL_CONTOUR_BUILD_RADIUS,
                     time,
                     &contour_load.ready_buckets,
+                    &contour_load.loading_progress,
                     Some(half_extent),
                 );
             }
@@ -216,7 +216,8 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                     LOCAL_CONTOUR_BUILD_RADIUS,
                     time,
                     &contour_load.ready_buckets,
-                    None,
+                    &contour_load.loading_progress,
+                    Some(srtm_focus_cache::mars_half_extent_for_zoom(render_zoom)),
                 );
             }
             crate::model::ActiveBody::Earth => {
@@ -229,6 +230,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                     build_radius,
                     time,
                     &contour_load.ready_buckets,
+                    &contour_load.loading_progress,
                     None,
                 );
             }

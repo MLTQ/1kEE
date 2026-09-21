@@ -846,6 +846,7 @@ fn touch(path: &Path) {
 /// than a mosaic of cached 0.02° chunks. The durable product of that request
 /// is the contour geometry stored in the SQLite focus cache, so the GeoTIFF
 /// written here is a build-time temporary the caller deletes.
+#[cfg(test)]
 pub fn fetch_tile_raster(
     min_lat: f32,
     min_lon: f32,
@@ -854,6 +855,21 @@ pub fn fetch_tile_raster(
     raster_size: u32,
     destination: &Path,
 ) -> bool {
+    fetch_tile_raster_with_progress(
+        min_lat, min_lon, max_lat, max_lon, raster_size, destination, |_, _| {},
+    )
+}
+
+/// Byte progress is determinate only when the host supplies Content-Length.
+pub fn fetch_tile_raster_with_progress(
+    min_lat: f32,
+    min_lon: f32,
+    max_lat: f32,
+    max_lon: f32,
+    raster_size: u32,
+    destination: &Path,
+    mut on_bytes: impl FnMut(u64, Option<u64>),
+) -> bool {
     if !is_enabled() {
         return false;
     }
@@ -861,7 +877,7 @@ pub fn fetch_tile_raster(
     let bbox = format!("{min_lon},{min_lat},{max_lon},{max_lat}");
     let size = format!("{size_px},{size_px}");
 
-    let Ok(response) = http_client()
+    let Ok(mut response) = http_client()
         .get(format!("{SERVICE}/exportImage"))
         .query(&[
             ("bbox", bbox.as_str()),
@@ -881,9 +897,20 @@ pub fn fetch_tile_raster(
     if !response.status().is_success() {
         return false;
     }
-    let Ok(bytes) = response.bytes() else {
-        return false;
-    };
+    use std::io::Read;
+    let total = response.content_length();
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        match response.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                bytes.extend_from_slice(&buffer[..count]);
+                on_bytes(bytes.len() as u64, total);
+            }
+            Err(_) => return false,
+        }
+    }
     if !looks_like_tiff(&bytes) {
         return false;
     }

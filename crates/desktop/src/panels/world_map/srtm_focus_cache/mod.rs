@@ -10,6 +10,7 @@ use std::time::Duration;
 pub mod builders;
 pub mod db;
 pub mod gdal;
+pub mod progress;
 mod work_slots;
 pub mod zoom; // pub so ui_overlays can access lunar_spec_for_zoom
 
@@ -258,6 +259,7 @@ fn local_region_state_from_assets(
         ordered_tile_buckets(center_lat_bucket, center_lon_bucket, radius)
     {
         if !bucket_has_latitude_coverage(lat_bucket, bucket_step, spec, max_abs_lat) {
+            ready_buckets.insert((lat_bucket, lon_bucket));
             continue;
         }
         let tile = TileKey {

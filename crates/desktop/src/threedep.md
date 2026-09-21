@@ -96,3 +96,8 @@ exists under a point, and pulls only the small area currently in view.
 - Live tests covering the probe, tile fetch, chunk round-trip, and hillshade are
   `#[ignore]`d. Run them after changing any request parameter:
   `cargo test -p one-thousand-electric-eye-desktop threedep -- --ignored`
+
+- `fetch_tile_raster_with_progress` streams the response in 64 KiB blocks and
+  reports real bytes with optional Content-Length. Missing length stays
+  indeterminate; the caller reports source completion after TIFF validation and
+  successful persistence. `fetch_tile_raster` is the no-observer test wrapper.

@@ -10,6 +10,10 @@ use std::time::{Duration, Instant};
 
 use super::gebco_depth_fill;
 use super::srtm_focus_cache;
+use srtm_focus_cache::progress::BuildSnapshot;
+
+#[path = "contour_loading.rs"]
+mod loading;
 
 #[cfg(test)]
 #[path = "contour_read_tests.rs"]
@@ -44,6 +48,7 @@ const LOCAL_MANIFEST_SNAPSHOT_TTL: Duration = Duration::from_millis(350);
 /// local terrain view.  Does NOT delete anything from disk; the SQLite cache
 /// files are untouched and tiles will be re-read (not re-built) on demand.
 pub fn blast_tile_caches() {
+    srtm_focus_cache::progress::clear();
     srtm_focus_cache::clear_contour_build_backoffs();
     if let Some(c) = LOCAL_CONTOUR_CACHE.get() {
         if let Ok(mut g) = c.lock() {
@@ -136,6 +141,7 @@ pub struct ContourPath {
 pub struct LocalContourLoad {
     pub contours: Option<Arc<Vec<ContourPath>>>,
     pub ready_buckets: HashSet<(i32, i32)>,
+    pub loading_progress: HashMap<(i32, i32), f32>,
     pub status: srtm_focus_cache::FocusContourRegionStatus,
     /// The same tiles the merge flattens, handed out unflattened for the GPU
     /// contour pass. Each `Arc` is stable once loaded, which is what lets the
@@ -183,6 +189,7 @@ struct LocalManifestKey {
 struct LocalManifestSnapshot {
     key: LocalManifestKey,
     assets: Vec<srtm_focus_cache::FocusContourAsset>,
+    build_progress: BuildSnapshot,
     manifest_revision: u64,
     refreshed_at: Instant,
 }
@@ -195,6 +202,7 @@ struct LocalManifestSnapshot {
 struct LocalManifestAssetViews {
     assets: Vec<srtm_focus_cache::FocusContourAsset>,
     exact_for_reads: bool,
+    build_progress: BuildSnapshot,
 }
 
 impl LocalManifestAssetViews {
@@ -330,6 +338,8 @@ struct LocalRegionCache {
     manifest_in_flight: Option<LocalManifestKey>,
     last_status: Option<srtm_focus_cache::FocusContourRegionStatus>,
     entries: HashMap<CacheKey, Arc<Vec<ContourPath>>>,
+    read_progress: HashMap<CacheKey, f32>,
+    published_tiles: HashSet<CacheKey>,
     /// Keys for which a background load thread has been spawned but not yet
     /// completed.  Prevents spawning O(N) duplicate threads per repaint
     /// (each finishing thread calls ctx.request_repaint(), which would
@@ -366,6 +376,8 @@ impl Default for LocalRegionCache {
             manifest_in_flight: None,
             last_status: None,
             entries: HashMap::new(),
+            read_progress: HashMap::new(),
+            published_tiles: HashSet::new(),
             in_flight: HashSet::new(),
             zoom_fallback: None,
             merged: None,
@@ -390,6 +402,8 @@ impl LocalRegionCache {
 
     fn clear_entries_for_new_scene(&mut self) {
         self.entries.clear();
+        self.read_progress.clear();
+        self.published_tiles.clear();
         self.in_flight.clear();
         self.last_status = None;
         self.merged = None;
@@ -504,6 +518,7 @@ fn finish_local_merge(
     cache: &Mutex<LocalRegionCache>,
     key: LocalMergeKey,
     merged: Option<Arc<Vec<ContourPath>>>,
+    published_tiles: HashSet<CacheKey>,
 ) {
     let Ok(mut cache) = cache.lock() else {
         return;
@@ -523,6 +538,7 @@ fn finish_local_merge(
             cache.zoom_fallback = None;
         }
         cache.merged = Some(merged);
+        cache.published_tiles = published_tiles;
         cache.merged_key = Some(key);
     }
 }
@@ -534,6 +550,7 @@ fn spawn_local_merge(
     worker_name: &'static str,
 ) {
     let key = work.key;
+    let published_tiles = work.tiles.iter().map(|(key, _)| key.clone()).collect();
     let cleanup_ctx = ctx.clone();
     if let Err(error) = std::thread::Builder::new()
         .name(worker_name.into())
@@ -547,11 +564,11 @@ fn spawn_local_merge(
                     None
                 }
             };
-            finish_local_merge(cache, key, merged);
+            finish_local_merge(cache, key, merged, published_tiles);
             ctx.request_repaint();
         })
     {
-        finish_local_merge(cache, key, None);
+        finish_local_merge(cache, key, None, HashSet::new());
         eprintln!("[1kEE] failed to spawn {worker_name}: {error}");
         cleanup_ctx.request_repaint();
     }
@@ -751,6 +768,7 @@ fn finish_local_read(
         }
         for (key, _) in requests {
             cache.in_flight.remove(key);
+            cache.read_progress.remove(key);
         }
         if changed {
             cache.mark_entries_changed();
@@ -811,7 +829,16 @@ fn spawn_local_read(
         .name(worker_name.into())
         .spawn(move || {
             let loaded = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                query_local_contours_batch(&requests[0].0.path, &requests, feature_budget).ok()
+                query_local_contours_with_progress(
+                    &requests[0].0.path, &requests, feature_budget,
+                    &mut |key, done, total| {
+                        if let Ok(mut guard) = cache.lock() {
+                            if guard.load_epoch == epoch && total > 0 {
+                                guard.read_progress.insert(key.clone(), done as f32 / total as f32);
+                            }
+                        }
+                    },
+                ).ok()
             })) {
                 Ok(loaded) => loaded,
                 Err(_) => {
@@ -877,6 +904,7 @@ fn finish_local_manifest(
     cache: &Mutex<LocalRegionCache>,
     key: &LocalManifestKey,
     assets: Option<Vec<srtm_focus_cache::FocusContourAsset>>,
+    build_progress: BuildSnapshot,
 ) {
     let Ok(mut cache) = cache.lock() else {
         return;
@@ -891,6 +919,7 @@ fn finish_local_manifest(
         cache.manifest_snapshot = Some(LocalManifestSnapshot {
             key: key.clone(),
             assets,
+            build_progress,
             // Observe the revision after selection: a builder that completed
             // during the query is already represented by this snapshot.
             manifest_revision: srtm_focus_cache::contour_manifest_revision(),
@@ -919,6 +948,7 @@ fn local_manifest_asset_views(
         return LocalManifestAssetViews {
             assets: snapshot.assets.clone(),
             exact_for_reads: true,
+            build_progress: snapshot.build_progress.clone(),
         };
     }
 
@@ -948,6 +978,7 @@ fn local_manifest_asset_views(
     LocalManifestAssetViews {
         assets: display_assets,
         exact_for_reads: false,
+        build_progress: snapshot.build_progress.clone(),
     }
 }
 
@@ -961,6 +992,7 @@ fn local_manifest_assets<F>(
     key: LocalManifestKey,
     ctx: egui::Context,
     worker_name: &'static str,
+    cache_path: fn(Option<&Path>) -> Option<PathBuf>,
     fetch: F,
 ) -> LocalManifestAssetViews
 where
@@ -1005,11 +1037,19 @@ where
                         None
                     }
                 };
-                finish_local_manifest(cache, &worker_key, assets);
+                let mut build_progress = cache_path(worker_key.root.as_deref())
+                    .map(|path| srtm_focus_cache::progress::snapshot(&path, worker_key.zoom_bucket))
+                    .unwrap_or_default();
+                build_progress.retain(|&(lat, lon), _| {
+                    (i64::from(lat) - i64::from(worker_key.center_lat_bucket)).abs()
+                        .max((i64::from(lon) - i64::from(worker_key.center_lon_bucket)).abs())
+                        <= i64::from(worker_key.prefetch_radius)
+                });
+                finish_local_manifest(cache, &worker_key, assets, build_progress);
                 ctx.request_repaint();
             })
         {
-            finish_local_manifest(cache, &cleanup_key, None);
+            finish_local_manifest(cache, &cleanup_key, None, BuildSnapshot::new());
             eprintln!("[1kEE] failed to spawn {worker_name}: {error}");
             cleanup_ctx.request_repaint();
         }
@@ -1049,6 +1089,7 @@ pub fn load_srtm_region_for_view(
         manifest_key,
         ctx.clone(),
         "earth-local-contour-manifest",
+        srtm_focus_cache::db::focus_cache_db_path,
         move || {
             srtm_focus_cache::ensure_focus_contour_region(
                 manifest_root.as_deref(),
@@ -1150,10 +1191,12 @@ pub fn load_srtm_region_for_view(
     if let Some(work) = merge {
         spawn_local_merge(cache, work, ctx.clone(), "earth-local-contour-merge");
     }
+    let loading = loading::snapshot(cache, &assets, state);
     LocalContourLoad {
         contours,
-        ready_buckets: state.ready_buckets,
-        status: state.status,
+        ready_buckets: loading.ready_buckets,
+        loading_progress: loading.fractions,
+        status: loading.status,
         tiles,
     }
 }
@@ -1193,6 +1236,7 @@ pub fn load_lunar_region_for_view(
         manifest_key,
         ctx.clone(),
         "lunar-local-contour-manifest",
+        srtm_focus_cache::lunar_cache_db_path,
         move || {
             srtm_focus_cache::ensure_lunar_contour_region(
                 manifest_root.as_deref(),
@@ -1278,10 +1322,12 @@ pub fn load_lunar_region_for_view(
     if let Some(work) = merge {
         spawn_local_merge(cache, work, ctx.clone(), "lunar-local-contour-merge");
     }
+    let loading = loading::snapshot(cache, &assets, state);
     LocalContourLoad {
         contours,
-        ready_buckets: state.ready_buckets,
-        status: state.status,
+        ready_buckets: loading.ready_buckets,
+        loading_progress: loading.fractions,
+        status: loading.status,
         // Lunar and Mars keep the CPU renderer; see `LocalContourLoad::tiles`.
         tiles: Vec::new(),
     }
@@ -1322,6 +1368,7 @@ pub fn load_mars_region_for_view(
         manifest_key,
         ctx.clone(),
         "mars-local-contour-manifest",
+        srtm_focus_cache::mars_cache_db_path,
         move || {
             srtm_focus_cache::ensure_mars_contour_region(
                 manifest_root.as_deref(),
@@ -1405,10 +1452,12 @@ pub fn load_mars_region_for_view(
     if let Some(work) = merge {
         spawn_local_merge(cache, work, ctx.clone(), "mars-local-contour-merge");
     }
+    let loading = loading::snapshot(cache, &assets, state);
     LocalContourLoad {
         contours,
-        ready_buckets: state.ready_buckets,
-        status: state.status,
+        ready_buckets: loading.ready_buckets,
+        loading_progress: loading.fractions,
+        status: loading.status,
         // Lunar and Mars keep the CPU renderer; see `LocalContourLoad::tiles`.
         tiles: Vec::new(),
     }
@@ -2085,6 +2134,15 @@ fn query_local_contours_batch(
     requests: &[(CacheKey, srtm_focus_cache::FocusContourAsset)],
     feature_budget: usize,
 ) -> rusqlite::Result<Vec<(CacheKey, Vec<ContourPath>)>> {
+    query_local_contours_with_progress(path, requests, feature_budget, &mut |_, _, _| {})
+}
+
+fn query_local_contours_with_progress(
+    path: &Path,
+    requests: &[(CacheKey, srtm_focus_cache::FocusContourAsset)],
+    feature_budget: usize,
+    on_progress: &mut dyn FnMut(&CacheKey, usize, usize),
+) -> rusqlite::Result<Vec<(CacheKey, Vec<ContourPath>)>> {
     let connection = srtm_focus_cache::db::open_cache_db_read_only(path)?;
     let mut statement = connection.prepare(
         "SELECT geom, elevation_m
@@ -2124,6 +2182,11 @@ fn query_local_contours_batch(
             }
         };
 
+        let total: usize = connection.query_row(
+            "SELECT contour_count FROM contour_tile_manifest WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
+            params![key.zoom_bucket, key.lat_bucket, key.lon_bucket], |r| r.get(0),
+        ).unwrap_or(0);
+        let mut decoded_rows = 0;
         let mut contours = Vec::new();
         let mut tile_failed = false;
         for row in rows {
@@ -2142,6 +2205,10 @@ fn query_local_contours_batch(
                 }
             };
             contours.extend(decoded);
+            decoded_rows += 1;
+            if decoded_rows % 128 == 0 {
+                on_progress(key, decoded_rows, total);
+            }
         }
         if tile_failed {
             continue;
@@ -2176,6 +2243,7 @@ fn query_local_contours_batch(
         // Cache empty ready tiles too. Otherwise the render loop mistakes
         // nodata/flat tiles for misses and schedules the same SQLite/WKB read
         // again after every completed batch.
+        on_progress(key, decoded_rows, total);
         results.push((key.clone(), contours));
     }
 
@@ -2523,7 +2591,7 @@ mod tests {
             assert_ne!(state.merge_requested_key, Some(stale_key));
         }
 
-        finish_local_merge(&cache, stale_key, Some(flatten_local_merge(stale_work)));
+        finish_local_merge(&cache, stale_key, Some(flatten_local_merge(stale_work)), HashSet::new());
 
         let mut state = cache.lock().expect("test cache lock");
         assert!(state.merged_key.is_none());
@@ -2532,7 +2600,7 @@ mod tests {
         let fresh_key = fresh_work.key;
         drop(state);
 
-        finish_local_merge(&cache, fresh_key, Some(flatten_local_merge(fresh_work)));
+        finish_local_merge(&cache, fresh_key, Some(flatten_local_merge(fresh_work)), HashSet::new());
         let state = cache.lock().expect("test cache lock");
         let merged = state.merged.as_ref().expect("published current merge");
         assert_eq!(merged.len(), 2);
@@ -2557,6 +2625,7 @@ mod tests {
             manifest_snapshot: Some(LocalManifestSnapshot {
                 key: requested_key.clone(),
                 assets: vec![test_asset(1, 0)],
+                build_progress: BuildSnapshot::new(),
                 manifest_revision: 0,
                 refreshed_at: Instant::now(),
             }),
@@ -2565,7 +2634,7 @@ mod tests {
             ..Default::default()
         });
 
-        finish_local_manifest(&cache, &stale_key, Some(vec![test_asset(0, 0)]));
+        finish_local_manifest(&cache, &stale_key, Some(vec![test_asset(0, 0)]), BuildSnapshot::new());
 
         let state = cache.lock().expect("test cache lock");
         assert!(state.manifest_in_flight.is_none());
@@ -2591,6 +2660,7 @@ mod tests {
                     (-1..=1).map(move |lon_bucket| test_asset(lat_bucket, lon_bucket))
                 })
                 .collect(),
+            build_progress: BuildSnapshot::new(),
             manifest_revision: 0,
             refreshed_at: Instant::now(),
         };

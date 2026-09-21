@@ -61,3 +61,11 @@ contracts shared by on-demand terrain builders and render-time tile lookups.
 
 - Import sources open read-only; a missing temporary GeoPackage is an error,
   so it cannot create an accidental empty manifest entry.
+
+- Active build handles receive imported-row counts every 128 contours, using
+  the source table count as denominator. The commit milestone advances only
+  after the SQLite transaction succeeds; import errors cannot report completion.
+
+- Import progress is passed as the exact attempt handle rather than looked up
+  by tile key, so late imports cannot advance a newer attempt after a reset.
+  A regression checks this with two handles for the same tile.

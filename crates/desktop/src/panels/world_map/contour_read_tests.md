@@ -17,3 +17,6 @@ ordering as the prior SQLite blob-sort implementation, and measures real data.
 |---|---|---|
 | `contour_asset.rs` | Test child can exercise private read/parse helpers | Changing ordering or simplification semantics |
 | Developer benchmark | Explicit opt-in; no writes to the supplied cache | Mutating operator data or requiring fixtures in the normal suite |
+
+- The row-progress regression reads a real 300-row temporary SQLite tile and
+  checks intermediate/final counts against its manifest, including empty blobs.
