@@ -14,6 +14,9 @@ use srtm_focus_cache::progress::BuildSnapshot;
 
 #[path = "contour_loading.rs"]
 mod loading;
+#[path = "contour_reader.rs"]
+mod reader;
+use reader::spawn_local_read;
 
 #[cfg(test)]
 #[path = "contour_read_tests.rs"]
@@ -815,52 +818,6 @@ fn finish_globe_read(
     cache.load_in_flight = None;
 }
 
-fn spawn_local_read(
-    cache: &'static Mutex<LocalRegionCache>,
-    epoch: u64,
-    requests: Vec<ContourReadRequest>,
-    feature_budget: usize,
-    ctx: egui::Context,
-    worker_name: &'static str,
-) {
-    let cleanup_requests = requests.clone();
-    let cleanup_ctx = ctx.clone();
-    if let Err(error) = std::thread::Builder::new()
-        .name(worker_name.into())
-        .spawn(move || {
-            let loaded = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                query_local_contours_with_progress(
-                    &requests[0].0.path, &requests, feature_budget,
-                    &mut |key, done, total| {
-                        if let Ok(mut guard) = cache.lock() {
-                            if guard.load_epoch == epoch && total > 0 {
-                                guard.read_progress.insert(key.clone(), done as f32 / total as f32);
-                            }
-                        }
-                    },
-                ).ok()
-            })) {
-                Ok(loaded) => loaded,
-                Err(_) => {
-                    eprintln!("[1kEE] {worker_name} panicked while reading contour tiles");
-                    None
-                }
-            };
-            let read_failed = loaded.is_none();
-            finish_local_read(cache, epoch, &requests, loaded);
-            if read_failed {
-                ctx.request_repaint_after(CONTOUR_READ_RETRY_DELAY);
-            } else {
-                ctx.request_repaint();
-            }
-        })
-    {
-        finish_local_read(cache, epoch, &cleanup_requests, None);
-        eprintln!("[1kEE] failed to spawn {worker_name}: {error}");
-        cleanup_ctx.request_repaint_after(CONTOUR_READ_RETRY_DELAY);
-    }
-}
-
 fn spawn_globe_read(
     cache: &'static Mutex<GlobeRegionCache>,
     epoch: u64,
@@ -905,6 +862,7 @@ fn finish_local_manifest(
     key: &LocalManifestKey,
     assets: Option<Vec<srtm_focus_cache::FocusContourAsset>>,
     build_progress: BuildSnapshot,
+    selection_revision: u64,
 ) {
     let Ok(mut cache) = cache.lock() else {
         return;
@@ -920,9 +878,10 @@ fn finish_local_manifest(
             key: key.clone(),
             assets,
             build_progress,
-            // Observe the revision after selection: a builder that completed
-            // during the query is already represented by this snapshot.
-            manifest_revision: srtm_focus_cache::contour_manifest_revision(),
+            // A tile completion or freed slot during selection may not be
+            // represented in this query. Keep its starting revision so the
+            // next repaint refreshes instead of losing that notification.
+            manifest_revision: selection_revision,
             refreshed_at: Instant::now(),
         });
     }
@@ -1045,11 +1004,11 @@ where
                         .max((i64::from(lon) - i64::from(worker_key.center_lon_bucket)).abs())
                         <= i64::from(worker_key.prefetch_radius)
                 });
-                finish_local_manifest(cache, &worker_key, assets, build_progress);
+                finish_local_manifest(cache, &worker_key, assets, build_progress, manifest_revision);
                 ctx.request_repaint();
             })
         {
-            finish_local_manifest(cache, &cleanup_key, None, BuildSnapshot::new());
+            finish_local_manifest(cache, &cleanup_key, None, BuildSnapshot::new(), manifest_revision);
             eprintln!("[1kEE] failed to spawn {worker_name}: {error}");
             cleanup_ctx.request_repaint();
         }
@@ -2143,6 +2102,27 @@ fn query_local_contours_with_progress(
     feature_budget: usize,
     on_progress: &mut dyn FnMut(&CacheKey, usize, usize),
 ) -> rusqlite::Result<Vec<(CacheKey, Vec<ContourPath>)>> {
+    let mut results = Vec::with_capacity(requests.len());
+    stream_local_contours(
+        path,
+        requests,
+        feature_budget,
+        on_progress,
+        &mut |key, contours| {
+            results.push((key, contours));
+            true
+        },
+    )?;
+    Ok(results)
+}
+
+fn stream_local_contours(
+    path: &Path,
+    requests: &[ContourReadRequest],
+    feature_budget: usize,
+    on_progress: &mut dyn FnMut(&CacheKey, usize, usize),
+    on_tile: &mut dyn FnMut(CacheKey, Vec<ContourPath>) -> bool,
+) -> rusqlite::Result<()> {
     let connection = srtm_focus_cache::db::open_cache_db_read_only(path)?;
     let mut statement = connection.prepare(
         "SELECT geom, elevation_m
@@ -2151,22 +2131,36 @@ fn query_local_contours_with_progress(
          ORDER BY fid",
     )?;
 
-    let mut results = Vec::with_capacity(requests.len());
+    let mut completed = 0;
     let mut first_error = None;
     for (key, asset) in requests {
+        let tile = srtm_focus_cache::TileKey {
+            zoom_bucket: key.zoom_bucket,
+            lat_bucket: key.lat_bucket,
+            lon_bucket: key.lon_bucket,
+        };
+        let read_timer = srtm_focus_cache::timings::StageTimer::new(tile, "read_decode");
+        let mut decode_time = Duration::ZERO;
+        let mut geometry_bytes = 0u64;
         let rows = match statement.query_map(
             params![key.zoom_bucket, key.lat_bucket, key.lon_bucket],
             |row| {
                 let elevation_m: f32 = row.get(1)?;
                 let geometry = row.get_ref(0)?.as_blob()?;
-                Ok(parse_gpkg_lines(geometry)
+                geometry_bytes += geometry.len() as u64;
+                let decode_start = read_timer.clock();
+                let decoded = parse_gpkg_lines(geometry)
                     .into_iter()
                     .filter(|line| line.len() >= 2)
                     .map(|line| ContourPath {
                         elevation_m,
                         points: simplify_line(line, asset.simplify_step),
                     })
-                    .collect::<Vec<_>>())
+                    .collect::<Vec<_>>();
+                if let Some(start) = decode_start {
+                    decode_time += start.elapsed();
+                }
+                Ok(decoded)
             },
         ) {
             Ok(rows) => rows,
@@ -2213,13 +2207,31 @@ fn query_local_contours_with_progress(
         if tile_failed {
             continue;
         }
+        if let Some(elapsed) = read_timer.elapsed() {
+            srtm_focus_cache::timings::record(
+                tile,
+                "wkb_decode",
+                decode_time,
+                decoded_rows as u64,
+                geometry_bytes,
+                "ok",
+            );
+            srtm_focus_cache::timings::record(
+                tile,
+                "sqlite_read",
+                elapsed.saturating_sub(decode_time),
+                decoded_rows as u64,
+                geometry_bytes,
+                "ok",
+            );
+        }
+        read_timer.finish(decoded_rows as u64, geometry_bytes);
+        let select_timer = srtm_focus_cache::timings::StageTimer::new(tile, "geometry_select");
 
         // Only move small Vec headers, not hundreds of MB of SQLite blobs.
         // Stable sorting preserves fid order (including MultiLineString parts)
         // for equal absolute elevations, exactly as the previous SQL sort did.
-        contours.sort_by(|left, right| {
-            left.elevation_m.abs().total_cmp(&right.elevation_m.abs())
-        });
+        contours.sort_by(|left, right| left.elevation_m.abs().total_cmp(&right.elevation_m.abs()));
 
         if contours.len() > feature_budget {
             // Keep the longest contours rather than every Nth one.
@@ -2233,29 +2245,30 @@ fn query_local_contours_with_progress(
             contours.sort_unstable_by(|left, right| right.points.len().cmp(&left.points.len()));
             contours.truncate(budget);
             // Restore the elevation ordering the renderer and cache expect.
-            contours.sort_by(|left, right| {
-                left.elevation_m
-                    .abs()
-                    .total_cmp(&right.elevation_m.abs())
-            });
+            contours
+                .sort_by(|left, right| left.elevation_m.abs().total_cmp(&right.elevation_m.abs()));
         }
 
         // Cache empty ready tiles too. Otherwise the render loop mistakes
         // nodata/flat tiles for misses and schedules the same SQLite/WKB read
         // again after every completed batch.
         on_progress(key, decoded_rows, total);
-        results.push((key.clone(), contours));
+        select_timer.finish(contours.len() as u64, 0);
+        completed += 1;
+        if !on_tile(key.clone(), contours) {
+            break;
+        }
     }
 
     // Preserve any successfully decoded tiles in a mixed batch. If every
     // request failed, surface the error so the single-flight scheduler applies
     // a short retry backoff instead of spinning one reader per repaint.
-    if results.is_empty() {
+    if completed == 0 {
         if let Some(error) = first_error {
             return Err(error);
         }
     }
-    Ok(results)
+    Ok(())
 }
 
 fn simplify_line(points: Vec<GeoPoint>, step: usize) -> Vec<GeoPoint> {
@@ -2634,7 +2647,7 @@ mod tests {
             ..Default::default()
         });
 
-        finish_local_manifest(&cache, &stale_key, Some(vec![test_asset(0, 0)]), BuildSnapshot::new());
+        finish_local_manifest(&cache, &stale_key, Some(vec![test_asset(0, 0)]), BuildSnapshot::new(), 0);
 
         let state = cache.lock().expect("test cache lock");
         assert!(state.manifest_in_flight.is_none());

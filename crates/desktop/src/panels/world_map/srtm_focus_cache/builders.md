@@ -51,14 +51,15 @@ SQLite assets immediately.
 - `allow_build=false` is intentionally a no-op on cache misses; the tile will
   be scheduled when it enters a caller's build window or a narrower caller
   requests it.
-- Shared processing remains capped at two jobs (one on small CPUs), leaving
-  capacity for rendering and readers. 3DEP separately permits four complete
-  remote jobs, so downloads overlap processing without occupying its slots.
-  The four-job bound includes downloaded rasters waiting for processing.
-  RAII permits in `work_slots.rs` release capacity on every exit.
+- Shared processing scales to half the available CPUs, capped at four.
+  3DEP reserves download/staging admission before spawning. Four downloads can
+  overlap processing; eight staging slots bound downloading and queued rasters.
+  Completed downloads release network slots immediately, and processing takes
+  ownership of queued rasters before releasing staging capacity. RAII permits
+  in `work_slots.rs` release capacity on every exit.
 - Builder calls receive the region selector's manifest count rather than
-  querying SQLite per tile. Completed in-process builds advance a revision so
-  local manifest snapshots refresh immediately.
+  querying SQLite per tile. Completed in-process builds and newly available download/staging slots
+  advance a revision so local manifest snapshots refresh immediately.
 - The sourceless memo is scoped to the source root that produced it and is
   cleared by a manual cache reset, so a remounted volume or a newly picked data
   root re-checks every bucket rather than inheriting stale ocean verdicts. It

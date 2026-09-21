@@ -69,3 +69,8 @@ contracts shared by on-demand terrain builders and render-time tile lookups.
 - Import progress is passed as the exact attempt handle rather than looked up
   by tile key, so late imports cannot advance a newer attempt after a reset.
   A regression checks this with two handles for the same tile.
+
+- Import profiling separates connection/schema setup, immediate writer-lock
+  acquisition, and row copying/commit. `BEGIN IMMEDIATE` obtains the writer
+  before mutations, keeping lock wait separate while preserving atomic import
+  and the existing busy timeout. Successful writes report rows and blob bytes.

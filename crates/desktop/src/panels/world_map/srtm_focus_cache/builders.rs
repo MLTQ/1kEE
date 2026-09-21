@@ -30,14 +30,13 @@ fn manifest_revision_counter() -> &'static AtomicU64 {
     MANIFEST_REVISION.get_or_init(|| AtomicU64::new(0))
 }
 
-/// Monotonically increases after an in-process contour builder finishes. Local
-/// manifest snapshots use it to refresh immediately instead of waiting for
-/// their short external-writer timeout.
+/// Increases after a builder finishes or a pipeline stage frees admission
+/// capacity. Manifest workers immediately see new tiles / refill the queue.
 pub fn manifest_revision() -> u64 {
     manifest_revision_counter().load(Ordering::Acquire)
 }
 
-fn bump_manifest_revision() {
+pub(super) fn bump_manifest_revision() {
     manifest_revision_counter().fetch_add(1, Ordering::AcqRel);
 }
 
@@ -365,10 +364,10 @@ pub fn ensure_bucket_asset(
         return None;
     }
 
-    let permit = if uses_threedep {
-        work_slots::remote_jobs().try_acquire()?
+    let (processing, download) = if uses_threedep {
+        (None, Some(work_slots::remote_downloads().try_acquire()?))
     } else {
-        work_slots::processing().try_acquire()?
+        (Some(work_slots::processing().try_acquire()?), None)
     };
 
     let pending = pending_set();
@@ -382,12 +381,14 @@ pub fn ensure_bucket_asset(
     let cache_root = cache_root.to_path_buf();
     let cache_db_path = cache_db_path.to_path_buf();
     std::thread::spawn(move || {
-        let _permit = permit;
+        let _permit = processing;
         let built = match srtm_root.as_deref() {
             Some(root) => {
                 build_focus_contours(root, &cache_root, &cache_db_path, tile, bounds, spec)
             }
-            None => build_threedep_contours(&cache_root, &cache_db_path, tile, bounds, spec),
+            None => build_threedep_contours(
+                &cache_root, &cache_db_path, tile, bounds, spec, download.expect("remote admission"),
+            ),
         };
         if built.is_some() {
             bump_manifest_revision();

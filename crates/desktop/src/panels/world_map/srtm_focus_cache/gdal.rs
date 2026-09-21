@@ -3,6 +3,7 @@ use super::db::{
     journal_path_for, mark_tile_empty, shm_path_for, temp_tile_paths, wal_path_for,
 };
 use super::{BUILD_TIMEOUT, FocusContourSpec, GeoBounds, TEMP_DIR_NAME, TileKey};
+use super::timings::StageTimer;
 use crate::settings_store;
 use std::collections::HashSet;
 use std::fs;
@@ -15,6 +16,10 @@ use std::time::{Duration, Instant};
 const LUNAR_SOURCE_CHUNK_CENTER_STEP_DEG: f32 = 4.0;
 const LUNAR_SOURCE_CHUNK_HALF_EXTENT_DEG: f32 = 6.0;
 const LUNAR_SOURCE_CHUNK_DIR: &str = "lunar_source_chunks";
+
+#[cfg(test)]
+#[path = "pipeline_bench.rs"]
+mod pipeline_bench;
 
 pub fn find_prebuilt_vrt(srtm_root: &Path) -> Option<PathBuf> {
     let parent = srtm_root.parent()?;
@@ -817,6 +822,11 @@ pub fn run_command_with_timeout(
         ));
     }
 
+    // GDAL's progress dots otherwise interleave with per-stage records in a
+    // redirected log. Preserve stderr so real tool errors remain visible.
+    if super::timings::enabled() {
+        command.stdout(std::process::Stdio::null());
+    }
     let mut child = command.spawn()?;
     let pid = child.id();
     if let Ok(mut guard) = active_children().lock() {
@@ -878,6 +888,7 @@ pub fn build_focus_contours(
         return None;
     }
 
+    let build_timer = StageTimer::new(tile, "build_srtm");
     let progress = super::progress::start(
         cache_db_path, tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket,
     );
@@ -892,7 +903,9 @@ pub fn build_focus_contours(
     if let Some(parent) = tmp_tif_path.parent() {
         fs::create_dir_all(parent).ok()?;
     }
+    let source_timer = StageTimer::new(tile, "local_source");
     run_gdalwarp(&tiles, &tmp_tif_path, bounds, spec).ok()?;
+    source_timer.finish(0, 0);
 
     if shutdown_requested().load(Ordering::Relaxed) {
         cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
@@ -900,7 +913,9 @@ pub fn build_focus_contours(
     }
 
     progress.source_ready();
+    let contour_timer = StageTimer::new(tile, "contour");
     run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m, Some(-32768.0)).ok()?;
+    contour_timer.finish(0, 0);
     progress.contours_ready();
     import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path, Some(&progress)).ok()?;
 
@@ -909,12 +924,15 @@ pub fn build_focus_contours(
         "z{}_lat{}_lon{}.coast.tmp.gpkg",
         tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket
     ));
+    let coastline_timer = StageTimer::new(tile, "coastline");
     if run_gdal_coastline_0m(&tmp_tif_path, &tmp_coast_gpkg_path).is_ok() {
         let _ = import_coastline_into_cache(cache_db_path, tile, &tmp_coast_gpkg_path);
+        coastline_timer.finish(0, 0);
     }
     let _ = fs::remove_file(&tmp_coast_gpkg_path);
 
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
+    build_timer.finish(0, 0);
     Some(())
 }
 
@@ -930,13 +948,18 @@ pub fn build_threedep_contours(
     tile: TileKey,
     bounds: GeoBounds,
     spec: FocusContourSpec,
+    download: super::work_slots::DownloadPermit<'_>,
 ) -> Option<()> {
     if shutdown_requested().load(Ordering::Relaxed) {
         return None;
     }
 
+    let build_timer = StageTimer::new(tile, "build_3dep");
     let progress = super::progress::start(
-        cache_db_path, tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket,
+        cache_db_path,
+        tile.zoom_bucket,
+        tile.lat_bucket,
+        tile.lon_bucket,
     );
 
     let (tmp_tif_path, tmp_gpkg_path) = temp_tile_paths(cache_root, tile);
@@ -945,6 +968,8 @@ pub fn build_threedep_contours(
         fs::create_dir_all(parent).ok()?;
     }
 
+    let source_timer = StageTimer::new(tile, "download");
+    let mut downloaded_bytes = 0;
     let fetched = crate::threedep::fetch_tile_raster_with_progress(
         bounds.min_lat,
         bounds.min_lon,
@@ -952,12 +977,19 @@ pub fn build_threedep_contours(
         bounds.max_lon,
         spec.raster_size,
         &tmp_tif_path,
-        |done, total| progress.source_bytes(done, total),
+        |done, total| {
+            downloaded_bytes = done;
+            progress.source_bytes(done, total);
+        },
     );
     if !fetched {
         cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
         return None;
     }
+    source_timer.finish(0, downloaded_bytes);
+    let staged = download.downloaded();
+    super::builders::bump_manifest_revision();
+    crate::app::request_repaint();
 
     if shutdown_requested().load(Ordering::Relaxed) {
         cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
@@ -965,22 +997,32 @@ pub fn build_threedep_contours(
     }
 
     progress.source_ready();
+    let wait_timer = StageTimer::new(tile, "processing_wait");
     let Some(_processing) = super::work_slots::processing()
         .acquire_until(|| shutdown_requested().load(Ordering::Relaxed))
     else {
         cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
         return None;
     };
+    wait_timer.finish(0, 0);
+    // The raster now belongs to a processing worker. Replenish the bounded
+    // download queue while this worker contours/imports it.
+    drop(staged);
+    super::builders::bump_manifest_revision();
+    crate::app::request_repaint();
 
     let nodata = crate::threedep::nodata_sentinel();
+    let contour_timer = StageTimer::new(tile, "contour");
     if run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m, Some(nodata)).is_err() {
         cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
         return None;
     }
+    contour_timer.finish(0, 0);
     progress.contours_ready();
     let imported = import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path, Some(&progress));
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
     imported.ok()?;
+    build_timer.finish(0, 0);
     Some(())
 }
 
@@ -1400,7 +1442,10 @@ mod tests {
         );
 
         assert!(
-            build_threedep_contours(&cache_root, &cache_db_path, tile, bounds, spec).is_some(),
+            build_threedep_contours(
+                &cache_root, &cache_db_path, tile, bounds, spec,
+                super::super::work_slots::remote_downloads().try_acquire().unwrap(),
+            ).is_some(),
             "3DEP contour build failed"
         );
 

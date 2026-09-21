@@ -7,7 +7,7 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 
 ### `LocalRegionCache`
 - **Does**: Tracks currently visible local-terrain tiles, a generation-safe
-  single in-flight SQLite/WKB read, a wide decoded return-pan envelope,
+  single in-flight SQLite/WKB batch, a wide decoded return-pan envelope,
   background manifest/merge workers, and zoom fallback geometry. It merges
   the active 13×13 source envelope off-thread so overlapping Moon/Mars
   contours owned by an outer tile cannot vanish at the visible edge or stall
@@ -42,8 +42,9 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 
 ### `begin_*_read` / `spawn_*_read`
 
-- **Does**: Coalesce camera-driven tile requests into at most one named reader
-  per cache. Reset epochs make late readers discard stale results rather than
+- **Does**: Coalesce camera-driven tile requests into one coordinator per
+  cache. `contour_reader.rs` uses up to two local readers and publishes tiles
+  individually; globe loading keeps one reader. Reset epochs make late readers discard stale results rather than
   repopulating a cleared or newly selected scene; a short retry backoff avoids
   reader churn when a cache database is temporarily unavailable. Local reads
   prioritize the viewport center and consume small bounded batches, so a wide
@@ -60,7 +61,7 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 - **Interacts with**: SQLite contour cache rows and `parse_gpkg_lines`.
 
 ### `load_lunar_region_for_view` / `load_lunar_for_globe`
-- **Does**: Request lunar cache assets, batch missing-tile SQLite reads onto one background thread, and merge the ready contours for rendering.
+- **Does**: Request lunar cache assets, batch missing-tile SQLite reads onto bounded background workers, and merge the ready contours for rendering.
 - **Interacts with**: `srtm_focus_cache`, `query_local_contours_batch`.
 - **Rationale**: Lunar mode often needs many overlapping tiles from the same SQLite file; batching reduces connection churn and thread storms.
 
@@ -85,12 +86,12 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 |-----------|---------|------------------|
 | World-map renderers | Returned contours are simplified but geographically correct polylines | Changing coordinate decoding or simplification semantics |
 | `srtm_focus_cache` | Tile cache keys remain `(path, zoom_bucket, lat_bucket, lon_bucket)` compatible with SQLite manifests | Changing keying or bucket math |
-| UI responsiveness | Local manifest selection, disk reads, and full contour merges stay off the render thread; each cache has one coalesced reader/merge and local reads stay batch-bounded during camera motion | Reintroducing synchronous selection/merges or an unbounded reader fan-out |
+| UI responsiveness | Local manifest selection, disk reads, and full contour merges stay off the render thread; each cache has one coalesced read batch/merge and local reads stay batch-bounded during camera motion | Reintroducing synchronous selection/merges or an unbounded reader fan-out |
 | GPU contour pass | Unchanged globe tiles return the same merged Arc so their instance version stays stable across repaints | Allocating a fresh merged Arc every frame |
 
 ## Notes
 - Lunar local rendering still performs the midpoint-based exclusive-region filter so overlapping tiles do not double-draw the same contour.
-- Batched reads still execute one SQL query per tile, but they reuse a single SQLite connection and one worker thread per repaint batch.
+- Batched reads still execute one SQL query per tile, but they reuse one SQLite connection per reader within a repaint batch.
 - All renderer geometry readers, including global contour GeoPackages, use the
   cache module's read-only/immutable fallback. A full derived-data volume can
   therefore stop new cache builds without blanking already checkpointed lines.
@@ -113,7 +114,8 @@ Loads contour geometry from disk into in-memory render caches for both local ter
   its overlapping ready tiles to the local pulse grid. The new manifest still
   owns read scheduling, so a root, zoom, or envelope change correctly reports
   unknown terrain rather than reusing stale data.
-- A local read batch is intentionally eight tiles. The full 13×13 envelope is
+- A local read batch is intentionally eight tiles, with at most two readers
+  and immediate per-tile publication. The full 13×13 envelope is
   still retained and eventually decoded, but small center-first arrivals avoid
   a burst of thousands of new paths in one frame.
 - Full tile flattening and lunar/Mars ownership partitioning use an immutable
@@ -149,3 +151,15 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 
 - Build observers are restricted to the selected tile window; snapshots cannot
   keep every previously visited build handle alive while panning.
+
+- `ONEKEE_TERRAIN_TIMINGS=1` measures each tile read, WKB decode/simplification,
+  SQLite/iteration overhead, and geometry selection. Disabled profiling makes
+  no per-row clock calls. Read counts and byte totals do not change geometry.
+
+- `stream_local_contours` emits successful tiles individually and can stop
+  between tiles when its callback rejects a stale epoch. The collecting wrapper
+  retains existing globe/test ordering and partial-failure behavior.
+
+- Manifest snapshots retain the revision observed before selection. Tile or
+  queue-capacity changes during a query therefore trigger another scheduling
+  pass immediately instead of being hidden until the 350 ms refresh timeout.

@@ -11,6 +11,7 @@ pub mod builders;
 pub mod db;
 pub mod gdal;
 pub mod progress;
+pub mod timings;
 mod work_slots;
 pub mod zoom; // pub so ui_overlays can access lunar_spec_for_zoom
 
@@ -153,7 +154,7 @@ pub(self) struct GeoBounds {
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-pub(self) struct TileKey {
+pub(crate) struct TileKey {
     pub zoom_bucket: i32,
     pub lat_bucket: i32,
     pub lon_bucket: i32,

@@ -140,6 +140,115 @@ fn row_progress_uses_manifest_count_and_reaches_the_actual_decoded_count() {
 }
 
 #[test]
+fn streamed_tiles_publish_before_batch_end_and_respect_resets() {
+    let requests = [
+        request(Path::new("test.sqlite"), (10, 0, 0)),
+        request(Path::new("test.sqlite"), (10, 0, 1)),
+    ];
+    let assets: Vec<_> = requests.iter().map(|(_, asset)| asset.clone()).collect();
+    let mut state = LocalRegionCache::default();
+    let (epoch, batch) = begin_local_read(&mut state, &assets, 0, 0).unwrap();
+    let cache = Mutex::new(state);
+    let contours = vec![ContourPath {
+        elevation_m: 10.0,
+        points: vec![
+            GeoPoint { lat: 0.0, lon: 0.0 },
+            GeoPoint { lat: 1.0, lon: 1.0 },
+        ],
+    }];
+    assert!(reader::publish_tile(
+        &cache,
+        epoch,
+        requests[0].0.clone(),
+        contours
+    ));
+    {
+        let mut state = cache.lock().unwrap();
+        assert!(state.entries.contains_key(&requests[0].0));
+        assert!(!state.in_flight.contains(&requests[0].0));
+        assert!(state.in_flight.contains(&requests[1].0));
+        assert_eq!(state.load_in_flight, Some(epoch));
+        assert!(
+            state.published_tiles.is_empty(),
+            "decode is not render completion"
+        );
+        assert!(begin_local_read(&mut state, &assets, 0, 0).is_none());
+        state.reset_all();
+    }
+    assert!(!reader::publish_tile(
+        &cache,
+        epoch,
+        requests[1].0.clone(),
+        Vec::new()
+    ));
+    finish_local_read(&cache, epoch, &batch, Some(Vec::new()));
+    let mut state = cache.lock().unwrap();
+    assert!(state.entries.is_empty());
+    assert!(state.load_in_flight.is_none());
+    let (new_epoch, _) = begin_local_read(&mut state, &assets, 0, 0).unwrap();
+    drop(state);
+    assert_ne!(epoch, new_epoch);
+    assert!(!reader::publish_tile(
+        &cache,
+        epoch,
+        requests[0].0.clone(),
+        Vec::new()
+    ));
+    finish_local_read(&cache, epoch, &batch, None);
+    assert_eq!(cache.lock().unwrap().load_in_flight, Some(new_epoch));
+}
+
+#[test]
+fn streaming_reader_can_cancel_between_tiles() {
+    let path =
+        std::env::temp_dir().join(format!("1kee-stream-cancel-{}.sqlite", std::process::id()));
+    let connection = srtm_focus_cache::db::open_cache_db(&path).unwrap();
+    connection
+        .execute_batch(
+            "DELETE FROM contour_tiles;
+         INSERT INTO contour_tiles VALUES (10,0,0,1,10.0,x'00'),(10,0,1,1,10.0,x'00');",
+        )
+        .unwrap();
+    drop(connection);
+    let requests = [request(&path, (10, 0, 0)), request(&path, (10, 0, 1))];
+    let mut tiles = Vec::new();
+    stream_local_contours(&path, &requests, 100, &mut |_, _, _| {}, &mut |key, _| {
+        tiles.push(key);
+        false
+    })
+    .unwrap();
+    assert!(tiles == vec![requests[0].0.clone()]);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn manifest_publication_preserves_revision_observed_before_selection() {
+    let key = LocalManifestKey {
+        root: None,
+        center_lat_bucket: 0,
+        center_lon_bucket: 0,
+        zoom_bucket: 10,
+        prefetch_radius: 2,
+        build_radius: 2,
+    };
+    let cache = Mutex::new(LocalRegionCache {
+        manifest_requested_key: Some(key.clone()),
+        manifest_in_flight: Some(key.clone()),
+        ..Default::default()
+    });
+    // Queue capacity can change while SQLite selection is in progress. The
+    // snapshot must retain the worker's revision, not stamp the latest global
+    // revision over it and suppress the next scheduling pass.
+    finish_local_manifest(&cache, &key, Some(Vec::new()), BuildSnapshot::new(), 41);
+    let state = cache.lock().unwrap();
+    assert_eq!(
+        state.manifest_snapshot.as_ref().unwrap().manifest_revision,
+        41
+    );
+    assert!(state.manifest_in_flight.is_none());
+}
+
+#[test]
 #[ignore = "set ONEKEE_CONTOUR_BENCH_DB to a real contour cache; reads only"]
 fn benchmark_dense_cached_tile() {
     let path =
@@ -169,6 +278,69 @@ fn benchmark_dense_cached_tile() {
         eprintln!(
             "tile {tile:?}: {} contours; baseline {before:?}, streamed {after:?}",
             expected.len()
+        );
+    }
+}
+
+#[test]
+#[ignore = "set ONEKEE_CONTOUR_BENCH_DB; reads eight dense tiles without modifying the cache"]
+fn benchmark_cached_reader_concurrency() {
+    use std::hash::{Hash, Hasher};
+    let path = PathBuf::from(std::env::var_os("ONEKEE_CONTOUR_BENCH_DB").expect("cache path"));
+    let connection = srtm_focus_cache::db::open_cache_db_read_only(&path).unwrap();
+    let mut statement = connection
+        .prepare(
+            "SELECT zoom_bucket,lat_bucket,lon_bucket FROM contour_tile_manifest
+         WHERE zoom_bucket=10 AND contour_count>5000 ORDER BY lat_bucket,lon_bucket LIMIT 8",
+        )
+        .unwrap();
+    let requests: Vec<_> = statement
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(|r| request(&path, r.unwrap()))
+        .collect();
+    assert_eq!(requests.len(), 8, "need eight dense tiles");
+    let mut reference = None;
+    for workers in [1usize, 2, 4, 2, 1] {
+        let start = Instant::now();
+        let fingerprints = std::thread::scope(|scope| {
+            let handles: Vec<_> = requests
+                .chunks(requests.len().div_ceil(workers))
+                .map(|chunk| {
+                    let path = &path;
+                    scope.spawn(move || {
+                        query_local_contours_batch(path, chunk, 1500)
+                            .unwrap()
+                            .into_iter()
+                            .map(|(key, contours)| {
+                                let mut hash = std::collections::hash_map::DefaultHasher::new();
+                                key.hash(&mut hash);
+                                for contour in &contours {
+                                    contour.elevation_m.to_bits().hash(&mut hash);
+                                    contour.points.len().hash(&mut hash);
+                                    for point in &contour.points {
+                                        point.lat.to_bits().hash(&mut hash);
+                                        point.lon.to_bits().hash(&mut hash);
+                                    }
+                                }
+                                hash.finish()
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        if let Some(expected) = &reference {
+            assert_eq!(&fingerprints, expected);
+        }
+        reference = Some(fingerprints);
+        eprintln!(
+            "READERS workers={workers} tiles=8 wall_ms={:.1}",
+            start.elapsed().as_secs_f64() * 1000.0
         );
     }
 }
