@@ -2,11 +2,13 @@ use cell_format::{CellFeature, CellPoint, write::write_cell};
 use tile_archive::{Key, Reader, Writer, contours, vector};
 
 fn root() -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let n = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let p = std::env::temp_dir().join(format!("1kee-archive-test-{}-{n}", std::process::id()));
+    let p = std::env::temp_dir().join(format!("1kee-archive-test-{}-{n}-{id}", std::process::id()));
     std::fs::create_dir(&p).unwrap();
     p
 }
@@ -93,6 +95,67 @@ fn subtiles_preserve_crossing_geometry_heights_and_empty_coverage() {
     drop(reader);
     std::fs::remove_dir_all(root).unwrap();
 }
+#[test]
+fn inclusive_boundary_cells_preserve_geometry_without_colliding_with_neighbors() {
+    let root = root();
+    let path = root.join("world.1ka");
+    let mut writer = Writer::create(&path).unwrap();
+    let cases = [
+        (
+            -17,
+            179,
+            [(-16.8, 179.9998), (-16.79, 180.0)],
+            [-17.0, -16.0, 179.9, 180.0],
+        ),
+        (
+            -17,
+            180,
+            [(-16.8, 179.9998), (-16.79, 180.0)],
+            [-17.0, -16.0, 179.9, 180.0],
+        ),
+        (
+            90,
+            12,
+            [(89.9998, 12.1), (90.0, 12.2)],
+            [89.9, 90.0, 12.0, 12.9],
+        ),
+        (
+            -90,
+            -180,
+            [(-90.0, -180.0), (-89.9, -179.9)],
+            [-90.0, -89.9, -180.0, -179.9],
+        ),
+    ];
+    for (id, &(lat, lon, points, _)) in cases.iter().enumerate() {
+        vector::pack_cell(
+            &mut writer,
+            *b"ROAD",
+            lat,
+            lon,
+            &[feature(id as i64, &points, false)],
+        )
+        .unwrap();
+    }
+    for (lat, lon) in [(-91, 0), (91, 0), (0, -181), (0, 181)] {
+        let error = vector::pack_cell(&mut writer, *b"ROAD", lat, lon, &[]).unwrap_err();
+        assert!(error.contains(&format!("({lat},{lon})")), "{error}");
+    }
+    writer.finish().unwrap();
+    let reader = Reader::open(&path).unwrap();
+    for (id, &(lat, lon, points, view)) in cases.iter().enumerate() {
+        let actual = vector::read_cell(&reader, *b"ROAD", lat, lon, view)
+            .unwrap()
+            .unwrap();
+        let expected = [feature(id as i64, &points, false)];
+        assert_eq!(
+            write_cell(lat as i16, lon as i16, &[(*b"ROAD", &actual)]),
+            write_cell(lat as i16, lon as i16, &[(*b"ROAD", &expected)]),
+        );
+    }
+    drop(reader);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn contours_are_exact_body_scoped_and_corruption_is_rejected() {
     let root = root();
