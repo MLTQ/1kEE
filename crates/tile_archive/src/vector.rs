@@ -52,8 +52,14 @@ pub fn pack_cell(
     lon: i32,
     features: &[CellFeature],
 ) -> Result<usize, String> {
-    if !(-90..90).contains(&lat) || !(-180..180).contains(&lon) {
-        return Err("Invalid vector cell coordinates".into());
+    // Existing builders use floor(min)..=floor(max), so a feature touching
+    // +180 longitude or +90 latitude also has a cell at that boundary. Keep
+    // those parent keys and their full geometry instead of wrapping or dropping
+    // them; readers use the same inclusive cell enumeration.
+    if !(-90..=90).contains(&lat) || !(-180..=180).contains(&lon) {
+        return Err(format!(
+            "Invalid vector cell coordinates ({lat},{lon}): expected latitude -90..=90 and longitude -180..=180"
+        ));
     }
     let mut ids = std::collections::HashSet::new();
     if features.iter().any(|f| !ids.insert(f.way_id)) {

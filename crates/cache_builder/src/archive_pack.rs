@@ -164,7 +164,8 @@ fn pack_vectors(
             if path.file_name().unwrap() != cell_format::cell_filename(prefix, lat, lon).as_str() {
                 return Err(format!("Cell filename/header mismatch: {}", path.display()));
             }
-            let packed = vector::pack_cell(writer, tag, lat, lon, &features)?;
+            let packed = vector::pack_cell(writer, tag, lat, lon, &features)
+                .map_err(|e| format!("Cannot pack {}: {e}", path.display()))?;
             if before != contours::fingerprint(&path)? {
                 return Err(format!(
                     "Source cell changed during packing: {}",
@@ -279,6 +280,29 @@ mod tests {
             cell_format::write::write_cell(0, 0, &[(*b"ROAD", &[])]),
         )
         .unwrap();
+        let boundary = osm.join("road_cells/road_cell_-017_+0180.1kc");
+        let boundary_features = [cell_format::CellFeature {
+            way_id: 1,
+            class: 2,
+            is_polygon: false,
+            name: None,
+            points: vec![
+                cell_format::CellPoint {
+                    lat: -16.8,
+                    lon: 179.9998,
+                },
+                cell_format::CellPoint {
+                    lat: -16.79,
+                    lon: 180.0,
+                },
+            ],
+            elevations: Some(vec![4.0, 5.0]),
+        }];
+        fs::write(
+            &boundary,
+            cell_format::write::write_cell(-17, 180, &[(*b"ROAD", &boundary_features)]),
+        )
+        .unwrap();
         let out = root.join("world.1ka");
         let command = || Command {
             out: out.clone(),
@@ -292,6 +316,15 @@ mod tests {
                 .has_cell(*b"ROAD", 0, 0)
                 .unwrap()
         );
+        let reader = tile_archive::Reader::open(&out).unwrap();
+        let packed = vector::read_cell(&reader, *b"ROAD", -17, 180, [-17.0, -16.0, 179.9, 180.0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cell_format::write::write_cell(-17, 180, &[(*b"ROAD", &packed)]),
+            fs::read(&boundary).unwrap(),
+        );
+        drop(reader);
         let original = fs::read(&out).unwrap();
         assert!(run_with_progress(command(), &mut |_| {}).is_err());
         assert_eq!(fs::read(&out).unwrap(), original);
@@ -301,12 +334,34 @@ mod tests {
             run_with_progress(
                 Command {
                     out: failed.clone(),
-                    osm: Some(osm),
+                    osm: Some(osm.clone()),
                     terrain: Vec::new()
                 },
                 &mut |_| {}
             )
             .is_err()
+        );
+        assert!(!failed.exists());
+        fs::remove_file(&source).unwrap();
+        let invalid = osm.join("road_cells/road_cell_+000_+0181.1kc");
+        fs::write(
+            &invalid,
+            cell_format::write::write_cell(0, 181, &[(*b"ROAD", &[])]),
+        )
+        .unwrap();
+        let error = run_with_progress(
+            Command {
+                out: failed.clone(),
+                osm: Some(osm),
+                terrain: Vec::new(),
+            },
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert!(error.contains(&invalid.display().to_string()), "{error}");
+        assert!(
+            error.contains("Invalid vector cell coordinates (0,181)"),
+            "{error}"
         );
         assert!(!failed.exists());
         assert_eq!(fs::read_dir(&root).unwrap().count(), 2); // osm directory + published file only

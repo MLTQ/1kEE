@@ -50,6 +50,11 @@ closes it, and publishes a new file without overwriting data. Errors clean owned
 staging files. A later snapshot currently needs a new output filename;
 incremental repacking is future work.
 
+The final filename appears only after packing completes. A failed pack removes
+its temporary output and reports the offending source file in the log. Existing
+cells at exactly +180° longitude or +90° latitude are accepted, matching the
+cache builder's inclusive boundary convention.
+
 Packing needs space for the additional archive and preserves source files. In
 the inspected Hilbert installation the Earth contour database alone is about
 269 GiB, while free space is about 23 GiB. A full duplicate terrain archive needs

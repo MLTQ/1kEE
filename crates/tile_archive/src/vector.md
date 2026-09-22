@@ -12,6 +12,10 @@ ID, class, flag, name and baked elevation. Readers deduplicate repeated IDs.
 - The cell transaction includes empty children, making empty different from
   missing. This asserts snapshot presence, not complete OSM source coverage.
 - Queries clamp to the parent cell and visit only overlapping children.
+- Parent coordinates include +180 longitude and +90 latitude, matching the
+  builder/readers' inclusive floor-based enumeration. Features touching those
+  boundaries retain their original keys and full geometry; do not wrap/drop
+  those cells. Coordinates beyond the closed geographic range remain invalid.
 - Source mtime/size are recorded for stale-file detection by desktop readers.
 
 - `prefer_subtiles` chooses packed reads for at most 16 of 64 children when an
