@@ -20,7 +20,16 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
 const INITIAL_BACKOFF: Duration = Duration::from_secs(5 * 60);
 const MAX_BACKOFF: Duration = Duration::from_secs(2 * 60 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
-const DEFLOCK_DATA_ENDPOINT: &str = "https://data.dontgetflocked.com/cameras-us.json";
+/// DeFlock's canonical public snapshot.
+///
+/// The old `cameras-us.json` path now 404s — the project replaced its
+/// US-only export with a single worldwide file. Despite the `.gz` suffix the
+/// origin serves plain JSON with no `Content-Encoding`, which matters because
+/// this crate builds `reqwest` without the `gzip` feature and would otherwise
+/// hand the parser compressed bytes. `parse_deflock_geojson` rejects a
+/// non-JSON body rather than replacing a good snapshot, so a future change to
+/// real gzip would surface as a clear parse error instead of silent garbage.
+const DEFLOCK_DATA_ENDPOINT: &str = "https://data.dontgetflocked.com/cameras.geojson.gz";
 const OVERPASS_ENDPOINTS: &[&str] = &[
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
@@ -412,7 +421,18 @@ fn save_cache(path: &Path, locations: &[DeflockAlprLocation]) -> Result<(), Stri
 }
 
 fn parse_overpass_json(body: &str) -> Result<Vec<DeflockAlprLocation>, String> {
+    reject_non_json(body, "Overpass")?;
     let value: Value = serde_json::from_str(body).map_err(|error| error.to_string())?;
+
+    // Overpass reports query timeouts and resource limits in-band: HTTP 200,
+    // a well-formed document, an empty `elements` array, and the real reason
+    // in `remark`. Without this the caller sees "contained no valid public
+    // ALPR locations", which reads as "OSM has no ALPRs" when it actually
+    // means "the server refused the query".
+    if let Some(remark) = value.get("remark").and_then(Value::as_str) {
+        return Err(format!("Overpass reported: {}", remark.trim()));
+    }
+
     let entries = value
         .get("elements")
         .and_then(Value::as_array)
@@ -422,10 +442,43 @@ fn parse_overpass_json(body: &str) -> Result<Vec<DeflockAlprLocation>, String> {
     ensure_nonempty(locations, "Overpass response")
 }
 
+/// Reject a response that is not JSON at all before handing it to the parser.
+///
+/// Overpass serves overload errors as an XHTML page under HTTP 200, and the
+/// DeFlock snapshot is served from a `.gz` path that currently returns plain
+/// JSON but might not forever. Either way a serde error about byte 0 tells the
+/// operator nothing, so name the failure and quote the start of the body.
+fn reject_non_json(body: &str, source: &str) -> Result<(), String> {
+    let head = body.trim_start();
+    if head.starts_with('{') || head.starts_with('[') {
+        return Ok(());
+    }
+    // Gzip magic is 1f 8b. By the time a body reaches here it has already been
+    // through `Response::text`, which replaces invalid UTF-8 — so 8b arrives as
+    // U+FFFD and byte-matching the pair would never fire. The 1f is plain ASCII
+    // and survives, and no legitimate JSON starts with a unit separator.
+    if head.starts_with('\u{1f}') {
+        return Err(format!(
+            "{source} returned gzip-compressed data, which this build cannot decode"
+        ));
+    }
+    let snippet: String = head.chars().take(160).collect();
+    let descriptor = if head.starts_with('<') {
+        "an HTML/XML error page"
+    } else {
+        "a non-JSON body"
+    };
+    Err(format!(
+        "{source} returned {descriptor} instead of JSON: {}",
+        snippet.split_whitespace().collect::<Vec<_>>().join(" ")
+    ))
+}
+
 /// Parse the canonical DeFlock public GeoJSON snapshot. The public worker uses
 /// OSM-derived point features, so only the same map metadata we support from
 /// Overpass is retained.
 fn parse_deflock_geojson(body: &str) -> Result<Vec<DeflockAlprLocation>, String> {
+    reject_non_json(body, "DeFlock data")?;
     let value: Value = serde_json::from_str(body).map_err(|error| error.to_string())?;
     let features = value
         .get("features")
@@ -799,5 +852,95 @@ mod tests {
         let loaded = load_cache(&path).unwrap();
         assert_eq!(loaded.locations, locations);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    // ── Failure modes observed live against the public endpoints ──────────
+
+    #[test]
+    fn overpass_timeout_remark_is_surfaced_verbatim() {
+        // Overpass signals an overloaded server with HTTP 200, a valid
+        // document, an empty elements array, and the reason in `remark`.
+        // Captured from a live nationwide query.
+        let body = r#"{
+            "version": 0.6,
+            "elements": [],
+            "remark": "runtime error: Query timed out in \"query\" at line 1 after 2 seconds."
+        }"#;
+        let error = parse_overpass_json(body).expect_err("a remark must fail the parse");
+        assert!(error.contains("Overpass reported:"), "unexpected: {error}");
+        assert!(error.contains("Query timed out"), "unexpected: {error}");
+        // The old message blamed the data rather than the server.
+        assert!(
+            !error.contains("no valid public ALPR locations"),
+            "timeout must not read as an empty dataset: {error}"
+        );
+    }
+
+    #[test]
+    fn overpass_html_error_page_is_named_as_such() {
+        // The other live overload response: an XHTML page, also under 200.
+        let body = "<?xml version=\"1.0\"?>\n<html><body><p>Error: runtime error:                     Dispatcher_Client::request_read_and_idx::timeout. The server is                     probably too busy to handle your request.</p></body></html>";
+        let error = parse_overpass_json(body).expect_err("HTML must fail the parse");
+        assert!(error.contains("HTML/XML error page"), "unexpected: {error}");
+        // The snippet is capped, so assert on the leading text it does keep.
+        assert!(
+            error.contains("runtime error"),
+            "should quote the body: {error}"
+        );
+    }
+
+    #[test]
+    fn gzip_body_is_reported_as_compressed_not_as_a_parse_error() {
+        // The snapshot lives on a `.gz` path that currently serves plain JSON.
+        // If that ever changes, say so plainly: this build has no gzip decoder.
+        // What a gzip body actually looks like after `Response::text`: the
+        // 1f survives as ASCII, the 8b has become a replacement character.
+        let error = reject_non_json("\u{1f}\u{fffd}\u{8}\u{0}binary", "DeFlock data")
+            .expect_err("gzip magic must be rejected");
+        assert!(error.contains("gzip-compressed"), "unexpected: {error}");
+    }
+
+    #[test]
+    fn current_deflock_snapshot_schema_parses() {
+        // Shape taken from the live cameras.geojson.gz feed, which replaced the
+        // removed cameras-us.json. Both camelCase and snake_case are accepted.
+        let body = r#"{
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [-79.2971901, 43.8261397]},
+                    "properties": {
+                        "osmId": 534071147,
+                        "osmType": "node",
+                        "surveillanceZone": "traffic",
+                        "osmTimestamp": "2026-06-28T17:29:22Z",
+                        "osmVersion": 3,
+                        "brand": "Flock Safety",
+                        "direction": "180"
+                    }
+                }
+            ]
+        }"#;
+        let parsed = parse_deflock_geojson(body).expect("live schema should parse");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].osm_id, 534071147);
+        assert_eq!(parsed[0].osm_type, "node");
+        assert_eq!(parsed[0].brand.as_deref(), Some("Flock Safety"));
+        assert_eq!(parsed[0].surveillance_zone.as_deref(), Some("traffic"));
+        assert_eq!(parsed[0].osm_version, Some(3));
+        assert_eq!(parsed[0].direction_degrees, Some(180.0));
+    }
+
+    #[test]
+    fn a_genuinely_empty_result_still_reads_as_empty() {
+        // No remark means the server answered normally; the dataset really is
+        // empty, and the message should say so rather than blame the server.
+        let error = parse_overpass_json(r#"{"elements": []}"#)
+            .expect_err("an empty result is still an error");
+        assert!(
+            error.contains("no valid public ALPR locations"),
+            "unexpected: {error}"
+        );
     }
 }

@@ -23,6 +23,12 @@ UI model without owning map rendering or collecting user data.
   surfaces that expose the public source.
 - **Interacts with**: map/source status presentation.
 
+### `reject_non_json`
+- **Does**: Names a non-JSON body before it reaches the parser — an Overpass
+  XHTML overload page, or gzip-compressed data this build cannot decode — and
+  quotes the start of it.
+- **Interacts with**: `parse_deflock_geojson`, `parse_overpass_json`.
+
 ### Cache and Overpass parser helpers
 - **Does**: Load a local snapshot first, validate the canonical DeFlock GeoJSON
   or tag-checked Overpass JSON, and persist a successful public-data snapshot
@@ -58,3 +64,17 @@ UI model without owning map rendering or collecting user data.
   or provide routing/avoidance behavior.
 - Empty or malformed source/cache responses are rejected rather than replacing
   a usable snapshot with a fresh empty cache.
+- The canonical snapshot is `cameras.geojson.gz`. The former `cameras-us.json`
+  path now returns 404: DeFlock replaced its US-only export with one worldwide
+  file (~142.5k features, ~38 MB). Despite the `.gz` suffix the origin serves
+  plain JSON with no `Content-Encoding`; `reject_non_json` names the failure
+  if that ever changes, because this crate builds `reqwest` without `gzip`.
+- Overpass reports query timeouts and resource limits **in band**: HTTP 200, a
+  well-formed document, an empty `elements` array, and the reason in `remark`.
+  That field is surfaced verbatim — without it an overloaded server is
+  indistinguishable from "OSM has no ALPRs here", which is what made a live
+  outage hard to diagnose. Overpass also serves overload errors as an XHTML
+  page under HTTP 200.
+- The nationwide Overpass fallback asks for ~142k elements with `out meta`. It
+  is best-effort by design: when the public instances are busy it will fail,
+  and the `remark` now says so. The canonical snapshot is the fast path.
