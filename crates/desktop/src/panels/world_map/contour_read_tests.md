@@ -31,3 +31,10 @@ ordering as the prior SQLite blob-sort implementation, and measures real data.
 
 - Manifest publication retains the selection-start revision, ensuring a queue
   wakeup during an in-flight selection cannot be consumed by stale results.
+
+- Packed archive regression verifies body/key lookup, exact geometry/order across budgets, and disabling a packed snapshot when the original source changes.
+
+- `benchmark_packed_contour_tile`: explicitly opted-in benchmark; copies one dense
+  tile into a unique directory under ONEKEE_ARCHIVE_BENCH_DIR, alternates the
+  actual runtime packed/legacy paths, checks exact geometry/order, and removes
+  only that test directory. The original database remains read-only.

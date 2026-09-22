@@ -8,6 +8,7 @@ mod camera_source_catalog;
 mod city_catalog;
 mod deflock_source;
 mod event_store;
+mod feature_heights;
 mod factal_stream;
 mod flight_tracks;
 mod gruve;
@@ -24,6 +25,7 @@ mod threedep;
 mod terrain_precompute;
 mod theme;
 mod usgs_stream;
+mod world_archive;
 
 use app::DashboardApp;
 

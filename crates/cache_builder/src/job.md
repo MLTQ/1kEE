@@ -24,4 +24,6 @@ Runs cache-builder work off the UI thread and streams progress back to the egui 
 | `app.rs` | receives `Progress` updates followed by one terminal `Finished` event | Removing event ordering or changing the event types |
 
 ## Notes
-- The first version handles only the roads export path. Future builder assets should plug into the same event stream instead of inventing another progress mechanism.
+- Vector, planetary terrain, and archive jobs share this event stream.
+
+- `PackArchive` streams completed-cell log entries and one Finished result. Packing is a background snapshot job; the UI does not invent a percentage while enumerating source files.

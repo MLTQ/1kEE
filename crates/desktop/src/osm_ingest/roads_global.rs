@@ -40,12 +40,12 @@ pub(super) fn import_planet_roads(db_path: &Path, job: &OsmJob) -> Result<String
 
     let (tx, rx) = crossbeam_channel::bounded(10000);
     let job_bounds = job.bounds;
-    
+
     let reader_handle = std::thread::spawn(move || {
         let result = reader.par_map_reduce(
             |element| {
                 let Element::Way(way) = element else { return };
-                
+
                 let mut highway_class = None;
                 let mut road_name = None;
                 for (key, value) in way.tags() {
@@ -56,7 +56,9 @@ pub(super) fn import_planet_roads(db_path: &Path, job: &OsmJob) -> Result<String
                     }
                 }
 
-                let Some(road_class) = highway_class else { return };
+                let Some(road_class) = highway_class else {
+                    return;
+                };
 
                 let points: Vec<_> = way
                     .node_locations()
@@ -66,16 +68,20 @@ pub(super) fn import_planet_roads(db_path: &Path, job: &OsmJob) -> Result<String
                     })
                     .collect();
 
-                if points.len() < 2 { return }
-                
+                if points.len() < 2 {
+                    return;
+                }
+
                 let bounds = polyline_bounds(&points);
-                if !bounds_intersect(bounds, job_bounds) { return }
+                if !bounds_intersect(bounds, job_bounds) {
+                    return;
+                }
 
                 // Send matching roads to writer thread. Break/ignore if channel closes.
                 let _ = tx.send((way.id(), road_class, road_name, points));
             },
             || (),
-            |_, _| ()
+            |_, _| (),
         );
         result.map_err(|e| e.to_string())
     });
@@ -103,10 +109,12 @@ pub(super) fn import_planet_roads(db_path: &Path, job: &OsmJob) -> Result<String
             );
         }
     }
-    
+
     drop(rx);
-    
-    let reader_result = reader_handle.join().unwrap_or_else(|_| Err("OSM parser thread panicked".to_owned()));
+
+    let reader_result = reader_handle
+        .join()
+        .unwrap_or_else(|_| Err("OSM parser thread panicked".to_owned()));
     if let Err(error) = reader_result {
         if import_error.is_none() {
             import_error = Some(error);
@@ -242,9 +250,35 @@ pub(super) fn load_roads_for_bounds_inner(
     let Ok(connection) = open_runtime_db(db_path) else {
         return Vec::new();
     };
+    load_roads_with_connection(&connection, bounds, tile_zoom, layer_kind)
+}
+
+pub(super) fn load_roads_for_missing_bounds(
+    db_path: &Path,
+    bounds: &[GeoBounds],
+    tile_zoom: u8,
+    layer_kind: super::RoadLayerKind,
+) -> Vec<super::RoadPolyline> {
+    let Ok(connection) = open_runtime_db(db_path) else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::HashSet::new();
+    bounds
+        .iter()
+        .flat_map(|b| load_roads_with_connection(&connection, *b, tile_zoom, layer_kind))
+        .filter(|r| seen.insert(r.way_id))
+        .collect()
+}
+
+fn load_roads_with_connection(
+    connection: &Connection,
+    bounds: GeoBounds,
+    tile_zoom: u8,
+    layer_kind: super::RoadLayerKind,
+) -> Vec<super::RoadPolyline> {
     let (min_x, min_y) = lat_lon_to_tile(bounds.max_lat, bounds.min_lon, tile_zoom);
     let (max_x, max_y) = lat_lon_to_tile(bounds.min_lat, bounds.max_lon, tile_zoom);
-    let Ok(mut statement) = connection.prepare(
+    let Ok(mut statement) = connection.prepare_cached(
         "SELECT way_id, class, name, geom_wkb
          FROM road_tiles
          WHERE zoom = ?1
@@ -292,6 +326,7 @@ pub(super) fn load_roads_for_bounds_inner(
             continue;
         }
         roads.push(super::RoadPolyline {
+            elevations: None,
             way_id,
             road_class,
             name: if name.is_empty() { None } else { Some(name) },

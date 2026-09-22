@@ -103,7 +103,9 @@ benchmark writes only a disposable sidecar in system temporary storage.
 
 A single indexed static-data archive is a useful target. It must package the
 data the renderer actually reads, rather than only collecting contour databases.
-This section is a proposed next stage, not an implemented file format.
+The first packed archive and desktop loading slice is now implemented; see
+[runtime-archive.md](runtime-archive.md) for usage, measured latency and limitations.
+The complete source-independent archive described below remains the larger goal.
 
 | Content | Present state | Archive requirement |
 |---|---|---|

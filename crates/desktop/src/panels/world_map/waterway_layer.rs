@@ -21,16 +21,13 @@ struct ElevatedWaterway {
 
 impl ElevatedWaterway {
     fn from_polyline(poly: &LoadedPolyline, selected_root: Option<&Path>) -> Self {
-        let points = poly
-            .points
-            .iter()
-            .copied()
-            .map(|pt| {
-                let elev = srtm_stream::sample_elevation_m(selected_root, pt).unwrap_or(0.0)
-                    + ELEVATION_OFFSET_M;
-                (pt, elev)
-            })
-            .collect();
+        let points = crate::feature_heights::prepare(
+            &poly.points,
+            poly.elevations.as_deref(),
+            usize::MAX,
+            ELEVATION_OFFSET_M,
+            |pt| srtm_stream::sample_elevation_m(selected_root, pt),
+        );
         Self { points }
     }
 }

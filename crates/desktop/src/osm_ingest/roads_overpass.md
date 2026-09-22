@@ -20,3 +20,5 @@ Focused-road importer for the Overpass fallback path. It is used when the user p
 ## Notes
 - Overpass is still a focused-region fallback, not a planet bootstrap path.
 - The direct vector cache write is merge-based per 1° cell so a new Overpass query does not erase previously cached roads elsewhere in the same cached cell.
+
+- Overpass roads carry `elevations: None`; existing binary cache heights survive merge when their feature is retained.

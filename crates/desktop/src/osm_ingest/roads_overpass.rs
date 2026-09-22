@@ -114,6 +114,7 @@ pub(super) fn import_focus_roads_via_overpass(
         }
 
         cached_roads.push(RoadPolyline {
+            elevations: None,
             way_id,
             road_class: road_class.to_owned(),
             name: road_name.map(ToOwned::to_owned),

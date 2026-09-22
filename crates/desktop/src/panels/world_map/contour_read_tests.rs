@@ -61,6 +61,191 @@ fn assert_same(actual: &[ContourPath], expected: &[ContourPath]) {
 }
 
 #[test]
+fn packed_contours_match_runtime_order_budget_and_source_updates() {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "1kee-packed-contour-{}-{nonce}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(root.join("terrain")).unwrap();
+    let path = root.join("terrain/srtm_focus_cache.sqlite");
+    let connection = srtm_focus_cache::db::open_cache_db(&path).unwrap();
+    let mut source_rows = Vec::new();
+    for (fid, elevation) in [(1, 20.0), (2, -20.0), (3, 5.0), (4, -0.5)] {
+        let mut blob = b"GP\0\0\0\0\0\0".to_vec();
+        blob.push(1);
+        blob.extend_from_slice(&2u32.to_le_bytes());
+        blob.extend_from_slice(&5u32.to_le_bytes());
+        for i in 0..5 {
+            blob.extend_from_slice(&(i as f64).to_le_bytes());
+            blob.extend_from_slice(&(fid as f64).to_le_bytes());
+        }
+        connection
+            .execute(
+                "INSERT INTO contour_tiles VALUES (10,0,0,?1,?2,?3)",
+                params![fid, elevation, &blob],
+            )
+            .unwrap();
+        source_rows.push((elevation as f32, blob));
+    }
+    connection.execute("INSERT INTO contour_tile_manifest(zoom_bucket,lat_bucket,lon_bucket,contour_count) VALUES(10,0,0,4)",[]).unwrap();
+    drop(connection);
+    let archive_path = root.join(tile_archive::FILE_NAME);
+    let mut writer = tile_archive::Writer::create(&archive_path).unwrap();
+    writer
+        .put_batch(
+            &[(
+                tile_archive::Key {
+                    body: 0,
+                    layer: *b"CNTR",
+                    grid: 2,
+                    level: 10,
+                    y: 0,
+                    x: 0,
+                },
+                tile_archive::contours::encode(&source_rows).unwrap(),
+            )],
+            None,
+        )
+        .unwrap();
+    writer
+        .metadata(
+            "contours:0",
+            &tile_archive::contours::fingerprint(&path).unwrap(),
+        )
+        .unwrap();
+    writer.finish().unwrap();
+    assert!(
+        crate::world_archive::ContourArchive::open(&path)
+            .unwrap()
+            .get(10, 0, 0)
+            .is_some()
+    );
+    for budget in [0, 1, 3, 100] {
+        let expected = baseline(&path, (10, 0, 0), budget);
+        let actual =
+            query_local_contours_batch(&path, &[request(&path, (10, 0, 0))], budget).unwrap();
+        assert_same(&actual[0].1, &expected);
+    }
+    let connection = srtm_focus_cache::db::open_cache_db(&path).unwrap();
+    connection
+        .execute("UPDATE contour_tiles SET elevation_m=123 WHERE fid=1", [])
+        .unwrap();
+    assert!(crate::world_archive::ContourArchive::open(&path).is_none());
+    drop(connection);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "real read/decode benchmark; ONEKEE_CONTOUR_BENCH_DB and ONEKEE_ARCHIVE_BENCH_DIR required"]
+fn benchmark_packed_contour_tile() {
+    let source_path =
+        PathBuf::from(std::env::var_os("ONEKEE_CONTOUR_BENCH_DB").expect("source database"));
+    let parent = PathBuf::from(
+        std::env::var_os("ONEKEE_ARCHIVE_BENCH_DIR").expect("disposable output parent"),
+    );
+    let source = srtm_focus_cache::db::open_cache_db_read_only(&source_path).unwrap();
+    let tile:(i32,i32,i32)=source.query_row("SELECT zoom_bucket,lat_bucket,lon_bucket FROM contour_tile_manifest ORDER BY contour_count DESC LIMIT 1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    let mut stmt=source.prepare("SELECT fid,elevation_m,geom FROM contour_tiles WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3 ORDER BY fid").unwrap();
+    let mut cursor = stmt.query(params![tile.0, tile.1, tile.2]).unwrap();
+    let mut rows = Vec::new();
+    let mut total_bytes = 0;
+    while let Some(row) = cursor.next().unwrap() {
+        let geometry = row.get_ref(2).unwrap().as_blob().unwrap();
+        total_bytes += geometry.len() + 8;
+        assert!(
+            total_bytes < tile_archive::MAX_PAYLOAD,
+            "choose a smaller benchmark source"
+        );
+        rows.push((
+            row.get::<_, i64>(0).unwrap(),
+            row.get::<_, f32>(1).unwrap(),
+            geometry.to_vec(),
+        ));
+    }
+    let root = parent.join(format!(
+        "contour-read-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::create_dir(root.join("terrain")).unwrap();
+    let path = root.join("terrain/srtm_focus_cache.sqlite");
+    let mut conn = Connection::open(&path).unwrap();
+    srtm_focus_cache::db::ensure_cache_schema_with_connection(&conn).unwrap();
+    let tx = conn.transaction().unwrap();
+    for (fid, elevation, geometry) in &rows {
+        tx.execute(
+            "INSERT INTO contour_tiles VALUES(?1,?2,?3,?4,?5,?6)",
+            params![tile.0, tile.1, tile.2, fid, elevation, geometry],
+        )
+        .unwrap();
+    }
+    tx.execute("INSERT INTO contour_tile_manifest(zoom_bucket,lat_bucket,lon_bucket,contour_count) VALUES(?1,?2,?3,?4)",params![tile.0,tile.1,tile.2,rows.len()]).unwrap();
+    tx.commit().unwrap();
+    drop(conn);
+    let archive_path = root.join(tile_archive::FILE_NAME);
+    let hidden = root.join("hidden.1ka");
+    let mut writer = tile_archive::Writer::create(&archive_path).unwrap();
+    let packed = tile_archive::contours::encode(
+        &rows.into_iter().map(|(_, e, g)| (e, g)).collect::<Vec<_>>(),
+    )
+    .unwrap();
+    writer
+        .put_batch(
+            &[(
+                tile_archive::Key {
+                    body: 0,
+                    layer: *b"CNTR",
+                    grid: 2,
+                    level: tile.0,
+                    y: tile.1,
+                    x: tile.2,
+                },
+                packed,
+            )],
+            None,
+        )
+        .unwrap();
+    writer
+        .metadata(
+            "contours:0",
+            &tile_archive::contours::fingerprint(&path).unwrap(),
+        )
+        .unwrap();
+    writer.finish().unwrap();
+    assert!(crate::world_archive::ContourArchive::open(&path).is_some());
+    let mut expected: Option<Vec<ContourPath>> = None;
+    for archived in [false, true, true, false, false, true, true, false] {
+        if !archived {
+            std::fs::rename(&archive_path, &hidden).unwrap();
+        }
+        let start = Instant::now();
+        let actual = query_local_contours_batch(&path, &[request(&path, tile)], 100_000).unwrap();
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        if !archived {
+            std::fs::rename(&hidden, &archive_path).unwrap();
+        }
+        if let Some(expected) = &expected {
+            assert_same(&actual[0].1, expected);
+        } else {
+            expected = Some(actual[0].1.clone());
+        }
+        eprintln!(
+            "PACKED_CONTOUR archived={archived} read_decode_ms={ms:.3} contours={} geometry_bytes={total_bytes}",
+            actual[0].1.len()
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn streamed_reader_preserves_elevation_fid_part_and_budget_order() {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

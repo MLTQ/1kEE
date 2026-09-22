@@ -10,7 +10,7 @@ Defines the OSM ingest subsystem’s public surface: source discovery, job queue
 - **Interacts with**: `job_dispatch.rs`, `inventory.rs`, `db.rs`
 
 ### `load_roads_for_bounds`
-- **Does**: Loads road geometry for the current view, now preferring focused vector-cell GeoJSON cache files before falling back to the SQLite tile store
+- **Does**: Loads road geometry for the current view, now preferring packed archive tiles or binary/legacy vector cells before falling back to the SQLite tile store
 - **Interacts with**: `roads_vector_cache.rs`, `roads_global.rs`
 - **Rationale**: Lets focused road imports become visible as soon as their vector cells are extracted, instead of waiting on the heavier SQLite replay path
 
@@ -24,3 +24,5 @@ Defines the OSM ingest subsystem’s public surface: source discovery, job queue
 
 ## Notes
 - Focused roads now have two cache layers: durable `.osm.pbf` cell extracts and directly streamable GeoJSON road cells. The old SQLite tile store still exists for global/legacy callers and as a fallback.
+
+- `RoadPolyline` now carries optional aligned elevations. `RoadLayerKind::All` lets the renderer read/decode once and partition major/minor roads afterward. Partial cached roads are retained; only missing cells consult the legacy SQLite store.

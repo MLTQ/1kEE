@@ -1,36 +1,21 @@
 # roads_vector_cache.rs
 
 ## Purpose
-Provides a directly streamable focused-road cache format on disk. Focused OSM road jobs can write per-cell GeoJSON files here so the renderer can load road geometry without waiting for the SQLite tile replay path.
+Loads and maintains focused road caches. Prefers validated packed archive tiles,
+then binary cells, then legacy GeoJSON. The import path still creates `.1kc` cells.
 
 ## Components
-
-### `vector_cache_dir` / `vector_cell_path`
-- **Does**: Resolves the per-cell GeoJSON cache directory and stable filenames
-- **Interacts with**: `roads_osmium.rs`, `mod.rs`
-
-### `ensure_cell_geojson_from_extract`
-- **Does**: Parses one focused `.osm.pbf` cell extract and writes a compact road `FeatureCollection` GeoJSON for that cell
-- **Interacts with**: `roads_osmium.rs`, `util.rs`
-
-### `write_roads_to_vector_cells`
-- **Does**: Merges already-normalized road polylines into the direct per-cell GeoJSON cache, preserving existing cached roads in the same 1° cells
-- **Interacts with**: `roads_overpass.rs`
-
-### `load_roads_for_bounds_from_vector_cache`
-- **Does**: Loads and filters cached road-cell GeoJSON files covering the current bounds, returning normalized `RoadPolyline` records only when the full requested cell envelope is present on disk
-- **Interacts with**: `mod.rs`, `road_layer.rs`
+- `load_roads_for_bounds_from_vector_cache` / `read_cached_roads`: return ready
+  roads and separate missing-cell bounds. Preserve baked heights and deduplicate IDs.
+- `write_roads_to_vector_cells`: merges normalized roads and preserves existing
+  elevation arrays when encoding the merged binary output.
+- `ensure_cell_geojson_from_extract`: historical name; now writes binary cells.
+- `load_all_roads_from_vector_cell`: binary-first reader with GeoJSON fallback.
 
 ## Contracts
-
-| Dependent | Expects | Breaking changes |
-|-----------|---------|------------------|
-| `roads_osmium.rs` | Cell extracts can be converted into durable GeoJSON road cells | Renaming the cache path format |
-| `roads_overpass.rs` | Focused Overpass road results can be merged into the same on-disk vector-cell cache without losing prior roads in the cell | Making writes destructive instead of merge-based |
-| `mod.rs` | Vector-cache loads return `Some(Vec<_>)` only when every requested cell exists; partial coverage must fall back to the slower runtime sources | Treating a partial cell set as cache success |
-| `road_layer.rs` | Focused road loads become available as soon as matching GeoJSON cells exist on disk | Removing the direct vector-cache load path |
-
-## Notes
-- This is intentionally focused-road only. Global road bootstraps still use the SQLite tile store.
-- GeoJSON is the first directly streamable format because it is easy to inspect and matches the user’s current fast local assets. A future follow-up can replace it with FlatGeobuf or another denser vector-cell format.
-- Partial cell coverage is intentionally treated as a cache miss. That keeps fragmented road chunks from masquerading as a fully loaded road layer while a focus import is still incomplete.
+- Partial coverage returns available data. Callers fill only missing regions;
+  partial presence is not proof of complete coverage.
+- Each load opens its own archive reader; no UI-thread disk access is introduced.
+- Missing/changed/corrupt archive cells use legacy readers independently.
+- IDs, geometry, names, classes and elevations stay aligned.
+- Tests cover a ready cell beside a missing cell and preserved baked heights.

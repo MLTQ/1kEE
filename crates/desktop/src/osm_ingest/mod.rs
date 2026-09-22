@@ -91,6 +91,7 @@ pub struct WaterPolyline {
 pub enum RoadLayerKind {
     Major,
     Minor,
+    All,
 }
 
 #[derive(Clone, Debug)]
@@ -102,6 +103,7 @@ pub struct RoadPolyline {
     #[allow(dead_code)]
     pub name: Option<String>,
     pub points: Vec<GeoPoint>,
+    pub elevations: Option<Vec<f32>>,
 }
 
 #[derive(Clone)]
@@ -150,12 +152,26 @@ pub fn load_roads_for_bounds(
     tile_zoom: u8,
     layer_kind: RoadLayerKind,
 ) -> Vec<RoadPolyline> {
-    if let Some(roads) = roads_vector_cache::load_roads_for_bounds_from_vector_cache(
+    if let Some(mut cached) = roads_vector_cache::load_roads_for_bounds_from_vector_cache(
         selected_root,
         bounds,
         layer_kind,
     ) {
-        return roads;
+        if let Some(db_path) = db::runtime_db_path(selected_root).filter(|p| p.exists()) {
+            let mut seen: std::collections::HashSet<_> =
+                cached.roads.iter().map(|r| r.way_id).collect();
+            for road in roads_global::load_roads_for_missing_bounds(
+                &db_path,
+                &cached.missing,
+                tile_zoom,
+                layer_kind,
+            ) {
+                if seen.insert(road.way_id) {
+                    cached.roads.push(road);
+                }
+            }
+        }
+        return cached.roads;
     }
     let Some(db_path) = db::runtime_db_path(selected_root) else {
         return Vec::new();

@@ -163,3 +163,7 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 - Manifest snapshots retain the revision observed before selection. Tile or
   queue-capacity changes during a query therefore trigger another scheduling
   pass immediately instead of being hidden until the 350 ms refresh timeout.
+
+- Local/globe tile reads prefer packed contour payloads in Derived/world.1ka when the source database/WAL fingerprint matches. A checksum/decode failure falls back per tile. Original manifests still drive scheduling in this first version. Both paths share geometry selection/order/budgets and progress callbacks.
+
+- GeoPackage decoding is shared with archive creation through `tile_archive::gpkg`. Packed CTF1 tiles already contain the renderer’s f32 coordinates; the runtime validates counts and skips GeoPackage parsing and f64 conversion.

@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 pub enum Command {
     Gui,
+    PackArchive(crate::archive_pack::Command),
     RoadsBbox(BboxCommand),
     ContoursBbox(ContoursBboxCommand),
     PlanetAll(PlanetAllCommand),
@@ -94,6 +95,7 @@ where
 
     match command.as_str() {
         "gui" => Ok(Command::Gui),
+        "pack-archive" => crate::archive_pack::parse(args).map(Command::PackArchive),
         "roads-bbox" => parse_roads_bbox(args).map(Command::RoadsBbox),
         "contours-bbox" => parse_contours_bbox(args).map(Command::ContoursBbox),
         "planet-all" => parse_planet_all(args).map(Command::PlanetAll),
@@ -409,6 +411,9 @@ fn usage() -> String {
     "Usage:
   one-thousand-electric-eye-cache-builder
   one-thousand-electric-eye-cache-builder gui
+  one-thousand-electric-eye-cache-builder pack-archive --out <Derived/world.1ka>
+      [--osm-cache-dir <Derived/osm>] [--earth-contours <database>]
+      [--moon-contours <database>] [--mars-contours <database>]
   one-thousand-electric-eye-cache-builder roads-bbox \\
       --planet <planet.osm.pbf> --cache-dir <Derived/osm> \\
       --min-lat <f32> --max-lat <f32> --min-lon <f32> --max-lon <f32> \\
