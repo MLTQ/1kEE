@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="1kEE-test">
+  <node id="10" lat="36.5" lon="-120.5"/>
+  <node id="20" lat="36.501" lon="-120.499"/>
+  <node id="30" lat="36.502" lon="-120.498"/>
+  <node id="40" lat="36.503" lon="-120.497"/>
+  <way id="100"><nd ref="10"/><nd ref="20"/><nd ref="30"/><tag k="highway" v="residential"/><tag k="name" v="Test road"/></way>
+  <way id="200"><nd ref="20"/><nd ref="30"/><nd ref="40"/><nd ref="20"/><tag k="building" v="yes"/></way>
+</osm>

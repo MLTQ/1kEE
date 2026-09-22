@@ -49,3 +49,19 @@ after an external sort.
   does not mutate the shared file cursor.
 - A block contains at most 4,096 records; its buffer is reused while processing
   a multi-reference lookup.
+- `session` creates a worker-local cache in `node_lookup_cache.rs`, reusing up
+  to 64 blocks across ways (4 MiB) without changing the on-disk node format.
+- `NodeWriter::write_encoded` appends complete 16-byte records from parallel
+  PBF decoders. Incomplete record batches fail before changing the node count.
+- Positional index/block reads use `read_exact_at`; a short index is an error,
+  and a partial block can never be searched as though it were complete.
+- `open_cached` reuses `node_index.rs` sidecars validated against file identity,
+  mtime, length, count, checksum, ordering, and stride. Cold construction uses
+  parallel positional reads; ordinary `open` remains source-read-only for tests.
+- Regression coverage replaces a node file beneath a previously saved index and
+  verifies exact lookups rebuild it. Incomplete encoded writes are rejected.
+- Single-record writes, uncached `open`, and uncached `lookup_many` are retained
+  only in tests as parity/benchmark references; production uses batched writes,
+  persistent index opening, and worker-local lookup sessions.
+- Index and block read failures include byte offsets. Production callers
+  propagate read errors instead of treating an unreadable block as absent nodes.
