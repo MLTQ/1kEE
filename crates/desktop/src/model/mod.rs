@@ -9,6 +9,7 @@ pub mod replay;
 mod vessels;
 
 pub use crate::deflock_source::DeflockAlprLocation;
+pub use crate::fire_source::FireDetection;
 pub use arcgis::*;
 pub use cameras::*;
 pub use events::*;
@@ -130,6 +131,23 @@ pub struct AppModel {
     /// Monotonically changes whenever the ALPR Arc snapshot is replaced. Mesh
     /// caches use this instead of an allocation address, which can be reused.
     deflock_snapshot_revision: u64,
+    /// TeleGeography submarine cable routes and landing points, held as ordinary
+    /// overlay layers so they reuse the uploaded-layer renderer.
+    pub submarine_cable_layers: Arc<Vec<GeoJsonLayer>>,
+    /// Optional public cable overlay. It remains off until the operator enables
+    /// it, and nothing is fetched until then.
+    pub show_submarine_cables: bool,
+    /// Human-readable cache/refresh state for the submarine cable source.
+    pub submarine_cable_status: String,
+    /// NASA FIRMS active-fire detections from the last 24 hours.
+    pub active_fires: Arc<Vec<FireDetection>>,
+    /// Optional public active-fire overlay. Off until the operator enables it.
+    pub show_active_fires: bool,
+    /// Human-readable cache/refresh state for the active-fire source.
+    pub fire_status: String,
+    /// Monotonically changes whenever the fire Arc snapshot is replaced. Mesh
+    /// caches use this instead of an allocation address, which can be reused.
+    fire_snapshot_revision: u64,
     /// Increments whenever camera data that contributes to nearby-camera
     /// records changes. It is intentionally private so cache invalidation stays
     /// coupled to the mutation methods below.
@@ -397,6 +415,13 @@ impl AppModel {
             show_deflock_alprs: false,
             deflock_status: "cache pending".into(),
             deflock_snapshot_revision: 0,
+            submarine_cable_layers: Arc::new(Vec::new()),
+            show_submarine_cables: false,
+            submarine_cable_status: "not loaded".into(),
+            active_fires: Arc::new(Vec::new()),
+            show_active_fires: false,
+            fire_status: "not loaded".into(),
+            fire_snapshot_revision: 0,
             camera_registry_revision: 0,
             nearby_camera_cache: RefCell::new(None),
             selected_root,
@@ -526,6 +551,22 @@ impl AppModel {
 
     pub(crate) fn deflock_snapshot_revision(&self) -> u64 {
         self.deflock_snapshot_revision
+    }
+
+    /// Replaces the submarine cable overlay layers with a freshly loaded set.
+    pub fn replace_submarine_cable_layers(&mut self, layers: Vec<GeoJsonLayer>) {
+        self.submarine_cable_layers = Arc::new(layers);
+    }
+
+    /// Replaces the active-fire snapshot and advances its cache revision even
+    /// when an allocator happens to reuse the prior Arc address.
+    pub fn replace_active_fires(&mut self, detections: Vec<FireDetection>) {
+        self.active_fires = Arc::new(detections);
+        self.fire_snapshot_revision = self.fire_snapshot_revision.wrapping_add(1);
+    }
+
+    pub(crate) fn fire_snapshot_revision(&self) -> u64 {
+        self.fire_snapshot_revision
     }
 
     pub fn set_selected_root(&mut self, root: PathBuf) {

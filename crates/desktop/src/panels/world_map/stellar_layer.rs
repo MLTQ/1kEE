@@ -31,6 +31,12 @@ pub(super) fn draw_stellar_correspondence(
     let gmst = stellar_time::gmst_deg(stellar_jd);
 
     for star in stellar_catalog::STARS {
+        // The catalogue is sorted by increasing magnitude, so the first entry
+        // past the render limit ends the walk — no need to scan the faint tail.
+        if star.mag > stellar_catalog::RENDER_MAG_LIMIT {
+            break;
+        }
+
         let (ra, dec) = if stellar_precess {
             stellar_time::precess_j2000(star.ra_deg as f64, star.dec_deg as f64, stellar_jd)
         } else {

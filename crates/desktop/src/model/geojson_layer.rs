@@ -22,6 +22,10 @@ pub struct GeoJsonFeature {
     pub geometry: GeoJsonGeometry,
     /// Best-effort label extracted from feature properties ("name", "label", …).
     pub label: Option<String>,
+    /// Per-feature RGBA override taken from the source's own styling
+    /// properties. `None` means the feature draws in its layer colour, which
+    /// is the case for most uploads.
+    pub color: Option<[u8; 4]>,
 }
 
 // ── Layer ─────────────────────────────────────────────────────────────────────
@@ -33,8 +37,13 @@ pub struct GeoJsonLayer {
     pub name: String,
     pub features: Vec<GeoJsonFeature>,
     pub visible: bool,
-    /// RGBA display colour auto-assigned from a palette on import.
+    /// RGBA display colour auto-assigned from a palette on import. Features
+    /// carrying their own `color` override it.
     pub color: [u8; 4],
+    /// Whether feature labels draw. Uploads label by default; dense built-in
+    /// layers start unlabelled because the globe view cannot cull them the way
+    /// the local view does.
+    pub show_labels: bool,
 }
 
 impl GeoJsonLayer {
@@ -48,6 +57,7 @@ impl GeoJsonLayer {
             name,
             features,
             visible: true,
+            show_labels: true,
         })
     }
 
@@ -87,6 +97,7 @@ impl GeoJsonLayer {
             name,
             features,
             visible: true,
+            show_labels: true,
         })
     }
 
@@ -167,6 +178,7 @@ fn collect_features(val: &Value) -> Result<Vec<GeoJsonFeature>, String> {
                 return Ok(Vec::new());
             }
             let label = extract_label(&val["properties"]);
+            let color = extract_color(&val["properties"]);
             // GeometryCollection inside a Feature → expand into multiple features
             if geom.get("type").and_then(Value::as_str) == Some("GeometryCollection") {
                 let geoms = geom["geometries"]
@@ -179,11 +191,16 @@ fn collect_features(val: &Value) -> Result<Vec<GeoJsonFeature>, String> {
                     .map(|geometry| GeoJsonFeature {
                         geometry,
                         label: label.clone(),
+                        color,
                     })
                     .collect());
             }
             let geometry = parse_geometry(geom)?;
-            Ok(vec![GeoJsonFeature { geometry, label }])
+            Ok(vec![GeoJsonFeature {
+                geometry,
+                label,
+                color,
+            }])
         }
         Some("GeometryCollection") => {
             let geoms = val["geometries"]
@@ -195,6 +212,7 @@ fn collect_features(val: &Value) -> Result<Vec<GeoJsonFeature>, String> {
                 .map(|geometry| GeoJsonFeature {
                     geometry,
                     label: None,
+                    color: None,
                 })
                 .collect())
         }
@@ -204,6 +222,7 @@ fn collect_features(val: &Value) -> Result<Vec<GeoJsonFeature>, String> {
                 Ok(geometry) => Ok(vec![GeoJsonFeature {
                     geometry,
                     label: None,
+                    color: None,
                 }]),
                 Err(_) => Ok(Vec::new()),
             }
@@ -299,6 +318,53 @@ fn extract_label(props: &Value) -> Option<String> {
         }
     }
     None
+}
+
+/// Read a per-feature colour from the source's own styling properties.
+///
+/// Covers the plain `color` key that several public datasets use (the
+/// submarine-cable map gives every cable its own colour this way) plus the
+/// simplestyle-spec keys that most GeoJSON exporters emit. Returns `None` when
+/// nothing usable is present, which leaves the feature on its layer colour.
+fn extract_color(props: &Value) -> Option<[u8; 4]> {
+    if !props.is_object() {
+        return None;
+    }
+    for key in &["color", "colour", "stroke", "marker-color", "fill"] {
+        if let Some(parsed) = props
+            .get(key)
+            .and_then(Value::as_str)
+            .and_then(parse_hex_color)
+        {
+            return Some(parsed);
+        }
+    }
+    None
+}
+
+/// Parse `#rgb` / `#rrggbb` (with or without the leading `#`) into RGBA.
+///
+/// Alpha is fixed at the same 220 the layer palette uses so a per-feature
+/// colour cannot make a feature render more opaque than the rest of its layer.
+fn parse_hex_color(raw: &str) -> Option<[u8; 4]> {
+    let hex = raw.trim().trim_start_matches('#');
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let (r, g, b) = match hex.len() {
+        // #rgb shorthand: each digit is doubled (`f0a` → `ff00aa`).
+        3 => {
+            let digit = |i: usize| u8::from_str_radix(&hex[i..i + 1], 16).ok();
+            let (r, g, b) = (digit(0)?, digit(1)?, digit(2)?);
+            (r * 17, g * 17, b * 17)
+        }
+        6 => {
+            let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+            (byte(0)?, byte(2)?, byte(4)?)
+        }
+        _ => return None,
+    };
+    Some([r, g, b, 220])
 }
 
 // ── Centroid helper (public for rendering modules) ────────────────────────────

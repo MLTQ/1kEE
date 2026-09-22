@@ -6,6 +6,7 @@ use super::camera::{self, GlobeLod};
 use super::contour_asset;
 use super::gebco_depth_fill;
 use super::globe_pass;
+use super::fire_layer;
 use super::local_terrain_scene::deflock_layer;
 use super::srtm_focus_cache;
 use super::terrain_field;
@@ -54,6 +55,20 @@ pub struct ProjectedPoint {
 pub(super) struct ProjectedMarker {
     pub(super) source_index: usize,
     pub(super) point: ProjectedPoint,
+}
+
+/// Exact inputs that determine the screen mesh for the immutable active-fire
+/// snapshot. Raw float bits keep even sub-pixel view changes visually exact.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FireGlobeMeshKey {
+    snapshot_revision: u64,
+    yaw: u32,
+    pitch: u32,
+    radius: u32,
+    focal_length: u32,
+    camera_distance: u32,
+    center_x: u32,
+    center_y: u32,
 }
 
 /// Exact inputs that determine the screen mesh for the immutable public ALPR
@@ -170,6 +185,16 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             selected_root,
             model.show_contours,
             contour_stroke_width_px,
+        );
+    }
+
+    // ── Submarine cables (drawn under user imports) ────────────────────────
+    if model.show_submarine_cables && !model.submarine_cable_layers.is_empty() {
+        geography::draw_geojson_layers(
+            painter,
+            &layout,
+            &model.globe_view,
+            &model.submarine_cable_layers,
         );
     }
 
@@ -308,6 +333,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             .collect()
     };
 
+    draw_active_fires(painter, &layout, &model.globe_view, model);
     draw_deflock_alprs(painter, &layout, &model.globe_view, model);
 
     // ── AIS ship markers ──────────────────────────────────────────────────
@@ -436,6 +462,59 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         arcgis_feature_markers,
         beam_elevation_m: None,
     }
+}
+
+/// Paint the optional active-fire overlay from a cached mesh when the data and
+/// globe transform have not changed. A global VIIRS day is tens of thousands of
+/// points, so reprojecting them every frame would be the dominant cost.
+fn draw_active_fires(
+    painter: &egui::Painter,
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    model: &AppModel,
+) {
+    if !model.show_active_fires
+        || model.active_body != crate::model::ActiveBody::Earth
+        || model.active_fires.is_empty()
+    {
+        return;
+    }
+
+    let key = FireGlobeMeshKey {
+        snapshot_revision: model.fire_snapshot_revision(),
+        yaw: view.yaw.to_bits(),
+        pitch: view.pitch.to_bits(),
+        radius: layout.radius.to_bits(),
+        focal_length: layout.focal_length.to_bits(),
+        camera_distance: layout.camera_distance.to_bits(),
+        center_x: layout.center.x.to_bits(),
+        center_y: layout.center.y.to_bits(),
+    };
+    thread_local! {
+        static FIRE_MESH: RefCell<Option<(FireGlobeMeshKey, Arc<egui::epaint::Mesh>)>> =
+            const { RefCell::new(None) };
+    }
+    let mesh = FIRE_MESH.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        match cache.as_ref() {
+            Some((cached_key, mesh)) if *cached_key == key => Arc::clone(mesh),
+            _ => {
+                let projected: Vec<_> = model
+                    .active_fires
+                    .iter()
+                    .filter_map(|detection| {
+                        projection::project_geo(layout, view, detection.location, 0.0)
+                            .filter(|point| point.front_facing)
+                            .map(|point| fire_layer::ProjectedFire::new(point.pos, detection))
+                    })
+                    .collect();
+                let mesh = fire_layer::build_mesh(&projected);
+                *cache = Some((key, Arc::clone(&mesh)));
+                mesh
+            }
+        }
+    });
+    fire_layer::draw_mesh(painter, mesh);
 }
 
 /// Paint the optional public ALPR overlay from a cached mesh when the data and

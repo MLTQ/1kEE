@@ -24,8 +24,12 @@ event → nearby cameras → attempted feed connection.
   and KML/KMZ layer import (`model/geojson_layer.rs`, `model/kml_layer.rs`).
 - **OSM ingest** — planet PBF / Overpass import pipeline producing cached feature cells
   (`osm_ingest/`).
-- **Terrain & bodies** — GEBCO / SRTM / Natural Earth elevation, a stellar catalog and
-  ephemeris, and a replay timeline.
+- **Public geospatial layers** — submarine cables and landing points from
+  TeleGeography (`submarine_cables.rs`) and NASA FIRMS active-fire detections
+  (`fire_source.rs`, rendered by `panels/world_map/fire_layer.rs`). Both are
+  keyless, default to off, and cache locally.
+- **Terrain & bodies** — GEBCO / SRTM / Natural Earth elevation, the Yale Bright
+  Star Catalogue and planetary ephemeris, and a replay timeline.
 - **Multiplayer** — a companion web view that mirrors the analyst's live view onto a
   local mesh (see below).
 
@@ -57,6 +61,8 @@ All keys are entered in-app under **Settings → APIs** and saved locally to
 | Webcams | [Windy Webcams](https://api.windy.com/webcams) | Yes — free tier |
 | New York traffic cams | [511NY](https://511ny.org/) | Yes — free |
 | Flights (ADS-B) | [OpenSky](https://opensky-network.org/) | No — anonymous, rate-limited |
+| Submarine cables | [TeleGeography](https://www.submarinecablemap.com/) | No |
+| Active fires | [NASA FIRMS](https://firms.modaps.eosdis.nasa.gov/) | No |
 
 ### Terrain & map data
 
@@ -112,4 +118,7 @@ boundaries.
 
 - A `puffin` profiler server runs on `127.0.0.1:8585` while the app is up; connect with
   `puffin_viewer`.
+- `crates/desktop/src/stellar_catalog.rs` is generated. Regenerate it from the
+  Yale Bright Star Catalogue with `python3 tools/generate_star_catalog.py`,
+  which preserves the curated common names already in the file.
 - Project planning uses the `beads` (`bd`) issue tracker in `.beads/`.

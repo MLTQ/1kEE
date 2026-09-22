@@ -1,9 +1,11 @@
 use crate::camera_registry;
 use crate::deflock_source;
 use crate::factal_stream;
+use crate::fire_source;
 use crate::model::AppModel;
 use crate::panels;
 use crate::panels::world_map::{contour_pass, globe_pass};
+use crate::submarine_cables;
 use crate::theme;
 use crate::usgs_stream;
 use std::sync::OnceLock;
@@ -83,6 +85,8 @@ impl Drop for DashboardApp {
         usgs_stream::shutdown();
         camera_registry::shutdown();
         deflock_source::shutdown();
+        submarine_cables::shutdown();
+        fire_source::shutdown();
         panels::world_map::srtm_focus_cache::terminate_active_gdal_jobs();
     }
 }
@@ -102,6 +106,8 @@ impl eframe::App for DashboardApp {
         usgs_stream::tick(&mut self.model);
         camera_registry::tick(&mut self.model);
         deflock_source::tick(&mut self.model);
+        submarine_cables::tick(&mut self.model);
+        fire_source::tick(&mut self.model);
 
         // Advance stellar time.
         if self.model.show_stellar_correspondence {

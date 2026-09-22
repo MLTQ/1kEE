@@ -165,6 +165,60 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                         crate::deflock_source::OPENSTREETMAP_ATTRIBUTION_URL,
                     );
                 });
+                ui.add_space(4.0);
+
+                ui.checkbox(&mut model.show_submarine_cables, "Submarine cables")
+                    .on_hover_text(
+                        "Cable routes and landing points from TeleGeography. Loaded on first \
+                         enable and cached locally for a day.",
+                    );
+                ui.small(
+                    egui::RichText::new(&model.submarine_cable_status).color(theme::text_muted()),
+                );
+                if model.show_submarine_cables && !model.submarine_cable_layers.is_empty() {
+                    // Names live on the features either way; this only controls
+                    // whether the globe draws ~2,600 of them at once.
+                    let mut show_labels = model
+                        .submarine_cable_layers
+                        .first()
+                        .is_some_and(|layer| layer.show_labels);
+                    if ui
+                        .checkbox(&mut show_labels, "Cable labels")
+                        .on_hover_text("Draws every cable and landing name. Dense at world zoom.")
+                        .changed()
+                    {
+                        let mut layers = (*model.submarine_cable_layers).clone();
+                        for layer in &mut layers {
+                            layer.show_labels = show_labels;
+                        }
+                        model.replace_submarine_cable_layers(layers);
+                    }
+                }
+                ui.horizontal_wrapped(|ui| {
+                    ui.hyperlink_to("Submarine Cable Map", crate::submarine_cables::PROJECT_URL);
+                    ui.label(egui::RichText::new("·").color(theme::text_muted()));
+                    ui.small(
+                        egui::RichText::new(crate::submarine_cables::ATTRIBUTION)
+                            .color(theme::text_muted()),
+                    );
+                });
+                ui.add_space(4.0);
+
+                ui.checkbox(&mut model.show_active_fires, "Active fires (24h)")
+                    .on_hover_text(
+                        "VIIRS thermal anomalies from NASA FIRMS, refreshed hourly while on. \
+                         Marker size and colour track fire radiative power; low-confidence \
+                         detections are filtered out.",
+                    );
+                ui.small(egui::RichText::new(&model.fire_status).color(theme::text_muted()));
+                ui.horizontal_wrapped(|ui| {
+                    ui.hyperlink_to("NASA FIRMS", crate::fire_source::PROJECT_URL);
+                    ui.label(egui::RichText::new("·").color(theme::text_muted()));
+                    ui.small(
+                        egui::RichText::new(crate::fire_source::ATTRIBUTION)
+                            .color(theme::text_muted()),
+                    );
+                });
                 ui.add_space(6.0);
 
                 // ── IMPORTED LAYERS ──────────────────────────────────────────

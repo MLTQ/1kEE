@@ -2,6 +2,7 @@ mod admin_layer;
 mod building_layer;
 mod camera;
 mod cell_loader;
+mod fire_layer;
 mod infra_layer;
 mod power_layer;
 pub(crate) mod contour_asset;

@@ -15,6 +15,7 @@ pub(super) fn parse_kml_features(xml: &str) -> Result<Vec<GeoJsonFeature>, Strin
             features.extend(geometries.into_iter().map(|geometry| GeoJsonFeature {
                 geometry,
                 label: label.clone(),
+                color: None,
             }));
         }
     }

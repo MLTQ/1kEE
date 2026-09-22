@@ -24,6 +24,19 @@ optional external overlays without owning their data pipelines.
   and explicit DeFlock/OpenStreetMap attribution links.
 - **Interacts with**: `AppModel::show_deflock_alprs` and `deflock_source.rs`.
 
+### Submarine cable control
+
+- **Does**: Exposes the optional TeleGeography cable/landing overlay, its
+  cache/refresh status, a label toggle, and explicit attribution.
+- **Interacts with**: `AppModel::show_submarine_cables`, `submarine_cables.rs`,
+  and `AppModel::replace_submarine_cable_layers` for the label toggle.
+
+### Active fire control
+
+- **Does**: Exposes the optional NASA FIRMS active-fire overlay, its
+  cache/refresh status, and explicit attribution.
+- **Interacts with**: `AppModel::show_active_fires` and `fire_source.rs`.
+
 ### Contour thickness control
 
 - **Does**: Exposes a linear physical-pixel contour-width slider (`1..=16 px`,

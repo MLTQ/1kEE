@@ -290,11 +290,13 @@ pub(super) fn draw_geojson_layers(
         if !layer.visible {
             continue;
         }
-        let [r, g, b, a] = layer.color;
-        let color = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
         for feature in &layer.features {
+            let [r, g, b, a] = feature.color.unwrap_or(layer.color);
+            let color = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
             draw_geojson_feature(painter, layout, view, &feature.geometry, color);
-            draw_feature_label(painter, layout, view, feature, color);
+            if layer.show_labels {
+                draw_feature_label(painter, layout, view, feature, color);
+            }
         }
     }
 }

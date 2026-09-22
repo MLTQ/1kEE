@@ -73,6 +73,26 @@ pub(super) struct ProjectedLocalPoint {
 /// Exact projection inputs for the optional public ALPR local-terrain mesh.
 /// Bit keys keep cached output valid only when it is visually identical.
 #[derive(Clone, Copy, PartialEq, Eq)]
+struct FireLocalMeshKey {
+    snapshot_revision: u64,
+    focus_lat: u32,
+    focus_lon: u32,
+    local_yaw: u32,
+    local_pitch: u32,
+    local_layer_spread: u32,
+    extent_x_km: u32,
+    extent_y_km: u32,
+    focus_center_x: u32,
+    focus_center_y: u32,
+    layout_height: u32,
+    horizontal_scale: u32,
+    center_x: u32,
+    center_y: u32,
+    layout_width: u32,
+}
+
+/// Bit keys keep cached output valid only when it is visually identical.
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct DeflockLocalMeshKey {
     snapshot_revision: u64,
     focus_lat: u32,
@@ -573,6 +593,15 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 .collect()
         };
 
+    draw_active_fires(
+        painter,
+        &layout,
+        &model.globe_view,
+        viewport_center,
+        extent_x_km,
+        extent_y_km,
+        model,
+    );
     draw_deflock_alprs(
         painter,
         &layout,
@@ -610,6 +639,17 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             render_zoom,
             model.selected_root.as_deref(),
             contour_stroke_scale,
+        );
+    }
+    if model.show_submarine_cables && !model.submarine_cable_layers.is_empty() {
+        draw_geojson_layers_local(
+            painter,
+            &layout,
+            &model.globe_view,
+            viewport_center,
+            extent_x_km,
+            extent_y_km,
+            &model.submarine_cable_layers,
         );
     }
     if !model.geojson_layers.is_empty() {
@@ -662,6 +702,87 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         arcgis_feature_markers: Vec::new(),
         beam_elevation_m: Some(beam_elevation_m),
     }
+}
+
+/// Paint the active-fire layer from a cached local-terrain mesh on the same
+/// terms as the ALPR layer below: rebuild only when the source revision or a
+/// projection input changes. Detections outside the viewport are dropped before
+/// the mesh is built, so a zoomed-in view only pays for what it shows.
+fn draw_active_fires(
+    painter: &egui::Painter,
+    layout: &LocalLayout,
+    view: &GlobeViewState,
+    viewport_center: GeoPoint,
+    extent_x_km: f32,
+    extent_y_km: f32,
+    model: &AppModel,
+) {
+    if model.active_body != crate::model::ActiveBody::Earth
+        || !model.show_active_fires
+        || model.active_fires.is_empty()
+    {
+        return;
+    }
+
+    let key = FireLocalMeshKey {
+        snapshot_revision: model.fire_snapshot_revision(),
+        focus_lat: viewport_center.lat.to_bits(),
+        focus_lon: viewport_center.lon.to_bits(),
+        local_yaw: view.local_yaw.to_bits(),
+        local_pitch: view.local_pitch.to_bits(),
+        local_layer_spread: view.local_layer_spread.to_bits(),
+        extent_x_km: extent_x_km.to_bits(),
+        extent_y_km: extent_y_km.to_bits(),
+        focus_center_x: layout.focus_center.x.to_bits(),
+        focus_center_y: layout.focus_center.y.to_bits(),
+        layout_height: layout.height.to_bits(),
+        horizontal_scale: layout.horizontal_scale.to_bits(),
+        center_x: layout.center.x.to_bits(),
+        center_y: layout.center.y.to_bits(),
+        layout_width: layout.width.to_bits(),
+    };
+    thread_local! {
+        static FIRE_MESH: RefCell<Option<(FireLocalMeshKey, Arc<egui::epaint::Mesh>)>> =
+            const { RefCell::new(None) };
+    }
+    let mesh = FIRE_MESH.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        match cache.as_ref() {
+            Some((cached_key, mesh)) if *cached_key == key => Arc::clone(mesh),
+            _ => {
+                // Generous margin so a detection just off-screen still
+                // contributes when the view is rotated or pitched.
+                let half_deg_lat = extent_y_km / 111.32 * 1.5;
+                let half_deg_lon = (extent_x_km
+                    / (111.32 * viewport_center.lat.to_radians().cos().abs().max(0.2)))
+                    * 1.5;
+                let projected: Vec<_> = model
+                    .active_fires
+                    .iter()
+                    .filter(|detection| {
+                        (detection.location.lat - viewport_center.lat).abs() <= half_deg_lat
+                            && (detection.location.lon - viewport_center.lon).abs() <= half_deg_lon
+                    })
+                    .filter_map(|detection| {
+                        projection::project_local(
+                            layout,
+                            view,
+                            viewport_center,
+                            detection.location,
+                            0.0,
+                            extent_x_km,
+                            extent_y_km,
+                        )
+                        .map(|point| super::fire_layer::ProjectedFire::new(point.pos, detection))
+                    })
+                    .collect();
+                let mesh = super::fire_layer::build_mesh(&projected);
+                *cache = Some((key, Arc::clone(&mesh)));
+                mesh
+            }
+        }
+    });
+    super::fire_layer::draw_mesh(painter, mesh);
 }
 
 /// Paint the public ALPR layer from a cached local-terrain mesh whenever both
@@ -1820,11 +1941,11 @@ fn draw_geojson_layers_local(
         if !layer.visible {
             continue;
         }
-        let [r, g, b, a] = layer.color;
-        let color = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
-        let stroke = egui::Stroke::new(1.5, color);
-
         for feature in &layer.features {
+            let [r, g, b, a] = feature.color.unwrap_or(layer.color);
+            let color = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
+            let stroke = egui::Stroke::new(1.5, color);
+
             // ── Draw geometry ─────────────────────────────────────────────
             match &feature.geometry {
                 GeoJsonGeometry::Point(pt) => {
@@ -1906,6 +2027,9 @@ fn draw_geojson_layers_local(
             }
 
             // ── Draw label ────────────────────────────────────────────────
+            if !layer.show_labels {
+                continue;
+            }
             let Some(label) = &feature.label else {
                 continue;
             };
