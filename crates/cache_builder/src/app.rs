@@ -156,6 +156,7 @@ struct BuilderForm {
     margin_deg: String,
     // Planet-all specific
     planet_tmp_dir: String, // empty = use cache_dir/.planet_build
+    compact_nodes: bool,
     // Contour-specific fields
     contour_db: String,   // path to srtm_focus_cache.sqlite
     gdal_bin_dir: String, // empty = use $PATH
@@ -229,6 +230,7 @@ impl BuilderApp {
                 max_lon: "-122.20".to_owned(),
                 margin_deg: "0.08".to_owned(),
                 planet_tmp_dir: String::new(),
+                compact_nodes: false,
             },
             assets: AssetSelection {
                 roads: true,
@@ -505,6 +507,11 @@ impl BuilderApp {
             planet_path,
             out_dir,
             tmp_dir,
+            node_storage: if self.form.compact_nodes {
+                crate::args::NodeStorage::IndexedPbf
+            } else {
+                crate::args::NodeStorage::Flat
+            },
             srtm_root,
             build_roads: self.assets.roads,
             build_waterways: self.assets.water,
@@ -1522,7 +1529,12 @@ impl eframe::App for BuilderApp {
 
                 if self.osm_mode == OsmMode::Planet {
                     ui.separator();
-                    ui.label("Tmp Dir (optional — for node sort chunks and checkpoint)");
+                    ui.checkbox(
+                        &mut self.form.compact_nodes,
+                        "Compact node lookup (experimental — saves disk space)",
+                    )
+                    .on_hover_text("Read coordinates from the original PBF using a small index. Avoids creating planet_nodes.bin. Keeps legacy files, uses separate resume state and may build more slowly.");
+                    ui.label("Working folder (optional — stores build progress and temporary data)");
                     ui.horizontal(|ui| {
                         ui.text_edit_singleline(&mut self.form.planet_tmp_dir);
                         if ui.small_button("…").clicked() {

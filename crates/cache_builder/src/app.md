@@ -42,3 +42,6 @@ Provides the minimal egui desktop shell for the offline cache-builder. It is the
   explicitly when they need to inspect an old cache.
 
 - **Pack vector archive…** converts the selected vector cache folder to a new `.1ka` file using a background job. The picker suggests Derived/world.1ka. Existing destinations are rejected; contour packing is available through the CLI.
+- Full Planet offers **Compact node lookup (experimental — saves disk space)**,
+  off by default. It sets the same indexed-PBF backend as the CLI; its tooltip
+  explains that it reads original compressed data and keeps legacy files intact.

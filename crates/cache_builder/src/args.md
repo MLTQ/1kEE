@@ -33,3 +33,6 @@ Parses the cache-builder CLI without pulling in a heavier argument framework yet
 - The parser now treats no-arg launch as a GUI request so the compiled binary can behave like a normal desktop companion app.
 
 - `pack-archive` accepts an output file and existing vector/contour cache inputs; its parser lives in `archive_pack.rs`.
+- `PlanetAllCommand::node_storage` selects `flat` (default, compatible with old
+  builds) or opt-in `indexed-pbf` via `--node-storage`. Unknown modes fail parsing.
+  Compact mode stores its index and resume state separately within `tmp_dir`.
