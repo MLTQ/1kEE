@@ -1,3 +1,4 @@
+use crate::archive_space::{SpaceMonitor, gb};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tile_archive::{Key, Writer, contours, vector};
@@ -76,30 +77,37 @@ pub fn run_with_progress(cmd: Command, progress: &mut dyn FnMut(String)) -> Resu
         .map_err(|e| e.to_string())?
         .as_nanos();
     let stage_path = parent.join(format!(".1kee-archive-{}-{nonce}.part", std::process::id()));
-    let mut writer = Writer::create(&stage_path)?;
+    let mut space = SpaceMonitor::new(cmd.out.clone(), stage_path.clone());
+    space.check(progress).map_err(|e| space.failure(&e))?;
+    let mut writer = Writer::create(&stage_path).map_err(|e| space.failure(&e))?;
     let stage = Staging(stage_path);
-    writer.metadata("created_unix_ns", &nonce.to_string())?;
-    writer.metadata("vector_grid", "Earth, eighth-degree, full detail, level 0")?;
-    writer.metadata(
-        "coverage",
-        "Imported cache snapshot only; missing tiles/layers are unknown, not empty",
-    )?;
-    let mut count = 0;
-    if let Some(osm) = &cmd.osm {
-        count += pack_vectors(&mut writer, osm, progress)?;
-    }
-    for (body, path) in &cmd.terrain {
-        count += pack_contours(&mut writer, *body, path, progress)?;
-    }
-    if count == 0 {
-        return Err("No source cells/tiles found; archive was not published".into());
-    }
-    writer.finish()?;
+    let packed = (|| {
+        writer.metadata("created_unix_ns", &nonce.to_string())?;
+        writer.metadata("vector_grid", "Earth, eighth-degree, full detail, level 0")?;
+        writer.metadata(
+            "coverage",
+            "Imported cache snapshot only; missing tiles/layers are unknown, not empty",
+        )?;
+        let mut count = 0;
+        if let Some(osm) = &cmd.osm {
+            count += pack_vectors(&mut writer, osm, progress, &mut space)?;
+        }
+        for (body, path) in &cmd.terrain {
+            count += pack_contours(&mut writer, *body, path, progress, &mut space)?;
+        }
+        if count == 0 {
+            return Err("No source cells/tiles found; archive was not published".into());
+        }
+        space.check(progress)?;
+        writer.finish()?;
+        Ok(count)
+    })();
+    let count = packed.map_err(|e: String| space.failure(&e))?;
     fs::hard_link(&stage.0, &cmd.out).map_err(|e| {
-        format!(
+        space.failure(&format!(
             "Cannot publish archive without overwriting {}: {e}",
             cmd.out.display()
-        )
+        ))
     })?;
     Ok(format!(
         "Published {} source cells/tiles to {} ({} bytes)",
@@ -130,11 +138,13 @@ fn pack_vectors(
     writer: &mut Writer,
     root: &Path,
     progress: &mut dyn FnMut(String),
+    space: &mut SpaceMonitor,
 ) -> Result<usize, String> {
     if !root.is_dir() {
         return Err(format!("Missing OSM cache directory {}", root.display()));
     }
-    let mut count = 0;
+    let mut sources = Vec::new();
+    let mut source_bytes = 0u64;
     for &(prefix, tag) in LAYERS {
         let directory = root.join(format!("{prefix}_cells"));
         if !directory.exists() {
@@ -150,38 +160,52 @@ fn pack_vectors(
             if path.extension().is_none_or(|ext| ext != "1kc") {
                 continue;
             }
-            let before = contours::fingerprint(&path)?;
-            if fs::metadata(&path).map_err(|e| e.to_string())?.len()
-                > tile_archive::MAX_PAYLOAD as u64
-            {
-                return Err(format!("Source cell exceeds 256 MiB: {}", path.display()));
-            }
-            let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            let features = cell_format::read::read_single_chunk(&bytes, tag)
-                .ok_or_else(|| format!("Invalid {} cell {}", prefix, path.display()))?;
-            let lat = i16::from_le_bytes(bytes[5..7].try_into().unwrap()) as i32;
-            let lon = i16::from_le_bytes(bytes[7..9].try_into().unwrap()) as i32;
-            if path.file_name().unwrap() != cell_format::cell_filename(prefix, lat, lon).as_str() {
-                return Err(format!("Cell filename/header mismatch: {}", path.display()));
-            }
-            let packed = vector::pack_cell(writer, tag, lat, lon, &features)
-                .map_err(|e| format!("Cannot pack {}: {e}", path.display()))?;
-            if before != contours::fingerprint(&path)? {
-                return Err(format!(
-                    "Source cell changed during packing: {}",
-                    path.display()
-                ));
-            }
-            writer.metadata(
-                &format!("vector:{}:{lat}:{lon}", String::from_utf8_lossy(&tag)),
-                &before,
-            )?;
-            count += 1;
-            progress(format!(
-                "Packed {prefix} ({lat},{lon}): {} features, {packed} bytes",
-                features.len()
+            source_bytes = source_bytes.saturating_add(
+                fs::metadata(&path)
+                    .map_err(|e| format!("{}: {e}", path.display()))?
+                    .len(),
+            );
+            sources.push((prefix, tag, path));
+        }
+    }
+    progress(format!(
+        "Vector input: {} cells, {} before tiling. The additional archive can be larger because features repeat across tile boundaries and the index takes space. Original cells are kept.",
+        sources.len(),
+        gb(source_bytes)
+    ));
+    let mut count = 0;
+    for (prefix, tag, path) in sources {
+        space.check(progress)?;
+        let before = contours::fingerprint(&path)?;
+        if fs::metadata(&path).map_err(|e| e.to_string())?.len() > tile_archive::MAX_PAYLOAD as u64
+        {
+            return Err(format!("Source cell exceeds 256 MiB: {}", path.display()));
+        }
+        let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let features = cell_format::read::read_single_chunk(&bytes, tag)
+            .ok_or_else(|| format!("Invalid {} cell {}", prefix, path.display()))?;
+        let lat = i16::from_le_bytes(bytes[5..7].try_into().unwrap()) as i32;
+        let lon = i16::from_le_bytes(bytes[7..9].try_into().unwrap()) as i32;
+        if path.file_name().unwrap() != cell_format::cell_filename(prefix, lat, lon).as_str() {
+            return Err(format!("Cell filename/header mismatch: {}", path.display()));
+        }
+        let packed = vector::pack_cell(writer, tag, lat, lon, &features)
+            .map_err(|e| format!("Cannot pack {}: {e}", path.display()))?;
+        if before != contours::fingerprint(&path)? {
+            return Err(format!(
+                "Source cell changed during packing: {}",
+                path.display()
             ));
         }
+        writer.metadata(
+            &format!("vector:{}:{lat}:{lon}", String::from_utf8_lossy(&tag)),
+            &before,
+        )?;
+        count += 1;
+        progress(format!(
+            "Packed {prefix} ({lat},{lon}): {} features, {packed} bytes",
+            features.len()
+        ));
     }
     Ok(count)
 }
@@ -191,6 +215,7 @@ fn pack_contours(
     body: i32,
     path: &Path,
     progress: &mut dyn FnMut(String),
+    space: &mut SpaceMonitor,
 ) -> Result<usize, String> {
     use rusqlite::{Connection, OpenFlags, params};
     let before = contours::fingerprint(path)?;
@@ -202,6 +227,7 @@ fn pack_contours(
     let mut geometry = source.prepare("SELECT elevation_m,geom FROM contour_tiles WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3 ORDER BY fid").map_err(|e|e.to_string())?;
     let mut count = 0;
     while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        space.check(progress)?;
         let level: i32 = row.get(0).map_err(|e| e.to_string())?;
         let y: i32 = row.get(1).map_err(|e| e.to_string())?;
         let x: i32 = row.get(2).map_err(|e| e.to_string())?;
