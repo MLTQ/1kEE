@@ -3,8 +3,9 @@
 ## Purpose
 
 Builds global `.1kc` vector-cell caches from a planet PBF in two resumable
-passes. Pass 1 writes and sorts the node store; Pass 2 resolves way geometry in
-parallel and incrementally merges feature cells.
+passes. Default Pass 1 writes and sorts the node store; opt-in compact builds
+delegate indexing to `planet_compact.rs`. Both resolve way geometry in the shared
+parallel Pass 2 and incrementally merge feature cells.
 
 ## Components
 
@@ -30,8 +31,11 @@ parallel and incrementally merges feature cells.
 - **Does**: Classifies an OSM way and emits selected vector features into the
   affected 1-degree cells.
 - **Interacts with**: `NodeLookup::lookup_many`, `util.rs` classifiers.
-- Uses `LookupSession::lookup_many` in production to keep up to 4 MiB of recently
-  read node blocks per active Rayon task; reference order and values are identical.
+- Uses the `planet_lookup` adapter for grouped coordinate queries: flat sessions
+  cache up to 4 MiB and compact sessions up to 16 MiB of decoded node arrays.
+  Reference order and coordinate values are identical across backends.
+- Compact sessions prepare each way blob's dependencies together before feature
+  classification to avoid repeatedly decompressing evicted node blocks.
 - **Rationale**: Resolving every reference in one grouped lookup amortizes
   positional I/O without changing vertex order, omissions, or `f32` values.
 
@@ -67,3 +71,5 @@ parallel and incrementally merges feature cells.
   unchanged, rather than recording an unreadable blob as completed work.
 - Node-store I/O failures propagate with way ID and byte offset, stopping before
   output/checkpoint advancement rather than emitting incomplete geometry.
+- Compact mode validates original-source identity around batches and before
+  checkpoint advancement. Its isolated state never reads legacy checkpoints.

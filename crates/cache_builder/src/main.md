@@ -30,3 +30,5 @@ Entry point for the offline cache-builder companion binary. It keeps the CLI sur
 
 - `pack-archive` dispatches snapshot conversion through `archive_pack.rs`.
 - `archive_space.rs` reports destination capacity during archive conversion.
+- `pbf_nodes` provides optional original-PBF node indexing; `planet_lookup` shares
+  the existing feature pipeline between flat and compact node storage.

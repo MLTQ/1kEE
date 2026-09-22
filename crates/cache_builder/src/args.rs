@@ -13,7 +13,8 @@ pub enum Command {
 pub struct PlanetAllCommand {
     pub planet_path: PathBuf,
     pub out_dir: PathBuf,
-    pub tmp_dir: PathBuf,          // node sort chunks + checkpoint file
+    pub tmp_dir: PathBuf, // flat node scratch or isolated compact index/checkpoints
+    pub node_storage: NodeStorage,
     pub srtm_root: Option<PathBuf>,
     pub build_roads: bool,
     pub build_waterways: bool,
@@ -30,6 +31,12 @@ pub struct PlanetAllCommand {
     pub build_port: bool,
     pub build_government: bool,
     pub build_surveillance: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NodeStorage {
+    Flat,
+    IndexedPbf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -230,6 +237,7 @@ where
     let mut planet_path = None;
     let mut out_dir = None;
     let mut tmp_dir = None;
+    let mut node_storage = NodeStorage::Flat;
     let mut srtm_root = None;
     let mut build_roads = true;
     let mut build_waterways = false;
@@ -256,6 +264,13 @@ where
             "--planet" => planet_path = Some(PathBuf::from(value)),
             "--out-dir" => out_dir = Some(PathBuf::from(value)),
             "--tmp-dir" => tmp_dir = Some(PathBuf::from(value)),
+            "--node-storage" => {
+                node_storage = match value.as_str() {
+                    "flat" => NodeStorage::Flat,
+                    "indexed-pbf" => NodeStorage::IndexedPbf,
+                    _ => return Err("--node-storage must be flat or indexed-pbf".into()),
+                };
+            }
             "--srtm-root" => srtm_root = Some(PathBuf::from(value)),
             "--features" => {
                 build_roads = false;
@@ -310,6 +325,7 @@ where
             .ok_or_else(|| format!("Missing --planet.\n\n{}", usage()))?,
         out_dir: resolved_out,
         tmp_dir: resolved_tmp,
+        node_storage,
         srtm_root,
         build_roads,
         build_waterways,
@@ -427,7 +443,7 @@ fn usage() -> String {
       [--zoom-buckets 0,1,2,3,4,5,6] [--gdal-bin <dir>] [--tmp-dir <dir>]
   one-thousand-electric-eye-cache-builder planet-all \\
       --planet <planet.osm.pbf> --out-dir <Derived/osm> \\
-      [--tmp-dir <dir>] [--srtm-root <dir>] \\
+      [--tmp-dir <dir>] [--srtm-root <dir>] [--node-storage flat|indexed-pbf] \\
       [--features all | roads,waterways,buildings,trees,admin,
                        power,rail,pipeline,aeroway,military,
                        comm,industrial,port,government,surveillance]"

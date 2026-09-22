@@ -15,10 +15,14 @@
 //!
 //! Interrupted runs restart from the checkpoint without re-sorting or
 //! re-scanning already-written output cells.
+//!
+//! Opt-in `indexed-pbf` storage delegates Pass 1 to `planet_compact.rs` and
+//! resolves coordinates from compressed source blocks, without a flat node file.
 
 use crate::args::PlanetAllCommand;
-use crate::flat_node_store::{LookupSession, NodeLookup, NodeWriter, RECORD_BYTES, sort_in_place};
+use crate::flat_node_store::{NodeLookup, NodeWriter, RECORD_BYTES, sort_in_place};
 use crate::geojson::{ensure_cache_dir, merge_write_cells, merge_write_feature_cells};
+use crate::planet_lookup::{Lookup, Session as LookupSession};
 use crate::roads::{RoadBuildProgress, open_planet_at};
 use crate::srtm::SrtmSampler;
 use crate::util::{
@@ -47,6 +51,8 @@ const PASS1_CHECKPOINT_NODE_INTERVAL: u64 = 5_000_000;
 // while the sequential reader refills the next batch.
 const BATCH_BLOBS: usize = 64;
 
+#[path = "planet_compact.rs"]
+mod compact;
 #[path = "planet_scan.rs"]
 mod scan;
 
@@ -113,6 +119,10 @@ pub fn build_planet_cache_with_progress(
     ensure_cache_dir(&cmd.out_dir)?;
     fs::create_dir_all(&cmd.tmp_dir).map_err(|e| e.to_string())?;
 
+    if cmd.node_storage == crate::args::NodeStorage::IndexedPbf {
+        return compact::build(&cmd, progress);
+    }
+
     let node_file = cmd.tmp_dir.join("planet_nodes.bin");
     let checkpoint_path = cmd.tmp_dir.join("checkpoint.txt");
     let sort_tmp = cmd.tmp_dir.join("sort_chunks");
@@ -176,11 +186,11 @@ pub fn build_planet_cache_with_progress(
         message: "Loading the reusable node index; building it once if missing or stale…"
             .to_owned(),
     });
-    let node_lookup = Arc::new(NodeLookup::open_cached(
+    let node_lookup = Arc::new(Lookup::Flat(NodeLookup::open_cached(
         &node_file,
         cp.pass1_record_count,
         &cmd.tmp_dir.join("planet_nodes.sparse-index-v1"),
-    )?);
+    )?));
 
     let stats = run_pass2(&cmd, &node_lookup, &mut cp, &checkpoint_path, progress)?;
 
@@ -358,6 +368,7 @@ fn process_blob(
     let BlobDecode::OsmData(block) = decoded else {
         return Ok(out);
     };
+    node_lookup.prepare_blob(&block)?;
     for element in block.elements() {
         let osmpbf::Element::Way(way) = element else {
             continue;
@@ -582,7 +593,7 @@ fn process_way(
 
 fn run_pass2(
     cmd: &PlanetAllCommand,
-    node_lookup: &Arc<NodeLookup>,
+    node_lookup: &Arc<Lookup>,
     cp: &mut Checkpoint,
     checkpoint_path: &Path,
     progress: &mut dyn FnMut(RoadBuildProgress),
@@ -629,6 +640,7 @@ fn run_pass2(
 
     loop {
         // Fill the batch from the sequential reader.
+        node_lookup.validate_source()?;
         blob_batch.clear();
         for blob_result in reader.by_ref().take(BATCH_BLOBS) {
             blob_batch.push(blob_result.map_err(|e| e.to_string())?);
@@ -649,6 +661,8 @@ fn run_pass2(
                 |lookup, blob| process_blob(blob, lookup, cmd),
             )
             .collect::<Result<Vec<_>, _>>()?;
+
+        node_lookup.validate_source()?;
 
         // Merge partial outputs into the main accumulators (single-threaded;
         // fast because it's pure in-memory HashMap work).
@@ -738,6 +752,7 @@ fn run_pass2(
             buffered = 0;
 
             cp.pass2_offset = batch_end_pos;
+            node_lookup.validate_source()?;
             cp.save(checkpoint_path)?;
 
             progress(RoadBuildProgress {
@@ -751,6 +766,7 @@ fn run_pass2(
         }
     }
 
+    node_lookup.validate_source()?;
     written_cells += flush_all(
         &cmd.out_dir,
         &mut roads_by_cell,
@@ -770,6 +786,7 @@ fn run_pass2(
         srtm.as_mut(),
     )?;
 
+    node_lookup.validate_source()?;
     cp.pass2_offset = 0; // complete — clear checkpoint
     cp.save(checkpoint_path)?;
 

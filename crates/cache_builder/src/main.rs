@@ -12,6 +12,8 @@ mod marching_squares;
 mod mars;
 mod node_store;
 mod planet_all;
+mod pbf_nodes;
+mod planet_lookup;
 mod roads;
 mod srtm;
 mod util;
