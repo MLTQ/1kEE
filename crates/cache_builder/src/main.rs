@@ -1,5 +1,6 @@
 mod admin;
 mod archive_pack;
+mod archive_space;
 mod app;
 mod args;
 mod contours;

@@ -10,6 +10,10 @@ world.1ka archive. Imports full-detail vector geometry and converts contours to 
 - Existing destinations are rejected. A unique staging file is atomically
   published via a hard link after SQLite closes; failures clean owned scratch.
 - Vector cells are individually fingerprinted before/after conversion.
+- Before packing, log the vector input count/bytes. This is not an output-size
+  estimate: duplication and SQLite indexing can make the archive larger.
+- `archive_space` checks the output volume while packing, logs actual temporary
+  growth/free capacity and adds a snapshot to errors before staging is removed.
 - Vector packing errors identify the source filename and cause. Boundary cells
   at +180 longitude/+90 latitude are valid and must not abort publication.
 - Contour databases are opened read-only in a consistent read transaction;

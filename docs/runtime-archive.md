@@ -61,6 +61,21 @@ the inspected Hilbert installation the Earth contour database alone is about
 additional capacity or a later incremental migration strategy. Benchmarks used
 small isolated copies.
 
+The inspected vector inputs total 19.89 GB across 77,053 cells. The output can
+exceed that size because features repeat across child tiles and SQLite adds an
+index. A drive showing 23.8 GB free after a failed pack may have been filled by
+the temporary archive and recovered that space during cleanup; it is not a
+measurement of free space at the instant the write failed.
+
+Packing now logs source count/bytes, the actual destination, temporary archive
+growth and destination free space. Failures capture those numbers before cleanup.
+A best-effort check keeps 1 GiB of working space, checked at most once a second;
+other writers or a large tile can still consume capacity between checks. Unknown
+capacity does not block packing. This reports and guards space, but does not
+compress the archive or make a full conversion fit a nearly full drive. Source
+bytes are not an output-size estimate. Use additional output capacity or free
+space explicitly; the packer never deletes source/cache data to make room.
+
 ## Measured loading behavior
 
 Release builds on the user's APFS NVMe, with both representations on that drive.
