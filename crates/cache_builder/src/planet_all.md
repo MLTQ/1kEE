@@ -21,6 +21,8 @@ parallel and incrementally merges feature cells.
 - **Does**: Streams all PBF nodes to the flat node file, periodically makes the
   file durable, then advances the checkpoint at blob boundaries. A resumed pass
   truncates the node file to `pass1_record_count` before replaying source data.
+- Decodes up to 64 blobs in parallel through `planet_scan.rs`, then appends the
+  encoded records in source order before checkpointing the batch's final offset.
 - **Interacts with**: `flat_node_store.rs`, `roads.rs` position reader.
 
 ### `process_way`
@@ -28,6 +30,8 @@ parallel and incrementally merges feature cells.
 - **Does**: Classifies an OSM way and emits selected vector features into the
   affected 1-degree cells.
 - **Interacts with**: `NodeLookup::lookup_many`, `util.rs` classifiers.
+- Uses `LookupSession::lookup_many` in production to keep up to 4 MiB of recently
+  read node blocks per active Rayon task; reference order and values are identical.
 - **Rationale**: Resolving every reference in one grouped lookup amortizes
   positional I/O without changing vertex order, omissions, or `f32` values.
 
@@ -52,3 +56,14 @@ parallel and incrementally merges feature cells.
   writers replace each feature by its stable OSM way ID.
 - SRTM baking, when requested, is delegated to the cell merge layer so one
   sampler lives for the full Pass 2 run.
+- Pass 2 propagates PBF decode errors instead of silently checkpointing past
+  unreadable blobs. Its node-block cache is task-local and needs no shared lock.
+- A synthetic PBF regression verifies that resumed parallel Pass 1 truncates
+  an uncheckpointed node tail and retains the exact original records/EOF offset.
+- Pass 2 announces node-index startup before opening it and reuses the validated
+  `planet_nodes.sparse-index-v1` scratch sidecar on subsequent starts. Existing
+  node/checkpoint files remain compatible and are not rebuilt for this change.
+- A corrupt-way fixture verifies that a failed Pass 2 leaves its saved checkpoint
+  unchanged, rather than recording an unreadable blob as completed work.
+- Node-store I/O failures propagate with way ID and byte offset, stopping before
+  output/checkpoint advancement rather than emitting incomplete geometry.

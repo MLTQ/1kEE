@@ -98,6 +98,8 @@ cargo run --release -p one-thousand-electric-eye-cache-builder
 ```
 
 Point the app at your asset root under **Settings → Paths**. See
+[`docs/cache-builder.md`](docs/cache-builder.md) for whole-planet build measurements
+and the proposed single-file static-data archive. See
 [`docs/terrain-pipeline.md`](docs/terrain-pipeline.md) for the GDAL preprocessing path.
 
 ## Multiplayer over Gruve

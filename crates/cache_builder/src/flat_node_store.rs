@@ -24,6 +24,13 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
+#[path = "node_lookup_cache.rs"]
+mod cache;
+pub use cache::LookupSession;
+
+#[path = "node_index.rs"]
+mod index_cache;
+
 pub const RECORD_BYTES: u64 = 16; // i64 id + f32 lat + f32 lon
 
 /// Number of records to load into RAM per sort chunk (512 MiB).
@@ -50,6 +57,7 @@ impl NodeWriter {
     }
 
     #[inline]
+    #[cfg(test)]
     pub fn write(&mut self, id: i64, lat: f32, lon: f32) -> Result<(), String> {
         self.writer
             .write_all(&id.to_le_bytes())
@@ -96,6 +104,16 @@ impl NodeWriter {
 
     pub fn finish(mut self) -> Result<(), String> {
         self.checkpoint()
+    }
+
+    /// Append already encoded complete records from an ordered PBF batch.
+    pub fn write_encoded(&mut self, records: &[u8]) -> Result<(), String> {
+        if !records.len().is_multiple_of(RECORD_BYTES as usize) {
+            return Err("Node batch contains an incomplete record".to_owned());
+        }
+        self.writer.write_all(records).map_err(|e| e.to_string())?;
+        self.count += (records.len() / RECORD_BYTES as usize) as u64;
+        Ok(())
     }
 
     /// Flush node records and make them durable before advancing a resume
@@ -280,25 +298,70 @@ pub struct NodeLookup {
 }
 
 impl NodeLookup {
+    #[cfg(test)]
     pub fn open(path: &Path, record_count: u64) -> Result<Self, String> {
-        let file = File::open(path).map_err(|e| format!("Cannot open node file: {e}"))?;
+        Self::open_inner(path, record_count, None)
+    }
 
-        let mut index = Vec::with_capacity((record_count / INDEX_STRIDE + 1) as usize);
-        let mut id_buf = [0u8; 8];
-        let mut i = 0u64;
-        while i < record_count {
-            file.read_at(&mut id_buf, i * RECORD_BYTES)
-                .map_err(|e| e.to_string())?;
-            let id = i64::from_le_bytes(id_buf);
-            index.push((id, i));
-            i += INDEX_STRIDE;
+    pub fn open_cached(path: &Path, record_count: u64, index_path: &Path) -> Result<Self, String> {
+        Self::open_inner(path, record_count, Some(index_path))
+    }
+
+    fn open_inner(
+        path: &Path,
+        record_count: u64,
+        index_path: Option<&Path>,
+    ) -> Result<Self, String> {
+        let file = File::open(path).map_err(|e| format!("Cannot open node file: {e}"))?;
+        let stamp = index_cache::stamp(&file, record_count).map_err(|e| e.to_string())?;
+        if record_count > stamp[1] / RECORD_BYTES {
+            return Err("Node store is shorter than the recorded node count".to_owned());
         }
+        let index = if let Some(index) = index_path.and_then(|path| index_cache::load(path, stamp))
+        {
+            index
+        } else {
+            use rayon::prelude::*;
+            let blocks =
+                usize::try_from(record_count.div_ceil(INDEX_STRIDE)).map_err(|e| e.to_string())?;
+            // Independent positional reads keep NVMe requests in flight;
+            // indexed collection preserves ascending record order.
+            let index = (0..blocks)
+                .into_par_iter()
+                .map(|block| {
+                    let record = block as u64 * INDEX_STRIDE;
+                    let mut id = [0u8; 8];
+                    file.read_exact_at(&mut id, record * RECORD_BYTES)
+                        .map_err(|e| {
+                            format!(
+                                "Cannot read node index {} at byte {}: {e}",
+                                path.display(),
+                                record * RECORD_BYTES
+                            )
+                        })?;
+                    Ok((i64::from_le_bytes(id), record))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            if index_cache::stamp(&file, record_count).map_err(|e| e.to_string())? != stamp {
+                return Err("Node store changed while its index was being built".to_owned());
+            }
+            if let Some(path) = index_path
+                && let Err(error) = index_cache::save(path, stamp, &index)
+            {
+                eprintln!("[1kEE] Cannot save reusable node index: {error}");
+            }
+            index
+        };
 
         Ok(Self {
             file,
             record_count,
             index,
         })
+    }
+
+    pub fn session(&self) -> LookupSession<'_> {
+        LookupSession::new(self)
     }
 
     fn block_bounds(&self, target_id: i64) -> Option<(u64, u64)> {
@@ -321,11 +384,22 @@ impl NodeLookup {
         (block_start < block_end).then_some((block_start, block_end))
     }
 
-    fn read_block(&self, block_start: u64, block_end: u64, buffer: &mut Vec<u8>) -> Option<()> {
+    fn read_block(
+        &self,
+        block_start: u64,
+        block_end: u64,
+        buffer: &mut Vec<u8>,
+    ) -> Result<(), String> {
         let block_len = (block_end - block_start) as usize;
         buffer.resize(block_len * RECORD_BYTES as usize, 0);
-        let bytes_read = self.file.read_at(buffer, block_start * RECORD_BYTES).ok()?;
-        (bytes_read == buffer.len()).then_some(())
+        self.file
+            .read_exact_at(buffer, block_start * RECORD_BYTES)
+            .map_err(|e| {
+                format!(
+                    "Cannot read node block at byte {}: {e}",
+                    block_start * RECORD_BYTES
+                )
+            })
     }
 
     fn search_block(buffer: &[u8], target_id: i64) -> Option<(f32, f32)> {
@@ -357,6 +431,7 @@ impl NodeLookup {
     /// References are grouped by sparse-index block, so every block is read at
     /// most once. This preserves the exact `lookup` result for each ID while
     /// avoiding a temporary 64 KiB allocation and positional read per ref.
+    #[cfg(test)]
     pub fn lookup_many(&self, target_ids: &[i64]) -> Vec<Option<(f32, f32)>> {
         let mut results = vec![None; target_ids.len()];
         if target_ids.is_empty() || self.record_count == 0 {
@@ -380,13 +455,10 @@ impl NodeLookup {
                 query_end += 1;
             }
 
-            if self
-                .read_block(block_start, block_end, &mut buffer)
-                .is_some()
-            {
-                for &(_, _, result_index) in &queries[query_start..query_end] {
-                    results[result_index] = Self::search_block(&buffer, target_ids[result_index]);
-                }
+            self.read_block(block_start, block_end, &mut buffer)
+                .expect("readable reference node block");
+            for &(_, _, result_index) in &queries[query_start..query_end] {
+                results[result_index] = Self::search_block(&buffer, target_ids[result_index]);
             }
             query_start = query_end;
         }
@@ -404,6 +476,49 @@ mod tests {
     use super::{INDEX_STRIDE, NodeLookup, NodeWriter};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn cached_index_rebuilds_after_node_file_replacement() {
+        let root = std::env::temp_dir().join(format!(
+            "1kee-index-replacement-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("nodes.bin");
+        let index = root.join("nodes.index");
+        let count = INDEX_STRIDE + 3;
+        let write = |path: &std::path::Path, shift: i64| {
+            let mut writer = NodeWriter::create(path).unwrap();
+            assert!(writer.write_encoded(&[0; 15]).is_err());
+            assert_eq!(writer.count, 0);
+            for n in 0..count {
+                writer
+                    .write(n as i64 + shift, n as f32, -(n as f32))
+                    .unwrap();
+            }
+            writer.finish().unwrap();
+        };
+        write(&path, 0);
+        drop(NodeLookup::open_cached(&path, count, &index).unwrap());
+        let original = fs::read(&index).unwrap();
+        drop(NodeLookup::open_cached(&path, count, &index).unwrap());
+        assert_eq!(fs::read(&index).unwrap(), original);
+        let replacement = root.join("new.bin");
+        write(&replacement, 10_000);
+        fs::rename(replacement, &path).unwrap();
+        let lookup = NodeLookup::open_cached(&path, count, &index).unwrap();
+        assert_eq!(
+            lookup.lookup_many(&[10_000, 14_096]),
+            vec![Some((0.0, 0.0)), Some((4096.0, -4096.0))]
+        );
+        assert_ne!(fs::read(&index).unwrap(), original);
+        drop(lookup);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn lookup_many_preserves_input_order_across_blocks() {

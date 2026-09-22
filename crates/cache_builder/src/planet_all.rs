@@ -17,7 +17,7 @@
 //! re-scanning already-written output cells.
 
 use crate::args::PlanetAllCommand;
-use crate::flat_node_store::{NodeLookup, NodeWriter, RECORD_BYTES, sort_in_place};
+use crate::flat_node_store::{LookupSession, NodeLookup, NodeWriter, RECORD_BYTES, sort_in_place};
 use crate::geojson::{ensure_cache_dir, merge_write_cells, merge_write_feature_cells};
 use crate::roads::{RoadBuildProgress, open_planet_at};
 use crate::srtm::SrtmSampler;
@@ -46,6 +46,9 @@ const PASS1_CHECKPOINT_NODE_INTERVAL: u64 = 5_000_000;
 // Each blob contains ~8 000 OSM elements; 64 blobs keeps all cores busy
 // while the sequential reader refills the next batch.
 const BATCH_BLOBS: usize = 64;
+
+#[path = "planet_scan.rs"]
+mod scan;
 
 // ── Checkpoint ────────────────────────────────────────────────────────────────
 
@@ -167,13 +170,17 @@ pub fn build_planet_cache_with_progress(
     }
 
     // ── Pass 2: scan ways ─────────────────────────────────────────────────────
-    let node_lookup = Arc::new(NodeLookup::open(&node_file, cp.pass1_record_count)?);
-
     progress(RoadBuildProgress {
-        stage: "Scanning Ways".to_owned(),
+        stage: "Opening Node Index".to_owned(),
         fraction: 0.41,
-        message: "Opening node lookup; starting Pass 2…".to_owned(),
+        message: "Loading the reusable node index; building it once if missing or stale…"
+            .to_owned(),
     });
+    let node_lookup = Arc::new(NodeLookup::open_cached(
+        &node_file,
+        cp.pass1_record_count,
+        &cmd.tmp_dir.join("planet_nodes.sparse-index-v1"),
+    )?);
 
     let stats = run_pass2(&cmd, &node_lookup, &mut cp, &checkpoint_path, progress)?;
 
@@ -225,24 +232,27 @@ fn run_pass1(
         NodeWriter::append(node_file, cp.pass1_record_count)?
     };
 
-    let (reader, pos) = open_planet_at(planet_path, resume)?;
+    let (mut reader, pos) = open_planet_at(planet_path, resume)?;
     let mut next_checkpoint_at =
         (writer.count / PASS1_CHECKPOINT_NODE_INTERVAL + 1) * PASS1_CHECKPOINT_NODE_INTERVAL;
 
-    for blob_result in reader {
-        let blob = blob_result.map_err(|e| e.to_string())?;
-        let decoded = blob.decode().map_err(|e| e.to_string())?;
-        let BlobDecode::OsmData(block) = decoded else {
-            continue;
-        };
-
-        for element in block.elements() {
-            let (id, lat, lon) = match element {
-                osmpbf::Element::Node(n) => (n.id(), n.lat() as f32, n.lon() as f32),
-                osmpbf::Element::DenseNode(n) => (n.id(), n.lat() as f32, n.lon() as f32),
-                _ => continue,
-            };
-            writer.write(id, lat, lon)?;
+    loop {
+        let blobs = reader
+            .by_ref()
+            .take(BATCH_BLOBS)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        if blobs.is_empty() {
+            break;
+        }
+        // Indexed parallel collection preserves source order. Only the single
+        // writer advances the durable checkpoint, after the entire batch.
+        let records = blobs
+            .par_iter()
+            .map(scan::node_records)
+            .collect::<Result<Vec<_>, _>>()?;
+        for bytes in records {
+            writer.write_encoded(&bytes)?;
         }
 
         // Checkpoint after crossing a global record-count boundary. The old
@@ -340,32 +350,29 @@ fn merge_map<T>(dst: &mut HashMap<(i32, i32), Vec<T>>, src: HashMap<(i32, i32), 
 // Decode one PBF blob and classify all Way elements inside it.
 fn process_blob(
     blob: &osmpbf::Blob,
-    node_lookup: &NodeLookup,
+    node_lookup: &mut LookupSession<'_>,
     cmd: &PlanetAllCommand,
-) -> BatchOutput {
+) -> Result<BatchOutput, String> {
     let mut out = BatchOutput::new();
-    let decoded = match blob.decode() {
-        Ok(d) => d,
-        Err(_) => return out,
-    };
+    let decoded = blob.decode().map_err(|e| e.to_string())?;
     let BlobDecode::OsmData(block) = decoded else {
-        return out;
+        return Ok(out);
     };
     for element in block.elements() {
         let osmpbf::Element::Way(way) = element else {
             continue;
         };
-        process_way(&way, node_lookup, cmd, &mut out);
+        process_way(&way, node_lookup, cmd, &mut out)?;
     }
-    out
+    Ok(out)
 }
 
 fn process_way(
     way: &osmpbf::Way<'_>,
-    node_lookup: &NodeLookup,
+    node_lookup: &mut LookupSession<'_>,
     cmd: &PlanetAllCommand,
     out: &mut BatchOutput,
-) {
+) -> Result<(), String> {
     let mut road_class: Option<&'static str> = None;
     let mut waterway_class: Option<&'static str> = None;
     let mut building_class: Option<&'static str> = None;
@@ -489,18 +496,19 @@ fn process_way(
         || (cmd.build_government && govt_class.is_some())
         || (cmd.build_surveillance && surv_class.is_some());
     if !any_match {
-        return;
+        return Ok(());
     }
 
     let refs: Vec<i64> = way.refs().collect();
     let points: Vec<GeoPoint> = node_lookup
         .lookup_many(&refs)
+        .map_err(|e| format!("Way {}: {e}", way.id()))?
         .into_iter()
         .flatten()
         .map(|(lat, lon)| GeoPoint { lat, lon })
         .collect();
     if points.len() < 2 {
-        return;
+        return Ok(());
     }
 
     let way_bounds = polyline_bounds(&points);
@@ -569,6 +577,7 @@ fn process_way(
     });
     emit_feature!(cmd.build_government, govt_class, out.govt, true);
     emit_feature!(cmd.build_surveillance, surv_class, out.surv, false);
+    Ok(())
 }
 
 fn run_pass2(
@@ -635,8 +644,11 @@ fn run_pass2(
         // Process blobs in parallel; each returns a BatchOutput.
         let partials: Vec<BatchOutput> = blob_batch
             .par_iter()
-            .map(|blob| process_blob(blob, node_lookup, cmd))
-            .collect();
+            .map_init(
+                || node_lookup.session(),
+                |lookup, blob| process_blob(blob, lookup, cmd),
+            )
+            .collect::<Result<Vec<_>, _>>()?;
 
         // Merge partial outputs into the main accumulators (single-threaded;
         // fast because it's pure in-memory HashMap work).
@@ -833,6 +845,87 @@ mod tests {
     use super::Checkpoint;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn corrupt_way_blob_cannot_advance_the_resume_checkpoint() {
+        let root = std::env::temp_dir().join(format!(
+            "1kee-corrupt-pass2-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("bad.pbf");
+        fs::write(&source, b"\0\0\0\x0b\x0a\x07OSMData\x18\x03\x0a\x01\xff").unwrap();
+        fs::write(root.join("planet_nodes.bin"), []).unwrap();
+        let checkpoint = root.join("checkpoint.txt");
+        Checkpoint {
+            pass1_complete: true,
+            ..Default::default()
+        }
+        .save(&checkpoint)
+        .unwrap();
+        let saved = fs::read(&checkpoint).unwrap();
+        let crate::args::Command::PlanetAll(cmd) = crate::args::parse([
+            "planet-all".to_owned(),
+            "--planet".to_owned(),
+            source.display().to_string(),
+            "--out-dir".to_owned(),
+            root.join("out").display().to_string(),
+            "--tmp-dir".to_owned(),
+            root.display().to_string(),
+        ])
+        .unwrap() else {
+            panic!("planet command")
+        };
+        assert!(super::build_planet_cache_with_progress(cmd, &mut |_| {}).is_err());
+        assert_eq!(fs::read(&checkpoint).unwrap(), saved);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn parallel_pass1_resumes_without_replaying_an_uncheckpointed_tail() {
+        let root = std::env::temp_dir().join(format!(
+            "1kee-parallel-pass1-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("tiny.pbf");
+        fs::write(
+            &source,
+            include_bytes!("../tests/fixtures/planet-tiny-dense.osm.pbf"),
+        )
+        .unwrap();
+        let nodes = root.join("nodes.bin");
+        let checkpoint = root.join("checkpoint.txt");
+        let mut cp = Checkpoint::default();
+        assert_eq!(
+            super::run_pass1(&source, &nodes, &mut cp, &checkpoint, &mut |_| {}).unwrap(),
+            4
+        );
+        let original = fs::read(&nodes).unwrap();
+        assert_eq!(cp.pass1_offset, fs::metadata(&source).unwrap().len());
+        use std::io::Write;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&nodes)
+            .unwrap()
+            .write_all(&[7; 16])
+            .unwrap();
+        let mut cp = Checkpoint::load(&checkpoint);
+        assert_eq!(
+            super::run_pass1(&source, &nodes, &mut cp, &checkpoint, &mut |_| {}).unwrap(),
+            4
+        );
+        assert_eq!(fs::read(&nodes).unwrap(), original);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn checkpoint_replacement_round_trips_latest_complete_state() {
