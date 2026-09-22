@@ -50,10 +50,19 @@ pub fn read_chunks(data: &[u8]) -> Option<Vec<([u8; 4], Vec<CellFeature>)>> {
 ///
 /// Returns `None` if the header is invalid or no matching chunk exists.
 pub fn read_single_chunk(data: &[u8], tag: [u8; 4]) -> Option<Vec<CellFeature>> {
-    read_chunks(data)?
-        .into_iter()
-        .find(|(t, _)| *t == tag)
-        .map(|(_, f)| f)
+    let mut pos = check_header(data)?;
+    while pos < data.len() {
+        let header = data.get(pos..pos.checked_add(8)?)?;
+        let length = u32::from_le_bytes(header[4..8].try_into().ok()?) as usize;
+        pos += 8;
+        let end = pos.checked_add(length)?;
+        let payload = data.get(pos..end)?;
+        if header[..4] == tag {
+            return decode_features(payload);
+        }
+        pos = end;
+    }
+    None
 }
 
 // ── Internal decoder ─────────────────────────────────────────────────────────
@@ -63,6 +72,9 @@ fn decode_features(data: &[u8]) -> Option<Vec<CellFeature>> {
         return None;
     }
     let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+    if count > (data.len() - 4) / 16 {
+        return None;
+    }
     let mut features = Vec::with_capacity(count);
     let mut pos = 4usize;
 
@@ -113,7 +125,7 @@ fn decode_features(data: &[u8]) -> Option<Vec<CellFeature>> {
 
         // Points (8 or 12 bytes each).
         let point_stride = if has_elevation { 12 } else { 8 };
-        if pos + point_count * point_stride > data.len() {
+        if point_count > data.len().checked_sub(pos)? / point_stride {
             return None;
         }
 

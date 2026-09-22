@@ -31,3 +31,5 @@ Parses the cache-builder CLI without pulling in a heavier argument framework yet
 ## Notes
 - This is intentionally simple for the first slice. If the cache-builder grows more commands, switching to `clap` will probably be worth it.
 - The parser now treats no-arg launch as a GUI request so the compiled binary can behave like a normal desktop companion app.
+
+- `pack-archive` accepts an output file and existing vector/contour cache inputs; its parser lives in `archive_pack.rs`.

@@ -99,7 +99,9 @@ cargo run --release -p one-thousand-electric-eye-cache-builder
 
 Point the app at your asset root under **Settings → Paths**. See
 [`docs/cache-builder.md`](docs/cache-builder.md) for whole-planet build measurements
-and the proposed single-file static-data archive. See
+and the complete static-data archive plan. See
+[`docs/runtime-archive.md`](docs/runtime-archive.md) to create packed runtime
+archives and review measured loading improvements and current limitations. See
 [`docs/terrain-pipeline.md`](docs/terrain-pipeline.md) for the GDAL preprocessing path.
 
 ## Multiplayer over Gruve
@@ -123,16 +125,19 @@ and not part of this repo.
 
 ## Workspace
 
-Three crates (`cargo` workspace, edition 2024):
+Five crates (`cargo` workspace, edition 2024):
 
 - **`crates/desktop`** — the main app (`one-thousand-electric-eye-desktop`): dashboard,
   all live data sources, and the map/globe renderer.
 - **`crates/cache_builder`** — offline preprocessing binary
   (`one-thousand-electric-eye-cache-builder`), GUI + CLI subcommands (`roads-bbox`,
-  `planet-all`, `contours-bbox`) that build road/contour/admin cells and Moon/Mars
+  `planet-all`, `contours-bbox`, `pack-archive`) that build road/contour/admin cells and Moon/Mars
   caches from raw OSM/terrain data.
 - **`crates/cell_format`** — the custom binary `.1kc` cell format for geographic feature
   cells, with chunk-based forward compatibility.
+- **`crates/tile_archive`** — indexed SQLite archives of packed vector and contour
+  tiles shared by the builder and desktop.
+- **`crates/gruve_sdk`** — vendored Rust client for the GRUVE integration.
 
 See [`docs/architecture.md`](docs/architecture.md) for module layout and integration
 boundaries.

@@ -524,6 +524,35 @@ impl BuilderApp {
         })
     }
 
+    fn start_archive_pack(&mut self) {
+        if self.active_job.is_some() {
+            return;
+        }
+        let osm = PathBuf::from(self.form.cache_dir.trim());
+        if !osm.is_dir() {
+            self.push_log("Choose an existing vector cache directory first.".to_owned());
+            return;
+        }
+        let Some(out) = rfd::FileDialog::new()
+            .set_file_name(tile_archive::FILE_NAME)
+            .set_directory(osm.parent().unwrap_or(&osm))
+            .add_filter("1kEE archive", &["1ka"])
+            .save_file()
+        else {
+            return;
+        };
+        self.status = "Packing vector archive".to_owned();
+        self.progress = 0.0;
+        self.progress_detail =
+            "Packing existing cached geometry; completed cells appear in the log.".to_owned();
+        self.active_job_tab = Some(ActiveTab::OsmContours);
+        self.active_job = Some(spawn_job(BuildJob::PackArchive(crate::archive_pack::Command {
+            out,
+            osm: Some(osm),
+            terrain: Vec::new(),
+        })));
+    }
+
     fn start_planet_build(&mut self) {
         if self.active_job.is_some() {
             return;
@@ -1442,6 +1471,14 @@ impl eframe::App for BuilderApp {
                 }
 
                 ui.heading("Export");
+                if ui
+                    .add_enabled(self.active_job.is_none(), egui::Button::new("Pack vector archive…"))
+                    .on_hover_text("Convert the selected vector cache directory to a packed runtime archive. Save as Derived/world.1ka; existing files are never overwritten.")
+                    .clicked()
+                {
+                    self.start_archive_pack();
+                }
+
                 ui.horizontal(|ui| {
                     ui.label("Mode:");
                     ui.selectable_value(&mut self.osm_mode, OsmMode::Bbox, "Bounding Box");

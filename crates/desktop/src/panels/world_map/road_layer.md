@@ -14,8 +14,8 @@ Loads OSM road geometry from the runtime store, enriches it with terrain elevati
 - **Does**: Projects cached elevated polylines into the local scene with stable per-layer point budgets
 - **Interacts with**: `project_local` in `local_terrain_scene`
 
-### `simplify_source_points`
-- **Does**: Reduces per-road source vertices before elevation sampling so the background enrichment step stays bounded
+### `feature_heights::prepare`
+- **Does**: Selects source vertex indices, reuses baked heights, and samples only missing heights so preparation stays bounded
 - **Interacts with**: `ElevatedRoad::from_polyline`
 
 ## Contracts
@@ -32,3 +32,5 @@ Loads OSM road geometry from the runtime store, enriches it with terrain elevati
 - The road cache always loads both major and minor classes together for the covered viewport. Layer toggles only decide what gets drawn, which keeps checkbox changes from blowing away the loaded road geometry.
 - Major roads are rendered before minor roads and use their own reserved point budget so enabling minor roads cannot starve the major-road layer.
 - Camera-dependent screen-space thinning was removed because it caused roads to pop in and out as the operator rotated the local scene.
+
+- Major/minor geometry is now loaded in one pass using `RoadLayerKind::All`, then partitioned. This removes duplicate cell reads/decodes without changing point budgets.

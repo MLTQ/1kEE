@@ -2328,6 +2328,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tiff",
+ "tile-archive",
 ]
 
 [[package]]
@@ -2351,6 +2352,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "tile-archive",
  "tungstenite",
  "zip",
 ]
@@ -3425,6 +3427,15 @@ dependencies = [
  "quick-error",
  "weezl",
  "zune-jpeg",
+]
+
+[[package]]
+name = "tile-archive"
+version = "0.1.0"
+dependencies = [
+ "cell-format",
+ "crc32fast",
+ "rusqlite",
 ]
 
 [[package]]

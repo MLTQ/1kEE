@@ -43,3 +43,8 @@ application with the map-oriented window configuration.
 
 - This binary intentionally uses WGPU because the world map registers custom
   GPU paint callbacks during app startup.
+
+- `world_archive` discovers packed runtime tiles; `feature_heights` preserves baked heights during render preparation.
+
+- Source module registration retains fire_source alongside the packed archive
+  and baked-height helpers when integrating upstream changes.

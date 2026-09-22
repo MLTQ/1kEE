@@ -26,4 +26,6 @@ Entry point for the offline cache-builder companion binary. It keeps the CLI sur
 
 ## Notes
 - No-arg launch now opens the GUI by default so the builder behaves like a companion desktop tool when launched directly.
-- The first implemented CLI command remains focused: build road-cell GeoJSON caches for a requested bbox.
+- Vector builds write binary `.1kc` cells; archive conversion packages existing outputs without reading raw sources.
+
+- `pack-archive` dispatches snapshot conversion through `archive_pack.rs`.

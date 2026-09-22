@@ -15,6 +15,7 @@ pub struct LoadedPolyline {
     pub class: String,
     pub name: Option<String>,
     pub points: Vec<GeoPoint>,
+    pub elevations: Option<Vec<f32>>,
     pub is_polygon: bool,
 }
 
@@ -29,7 +30,7 @@ fn osm_cache_dir_candidates(root: &Path) -> Vec<std::path::PathBuf> {
 
     if let Some(derived) = terrain_assets::find_derived_root(Some(root)) {
         candidates.push(derived.join("osm")); // canonical: Derived/osm/
-        candidates.push(derived.clone());     // fallback: Derived/
+        candidates.push(derived.clone()); // fallback: Derived/
     }
 
     // Also try root itself and root/osm in case the user pointed at the
@@ -55,7 +56,8 @@ pub fn load_features_from_cells(
         .find(|dir| dir.exists())
         .unwrap_or_else(|| root.join(format!("{prefix}_cells")));
 
-    if !cell_dir.exists() {
+    let archive = crate::world_archive::open(Some(root));
+    if !cell_dir.exists() && archive.is_none() {
         return Vec::new();
     }
 
@@ -70,33 +72,42 @@ pub fn load_features_from_cells(
 
     for lat in min_lat_c..=max_lat_c {
         for lon in min_lon_c..=max_lon_c {
-            // Try binary format first, then fall back to GeoJSON.
             let binary_path = cell_dir.join(cell_filename(prefix, lat, lon));
-            if binary_path.exists() {
-                if let Ok(data) = fs::read(&binary_path) {
-                    if let Some(features) = read_single_chunk(&data, tag) {
-                        for f in features {
-                            if f.points.len() < 2 {
-                                continue;
-                            }
-                            results.push(LoadedPolyline {
-                                way_id: f.way_id,
-                                class: decode_class(&tag, f.class).to_owned(),
-                                name: f.name,
-                                points: f
-                                    .points
-                                    .into_iter()
-                                    .map(|p| GeoPoint {
-                                        lat: p.lat,
-                                        lon: p.lon,
-                                    })
-                                    .collect(),
-                                is_polygon: f.is_polygon,
-                            });
-                        }
-                        continue; // binary cell loaded — skip GeoJSON fallback
+            let cached = crate::world_archive::vector_cell(
+                archive.as_ref(),
+                &binary_path,
+                tag,
+                lat,
+                lon,
+                bounds,
+            )
+            .or_else(|| {
+                fs::read(&binary_path)
+                    .ok()
+                    .and_then(|data| read_single_chunk(&data, tag))
+            });
+            if let Some(features) = cached {
+                for f in features {
+                    if f.points.len() < 2 {
+                        continue;
                     }
+                    results.push(LoadedPolyline {
+                        way_id: f.way_id,
+                        class: decode_class(&tag, f.class).to_owned(),
+                        name: f.name,
+                        points: f
+                            .points
+                            .into_iter()
+                            .map(|p| GeoPoint {
+                                lat: p.lat,
+                                lon: p.lon,
+                            })
+                            .collect(),
+                        elevations: f.elevations,
+                        is_polygon: f.is_polygon,
+                    });
                 }
+                continue;
             }
 
             // Legacy GeoJSON fallback.
@@ -150,6 +161,7 @@ pub fn load_features_from_cells(
                 }
 
                 results.push(LoadedPolyline {
+                    elevations: None,
                     way_id,
                     class,
                     name,
@@ -160,6 +172,24 @@ pub fn load_features_from_cells(
         }
     }
 
+    results.retain(|f| {
+        let min_lat = f.points.iter().map(|p| p.lat).fold(f32::INFINITY, f32::min);
+        let max_lat = f
+            .points
+            .iter()
+            .map(|p| p.lat)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let min_lon = f.points.iter().map(|p| p.lon).fold(f32::INFINITY, f32::min);
+        let max_lon = f
+            .points
+            .iter()
+            .map(|p| p.lon)
+            .fold(f32::NEG_INFINITY, f32::max);
+        min_lat <= bounds.max_lat
+            && max_lat >= bounds.min_lat
+            && min_lon <= bounds.max_lon
+            && max_lon >= bounds.min_lon
+    });
     results
 }
 

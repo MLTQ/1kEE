@@ -1,8 +1,8 @@
 use crate::model::GeoPoint;
 use crate::terrain_assets;
-use rusqlite::params;
 #[cfg(test)]
 use rusqlite::Connection;
+use rusqlite::params;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1000,15 +1000,28 @@ where
                     .map(|path| srtm_focus_cache::progress::snapshot(&path, worker_key.zoom_bucket))
                     .unwrap_or_default();
                 build_progress.retain(|&(lat, lon), _| {
-                    (i64::from(lat) - i64::from(worker_key.center_lat_bucket)).abs()
+                    (i64::from(lat) - i64::from(worker_key.center_lat_bucket))
+                        .abs()
                         .max((i64::from(lon) - i64::from(worker_key.center_lon_bucket)).abs())
                         <= i64::from(worker_key.prefetch_radius)
                 });
-                finish_local_manifest(cache, &worker_key, assets, build_progress, manifest_revision);
+                finish_local_manifest(
+                    cache,
+                    &worker_key,
+                    assets,
+                    build_progress,
+                    manifest_revision,
+                );
                 ctx.request_repaint();
             })
         {
-            finish_local_manifest(cache, &cleanup_key, None, BuildSnapshot::new(), manifest_revision);
+            finish_local_manifest(
+                cache,
+                &cleanup_key,
+                None,
+                BuildSnapshot::new(),
+                manifest_revision,
+            );
             eprintln!("[1kEE] failed to spawn {worker_name}: {error}");
             cleanup_ctx.request_repaint();
         }
@@ -1122,8 +1135,7 @@ pub fn load_srtm_region_for_view(
             .entries
             .iter()
             .filter(|(tile, _)| {
-                local_tile_distance(tile, center_lat_bucket, center_lon_bucket)
-                    <= prefetch_radius
+                local_tile_distance(tile, center_lat_bucket, center_lon_bucket) <= prefetch_radius
             })
             .map(|(tile, contours)| LocalTileGeometry {
                 id: super::local_contour_pass::LocalTileId {
@@ -1594,13 +1606,8 @@ pub fn load_lunar_for_globe(
     const MAX_TILES: usize = 800;
     let tile_zoom = globe_zoom_to_tile_zoom(zoom);
 
-    let assets = srtm_focus_cache::ensure_lunar_contour_region(
-        selected_root,
-        center,
-        tile_zoom,
-        2,
-        2,
-    );
+    let assets =
+        srtm_focus_cache::ensure_lunar_contour_region(selected_root, center, tile_zoom, 2, 2);
 
     let cache: &'static Mutex<GlobeRegionCache> =
         LUNAR_GLOBE_CONTOUR_CACHE.get_or_init(|| Mutex::new(GlobeRegionCache::default()));
@@ -1680,13 +1687,8 @@ pub fn load_mars_for_globe(
     const MAX_TILES: usize = 800;
     let tile_zoom = globe_zoom_to_tile_zoom(zoom);
 
-    let assets = srtm_focus_cache::ensure_mars_contour_region(
-        selected_root,
-        center,
-        tile_zoom,
-        2,
-        2,
-    );
+    let assets =
+        srtm_focus_cache::ensure_mars_contour_region(selected_root, center, tile_zoom, 2, 2);
 
     let cache: &'static Mutex<GlobeRegionCache> =
         MARS_GLOBE_CONTOUR_CACHE.get_or_init(|| Mutex::new(GlobeRegionCache::default()));
@@ -2131,6 +2133,7 @@ fn stream_local_contours(
          ORDER BY fid",
     )?;
 
+    let archive = crate::world_archive::ContourArchive::open(path);
     let mut completed = 0;
     let mut first_error = None;
     for (key, asset) in requests {
@@ -2140,6 +2143,44 @@ fn stream_local_contours(
             lon_bucket: key.lon_bucket,
         };
         let read_timer = srtm_focus_cache::timings::StageTimer::new(tile, "read_decode");
+        if let Some(bytes) = archive
+            .as_ref()
+            .and_then(|a| a.get(key.zoom_bucket, key.lat_bucket, key.lon_bucket))
+        {
+            match tile_archive::contours::decode(&bytes) {
+                Ok(rows) => {
+                    let total = rows.len();
+                    let mut contours = Vec::new();
+                    for (i, (elevation_m, geometry)) in rows.into_iter().enumerate() {
+                        contours.extend(
+                            tile_archive::contours::decode_lines(geometry, |lon, lat| GeoPoint {
+                                lat,
+                                lon,
+                            })
+                            .expect("validated packed geometry")
+                            .into_iter()
+                            .filter(|line| line.len() >= 2)
+                            .map(|line| ContourPath {
+                                elevation_m,
+                                points: simplify_line(line, asset.simplify_step),
+                            }),
+                        );
+                        if (i + 1) % 128 == 0 {
+                            on_progress(key, i + 1, total);
+                        }
+                    }
+                    select_contour_geometry(&mut contours, feature_budget);
+                    read_timer.finish(total as u64, bytes.len() as u64);
+                    on_progress(key, total, total);
+                    completed += 1;
+                    if !on_tile(key.clone(), contours) {
+                        break;
+                    }
+                    continue;
+                }
+                Err(error) => eprintln!("[1kEE] Packed contour decode fallback: {error}"),
+            }
+        }
         let mut decode_time = Duration::ZERO;
         let mut geometry_bytes = 0u64;
         let rows = match statement.query_map(
@@ -2228,26 +2269,7 @@ fn stream_local_contours(
         read_timer.finish(decoded_rows as u64, geometry_bytes);
         let select_timer = srtm_focus_cache::timings::StageTimer::new(tile, "geometry_select");
 
-        // Only move small Vec headers, not hundreds of MB of SQLite blobs.
-        // Stable sorting preserves fid order (including MultiLineString parts)
-        // for equal absolute elevations, exactly as the previous SQL sort did.
-        contours.sort_by(|left, right| left.elevation_m.abs().total_cmp(&right.elevation_m.abs()));
-
-        if contours.len() > feature_budget {
-            // Keep the longest contours rather than every Nth one.
-            //
-            // Stride decimation drops a 10 000-point shoreline trace and a
-            // 5-point speck at the same rate, which spends the budget on noise:
-            // in a 3DEP tile the longest 10% of contours hold ~73% of all
-            // geometry while the shortest 75% hold under 3%. Length-ordered
-            // selection keeps the lines that carry the shape of the terrain.
-            let budget = feature_budget.max(1);
-            contours.sort_unstable_by(|left, right| right.points.len().cmp(&left.points.len()));
-            contours.truncate(budget);
-            // Restore the elevation ordering the renderer and cache expect.
-            contours
-                .sort_by(|left, right| left.elevation_m.abs().total_cmp(&right.elevation_m.abs()));
-        }
+        select_contour_geometry(&mut contours, feature_budget);
 
         // Cache empty ready tiles too. Otherwise the render loop mistakes
         // nodata/flat tiles for misses and schedules the same SQLite/WKB read
@@ -2271,6 +2293,28 @@ fn stream_local_contours(
     Ok(())
 }
 
+fn select_contour_geometry(contours: &mut Vec<ContourPath>, feature_budget: usize) {
+    // Only move small Vec headers, not hundreds of MB of SQLite blobs.
+    // Stable sorting preserves fid order (including MultiLineString parts)
+    // for equal absolute elevations, exactly as the previous SQL sort did.
+    contours.sort_by(|left, right| left.elevation_m.abs().total_cmp(&right.elevation_m.abs()));
+
+    if contours.len() > feature_budget {
+        // Keep the longest contours rather than every Nth one.
+        //
+        // Stride decimation drops a 10 000-point shoreline trace and a
+        // 5-point speck at the same rate, which spends the budget on noise:
+        // in a 3DEP tile the longest 10% of contours hold ~73% of all
+        // geometry while the shortest 75% hold under 3%. Length-ordered
+        // selection keeps the lines that carry the shape of the terrain.
+        let budget = feature_budget.max(1);
+        contours.sort_unstable_by(|left, right| right.points.len().cmp(&left.points.len()));
+        contours.truncate(budget);
+        // Restore the elevation ordering the renderer and cache expect.
+        contours.sort_by(|left, right| left.elevation_m.abs().total_cmp(&right.elevation_m.abs()));
+    }
+}
+
 fn simplify_line(points: Vec<GeoPoint>, step: usize) -> Vec<GeoPoint> {
     if points.len() <= 2 || step <= 1 {
         return points;
@@ -2289,107 +2333,12 @@ fn simplify_line(points: Vec<GeoPoint>, step: usize) -> Vec<GeoPoint> {
 }
 
 fn parse_gpkg_lines(blob: &[u8]) -> Vec<Vec<GeoPoint>> {
-    if blob.len() < 8 || &blob[0..2] != b"GP" {
-        return Vec::new();
-    }
-
-    let flags = blob[3];
-    let envelope_indicator = (flags >> 1) & 0b111;
-    let envelope_len = match envelope_indicator {
-        0 => 0,
-        1 => 32,
-        2 | 3 => 48,
-        4 => 64,
-        _ => 0,
-    };
-    let header_len = 8 + envelope_len;
-    if blob.len() <= header_len {
-        return Vec::new();
-    }
-
-    parse_wkb_geometry(&blob[header_len..]).unwrap_or_default()
+    tile_archive::gpkg::parse_gpkg_lines(blob, |lon, lat| GeoPoint { lat, lon })
 }
 
+#[cfg(test)]
 fn parse_wkb_geometry(wkb: &[u8]) -> Option<Vec<Vec<GeoPoint>>> {
-    let mut cursor = 0usize;
-    let endian = *wkb.get(cursor)?;
-    cursor += 1;
-    let little = endian == 1;
-    let geom_type = read_u32(wkb, &mut cursor, little)?;
-    let base_type = geom_type % 1000;
-
-    match base_type {
-        2 => Some(vec![parse_linestring(wkb, &mut cursor, little)?]),
-        5 => {
-            let count = read_u32(wkb, &mut cursor, little)? as usize;
-            // Every direct child has at least one byte of endian marker, four
-            // bytes of geometry type, and four bytes of point count. Validate
-            // that minimum before reserving so a corrupt count cannot trigger
-            // an enormous allocation.
-            if count > wkb.len().checked_sub(cursor)? / 9 {
-                return None;
-            }
-            let mut lines = Vec::with_capacity(count);
-            for _ in 0..count {
-                lines.push(parse_wkb_linestring(wkb, &mut cursor)?);
-            }
-            Some(lines)
-        }
-        _ => None,
-    }
-}
-
-/// Parse a child of a WKB `MultiLineString`. WKB requires every child to be a
-/// direct `LineString`, so deliberately rejecting nested collections keeps an
-/// untrusted/corrupt cache blob from recursing an unnamed loader thread into a
-/// stack overflow.
-fn parse_wkb_linestring(wkb: &[u8], cursor: &mut usize) -> Option<Vec<GeoPoint>> {
-    let endian = *wkb.get(*cursor)?;
-    *cursor += 1;
-    let little = endian == 1;
-    let geom_type = read_u32(wkb, cursor, little)?;
-    if geom_type % 1000 != 2 {
-        return None;
-    }
-    parse_linestring(wkb, cursor, little)
-}
-
-fn parse_linestring(wkb: &[u8], cursor: &mut usize, little: bool) -> Option<Vec<GeoPoint>> {
-    let count = read_u32(wkb, cursor, little)? as usize;
-    // Each XY point occupies two f64 values. Check before reserving to reject
-    // malformed count fields without a large allocation attempt.
-    if count > wkb.len().checked_sub(*cursor)? / 16 {
-        return None;
-    }
-    let mut points = Vec::with_capacity(count);
-    for _ in 0..count {
-        let lon = read_f64(wkb, cursor, little)? as f32;
-        let lat = read_f64(wkb, cursor, little)? as f32;
-        points.push(GeoPoint { lat, lon });
-    }
-    Some(points)
-}
-
-fn read_u32(bytes: &[u8], cursor: &mut usize, little: bool) -> Option<u32> {
-    let end = (*cursor).checked_add(4)?;
-    let slice = bytes.get(*cursor..end)?;
-    *cursor = end;
-    Some(if little {
-        u32::from_le_bytes(slice.try_into().ok()?)
-    } else {
-        u32::from_be_bytes(slice.try_into().ok()?)
-    })
-}
-
-fn read_f64(bytes: &[u8], cursor: &mut usize, little: bool) -> Option<f64> {
-    let end = (*cursor).checked_add(8)?;
-    let slice = bytes.get(*cursor..end)?;
-    *cursor = end;
-    Some(if little {
-        f64::from_le_bytes(slice.try_into().ok()?)
-    } else {
-        f64::from_be_bytes(slice.try_into().ok()?)
-    })
+    tile_archive::gpkg::parse_wkb_geometry(wkb, |lon, lat| GeoPoint { lat, lon })
 }
 
 #[cfg(test)]
@@ -2604,7 +2553,12 @@ mod tests {
             assert_ne!(state.merge_requested_key, Some(stale_key));
         }
 
-        finish_local_merge(&cache, stale_key, Some(flatten_local_merge(stale_work)), HashSet::new());
+        finish_local_merge(
+            &cache,
+            stale_key,
+            Some(flatten_local_merge(stale_work)),
+            HashSet::new(),
+        );
 
         let mut state = cache.lock().expect("test cache lock");
         assert!(state.merged_key.is_none());
@@ -2613,7 +2567,12 @@ mod tests {
         let fresh_key = fresh_work.key;
         drop(state);
 
-        finish_local_merge(&cache, fresh_key, Some(flatten_local_merge(fresh_work)), HashSet::new());
+        finish_local_merge(
+            &cache,
+            fresh_key,
+            Some(flatten_local_merge(fresh_work)),
+            HashSet::new(),
+        );
         let state = cache.lock().expect("test cache lock");
         let merged = state.merged.as_ref().expect("published current merge");
         assert_eq!(merged.len(), 2);
@@ -2647,7 +2606,13 @@ mod tests {
             ..Default::default()
         });
 
-        finish_local_manifest(&cache, &stale_key, Some(vec![test_asset(0, 0)]), BuildSnapshot::new(), 0);
+        finish_local_manifest(
+            &cache,
+            &stale_key,
+            Some(vec![test_asset(0, 0)]),
+            BuildSnapshot::new(),
+            0,
+        );
 
         let state = cache.lock().expect("test cache lock");
         assert!(state.manifest_in_flight.is_none());
@@ -2691,10 +2656,12 @@ mod tests {
         // but the 2×3 overlapping tile strip remains valid progress data.
         assert!(adjacent.reader_assets().is_empty());
         assert_eq!(adjacent.display_assets().len(), 6);
-        assert!(adjacent
-            .display_assets()
-            .iter()
-            .all(|asset| (0..=1).contains(&asset.lat_bucket)));
+        assert!(
+            adjacent
+                .display_assets()
+                .iter()
+                .all(|asset| (0..=1).contains(&asset.lat_bucket))
+        );
 
         let zoom = 0.5;
         let bucket_step = srtm_focus_cache::half_extent_for_zoom(zoom) * 0.45;
@@ -2761,9 +2728,11 @@ mod tests {
 
         assert_eq!(requests.len(), LOCAL_CONTOUR_READ_BATCH_SIZE);
         assert_eq!(requests[0].0.lat_bucket, 0);
-        assert!(!requests.iter().any(|(key, _)| {
-            key.lat_bucket == LOCAL_CONTOUR_READ_BATCH_SIZE as i32
-        }));
+        assert!(
+            !requests
+                .iter()
+                .any(|(key, _)| { key.lat_bucket == LOCAL_CONTOUR_READ_BATCH_SIZE as i32 })
+        );
     }
 
     #[test]

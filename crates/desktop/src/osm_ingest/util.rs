@@ -198,6 +198,10 @@ pub(super) fn canonical_road_class(value: &str) -> Option<&'static str> {
 
 pub(super) fn road_class_matches(road_class: &str, layer_kind: super::RoadLayerKind) -> bool {
     match layer_kind {
+        super::RoadLayerKind::All => {
+            road_class_matches(road_class, super::RoadLayerKind::Major)
+                || road_class_matches(road_class, super::RoadLayerKind::Minor)
+        }
         super::RoadLayerKind::Major => {
             matches!(road_class, "motorway" | "trunk" | "primary" | "secondary")
         }

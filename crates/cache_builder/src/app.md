@@ -35,8 +35,10 @@ Provides the minimal egui desktop shell for the offline cache-builder. It is the
 | users | no-arg launch opens a GUI instead of exiting with CLI usage | Removing GUI default launch |
 
 ## Notes
-- Roads are the only implemented export asset today. Water, buildings, and boundaries are present as disabled planned toggles so the intended builder shape is visible immediately.
+- The builder offers OSM vector, Earth contour, Moon/Mars terrain jobs, and vector archive packing.
 - The inspector intentionally stays lightweight: it reports road-cell count, node-cache count, approximate cache size, and the most recently touched files so users can sanity-check output directories without opening another tool.
 - Mars defaults intentionally do not rename, merge, or import legacy
   `mars_focus_cache.sqlite` files; operators can still choose a custom path
   explicitly when they need to inspect an old cache.
+
+- **Pack vector archive…** converts the selected vector cache folder to a new `.1ka` file using a background job. The picker suggests Derived/world.1ka. Existing destinations are rejected; contour packing is available through the CLI.

@@ -131,138 +131,78 @@ pub(super) fn ensure_cell_geojson_from_extract(
     Ok(feature_count)
 }
 
+pub struct CachedRoads {
+    pub roads: Vec<RoadPolyline>,
+    pub missing: Vec<GeoBounds>,
+}
+
 pub fn load_roads_for_bounds_from_vector_cache(
     selected_root: Option<&Path>,
     bounds: GeoBounds,
     layer_kind: RoadLayerKind,
-) -> Option<Vec<RoadPolyline>> {
+) -> Option<CachedRoads> {
     let db_path = runtime_db_path(selected_root)?;
     let cache_dir = db_path.parent()?.join("road_cells");
-    if !cache_dir.exists() {
-        return None;
-    }
+    let archive = crate::world_archive::open(selected_root);
+    read_cached_roads(&cache_dir, archive, bounds, layer_kind)
+}
 
-    let cells = focus_cells_for_bounds(bounds);
-    if cells.is_empty() {
-        return None;
-    }
-
-    let mut any_file = false;
-    let mut missing_cell = false;
-    let mut seen_way_ids = HashSet::new();
+fn read_cached_roads(
+    cache_dir: &Path,
+    archive: Option<tile_archive::Reader>,
+    bounds: GeoBounds,
+    layer_kind: RoadLayerKind,
+) -> Option<CachedRoads> {
     let mut roads = Vec::new();
-
-    for (cell_lat, cell_lon) in cells {
-        let path = vector_cell_path(&cache_dir, cell_lat, cell_lon);
-
-        // Try binary format first.
-        if path.exists() {
-            any_file = true;
-            if let Ok(data) = fs::read(&path) {
-                if let Some(features) = read_single_chunk(&data, TAG_ROAD) {
-                    for f in features {
-                        let road_class = decode_road_class(f.class).to_owned();
-                        if !road_class_matches(&road_class, layer_kind)
-                            || !seen_way_ids.insert(f.way_id)
-                        {
-                            continue;
-                        }
-                        if f.points.len() < 2 {
-                            continue;
-                        }
-                        let points: Vec<GeoPoint> = f
-                            .points
-                            .into_iter()
-                            .map(|p| GeoPoint {
-                                lat: p.lat,
-                                lon: p.lon,
-                            })
-                            .collect();
-                        if !bounds_intersect(polyline_bounds(&points), bounds) {
-                            continue;
-                        }
-                        roads.push(RoadPolyline {
+    let mut missing = Vec::new();
+    let mut seen = HashSet::new();
+    let mut any_cell = false;
+    for (lat, lon) in focus_cells_for_bounds(bounds) {
+        let path = vector_cell_path(cache_dir, lat, lon);
+        let cached =
+            crate::world_archive::vector_cell(archive.as_ref(), &path, TAG_ROAD, lat, lon, bounds)
+                .map(|features| {
+                    features
+                        .into_iter()
+                        .filter(|f| f.points.len() >= 2)
+                        .map(|f| RoadPolyline {
                             way_id: f.way_id,
-                            road_class,
+                            road_class: decode_road_class(f.class).to_owned(),
                             name: f.name,
-                            points,
-                        });
+                            elevations: f.elevations,
+                            points: f
+                                .points
+                                .into_iter()
+                                .map(|p| GeoPoint {
+                                    lat: p.lat,
+                                    lon: p.lon,
+                                })
+                                .collect(),
+                        })
+                        .collect()
+                })
+                .or_else(|| load_all_roads_from_vector_cell(&path, lat, lon, cache_dir));
+        match cached {
+            Some(features) => {
+                any_cell = true;
+                for road in features {
+                    if road_class_matches(&road.road_class, layer_kind)
+                        && bounds_intersect(polyline_bounds(&road.points), bounds)
+                        && seen.insert(road.way_id)
+                    {
+                        roads.push(road);
                     }
-                    continue; // binary cell handled
                 }
             }
-        }
-
-        // Legacy GeoJSON fallback.
-        let geojson_path =
-            cache_dir.join(format!("road_cell_{cell_lat:+04}_{cell_lon:+05}.geojson"));
-        if !geojson_path.exists() {
-            missing_cell = true;
-            continue;
-        }
-        any_file = true;
-        let Ok(body) = fs::read_to_string(&geojson_path) else {
-            continue;
-        };
-        let Ok(payload) = serde_json::from_str::<Value>(&body) else {
-            continue;
-        };
-        let Some(features) = payload.get("features").and_then(Value::as_array) else {
-            continue;
-        };
-
-        for feature in features {
-            let props = feature.get("properties").unwrap_or(&Value::Null);
-            let way_id = props
-                .get("way_id")
-                .and_then(Value::as_i64)
-                .unwrap_or_default();
-            let road_class = props
-                .get("class")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned();
-            if !road_class_matches(&road_class, layer_kind) || !seen_way_ids.insert(way_id) {
-                continue;
-            }
-
-            let Some(geometry) = feature.get("geometry") else {
-                continue;
-            };
-            let points = match geometry.get("type").and_then(Value::as_str) {
-                Some("LineString") => parse_geojson_linestring(geometry),
-                Some("MultiLineString") => parse_geojson_multilinestring(geometry)
-                    .and_then(|mut lines| lines.drain(..).next()),
-                _ => None,
-            };
-            let Some(points) = points else {
-                continue;
-            };
-            if points.len() < 2 {
-                continue;
-            }
-            if !bounds_intersect(polyline_bounds(&points), bounds) {
-                continue;
-            }
-
-            roads.push(RoadPolyline {
-                way_id,
-                road_class,
-                name: props
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned)
-                    .filter(|name| !name.is_empty()),
-                points,
-            });
+            None => missing.push(GeoBounds {
+                min_lat: bounds.min_lat.max(lat as f32),
+                max_lat: bounds.max_lat.min((lat + 1) as f32),
+                min_lon: bounds.min_lon.max(lon as f32),
+                max_lon: bounds.max_lon.min((lon + 1) as f32),
+            }),
         }
     }
-
-    if !any_file || missing_cell {
-        None
-    } else {
-        Some(roads)
-    }
+    any_cell.then_some(CachedRoads { roads, missing })
 }
 
 pub(super) fn write_roads_to_vector_cells(
@@ -320,7 +260,7 @@ pub(super) fn write_roads_to_vector_cells(
                         lat: p.lat,
                     })
                     .collect(),
-                elevations: None,
+                elevations: road.elevations,
             })
             .collect();
 
@@ -366,6 +306,7 @@ fn load_all_roads_from_vector_cell(
                             way_id: f.way_id,
                             road_class: decode_road_class(f.class).to_owned(),
                             name: f.name,
+                            elevations: f.elevations,
                             points: f
                                 .points
                                 .into_iter()
@@ -415,6 +356,7 @@ fn load_roads_from_geojson(path: &Path) -> Option<Vec<RoadPolyline>> {
             continue;
         }
         roads.push(RoadPolyline {
+            elevations: None,
             way_id,
             road_class,
             name: props
@@ -441,4 +383,49 @@ fn cell_coords_from_path(path: &Path) -> (i16, i16) {
         return (lat, lon);
     }
     (0, 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn partial_cache_keeps_ready_roads_and_baked_elevations() {
+        let root = std::env::temp_dir().join(format!(
+            "1kee-partial-roads-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&root).unwrap();
+        let features = vec![CellFeature {
+            way_id: 7,
+            class: 2,
+            is_polygon: false,
+            name: None,
+            points: vec![
+                CellPoint { lat: 0.1, lon: 0.1 },
+                CellPoint { lat: 0.2, lon: 0.2 },
+            ],
+            elevations: Some(vec![40.0, 50.0]),
+        }];
+        fs::write(
+            vector_cell_path(&root, 0, 0),
+            write_cell(0, 0, &[(TAG_ROAD, &features)]),
+        )
+        .unwrap();
+        let bounds = GeoBounds {
+            min_lat: 0.0,
+            max_lat: 0.9,
+            min_lon: 0.0,
+            max_lon: 1.9,
+        };
+        let cached = read_cached_roads(&root, None, bounds, RoadLayerKind::All).unwrap();
+        assert_eq!(cached.roads.len(), 1);
+        assert_eq!(cached.roads[0].elevations, Some(vec![40.0, 50.0]));
+        assert_eq!(cached.missing.len(), 1);
+        assert_eq!(cached.missing[0].min_lon, 1.0);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

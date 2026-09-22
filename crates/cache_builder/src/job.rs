@@ -8,6 +8,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 pub enum BuildJob {
+    PackArchive(crate::archive_pack::Command),
     Bbox(BboxCommand),
     ContoursBbox(ContoursBboxCommand),
     LunarContours(LunarBuildCommand),
@@ -31,6 +32,12 @@ pub enum BuildEvent {
 pub fn spawn_job(job: BuildJob) -> JobHandle {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || match job {
+        BuildJob::PackArchive(command) => {
+            let result = crate::archive_pack::run_with_progress(command, &mut |message| {
+                let _ = tx.send(BuildEvent::Log(message));
+            });
+            let _ = tx.send(BuildEvent::Finished(result));
+        }
         BuildJob::Bbox(command) => {
             let mut reporter = |progress: RoadBuildProgress| {
                 let _ = tx.send(BuildEvent::Progress(progress));

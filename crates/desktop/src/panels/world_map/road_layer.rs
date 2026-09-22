@@ -36,19 +36,13 @@ struct ElevatedRoad {
 impl ElevatedRoad {
     /// Build an elevated road with a terrain sample for every vertex.
     fn from_polyline(poly: &osm_ingest::RoadPolyline, selected_root: Option<&Path>) -> Self {
-        let simplified = simplify_source_points(&poly.points, MAX_SOURCE_POINTS_PER_ROAD);
-        if simplified.is_empty() {
-            return Self { points: Vec::new() };
-        }
-        let points = simplified
-            .iter()
-            .copied()
-            .map(|pt| {
-                let elevation =
-                    srtm_stream::sample_elevation_m(selected_root, pt).unwrap_or(0.0) + 3.0;
-                (pt, elevation)
-            })
-            .collect();
+        let points = crate::feature_heights::prepare(
+            &poly.points,
+            poly.elevations.as_deref(),
+            MAX_SOURCE_POINTS_PER_ROAD,
+            3.0,
+            |pt| srtm_stream::sample_elevation_m(selected_root, pt),
+        );
         Self { points }
     }
 }
@@ -171,27 +165,27 @@ pub(super) fn draw_roads(
                 // Load both classes whenever any road layer is enabled so the
                 // cache survives checkbox toggles and only drawing changes.
                 // tile_zoom is scaled based on render depth to avoid global grid locks.
-                let major_elevated = osm_ingest::load_roads_for_bounds(
+                let roads = osm_ingest::load_roads_for_bounds(
                     root_ref,
                     load_bounds,
                     tile_zoom,
-                    RoadLayerKind::Major,
-                )
-                .into_iter()
-                .map(|poly| ElevatedRoad::from_polyline(&poly, root_ref))
-                .collect::<Vec<_>>();
-                let minor_elevated = osm_ingest::load_roads_for_bounds(
-                    root_ref,
-                    load_bounds,
-                    tile_zoom,
-                    RoadLayerKind::Minor,
-                )
-                .into_iter()
-                .map(|poly| ElevatedRoad::from_polyline(&poly, root_ref))
-                .collect::<Vec<_>>();
+                    RoadLayerKind::All,
+                );
+                let mut major_elevated = Vec::new();
+                let mut minor_elevated = Vec::new();
+                for poly in roads {
+                    let major = matches!(
+                        poly.road_class.as_str(),
+                        "motorway" | "trunk" | "primary" | "secondary"
+                    );
+                    let elevated = ElevatedRoad::from_polyline(&poly, root_ref);
+                    if major {
+                        major_elevated.push(elevated);
+                    } else {
+                        minor_elevated.push(elevated);
+                    }
+                }
 
-                let mut major_elevated = major_elevated;
-                let mut minor_elevated = minor_elevated;
                 sort_roads_for_budget(&mut major_elevated);
                 sort_roads_for_budget(&mut minor_elevated);
 
@@ -294,29 +288,6 @@ fn draw_road_layer(
             painter.add(egui::Shape::line(points, stroke));
         }
     }
-}
-
-fn simplify_source_points(points: &[GeoPoint], max_points: usize) -> Vec<GeoPoint> {
-    if points.len() <= max_points {
-        return points.to_vec();
-    }
-
-    let mut simplified = Vec::with_capacity(max_points);
-    simplified.push(points[0]);
-
-    let stride = ((points.len() - 1) as f32 / (max_points - 1) as f32).ceil() as usize;
-    let mut idx = stride;
-    while idx + 1 < points.len() {
-        simplified.push(points[idx]);
-        idx += stride;
-    }
-
-    let last = *points.last().unwrap();
-    if simplified.last().copied() != Some(last) {
-        simplified.push(last);
-    }
-
-    simplified
 }
 
 fn sort_roads_for_budget(roads: &mut [ElevatedRoad]) {
