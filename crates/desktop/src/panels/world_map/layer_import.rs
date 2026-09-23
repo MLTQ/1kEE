@@ -4,15 +4,17 @@ use crate::osm_ingest;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+#[path = "road_import.rs"]
+mod roads;
+
 pub(super) fn ensure_visible_road_layers(model: &mut AppModel, local_terrain_mode: bool) {
+    roads::poll(model);
     if !local_terrain_mode || (!model.show_major_roads && !model.show_minor_roads) {
         return;
     }
 
-    // Rate-limit: only attempt queue checks twice per second.  The actual
-    // queue check is now O(1) thanks to in-memory caches, but calling
-    // ensure_runtime_store (which opens SQLite) on every frame is still
-    // wasteful when nothing has changed.
+    // Only launch scheduling checks twice per second. SQLite setup and source
+    // discovery run in the road scheduling worker, never in this render call.
     static LAST_CHECK: OnceLock<Mutex<Instant>> = OnceLock::new();
     {
         let mut last = LAST_CHECK
@@ -34,8 +36,9 @@ pub(super) fn ensure_visible_road_layers(model: &mut AppModel, local_terrain_mod
     let half_deg = local_terrain_scene::visual_half_extent_for_zoom(model.globe_view.local_zoom);
     let radius_miles = (half_deg * 69.0).clamp(8.0, 60.0);
 
+    let mut requests = Vec::new();
     if let Some(focus) = model.terrain_focus_location() {
-        queue_road_focus_import(model, focus, radius_miles, "terrain focus");
+        requests.push((focus, radius_miles, "terrain focus"));
     }
 
     let center = model.globe_view.local_center;
@@ -44,28 +47,9 @@ pub(super) fn ensure_visible_road_layers(model: &mut AppModel, local_terrain_mod
         .map(|focus| (focus.lat - center.lat).abs() > 0.15 || (focus.lon - center.lon).abs() > 0.15)
         .unwrap_or(true)
     {
-        queue_road_focus_import(model, center, radius_miles, "map viewport");
+        requests.push((center, radius_miles, "map viewport"));
     }
-}
-
-pub(super) fn queue_road_focus_import(
-    model: &mut AppModel,
-    point: crate::model::GeoPoint,
-    radius_miles: f32,
-    label: &str,
-) {
-    match osm_ingest::queue_focus_roads_import(model.selected_root.as_deref(), point, radius_miles)
-    {
-        Ok(true) => {
-            model.push_log(format!("Queued focused road import for the {label}."));
-            model.osm_inventory =
-                osm_ingest::OsmInventory::detect_from(model.selected_root.as_deref());
-        }
-        Ok(false) => {}
-        Err(error) => {
-            model.push_log(format!("Focused road import failed: {error}"));
-        }
-    }
+    roads::queue(model, requests);
 }
 
 pub(super) fn ensure_visible_water_layers(model: &mut AppModel, local_terrain_mode: bool) {

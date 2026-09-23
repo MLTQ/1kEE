@@ -44,24 +44,26 @@ const LOCAL_CONTOUR_WGSL: &str = include_str!("local_contour_lines.wgsl");
 /// wgpu requires dynamic uniform offsets to be 256-aligned on most hardware.
 const UNIFORM_STRIDE: u64 = 256;
 
-/// The local scene draws contours twice: once beneath the opaque elevation fill
-/// and once above it. Each pass gets its own uniform slot because they differ in
-/// fade and stroke width.
+/// Contours draw beneath and above the elevation fill; roads draw afterwards.
+/// Each pass has independent uniforms for fade and stroke width.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum LocalContourPass {
     /// Drawn before the elevation fill, which then occludes it.
     Background,
     /// Drawn after the fill so lines stay visible on top.
     Surface,
+    /// Road overlays use their own uniforms after the terrain passes.
+    Roads,
 }
 
-const PASS_COUNT: usize = 2;
+const PASS_COUNT: usize = 3;
 
 impl LocalContourPass {
     fn slot(self) -> u32 {
         match self {
             LocalContourPass::Background => 0,
             LocalContourPass::Surface => 1,
+            LocalContourPass::Roads => 2,
         }
     }
 }
@@ -72,6 +74,13 @@ pub struct LocalTileId {
     pub zoom_bucket: i32,
     pub lat_bucket: i32,
     pub lon_bucket: i32,
+}
+
+/// Keep road chunks and contour tiles in disjoint GPU-cache namespaces.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum LocalBatchId {
+    Contour(LocalTileId),
+    Road { major: bool, chunk: usize },
 }
 
 /// One polyline segment. Endpoints are raw geography — the shader applies the
@@ -92,6 +101,20 @@ pub struct LocalSegmentInstance {
 }
 
 const _: () = assert!(std::mem::size_of::<LocalSegmentInstance>() == 32);
+
+impl LocalSegmentInstance {
+    pub fn line(a: [f32; 3], b: [f32; 3], color: egui::Color32, major: bool) -> Self {
+        Self {
+            a,
+            b,
+            color: linear_u8(color),
+            major: u32::from(major),
+        }
+    }
+    pub fn with_endpoints(self, a: [f32; 3], b: [f32; 3]) -> Self {
+        Self { a, b, ..self }
+    }
+}
 
 /// Must stay byte-for-byte in sync with `Uniforms` in local_contour_lines.wgsl.
 #[repr(C)]
@@ -141,7 +164,7 @@ fn linear_u8(c: egui::Color32) -> [u8; 4] {
 /// A tile's built instances, plus the version that produced them.
 #[derive(Clone)]
 pub struct LocalTileBatch {
-    pub id: LocalTileId,
+    pub id: LocalBatchId,
     pub version: u64,
     pub instances: Arc<Vec<LocalSegmentInstance>>,
 }
@@ -184,7 +207,7 @@ pub fn instances_for_tile(
             && *v == version
         {
             return Some(LocalTileBatch {
-                id,
+                id: LocalBatchId::Contour(id),
                 version,
                 instances: instances.clone(),
             });
@@ -261,9 +284,8 @@ pub struct LocalContourPassResources {
     pipeline: wgpu::RenderPipeline,
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    tiles: HashMap<LocalTileId, TileGpu>,
+    tiles: HashMap<LocalBatchId, TileGpu>,
     resident_bytes: u64,
-    frame: u64,
 }
 
 /// Uploading a whole envelope in one frame would stall visibly, so a cold start
@@ -275,7 +297,7 @@ const MAX_TILE_UPLOADS_PER_FRAME: usize = 3;
 /// without reaching into `CallbackResources` from outside a paint callback.
 static RESIDENT_BYTES: AtomicU64 = AtomicU64::new(0);
 
-/// Bytes of local contour geometry currently resident on the GPU.
+/// Bytes of local contour and road geometry currently resident on the GPU.
 pub fn resident_bytes() -> u64 {
     RESIDENT_BYTES.load(Ordering::Relaxed)
 }
@@ -393,21 +415,22 @@ impl LocalContourPassResources {
             bind_group,
             tiles: HashMap::new(),
             resident_bytes: 0,
-            frame: 0,
         }
     }
 
     /// Evict least-recently-drawn tiles until resident geometry fits the
-    /// configured budget. Tiles drawn this frame are never evicted: dropping one
-    /// would only force it to be re-uploaded on the next frame.
+    /// configured budget. Current/previous-frame geometry is retained so a later
+    /// callback can draw without having its buffers evicted during preparation.
     fn enforce_budget(&mut self, budget_bytes: u64, frame: u64) {
         if self.resident_bytes <= budget_bytes {
             return;
         }
-        let mut evictable: Vec<(LocalTileId, u64, u64)> = self
+        let mut evictable: Vec<(LocalBatchId, u64, u64)> = self
             .tiles
             .iter()
-            .filter(|(_, gpu)| gpu.last_used != frame)
+            // All callbacks prepare before any paints. Preserve the previous
+            // frame too, so a later road/contour pass can mark its live batches.
+            .filter(|(_, gpu)| gpu.last_used.saturating_add(1) < frame)
             .map(|(id, gpu)| (*id, gpu.last_used, gpu.bytes))
             .collect();
         evictable.sort_unstable_by_key(|(_, last_used, _)| *last_used);
@@ -434,10 +457,12 @@ pub struct LocalContourCallback {
     pass: LocalContourPass,
     batches: Vec<LocalTileBatch>,
     uniforms: LocalContourUniforms,
+    ctx: egui::Context,
+    frame: u64,
 }
 
 impl LocalContourCallback {
-    /// Build a callback for one of the scene's two contour passes.
+    /// Build a callback for a local contour or road pass.
     ///
     /// Widths are **physical pixels**, matching `contour_pass`. The scene's CPU
     /// stroke helpers return logical points, so callers must scale by
@@ -452,9 +477,12 @@ impl LocalContourCallback {
         alpha: f32,
         stroke_width_px_minor: f32,
         stroke_width_px_major: f32,
-        pixels_per_point: f32,
+        ctx: egui::Context,
     ) -> Self {
+        let pixels_per_point = ctx.pixels_per_point();
         Self {
+            frame: ctx.cumulative_pass_nr(),
+            ctx,
             pass,
             batches,
             uniforms: LocalContourUniforms {
@@ -526,12 +554,8 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
             bytemuck::bytes_of(&self.uniforms),
         );
 
-        // Only the first pass of a frame advances the clock and uploads; the
-        // second draws exactly the same geometry with different uniforms.
-        if self.pass == LocalContourPass::Background {
-            res.frame = res.frame.wrapping_add(1);
-        }
-        let frame = res.frame;
+        // The clock also advances when contours are hidden and only roads draw.
+        let frame = self.frame;
 
         let mut uploads = 0usize;
         for batch in &self.batches {
@@ -546,6 +570,7 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
 
             if stale {
                 if uploads >= MAX_TILE_UPLOADS_PER_FRAME {
+                    self.ctx.request_repaint();
                     continue;
                 }
                 uploads += 1;
@@ -598,6 +623,9 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
             let Some(gpu) = res.tiles.get(&batch.id) else {
                 continue;
             };
+            if gpu.version != batch.version {
+                continue;
+            }
             for chunk in &gpu.chunks {
                 if chunk.count == 0 {
                     continue;
@@ -608,6 +636,10 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "local_line_gpu_tests.rs"]
+mod gpu_tests;
 
 #[cfg(test)]
 mod tests {

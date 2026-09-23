@@ -19,6 +19,8 @@ Renders the app settings window for the desktop app. This file is the user-facin
 | `settings_store.rs` | Saving empty path fields reverts to executable-directory defaults / PATH discovery and saving an empty Factal key clears the stored token | Changing blank-field semantics |
 
 ## Notes
+- The local GPU budget/readout covers both contour tiles and retained road
+  batches. Its existing persisted setting key remains compatible.
 - The key is masked in the UI but still stored as plain text in the local desktop settings file.
 - Clearing keys changes keyed sources to inactive; it never activates fallback
   records.

@@ -12,3 +12,5 @@ the complete compact build rather than only the lookup implementation.
 - Changed feature settings or sources fail while preserving saved compact state.
 - Corrupt input cannot create a feature checkpoint; invalid mode fails parsing.
 - All mutations and cleanup are confined to unique owned temporary directories.
+- An atomic suffix prevents parallel tests colliding when wall-clock timestamps
+  have coarser resolution than their nanosecond representation.

@@ -90,18 +90,8 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
 
                 // ── TRANSPORT ────────────────────────────────────────────────
                 section_label(ui, "TRANSPORT");
-                let major_changed = ui
-                    .checkbox(&mut model.show_major_roads, "Major roads")
-                    .changed();
-                let minor_changed = ui
-                    .checkbox(&mut model.show_minor_roads, "Minor roads")
-                    .changed();
-                if (major_changed || minor_changed)
-                    && !model.show_major_roads
-                    && !model.show_minor_roads
-                {
-                    world_map::invalidate_road_cache_pub();
-                }
+                ui.checkbox(&mut model.show_major_roads, "Major roads");
+                ui.checkbox(&mut model.show_minor_roads, "Minor roads");
                 ui.checkbox(&mut model.show_rail, "Railways");
                 ui.checkbox(&mut model.show_aeroway, "Airports");
                 ui.add_space(6.0);

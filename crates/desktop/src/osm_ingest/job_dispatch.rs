@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use super::db::{
@@ -445,30 +445,39 @@ pub fn queue_focus_water_import(
 }
 
 pub fn tick(selected_root: Option<&Path>) {
-    let worker = worker();
-    let mut guard = match worker.lock() {
-        Ok(g) => g,
-        Err(_) => return,
+    let Ok(mut guard) = worker().try_lock() else {
+        return;
     };
-
     if let Some(active) = guard.as_ref() {
-        if active.handle.is_finished() {
-            let active = guard.take().expect("finished worker present");
-            drop(guard);
-            let _ = active.handle.join();
-            if let Ok(mut note) = current_job_note_store().lock() {
-                *note = None;
-            }
-        } else {
+        if !active.handle.is_finished() {
             return;
         }
-    } else {
-        drop(guard);
-        if !active_jobs_flag().load(Ordering::Relaxed) {
-            return;
+        let active = guard.take().expect("finished worker present");
+        let _ = active.handle.join();
+        if let Ok(mut note) = current_job_note_store().lock() {
+            *note = None;
         }
     }
+    if !active_jobs_flag().load(Ordering::Relaxed) {
+        return;
+    }
 
+    // Schema checks, recovery and dequeue can wait on disk/SQLite locks too.
+    // Keep them in the worker along with the actual import.
+    let root = selected_root.map(Path::to_owned);
+    match thread::Builder::new()
+        .name("osm-ingest-job".into())
+        .spawn(move || {
+            run_next_job(root.as_deref());
+            crate::app::request_repaint();
+        })
+    {
+        Ok(handle) => *guard = Some(ActiveWorker { handle }),
+        Err(error) => eprintln!("[1kEE] cannot start OSM import worker: {error}"),
+    }
+}
+
+fn run_next_job(selected_root: Option<&Path>) {
     let Ok(db_path) = ensure_runtime_store(selected_root) else {
         return;
     };
@@ -490,8 +499,8 @@ pub fn tick(selected_root: Option<&Path>) {
         Ok(c) => c,
         Err(_) => return,
     };
-    let Some(job) = fetch_next_job(&connection).ok().flatten() else {
-        active_jobs_flag().store(false, Ordering::Relaxed);
+    let next = fetch_with_activity(active_jobs_flag(), || fetch_next_job(&connection));
+    let Some(job) = next.ok().flatten() else {
         if let Ok(mut note) = current_job_note_store().lock() {
             *note = None;
         }
@@ -503,38 +512,65 @@ pub fn tick(selected_root: Option<&Path>) {
         *note = Some(job.note.clone());
     }
 
-    let handle = thread::spawn(move || {
-        let result = match job.feature_kind {
-            OsmFeatureKind::Roads => import_planet_roads_dispatch(&db_path, &job),
-            OsmFeatureKind::Water => import_planet_water(&db_path, &job),
-            OsmFeatureKind::Buildings => {
-                Err("Planet building import is not implemented yet.".to_owned())
-            }
-        };
+    let result = match job.feature_kind {
+        OsmFeatureKind::Roads => import_planet_roads_dispatch(&db_path, &job),
+        OsmFeatureKind::Water => import_planet_water(&db_path, &job),
+        OsmFeatureKind::Buildings => {
+            Err("Planet building import is not implemented yet.".to_owned())
+        }
+    };
 
-        match result {
-            Ok(summary) => {
-                let _ = mark_job_completed(&db_path, job.id, &summary);
-                match job.feature_kind {
-                    OsmFeatureKind::Roads => {
-                        road_data_gen().fetch_add(1, Ordering::Relaxed);
-                    }
-                    OsmFeatureKind::Water => {
-                        water_data_gen().fetch_add(1, Ordering::Relaxed);
-                    }
-                    OsmFeatureKind::Buildings => {}
+    match result {
+        Ok(summary) => {
+            let _ = mark_job_completed(&db_path, job.id, &summary);
+            match job.feature_kind {
+                OsmFeatureKind::Roads => {
+                    road_data_gen().fetch_add(1, Ordering::Relaxed);
                 }
-            }
-            Err(error) => {
-                let _ = mark_job_failed(&db_path, job.id, &error);
+                OsmFeatureKind::Water => {
+                    water_data_gen().fetch_add(1, Ordering::Relaxed);
+                }
+                OsmFeatureKind::Buildings => {}
             }
         }
+        Err(error) => {
+            let _ = mark_job_failed(&db_path, job.id, &error);
+        }
+    }
+}
 
-        crate::app::request_repaint();
-    });
+/// Clear the idle hint before inspecting SQLite. A scheduling worker may set
+/// it concurrently; clearing afterwards would lose that newly queued job.
+fn fetch_with_activity<T, E>(
+    active: &AtomicBool,
+    fetch: impl FnOnce() -> Result<Option<T>, E>,
+) -> Result<Option<T>, E> {
+    active.store(false, Ordering::Relaxed);
+    let result = fetch();
+    if !matches!(&result, Ok(None)) {
+        active.store(true, Ordering::Relaxed);
+    }
+    result
+}
 
-    if let Ok(mut guard) = worker.lock() {
-        *guard = Some(ActiveWorker { handle });
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+
+    #[test]
+    fn a_job_queued_during_an_empty_poll_is_not_lost() {
+        let active = AtomicBool::new(true);
+        let result: Result<Option<()>, ()> = fetch_with_activity(&active, || {
+            // SQLite's empty snapshot predates a concurrent queue commit.
+            active.store(true, Ordering::Relaxed);
+            Ok(None)
+        });
+        assert_eq!(result, Ok(None));
+        assert!(active.load(Ordering::Relaxed));
+        let _: Result<Option<()>, ()> = fetch_with_activity(&active, || Ok(None));
+        assert!(!active.load(Ordering::Relaxed));
+        let _: Result<Option<()>, ()> = fetch_with_activity(&active, || Err(()));
+        assert!(active.load(Ordering::Relaxed));
     }
 }
 

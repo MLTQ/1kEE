@@ -34,9 +34,6 @@ use crate::moving_tracks;
 use crate::osm_ingest;
 use crate::theme;
 
-pub(crate) fn invalidate_road_cache_pub() {
-    local_terrain_scene::invalidate_road_cache();
-}
 pub(crate) fn invalidate_water_cache_pub() {
     local_terrain_scene::invalidate_water_cache();
 }

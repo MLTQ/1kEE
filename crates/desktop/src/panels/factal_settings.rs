@@ -629,11 +629,11 @@ fn tab_paths(ui: &mut egui::Ui, model: &mut AppModel) {
     ui.add_space(8.0);
     ui.separator();
     ui.add_space(4.0);
-    ui.strong("Local Contour GPU Budget");
+    ui.strong("Local Map GPU Budget");
     ui.label(
         egui::RichText::new(
-            "Local contours are drawn from geometry uploaded to the GPU once per source \
-             tile, so this is a ceiling on resident geometry rather than a per-frame \
+            "Local contours and roads reuse geometry uploaded to the GPU in batches, \
+             so this budget controls cached geometry rather than a per-frame \
              drawing limit.  Least-recently-drawn tiles are evicted past it and \
              re-uploaded if revisited.",
         )
@@ -658,7 +658,7 @@ fn tab_paths(ui: &mut egui::Ui, model: &mut AppModel) {
             / (1024.0 * 1024.0 * 1024.0);
         ui.label(
             egui::RichText::new(format!(
-                "Resident contour geometry: {resident_gb:.2} GB of {:.2} GB",
+                "Resident map geometry: {resident_gb:.2} GB of {:.2} GB",
                 model.settings_local_contour_vram_budget_gb
             ))
             .small()

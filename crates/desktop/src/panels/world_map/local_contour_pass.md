@@ -8,6 +8,9 @@ orders of magnitude more geometry in front of the local scene than SRTM ever
 did — a measured bucket-10 tile holds ~9 800 contours and 4.3 M points — which
 the CPU projection and egui tessellation could not keep up with.
 
+Also draws road batches through the same projection and shader, with a separate
+uniform slot and a typed cache namespace so roads never overwrite contour tiles.
+
 ## Components
 
 ### `instances_for_tile`
@@ -81,6 +84,12 @@ the CPU projection and egui tessellation could not keep up with.
   change invalidates the baked colours.
 - Uploads are capped per frame so a jump into a fully-cached area spreads its
   envelope over consecutive frames instead of stalling on one.
+- The upload cap is three batches per callback; roads use at most 2 MiB batches.
+  Deferred uploads request repaint; stale versions are never painted in place
+  of requested geometry. egui's pass counter drives eviction even without any
+  contour pass. Current/previous-pass entries survive other callbacks preparing.
+- Road/contour hardware regression in `local_line_gpu_tests.rs` checks actual
+  shader pixels at joins, separate widths, and completion of deferred uploads.
 - A single tile can exceed the device's `max_buffer_size` on its own — a dense
   bucket-10 tile is ~4.3 M segments — so uploads go through
   `contour_pass::split_instance_buffers` rather than one allocation per tile.
