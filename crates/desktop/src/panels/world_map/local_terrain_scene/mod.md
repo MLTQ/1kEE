@@ -12,6 +12,10 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 ### Helper submodules (`projection`, `geography`, `markers`, `deflock_layer`, `dissolve`, `ui_overlays`)
 - **Does**: Split projection math, geographic drawing, marker rendering, transition effects, and HUD overlays out of the main scene entrypoint
 - **Interacts with**: `render_local_terrain_scene` and world-map state in `AppModel`
+- Local GPU callbacks receive the egui context for upload continuation and a
+  shared pass clock, including frames when only road overlays are visible.
+- Earth roads are submitted independently of contour availability; terrain
+  loading cannot suppress an already-ready road overlay.
 
 ### DeFlock ALPR overlay
 

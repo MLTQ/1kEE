@@ -1,96 +1,64 @@
 use crate::model::{GeoPoint, GlobeViewState};
 use crate::osm_ingest::{self, RoadLayerKind};
 use crate::theme;
-use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use super::local_contour_pass::{LocalContourCallback, LocalContourPass};
 use super::local_terrain_scene::{
-    LocalLayout, local_geo_bounds, project_local, visual_half_extent_for_zoom,
+    LocalLayout, local_geo_bounds, projection, visual_half_extent_for_zoom,
 };
-use super::srtm_stream;
 
-const MAX_SOURCE_POINTS_PER_ROAD: usize = 192;
-const MAX_MAJOR_RENDER_POINTS_TOTAL: usize = 400_000;
-const MAX_MINOR_RENDER_POINTS_TOTAL: usize = 800_000;
+#[path = "road_geometry.rs"]
+mod geometry;
+use geometry::RoadGeometry;
 
-// How much extra area to pre-fetch beyond the visible viewport in each
-// direction, expressed as a fraction of the current view half-extent.
-// 0.75 means "load 75 % extra on every side", giving a comfortable pan
-// buffer without flooding memory on large zoom-out views.
 const GEO_MARGIN_FACTOR: f32 = 0.75;
 
-// ── Road geo-bounds cache ───────────────────────────────────────────────────
-// Roads are loaded once for a geo bounding box that is slightly larger than
-// the visible viewport.  The cache stays valid as long as the viewport is
-// fully contained within that box — zoom changes that shrink the view never
-// invalidate it, and zoom-out/pan only invalidates when the viewport actually
-// escapes the loaded coverage area.
-
-/// A road polyline with elevation pre-sampled for every vertex.
-/// Elevation is computed once at cache-load time so `draw_road_layer`
-/// only has to do fast projection math on each frame.
-struct ElevatedRoad {
-    points: Vec<(GeoPoint, f32)>, // (position, elevation_m above ground)
-}
-
-impl ElevatedRoad {
-    /// Build an elevated road with a terrain sample for every vertex.
-    fn from_polyline(poly: &osm_ingest::RoadPolyline, selected_root: Option<&Path>) -> Self {
-        let points = crate::feature_heights::prepare(
-            &poly.points,
-            poly.elevations.as_deref(),
-            MAX_SOURCE_POINTS_PER_ROAD,
-            3.0,
-            |pt| srtm_stream::sample_elevation_m(selected_root, pt),
-        );
-        Self { points }
-    }
-}
-
-/// Clear the road cache so the next draw reloads from disk.
-/// Call this whenever the road layer checkboxes change.
+/// Explicit data/terrain resets invalidate roads; visibility toggles retain them.
 pub fn invalidate_road_cache() {
-    if let Ok(mut g) = road_cache().lock() {
-        g.cache = None;
-        // Leave `building` alone — any in-flight thread will finish and
-        // write a result; the stale check will then trigger a fresh build.
+    let old = if let Ok(mut store) = road_cache().lock() {
+        store.epoch = store.epoch.wrapping_add(1);
+        store.cache.take()
+    } else {
+        None
+    };
+    // Releasing large geometry must not hold the publication lock or UI thread.
+    if let Some(old) = old {
+        std::thread::spawn(move || drop(old));
     }
 }
 
-/// The bounding box of the background road-cache build in progress, if any.
 pub fn road_cache_building_bounds() -> Option<osm_ingest::GeoBounds> {
-    road_cache().lock().ok().and_then(|g| g.building)
+    road_cache().try_lock().ok().and_then(|g| g.building)
 }
 
 struct RoadCache {
     road_gen: u64,
-    /// The selected_root active when this cache was built.
-    /// A root change (different event) immediately invalidates the cache.
-    last_root: Option<std::path::PathBuf>,
-    /// Geo coverage this cache was built for (viewport + margin).
-    /// Cache is valid as long as the current viewport is fully inside this box.
-    /// This is zoom-level independent — zooming in never evicts the cache.
-    covered_min_lat: f32,
-    covered_max_lat: f32,
-    covered_min_lon: f32,
-    covered_max_lon: f32,
-    major_elevated: Vec<ElevatedRoad>,
-    minor_elevated: Vec<ElevatedRoad>,
+    root: Option<PathBuf>,
+    bounds: osm_ingest::GeoBounds,
+    colors: [egui::Color32; 2],
+    geometry: RoadGeometry,
 }
 
+#[derive(Default)]
 struct RoadCacheStore {
-    cache: Option<RoadCache>,
+    cache: Option<Arc<RoadCache>>,
     building: Option<osm_ingest::GeoBounds>,
+    epoch: u64,
 }
 
 fn road_cache() -> &'static Mutex<RoadCacheStore> {
     static CACHE: OnceLock<Mutex<RoadCacheStore>> = OnceLock::new();
-    CACHE.get_or_init(|| {
-        Mutex::new(RoadCacheStore {
-            cache: None,
-            building: None,
-        })
-    })
+    CACHE.get_or_init(|| Mutex::new(RoadCacheStore::default()))
+}
+
+fn covers(outer: osm_ingest::GeoBounds, inner: osm_ingest::GeoBounds) -> bool {
+    outer.min_lat <= inner.min_lat
+        && outer.max_lat >= inner.max_lat
+        && outer.min_lon <= inner.min_lon
+        && outer.max_lon >= inner.max_lon
 }
 
 pub(super) fn draw_roads(
@@ -104,47 +72,24 @@ pub(super) fn draw_roads(
     show_minor_roads: bool,
 ) {
     puffin::profile_function!();
-    // Dynamically calculate the SQLite `road_tiles` zoom level to query based on render depth.
-    // If we're fully zoomed out, this drops to 4, preventing 1,000,000-tile queries!
-    let tile_zoom = super::local_terrain_scene::road_tile_zoom(render_zoom);
-
     if !show_major_roads && !show_minor_roads {
-        if let Ok(mut g) = road_cache().lock() {
-            g.cache = None;
-        }
         return;
     }
-
     let bounds = local_geo_bounds(viewport_center, view.local_zoom);
-    let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
-    let km_per_deg_lat = 111.32f32;
-    let km_per_deg_lon = km_per_deg_lat * viewport_center.lat.to_radians().cos().abs().max(0.2);
-    let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
-    let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
     let current_gen = osm_ingest::road_data_generation();
-
-    // ── Stale check + background build launch ─────────────────────────────
-    {
-        let mut store = match road_cache().lock() {
-            Ok(g) => g,
-            Err(_) => return,
+    let colors = [theme::road_major_color(), theme::road_minor_color()];
+    let cache = {
+        let Ok(mut store) = road_cache().try_lock() else {
+            painter.ctx().request_repaint();
+            return;
         };
-
-        // Stale when: data generation changed, toggles changed, root changed,
-        // or — crucially — the viewport has panned/zoomed OUT of the loaded
-        // geo coverage.  Zooming IN never triggers a rebuild.
-        let stale = store.cache.as_ref().map_or(true, |c| {
+        let stale = store.cache.as_ref().is_none_or(|c| {
             c.road_gen != current_gen
-                || c.last_root.as_deref() != selected_root
-                || bounds.min_lat < c.covered_min_lat
-                || bounds.max_lat > c.covered_max_lat
-                || bounds.min_lon < c.covered_min_lon
-                || bounds.max_lon > c.covered_max_lon
+                || c.root.as_deref() != selected_root
+                || c.colors != colors
+                || !covers(c.bounds, bounds)
         });
-
         if stale && store.building.is_none() {
-            // Build a load bbox that extends GEO_MARGIN_FACTOR beyond the
-            // current viewport in each direction.
             let lat_margin = (bounds.max_lat - bounds.min_lat) * GEO_MARGIN_FACTOR;
             let lon_margin = (bounds.max_lon - bounds.min_lon) * GEO_MARGIN_FACTOR;
             let load_bounds = osm_ingest::GeoBounds {
@@ -153,160 +98,90 @@ pub(super) fn draw_roads(
                 min_lon: (bounds.min_lon - lon_margin).max(-180.0),
                 max_lon: (bounds.max_lon + lon_margin).min(180.0),
             };
-            let (covered_min_lat, covered_max_lat) = (load_bounds.min_lat, load_bounds.max_lat);
-            let (covered_min_lon, covered_max_lon) = (load_bounds.min_lon, load_bounds.max_lon);
-
             store.building = Some(load_bounds);
-            drop(store); // release lock before spawning
-
-            let root_buf = selected_root.map(|p| p.to_path_buf());
-            std::thread::spawn(move || {
-                let root_ref = root_buf.as_deref();
-                // Load both classes whenever any road layer is enabled so the
-                // cache survives checkbox toggles and only drawing changes.
-                // tile_zoom is scaled based on render depth to avoid global grid locks.
-                let roads = osm_ingest::load_roads_for_bounds(
-                    root_ref,
-                    load_bounds,
-                    tile_zoom,
-                    RoadLayerKind::All,
-                );
-                let mut major_elevated = Vec::new();
-                let mut minor_elevated = Vec::new();
-                for poly in roads {
-                    let major = matches!(
-                        poly.road_class.as_str(),
-                        "motorway" | "trunk" | "primary" | "secondary"
-                    );
-                    let elevated = ElevatedRoad::from_polyline(&poly, root_ref);
-                    if major {
-                        major_elevated.push(elevated);
-                    } else {
-                        minor_elevated.push(elevated);
+            let epoch = store.epoch;
+            let root = selected_root.map(Path::to_owned);
+            let zoom = super::local_terrain_scene::road_tile_zoom(render_zoom);
+            let ctx = painter.ctx().clone();
+            let spawned = std::thread::Builder::new()
+                .name("road-geometry".into())
+                .spawn(move || {
+                    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        static VERSION: AtomicU64 = AtomicU64::new(1);
+                        let version = VERSION.fetch_add(1, Ordering::Relaxed);
+                        let roads = osm_ingest::load_roads_for_bounds(
+                            root.as_deref(),
+                            load_bounds,
+                            zoom,
+                            RoadLayerKind::All,
+                        );
+                        let geometry = RoadGeometry::build(roads, root.as_deref(), version, colors);
+                        Arc::new(RoadCache {
+                            road_gen: current_gen,
+                            root,
+                            bounds: load_bounds,
+                            colors,
+                            geometry,
+                        })
+                    }));
+                    let mut retired = None;
+                    if let Ok(mut store) = road_cache().lock() {
+                        store.building = None;
+                        match built {
+                            Ok(cache) => {
+                                retired = if store.epoch == epoch {
+                                    store.cache.replace(cache)
+                                } else {
+                                    Some(cache)
+                                };
+                            }
+                            Err(_) => eprintln!("[1kEE] road geometry worker failed; retrying"),
+                        }
                     }
-                }
-
-                sort_roads_for_budget(&mut major_elevated);
-                sort_roads_for_budget(&mut minor_elevated);
-
-                if let Ok(mut store) = road_cache().lock() {
-                    store.cache = Some(RoadCache {
-                        road_gen: current_gen,
-                        last_root: root_buf.clone(),
-                        covered_min_lat,
-                        covered_max_lat,
-                        covered_min_lon,
-                        covered_max_lon,
-                        major_elevated,
-                        minor_elevated,
-                    });
-                    store.building = None;
-                }
-                crate::app::request_repaint();
-            });
+                    drop(retired);
+                    ctx.request_repaint();
+                });
+            if let Err(error) = spawned {
+                store.building = None;
+                eprintln!("[1kEE] cannot start road geometry worker: {error}");
+            }
         }
-        // `store` dropped here (or already explicitly dropped above)
-    }
-
-    let mut store = match road_cache().lock() {
-        Ok(g) => g,
-        Err(_) => return,
+        // Only clone Arc-backed batches after releasing the shared lock.
+        store
+            .cache
+            .as_ref()
+            .filter(|c| c.root.as_deref() == selected_root)
+            .cloned()
     };
-    let Some(cache) = &mut store.cache else {
+    let Some(cache) = cache else {
         return;
     };
-
+    let mut batches = Vec::new();
     if show_major_roads {
-        let mut remaining_points = MAX_MAJOR_RENDER_POINTS_TOTAL;
-        draw_road_layer(
-            painter,
-            layout,
-            view,
-            viewport_center,
-            extent_x_km,
-            extent_y_km,
-            &cache.major_elevated,
-            egui::Stroke::new(1.35, theme::road_major_color()),
-            &mut remaining_points,
-        );
+        batches.extend(cache.geometry.major.iter().cloned());
     }
     if show_minor_roads {
-        let mut remaining_points = MAX_MINOR_RENDER_POINTS_TOTAL;
-        draw_road_layer(
-            painter,
-            layout,
-            view,
-            viewport_center,
-            extent_x_km,
-            extent_y_km,
-            &cache.minor_elevated,
-            egui::Stroke::new(0.8, theme::road_minor_color()),
-            &mut remaining_points,
-        );
+        batches.extend(cache.geometry.minor.iter().cloned());
     }
-}
-
-fn draw_road_layer(
-    painter: &egui::Painter,
-    layout: &LocalLayout,
-    view: &GlobeViewState,
-    viewport_center: GeoPoint,
-    extent_x_km: f32,
-    extent_y_km: f32,
-    roads: &[ElevatedRoad],
-    stroke: egui::Stroke,
-    remaining_points: &mut usize,
-) {
-    for road in roads {
-        if *remaining_points < 2 {
-            break;
-        }
-
-        let mut points = Vec::with_capacity(road.points.len().min(*remaining_points));
-        for &(pt, elev) in &road.points {
-            if *remaining_points == 0 {
-                break;
-            }
-            let Some(pos) = project_local(
-                layout,
-                view,
-                viewport_center,
-                pt,
-                elev,
-                extent_x_km,
-                extent_y_km,
-            )
-            .map(|p| p.pos) else {
-                continue;
-            };
-
-            points.push(pos);
-            *remaining_points = remaining_points.saturating_sub(1);
-        }
-
-        if points.len() >= 2 {
-            painter.add(egui::Shape::line(points, stroke));
-        }
+    if batches.is_empty() {
+        return;
     }
-}
-
-fn sort_roads_for_budget(roads: &mut [ElevatedRoad]) {
-    roads.sort_by(|a, b| {
-        b.points
-            .len()
-            .cmp(&a.points.len())
-            .then_with(|| compare_road_start(a, b))
-    });
-}
-
-fn compare_road_start(a: &ElevatedRoad, b: &ElevatedRoad) -> std::cmp::Ordering {
-    let a0 = a
-        .points
-        .first()
-        .map(|(pt, _)| (pt.lat.to_bits(), pt.lon.to_bits()));
-    let b0 = b
-        .points
-        .first()
-        .map(|(pt, _)| (pt.lat.to_bits(), pt.lon.to_bits()));
-    a0.cmp(&b0)
+    let half = visual_half_extent_for_zoom(view.local_zoom);
+    let extent_x = (half * 111.32 * viewport_center.lat.to_radians().cos().abs().max(0.2)).max(1.0);
+    let extent_y = (half * 111.32).max(1.0);
+    let params =
+        projection::local_projection_params(layout, view, viewport_center, extent_x, extent_y);
+    let ppp = painter.ctx().pixels_per_point();
+    painter.add(
+        LocalContourCallback::new(
+            LocalContourPass::Roads,
+            batches,
+            &params,
+            1.0,
+            0.8 * ppp,
+            1.35 * ppp,
+            painter.ctx().clone(),
+        )
+        .into_paint_callback(painter.clip_rect()),
+    );
 }

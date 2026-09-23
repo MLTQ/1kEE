@@ -50,7 +50,7 @@ optional external overlays without owning their data pipelines.
 | Dependent | Expects | Breaking changes |
 |---|---|---|
 | World map | Toggle values correspond directly to renderer visibility checks | Relabeling a control while changing its target field |
-| Cache helpers | Disabling road/water layers triggers the appropriate invalidation behavior | Removing cache invalidation on affected toggles |
+| Cache helpers | Road toggles retain prepared geometry; disabling water keeps its existing invalidation behavior | Discarding road geometry on visibility changes |
 | Optional sources | A layer can remain off while its cache/data becomes available | Making a source fetch conditional on visual enablement alone |
 | Contour renderers | No contour-derived local or globe stroke is below 1 px; local major/minor, coastline, and bathymetry strokes retain their hierarchy above that floor | Sending an unchecked physical width or allowing sub-pixel strokes |
 

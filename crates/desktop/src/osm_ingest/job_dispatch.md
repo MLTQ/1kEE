@@ -17,6 +17,13 @@ Owns the OSM ingest queue, worker lifecycle, focus-job scheduling, and the small
 ### `tick`
 - **Does**: Advances one background OSM worker, updates the active-job note, and publishes data-generation bumps when imports finish
 - **Interacts with**: `db.rs`, feature-specific importers, UI overlays
+- Main-thread work is limited to polling/joining a finished handle and starting
+  a single worker. `run_next_job` performs schema setup, recovery, dequeue,
+  import and completion writes on that worker, so enabling roads cannot block
+  the UI on a database lock before the import even starts.
+- Dequeue clears its activity hint before fetching, preserving notifications
+  from concurrent queue commits; failures retain the hint for retry. Regression
+  tests pin this empty-poll/queue race introduced by asynchronous scheduling.
 
 ### `initialize_caches`
 - **Does**: Hydrates the in-memory note/job caches at startup and now also recovers orphaned `running` jobs left behind by a previous crash

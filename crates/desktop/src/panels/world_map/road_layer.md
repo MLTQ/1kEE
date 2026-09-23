@@ -1,36 +1,21 @@
 # road_layer.rs
 
 ## Purpose
-Loads OSM road geometry from the runtime store, enriches it with terrain elevation off the render thread, and draws the visible local/regional road overlays. It now also acts as the guardrail against runaway egui geometry when a road import covers a dense urban/coastal area.
-
-## Components
-
-### `draw_roads`
-- **Does**: Refreshes the cached elevated road set when tile coverage, root, or road data generation changes, then renders the current major/minor road overlays
-- **Interacts with**: `osm_ingest`, `srtm_stream`, `local_terrain_scene`
-- **Rationale**: Keeps SQLite/direct-cache reads and terrain sampling off the main render loop while still reacting to new OSM imports
-
-### `draw_road_layer`
-- **Does**: Projects cached elevated polylines into the local scene with stable per-layer point budgets
-- **Interacts with**: `project_local` in `local_terrain_scene`
-
-### `feature_heights::prepare`
-- **Does**: Selects source vertex indices, reuses baked heights, and samples only missing heights so preparation stays bounded
-- **Interacts with**: `ElevatedRoad::from_polyline`
+Loads and elevates OSM roads in one background job, then submits retained GPU
+line batches. No per-frame CPU road projection/tessellation or point cutoff.
 
 ## Contracts
-
-| Dependent | Expects | Breaking changes |
-|-----------|---------|------------------|
-| `local_terrain_scene/mod.rs` | `draw_roads` renders without blocking the UI thread or exploding egui buffers | Removing the background cache or returning unbounded geometry |
-| `world_map.rs` | `invalidate_road_cache` and `road_cache_building` describe the road overlay cache state | Renaming or removing those helpers |
-| `osm_ingest` | `load_roads_for_bounds` returns canonicalized road polylines keyed by `way_id` | Changing the loaded shape type or dropping `way_id` dedupe |
-
-## Notes
-- The local road overlay now enforces both a per-road source simplification cap and separate per-layer point budgets. This intentionally trades some road detail for stability when the focused import covers a very dense region.
-- The current per-layer budgets are intentionally generous (`400k` major, `800k` minor render points) so remaining fragmentation is more likely to indicate cache/LOD gaps than simple overlay starvation.
-- The road cache always loads both major and minor classes together for the covered viewport. Layer toggles only decide what gets drawn, which keeps checkbox changes from blowing away the loaded road geometry.
-- Major roads are rendered before minor roads and use their own reserved point budget so enabling minor roads cannot starve the major-road layer.
-- Camera-dependent screen-space thinning was removed because it caused roads to pop in and out as the operator rotated the local scene.
-
-- Major/minor geometry is now loaded in one pass using `RoadLayerKind::All`, then partitioned. This removes duplicate cell reads/decodes without changing point budgets.
+- Both classes share a viewport-plus-margin cache. Visibility toggles only
+  filter batches and keep the last loaded region, even with both classes off.
+- Root, data generation, theme or escaped coverage triggers a single worker.
+  Old geometry remains displayable while refreshing within the same root.
+- Workers build geography/elevation instances through `road_geometry`; frame
+  snapshots clone Arcs under a short, nonblocking lock. Retired cache disposal
+  happens outside the lock and explicit resets defer disposal off the UI thread.
+- Explicit invalidation increments an epoch, preventing in-flight stale builds
+  from resurrecting reset data. Failed/panicked workers release the build gate.
+- Widths remain 1.35/0.8 logical points for major/minor roads; the GPU boundary
+  converts them to physical pixels. Projection is shared with terrain/markers.
+- `road_cache_building_bounds` continues to describe the pending load envelope.
+- Existing per-way 192-vertex simplification remains; missing source geometry
+  cannot be reconstructed by this renderer.

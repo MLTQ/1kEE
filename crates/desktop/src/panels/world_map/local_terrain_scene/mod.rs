@@ -331,7 +331,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             contour_stroke_scale,
         );
     }
-    if !contours_slice.is_empty() && model.active_body == crate::model::ActiveBody::Earth {
+    if model.active_body == crate::model::ActiveBody::Earth {
         super::road_layer::draw_roads(
             painter,
             &layout,
@@ -342,6 +342,8 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             model.show_major_roads,
             model.show_minor_roads,
         );
+    }
+    if !contours_slice.is_empty() && model.active_body == crate::model::ActiveBody::Earth {
         super::water_layer::draw_water(
             painter,
             &layout,
@@ -1900,7 +1902,7 @@ fn draw_gpu_contour_pass(
             // which is what the pass expects.
             gpu_contour_stroke_width_px(0.7, alpha, contour_stroke_scale, pixels_per_point),
             gpu_contour_stroke_width_px(1.35, alpha, contour_stroke_scale, pixels_per_point),
-            pixels_per_point,
+            painter.ctx().clone(),
         )
         .into_paint_callback(painter.clip_rect()),
     );
