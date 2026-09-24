@@ -87,3 +87,7 @@ recorded in a separate uncovered-tile memo — kept apart from the SRTM one, whi
 is invalidated per source root, because 3DEP coverage is a property of the
 service rather than a local directory. An unprobed bucket stays outstanding so it
 is retried once its probe lands.
+
+- Earth source-presence checks now use the small padded core bounds. Discovery
+  no longer scans every source in the old overlapping footprint. Tile keys and
+  immediate legacy-cache hits remain unchanged.

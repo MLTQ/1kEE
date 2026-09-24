@@ -141,8 +141,8 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 
     let viewport_center = model.globe_view.local_center;
     let render_zoom = local_render_zoom(model.globe_view.local_zoom);
-    // The 3DEP tiers fetch each tile over the network, so they take a smaller
-    // envelope than the local SRTM tiers' 13x13 grid.
+    // Earth core tiles cover disjoint ground. Select enough to cover the
+    // oblique viewport, including a focus near the edge of its center core.
     let prefetch_radius =
         srtm_focus_cache::prefetch_radius_for_zoom(render_zoom, LOCAL_CONTOUR_PREFETCH_RADIUS);
     let build_radius =
@@ -2482,44 +2482,31 @@ mod tests {
         }
     }
 
-    /// The oblique camera shows ground well past `visual_half_extent_for_zoom`.
-    /// A 3DEP tier whose 5x5 envelope covers less than that leaves visible
-    /// terrain blank, which is exactly what shipping radius-2 tiles sized to
-    /// the *nominal* extent did: it drew about a quarter of the viewport.
-    ///
-    /// This sweeps the whole local zoom range rather than a list of tier
-    /// openings, so moving a tier boundary cannot quietly escape the check.
+    /// Verify disjoint cores cover the complete oblique view even when the
+    /// focus is at the edge of its center core, across every Earth zoom tier.
     #[test]
-    fn threedep_tiers_cover_the_oblique_viewport() {
+    fn earth_core_tiers_cover_the_oblique_viewport() {
         let mut checked_buckets = std::collections::BTreeSet::new();
         let mut zoom = LOCAL_ZOOM_MIN;
         while zoom <= LOCAL_ZOOM_MAX {
             let spec = srtm_focus_cache::zoom::spec_for_zoom(zoom);
+            let radius =
+                srtm_focus_cache::prefetch_radius_for_zoom(zoom, LOCAL_CONTOUR_PREFETCH_RADIUS);
+            assert!(radius <= 16);
             if srtm_focus_cache::zoom::spec_uses_threedep(&spec) {
-                let radius = srtm_focus_cache::prefetch_radius_for_zoom(
-                    zoom,
-                    LOCAL_CONTOUR_PREFETCH_RADIUS,
-                );
-                assert_eq!(radius, srtm_focus_cache::THREEDEP_PREFETCH_RADIUS);
-
-                let covered = srtm_focus_cache::region_coverage_half_extent_deg(&spec, radius);
-                let visible = visual_half_extent_for_zoom(zoom)
-                    * srtm_focus_cache::OBLIQUE_VISIBLE_EXTENT_FACTOR;
-                assert!(
-                    covered >= visible,
-                    "zoom {zoom} (bucket {}) covers {covered:.5}° but the oblique \
-                     viewport reaches {visible:.5}°",
-                    spec.zoom_bucket
-                );
+                assert!(radius <= srtm_focus_cache::THREEDEP_PREFETCH_RADIUS);
                 checked_buckets.insert(spec.zoom_bucket);
             }
+            let covered = srtm_focus_cache::region_coverage_half_extent_deg(&spec, radius);
+            let visible =
+                visual_half_extent_for_zoom(zoom) * srtm_focus_cache::OBLIQUE_VISIBLE_EXTENT_FACTOR;
+            assert!(
+                covered >= visible,
+                "zoom {zoom} covers {covered} but needs {visible}"
+            );
             zoom += 0.25;
         }
-        assert!(
-            checked_buckets.len() >= 4,
-            "expected every 3DEP tier to be reachable from the local zoom \
-             range, only saw {checked_buckets:?}"
-        );
+        assert_eq!(checked_buckets.len(), 4);
     }
 
     /// `feature_budget` is split across the assets in the envelope and decides
@@ -2540,7 +2527,8 @@ mod tests {
             if !srtm_focus_cache::zoom::spec_uses_threedep(&spec) {
                 continue;
             }
-            let per_asset = spec.feature_budget / assets_in_envelope;
+            let per_asset =
+                srtm_focus_cache::zoom::per_asset_feature_budget(zoom, assets_in_envelope);
             assert!(
                 per_asset >= 10_000,
                 "bucket {} allows {per_asset} contours per tile, under the \

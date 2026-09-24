@@ -183,6 +183,16 @@ pub fn import_tile_into_cache(
     gpkg_path: &Path,
     progress: Option<&super::progress::BuildProgress>,
 ) -> rusqlite::Result<()> {
+    import_tile_into_cache_clipped(cache_db_path, tile, gpkg_path, progress, None)
+}
+
+pub fn import_tile_into_cache_clipped(
+    cache_db_path: &Path,
+    tile: TileKey,
+    gpkg_path: &Path,
+    progress: Option<&super::progress::BuildProgress>,
+    bounds: Option<tile_archive::contour_grid::Bounds>,
+) -> rusqlite::Result<()> {
     let open_timer = super::timings::StageTimer::new(tile, "cache_open");
     let source = Connection::open_with_flags(gpkg_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     source.busy_timeout(Duration::from_secs(30))?;
@@ -226,9 +236,27 @@ pub fn import_tile_into_cache(
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
         let mut rows = source_rows.query([])?;
+        let mut processed = 0u64;
         while let Some(row) = rows.next()? {
+            processed += 1;
+            if processed % 128 == 0 {
+                if let Some(progress) = &progress {
+                    progress.imported_rows(processed, total);
+                }
+            }
             let fid: i64 = row.get(0)?;
             let geometry = row.get_ref(1)?.as_blob()?;
+            let clipped;
+            let geometry = if let Some(bounds) = bounds {
+                clipped = tile_archive::contour_clip::clip_gpkg(geometry, bounds)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+                let Some(ref bytes) = clipped else {
+                    continue;
+                };
+                bytes.as_slice()
+            } else {
+                geometry
+            };
             geometry_bytes += geometry.len() as u64;
             let elevation_m: f32 = row.get(2)?;
             insert.execute(params![
@@ -240,11 +268,6 @@ pub fn import_tile_into_cache(
                 geometry
             ])?;
             contour_count += 1;
-            if contour_count % 128 == 0 {
-                if let Some(progress) = &progress {
-                    progress.imported_rows(contour_count as u64, total);
-                }
-            }
         }
     }
 
@@ -275,6 +298,15 @@ pub fn import_coastline_into_cache(
     cache_db_path: &Path,
     tile: TileKey,
     gpkg_path: &Path,
+) -> rusqlite::Result<()> {
+    import_coastline_into_cache_clipped(cache_db_path, tile, gpkg_path, None)
+}
+
+pub fn import_coastline_into_cache_clipped(
+    cache_db_path: &Path,
+    tile: TileKey,
+    gpkg_path: &Path,
+    bounds: Option<tile_archive::contour_grid::Bounds>,
 ) -> rusqlite::Result<()> {
     let source = Connection::open_with_flags(gpkg_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     source.busy_timeout(Duration::from_secs(30))?;
@@ -310,6 +342,17 @@ pub fn import_coastline_into_cache(
         while let Some(row) = rows.next()? {
             let fid: i64 = row.get(0)?;
             let geometry = row.get_ref(1)?.as_blob()?;
+            let clipped;
+            let geometry = if let Some(bounds) = bounds {
+                clipped = tile_archive::contour_clip::clip_gpkg(geometry, bounds)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+                let Some(ref bytes) = clipped else {
+                    continue;
+                };
+                bytes.as_slice()
+            } else {
+                geometry
+            };
             insert.execute(params![
                 tile.zoom_bucket,
                 tile.lat_bucket,

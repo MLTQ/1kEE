@@ -40,7 +40,7 @@ const CONTOUR_READ_RETRY_DELAY: Duration = Duration::from_millis(250);
 const LOCAL_CONTOUR_READ_BATCH_SIZE: usize = 8;
 /// Keep a wide decoded-tile envelope while the viewport moves, without
 /// retaining an unbounded trail across a long local-terrain session.
-const LOCAL_CONTOUR_RETAIN_RADIUS: i32 = 12;
+const LOCAL_CONTOUR_RETAIN_RADIUS: i32 = 16;
 /// Refresh a stationary local manifest periodically so companion cache-builder
 /// writes become visible without polling SQLite every paint.
 const LOCAL_MANIFEST_SNAPSHOT_TTL: Duration = Duration::from_millis(350);
@@ -1079,8 +1079,8 @@ pub fn load_srtm_region_for_view(
         zoom,
         build_radius,
     );
-    let feature_budget = srtm_focus_cache::feature_budget_for_zoom(zoom);
-    let per_asset_budget = (feature_budget / assets.reader_assets().len().max(1)).max(120);
+    let per_asset_budget =
+        srtm_focus_cache::zoom::per_asset_feature_budget(zoom, assets.reader_assets().len());
     let scene_key = SceneKey {
         root: selected_root.map(Path::to_path_buf),
         anchor_lat_bucket: (scene_anchor.lat * 20.0).round() as i32,
@@ -1437,8 +1437,8 @@ pub fn load_mars_region_for_view(
 /// Load SRTM focus-tile contours for globe-mode rendering.
 ///
 /// Differences from `load_srtm_region_for_view`:
-/// - Loads a 3×3 tile grid (radius=1) so neighbours are pre-fetched before
-///   they scroll into view, preventing pop-in.
+/// - Loads an 11×11 core grid (radius=5), retaining the former wide-tile
+///   coverage while prefetching neighbors before they scroll into view.
 /// - Cache clears only on zoom-bucket change, not on position; tiles remain
 ///   visible while they are near the current centre.
 /// - Evicts by distance from centre when the tile count exceeds `MAX_TILES`.
@@ -1451,11 +1451,11 @@ pub fn load_srtm_for_globe(
     const MAX_TILES: usize = 1600;
     // Map the actual globe view zoom to a coarse tile spec.  Globe mode caps
     // at bucket 1 (2.2°, 25 m) — finer tiles aren't visible on a globe and
-    // cost far too much geometry.  radius=2 gives a 5×5 grid pre-fetched.
+    // cost far too much geometry. Five rings cover the new disjoint cores.
     let tile_zoom = globe_zoom_to_tile_zoom(zoom);
 
     let assets =
-        srtm_focus_cache::ensure_focus_contour_region(selected_root, center, tile_zoom, 2, 2);
+        srtm_focus_cache::ensure_focus_contour_region(selected_root, center, tile_zoom, 5, 5);
 
     let cache: &'static Mutex<GlobeRegionCache> =
         GLOBE_CONTOUR_CACHE.get_or_init(|| Mutex::new(GlobeRegionCache::default()));

@@ -67,16 +67,11 @@ on-demand Earth, lunar, and Mars tile builds.
   and a bucket with no 1 m source joins `ready_buckets` for the same reason an
   ocean bucket does. `FocusContourSpec::interval_m` is `f32` so those tiers can
   ask for sub-metre intervals.
-- 3DEP tiles cost a network request each, so `prefetch_radius_for_zoom` tightens
-  their envelope to a 5×5 grid instead of the local SRTM tiers' 13×13. The
-  coverage that grid loses is made back by sizing the tiles themselves: each
-  tier satisfies
-  `half_extent * (1 + 0.45 * radius) >= 2.5 * visual_half_extent_for_zoom`
-  at its **opening** zoom, where the visual extent is largest. The 2.5 factor is
-  how far the oblique camera actually sees, matching the local marker cull.
-  `threedep_tiers_cover_the_oblique_viewport` sweeps the whole local zoom range
-  to enforce this; the first cut of these tiers sized tiles against the nominal
-  extent instead and drew roughly a quarter of the viewport.
+- Earth cores retain the old address step but own only half a step around their
+  center. Source extraction adds a two-pixel halo; import discards the halo.
+  Local selection derives its radius from actual oblique coverage, including
+  worst-case displacement of the focus within its center core. The hosted path
+  prefetches one spare ring; existing cache entries stay readable unchanged.
 - `feature_budget` is split across the assets in the envelope, so these tiers
   need proportionally larger budgets than the SRTM tiers to draw a comparable
   number of contours from a quarter as many tiles.

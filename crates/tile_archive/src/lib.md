@@ -22,3 +22,7 @@ read-only connections, never a shared connection mutex.
 - `Writer`: writes tile batches transactionally and seals the database.
 - `vector`: partitions full vector features into smaller read units.
 - `contours`: converts contour rows to renderer-coordinate arrays in one tile payload.
+
+- contour_grid and contour_clip share Earth core ownership, aligned source halos
+  and strict f64 GeoPackage clipping across both builders. Existing archive
+  readers and CTF1 payloads remain compatible.

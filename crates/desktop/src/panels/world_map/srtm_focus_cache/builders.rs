@@ -299,7 +299,19 @@ pub fn ensure_bucket_asset(
         lat: (lat_bucket as f32 * bucket_step).clamp(-89.999, 89.999),
         lon: lon_bucket as f32 * bucket_step,
     };
-    let bounds = GeoBounds::around(bucket_center, spec.half_extent_deg);
+    let source = tile_archive::contour_grid::CoreTile::new(
+        spec.half_extent_deg,
+        spec.raster_size,
+        lat_bucket,
+        lon_bucket,
+    )
+    .source;
+    let bounds = GeoBounds {
+        min_lat: source.min_lat as f32,
+        max_lat: source.max_lat as f32,
+        min_lon: source.min_lon as f32,
+        max_lon: source.max_lon as f32,
+    };
     let tile = TileKey {
         zoom_bucket: spec.zoom_bucket,
         lat_bucket,

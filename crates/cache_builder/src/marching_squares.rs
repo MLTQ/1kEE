@@ -226,6 +226,23 @@ pub struct ContourLine {
 pub fn build_tile_contours_with_sampler(
     spec: FocusContourSpec,
     bounds: GeoBounds,
+    sample: impl FnMut(f32, f32) -> f32,
+) -> (Vec<ContourLine>, Vec<Vec<(f32, f32)>>) {
+    build_tile_contours_on_grid(
+        spec,
+        tile_archive::contour_grid::Bounds {
+            min_lat: bounds.min_lat.into(),
+            max_lat: bounds.max_lat.into(),
+            min_lon: bounds.min_lon.into(),
+            max_lon: bounds.max_lon.into(),
+        },
+        sample,
+    )
+}
+
+pub fn build_tile_contours_on_grid(
+    spec: FocusContourSpec,
+    bounds: tile_archive::contour_grid::Bounds,
     mut sample: impl FnMut(f32, f32) -> f32,
 ) -> (Vec<ContourLine>, Vec<Vec<(f32, f32)>>) {
     let n = spec.raster_size as usize;
@@ -293,15 +310,19 @@ pub fn build_tile_contours(
 
 // ── Grid building ─────────────────────────────────────────────────────────────
 
-fn build_grid(n: usize, bounds: GeoBounds, sample: &mut dyn FnMut(f32, f32) -> f32) -> Vec<f32> {
-    let dlat = (bounds.max_lat - bounds.min_lat) / n as f32;
-    let dlon = (bounds.max_lon - bounds.min_lon) / n as f32;
+fn build_grid(
+    n: usize,
+    bounds: tile_archive::contour_grid::Bounds,
+    sample: &mut dyn FnMut(f32, f32) -> f32,
+) -> Vec<f32> {
+    let dlat = (bounds.max_lat - bounds.min_lat) / n as f64;
+    let dlon = (bounds.max_lon - bounds.min_lon) / n as f64;
     let mut grid = Vec::with_capacity(n * n);
     for row in 0..n {
-        let lat = bounds.max_lat - (row as f32 + 0.5) * dlat;
+        let lat = bounds.max_lat - (row as f64 + 0.5) * dlat;
         for col in 0..n {
-            let lon = bounds.min_lon + (col as f32 + 0.5) * dlon;
-            grid.push(sample(lat, lon));
+            let lon = bounds.min_lon + (col as f64 + 0.5) * dlon;
+            grid.push(sample(lat as f32, lon as f32));
         }
     }
     grid
@@ -316,13 +337,13 @@ fn extract_segments(
     grid: &[f32],
     n: usize,
     threshold: f32,
-    bounds: GeoBounds,
+    bounds: tile_archive::contour_grid::Bounds,
 ) -> Vec<[(f32, f32); 2]> {
-    let dlat = (bounds.max_lat - bounds.min_lat) / n as f32;
-    let dlon = (bounds.max_lon - bounds.min_lon) / n as f32;
+    let dlat = (bounds.max_lat - bounds.min_lat) / n as f64;
+    let dlon = (bounds.max_lon - bounds.min_lon) / n as f64;
 
-    let lat_at = |row: usize| bounds.max_lat - (row as f32 + 0.5) * dlat;
-    let lon_at = |col: usize| bounds.min_lon + (col as f32 + 0.5) * dlon;
+    let lat_at = |row: usize| (bounds.max_lat - (row as f64 + 0.5) * dlat) as f32;
+    let lon_at = |col: usize| (bounds.min_lon + (col as f64 + 0.5) * dlon) as f32;
     let g = |row: usize, col: usize| grid[row * n + col];
 
     let mut segs: Vec<[(f32, f32); 2]> = Vec::new();

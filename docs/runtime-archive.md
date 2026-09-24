@@ -1,5 +1,10 @@
 # Packed runtime tile archive
 
+New Earth builds now store nonoverlapping cores; existing caches remain intact.
+See [contour-core-storage.md](contour-core-storage.md) for the current layout,
+compatibility and measured storage reductions. Earlier full-footprint measurements
+below describe the legacy overlapping tiles.
+
 ## First usable version
 
 The desktop can read `Derived/world.1ka`, a SQLite archive containing packed map

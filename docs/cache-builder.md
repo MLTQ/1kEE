@@ -1,5 +1,10 @@
 # Cache builder: throughput and portable static data
 
+New Earth builds now store nonoverlapping cores; existing caches remain intact.
+See [contour-core-storage.md](contour-core-storage.md) for the current layout,
+compatibility and measured storage reductions. Earlier full-footprint measurements
+below describe the legacy overlapping tiles.
+
 ## Scope
 
 The GUI's whole-planet job runs `planet-all`: an OSM vector build. It is separate

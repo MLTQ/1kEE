@@ -8,6 +8,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 pub mod builders;
+#[cfg(test)]
+mod core_import_tests;
 pub mod db;
 pub mod gdal;
 pub mod progress;

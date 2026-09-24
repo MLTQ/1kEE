@@ -81,3 +81,8 @@ contracts shared by on-demand terrain builders and render-time tile lookups.
 
 - A regression unwinds one attempt with raster/GeoPackage/journal/WAL/SHM
   files and verifies cleanup leaves a simultaneous same-tile attempt intact.
+
+- Explicit clipped import variants store only an Earth tile core. Unsupported
+  geometry rolls back the transaction; discarded halo rows do not inflate the
+  manifest. Progress counts processed source rows, including discarded ones.
+  Original import wrappers retain unmodified lunar/Mars and legacy semantics.

@@ -362,10 +362,10 @@ impl BuilderApp {
                     let center_lon = lon_bucket as f32 * step;
                     tiles.push((
                         zoom_bucket,
-                        center_lat - spec.half_extent_deg,
-                        center_lat + spec.half_extent_deg,
-                        center_lon - spec.half_extent_deg,
-                        center_lon + spec.half_extent_deg,
+                        center_lat - step * 0.5,
+                        center_lat + step * 0.5,
+                        center_lon - step * 0.5,
+                        center_lon + step * 0.5,
                     ));
                 }
             }

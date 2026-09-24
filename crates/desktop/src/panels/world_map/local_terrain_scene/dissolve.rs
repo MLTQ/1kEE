@@ -36,7 +36,11 @@ pub(super) fn draw_tile_pulse_grid(
 
     let center_lat_b = (viewport_center.lat / bucket_step).round() as i32;
     let center_lon_b = (viewport_center.lon / bucket_step).round() as i32;
-    let half = half_extent;
+    let half = if half_extent_override.is_some() {
+        half_extent
+    } else {
+        bucket_step * 0.5
+    };
 
     // Brightness indicates activity without advancing completion.
     let breath = ((time as f32 * std::f32::consts::TAU / 4.5).sin() * 0.5 + 0.5) * 0.35 + 0.65;

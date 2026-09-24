@@ -167,3 +167,9 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 - Local/globe tile reads prefer packed contour payloads in Derived/world.1ka when the source database/WAL fingerprint matches. A checksum/decode failure falls back per tile. Original manifests still drive scheduling in this first version. Both paths share geometry selection/order/budgets and progress callbacks.
 
 - GeoPackage decoding is shared with archive creation through `tile_archive::gpkg`. Packed CTF1 tiles already contain the renderer’s f32 coordinates; the runtime validates counts and skips GeoPackage parsing and f64 conversion.
+
+- Earth local requests use the core-aware viewport envelope. Retention reaches
+  16 rings and deep tiers keep the previous 10,000-feature per-asset floor so
+  selecting more small cores does not silently reduce detail in legacy tiles.
+  Globe Earth requests five rings to retain former coverage with smaller cores.
+  Legacy full-footprint geometry and existing .1ka reads are preserved.

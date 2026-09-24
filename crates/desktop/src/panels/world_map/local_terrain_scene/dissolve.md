@@ -29,3 +29,6 @@ stable tile-specific randomness, 99% versus completion, and unknown values.
 
 An egui paint regression compares actual cell vertex positions before and after
 multiple former timer cycles, then checks 75%, 99%, complete, and ready states.
+
+- Earth indicators cover the disjoint owned core (half a bucket step), not the
+  old overlapping raster footprint. Moon/Mars override footprints are unchanged.

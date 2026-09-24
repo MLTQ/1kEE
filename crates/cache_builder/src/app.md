@@ -45,3 +45,7 @@ Provides the minimal egui desktop shell for the offline cache-builder. It is the
 - Full Planet offers **Compact node lookup (experimental — saves disk space)**,
   off by default. It sets the same indexed-PBF backend as the CLI; its tooltip
   explains that it reads original compressed data and keeps legacy files intact.
+
+- Earth cache scan paints guaranteed core coverage instead of overlapping source
+  footprints. Newly completed Earth tiles publish core bounds too; old cache
+  entries can still contain additional geometry outside that guaranteed area.

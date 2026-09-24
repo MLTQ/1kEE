@@ -1,5 +1,10 @@
 # Terrain Pipeline
 
+New Earth builds now store nonoverlapping cores; existing caches remain intact.
+See [contour-core-storage.md](contour-core-storage.md) for the current layout,
+compatibility and measured storage reductions. Earlier full-footprint measurements
+below describe the legacy overlapping tiles.
+
 ## Purpose
 This document defines the first practical preprocessing path from the raw terrain datasets already checked into `Data/` to runtime-friendly assets for the 1kEE globe.
 

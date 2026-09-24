@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+use tile_archive::contour_grid::{Bounds as CoreBounds, CoreTile};
 
 // ── Types (mirrors desktop srtm_focus_cache internals) ───────────────────────
 
@@ -176,6 +177,15 @@ pub fn tile_contour_count(conn: &Connection, tile: TileKey) -> rusqlite::Result<
 }
 
 pub fn import_tile(cache_db_path: &Path, tile: TileKey, gpkg_path: &Path) -> rusqlite::Result<()> {
+    import_tile_clipped(cache_db_path, tile, gpkg_path, None)
+}
+
+fn import_tile_clipped(
+    cache_db_path: &Path,
+    tile: TileKey,
+    gpkg_path: &Path,
+    bounds: Option<CoreBounds>,
+) -> rusqlite::Result<()> {
     let source = Connection::open(gpkg_path)?;
     source.busy_timeout(Duration::from_secs(30))?;
     let mut stmt = source
@@ -197,6 +207,9 @@ pub fn import_tile(cache_db_path: &Path, tile: TileKey, gpkg_path: &Path) -> rus
     while let Some(row) = rows.next()? {
         let fid: i64 = row.get(0)?;
         let geom: Vec<u8> = row.get(1)?;
+        let Some(geom) = clip_geometry(geom, bounds)? else {
+            continue;
+        };
         let elev: f32 = row.get(2)?;
         tx.execute(
             "INSERT INTO contour_tiles (zoom_bucket,lat_bucket,lon_bucket,fid,elevation_m,geom)
@@ -252,6 +265,9 @@ fn import_coastline(cache_db_path: &Path, tile: TileKey, gpkg_path: &Path) -> ru
         while let Some(row) = rows.next()? {
             let fid: i64 = row.get(0)?;
             let geom: Vec<u8> = row.get(1)?;
+            let Some(geom) = clip_geometry(geom, earth_core_bounds(tile))? else {
+                continue;
+            };
             tx.execute(
                 "INSERT INTO coastline_tiles (zoom_bucket,lat_bucket,lon_bucket,fid,geom)
                  VALUES (?1,?2,?3,?4,?5)",
@@ -334,7 +350,7 @@ fn run_gdalwarp(
     gdalwarp: &Path,
     tiles: &[PathBuf],
     out_tif: &Path,
-    bounds: GeoBounds,
+    bounds: CoreBounds,
     spec: FocusContourSpec,
 ) -> std::io::Result<()> {
     let mut cmd = Command::new(gdalwarp);
@@ -346,10 +362,10 @@ fn run_gdalwarp(
         "-dstnodata",
         "-32768",
         "-te",
-        &format!("{:.6}", bounds.min_lon),
-        &format!("{:.6}", bounds.min_lat),
-        &format!("{:.6}", bounds.max_lon),
-        &format!("{:.6}", bounds.max_lat),
+        &format!("{:.15}", bounds.min_lon),
+        &format!("{:.15}", bounds.min_lat),
+        &format!("{:.15}", bounds.max_lon),
+        &format!("{:.15}", bounds.max_lat),
         "-ts",
         &spec.raster_size.to_string(),
         &spec.raster_size.to_string(),
@@ -570,7 +586,6 @@ pub fn build_contour_tiles(
 
     struct TileWork {
         tile: TileKey,
-        tile_bounds: GeoBounds,
         spec: FocusContourSpec,
         srtm_tiles: Vec<PathBuf>,
     }
@@ -592,19 +607,23 @@ pub fn build_contour_tiles(
                     skipped += 1;
                     continue;
                 }
-                let center_lat = (lat_bucket as f32 * bucket_step).clamp(-89.999, 89.999);
-                let center_lon = lon_bucket as f32 * bucket_step;
+                let source = CoreTile::new(
+                    spec.half_extent_deg,
+                    spec.raster_size,
+                    lat_bucket,
+                    lon_bucket,
+                )
+                .source;
                 let tile_bounds = GeoBounds {
-                    min_lat: (center_lat - spec.half_extent_deg).clamp(-89.999, 89.999),
-                    max_lat: (center_lat + spec.half_extent_deg).clamp(-89.999, 89.999),
-                    min_lon: center_lon - spec.half_extent_deg,
-                    max_lon: center_lon + spec.half_extent_deg,
+                    min_lat: source.min_lat as f32,
+                    max_lat: source.max_lat as f32,
+                    min_lon: source.min_lon as f32,
+                    max_lon: source.max_lon as f32,
                 };
                 let srtm_tiles = srtm_tile_paths(srtm_root, tile_bounds);
                 if !srtm_tiles.is_empty() {
                     work.push(TileWork {
                         tile,
-                        tile_bounds,
                         spec: *spec,
                         srtm_tiles,
                     });
@@ -664,7 +683,6 @@ pub fn build_contour_tiles(
             work.into_par_iter().for_each_with(tx, |tx, w| {
                 let TileWork {
                     tile,
-                    tile_bounds,
                     spec,
                     srtm_tiles,
                 } = w;
@@ -677,12 +695,27 @@ pub fn build_contour_tiles(
                 let tmp_coast_gpkg = tmp_dir.join(format!("{stem}.coast.tmp.gpkg"));
                 cleanup(&[&tmp_tif, &tmp_gpkg, &tmp_coast_gpkg]);
 
+                let core = CoreTile::new(
+                    spec.half_extent_deg,
+                    spec.raster_size,
+                    tile.lat_bucket,
+                    tile.lon_bucket,
+                );
                 let outcome = (|| {
-                    run_gdalwarp(&gdalwarp, &srtm_tiles, &tmp_tif, tile_bounds, spec)
-                        .map_err(|e| format!("gdalwarp: {e}"))?;
+                    run_gdalwarp(
+                        &gdalwarp,
+                        &srtm_tiles,
+                        &tmp_tif,
+                        core.source,
+                        FocusContourSpec {
+                            raster_size: core.raster_size,
+                            ..spec
+                        },
+                    )
+                    .map_err(|e| format!("gdalwarp: {e}"))?;
                     run_gdal_contour(&gdal_contour, &tmp_tif, &tmp_gpkg, spec.interval_m)
                         .map_err(|e| format!("gdal_contour: {e}"))?;
-                    import_tile(&cache_db_path, tile, &tmp_gpkg)
+                    import_tile_clipped(&cache_db_path, tile, &tmp_gpkg, Some(core.core))
                         .map_err(|e| format!("db import: {e}"))?;
                     if run_gdal_coastline(&gdal_contour, &tmp_tif, &tmp_coast_gpkg).is_ok() {
                         let _ = import_coastline(&cache_db_path, tile, &tmp_coast_gpkg);
@@ -694,10 +727,10 @@ pub fn build_contour_tiles(
                 done_arc.fetch_add(1, Ordering::Relaxed);
                 let _ = tx.send(match outcome {
                     Ok(()) => Outcome::Built(
-                        tile_bounds.min_lat,
-                        tile_bounds.max_lat,
-                        tile_bounds.min_lon,
-                        tile_bounds.max_lon,
+                        core.core.min_lat as f32,
+                        core.core.max_lat as f32,
+                        core.core.min_lon as f32,
+                        core.core.max_lon as f32,
                     ),
                     Err(e) => Outcome::Error(format!(
                         "z{} ({},{}) — {e}",
@@ -783,6 +816,9 @@ fn write_tile_native(
     let mut contour_count = 0usize;
     for (fid, line) in contours.iter().enumerate() {
         let blob = encode_gpkg_linestring(&line.points);
+        let Some(blob) = clip_geometry(blob, earth_core_bounds(tile))? else {
+            continue;
+        };
         tx.execute(
             "INSERT INTO contour_tiles (zoom_bucket,lat_bucket,lon_bucket,fid,elevation_m,geom)
              VALUES (?1,?2,?3,?4,?5,?6)",
@@ -815,6 +851,9 @@ fn write_tile_native(
     let mut coastline_count = 0usize;
     for (fid, pts) in coastlines.iter().enumerate() {
         let blob = encode_gpkg_linestring(pts);
+        let Some(blob) = clip_geometry(blob, earth_core_bounds(tile))? else {
+            continue;
+        };
         tx.execute(
             "INSERT INTO coastline_tiles (zoom_bucket,lat_bucket,lon_bucket,fid,geom)
              VALUES (?1,?2,?3,?4,?5)",
@@ -854,7 +893,7 @@ pub fn build_contour_tiles_native(
     zoom_buckets: &[i32],
     progress: &mut dyn FnMut(ContourBuildProgress),
 ) -> Result<String, String> {
-    use crate::marching_squares::{NativeSrtmSampler, build_tile_contours};
+    use crate::marching_squares::{NativeSrtmSampler, build_tile_contours_on_grid};
 
     // ── Validate SRTM root ────────────────────────────────────────────────────
     if !srtm_root.exists() {
@@ -918,13 +957,18 @@ pub fn build_contour_tiles_native(
                     skipped += 1;
                     continue;
                 }
-                let center_lat = (lat_bucket as f32 * bucket_step).clamp(-89.999, 89.999);
-                let center_lon = lon_bucket as f32 * bucket_step;
+                let source = CoreTile::new(
+                    spec.half_extent_deg,
+                    spec.raster_size,
+                    lat_bucket,
+                    lon_bucket,
+                )
+                .source;
                 let tile_bounds = GeoBounds {
-                    min_lat: (center_lat - spec.half_extent_deg).clamp(-89.999, 89.999),
-                    max_lat: (center_lat + spec.half_extent_deg).clamp(-89.999, 89.999),
-                    min_lon: center_lon - spec.half_extent_deg,
-                    max_lon: center_lon + spec.half_extent_deg,
+                    min_lat: source.min_lat as f32,
+                    max_lat: source.max_lat as f32,
+                    min_lon: source.min_lon as f32,
+                    max_lon: source.max_lon as f32,
                 };
                 // Only plan tiles that have at least one SRTM tile in range.
                 if !srtm_tile_paths(srtm_root, tile_bounds).is_empty() {
@@ -1016,11 +1060,29 @@ pub fn build_contour_tiles_native(
             .expect("rayon pool");
         pool.install(|| {
             work.into_par_iter()
-                .for_each_with(compute_tx, |tx, (tile, tile_bounds, spec)| {
+                .for_each_with(compute_tx, |tx, (tile, _tile_bounds, spec)| {
                     let mut sampler = NativeSrtmSampler::new(srtm_root_owned.clone());
-                    let (contours, coastlines) =
-                        build_tile_contours(&mut sampler, spec, tile_bounds);
-                    let _ = tx.send((tile, tile_bounds, contours, coastlines));
+                    let core = CoreTile::new(
+                        spec.half_extent_deg,
+                        spec.raster_size,
+                        tile.lat_bucket,
+                        tile.lon_bucket,
+                    );
+                    let (contours, coastlines) = build_tile_contours_on_grid(
+                        FocusContourSpec {
+                            raster_size: core.raster_size,
+                            ..spec
+                        },
+                        core.source,
+                        |lat, lon| sampler.sample(lat, lon),
+                    );
+                    let display = GeoBounds {
+                        min_lat: core.core.min_lat as f32,
+                        max_lat: core.core.max_lat as f32,
+                        min_lon: core.core.min_lon as f32,
+                        max_lon: core.core.max_lon as f32,
+                    };
+                    let _ = tx.send((tile, display, contours, coastlines));
                 });
         });
         // compute_tx drops here, closing the channel → writer thread exits
@@ -1100,3 +1162,29 @@ pub fn bucket_range(coord_min: f32, coord_max: f32, step: f32) -> std::ops::Rang
     let hi = (coord_max / step).ceil() as i32;
     lo..=hi
 }
+
+fn earth_core_bounds(tile: TileKey) -> Option<CoreBounds> {
+    all_specs()
+        .into_iter()
+        .find(|s| s.zoom_bucket == tile.zoom_bucket)
+        .map(|s| {
+            CoreTile::new(
+                s.half_extent_deg,
+                s.raster_size,
+                tile.lat_bucket,
+                tile.lon_bucket,
+            )
+            .core
+        })
+}
+fn clip_geometry(blob: Vec<u8>, bounds: Option<CoreBounds>) -> rusqlite::Result<Option<Vec<u8>>> {
+    match bounds {
+        Some(bounds) => tile_archive::contour_clip::clip_gpkg(&blob, bounds)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into())),
+        None => Ok(Some(blob)),
+    }
+}
+
+#[cfg(test)]
+#[path = "contour_core_tests.rs"]
+mod core_tests;

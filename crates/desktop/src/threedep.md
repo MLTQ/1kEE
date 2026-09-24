@@ -106,3 +106,6 @@ exists under a point, and pulls only the small area currently in view.
   partial file, validates length, and atomically publishes it. Errors preserve
   existing destinations and remove partial files. A 64 MiB response ceiling
   bounds staging; complete TIFF byte vectors are no longer retained in RAM.
+
+- Direct contour requests now accept f64 bounds. This keeps adjacent small core
+  rasters on the same pixel grid rather than rounding each source window to f32.

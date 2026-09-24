@@ -859,16 +859,22 @@ pub fn fetch_tile_raster(
     destination: &Path,
 ) -> bool {
     fetch_tile_raster_with_progress(
-        min_lat, min_lon, max_lat, max_lon, raster_size, destination, |_, _| {},
+        min_lat.into(),
+        min_lon.into(),
+        max_lat.into(),
+        max_lon.into(),
+        raster_size,
+        destination,
+        |_, _| {},
     )
 }
 
 /// Byte progress is determinate only when the host supplies Content-Length.
 pub fn fetch_tile_raster_with_progress(
-    min_lat: f32,
-    min_lon: f32,
-    max_lat: f32,
-    max_lon: f32,
+    min_lat: f64,
+    min_lon: f64,
+    max_lat: f64,
+    max_lon: f64,
     raster_size: u32,
     destination: &Path,
     on_bytes: impl FnMut(u64, Option<u64>),

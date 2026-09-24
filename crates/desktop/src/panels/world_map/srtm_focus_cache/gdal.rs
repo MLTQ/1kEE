@@ -1,9 +1,9 @@
 use super::db::{
-    cleanup_temp_tile_artifacts, import_coastline_into_cache, import_tile_into_cache,
-    journal_path_for, mark_tile_empty, shm_path_for, temp_tile_paths, wal_path_for, TempTileCleanup,
+    TempTileCleanup, cleanup_temp_tile_artifacts, import_tile_into_cache, journal_path_for,
+    mark_tile_empty, shm_path_for, temp_tile_paths, wal_path_for,
 };
-use super::{BUILD_TIMEOUT, FocusContourSpec, GeoBounds, TEMP_DIR_NAME, TileKey};
 use super::timings::StageTimer;
+use super::{BUILD_TIMEOUT, FocusContourSpec, GeoBounds, TEMP_DIR_NAME, TileKey};
 use crate::settings_store;
 use std::collections::HashSet;
 use std::fs;
@@ -833,9 +833,22 @@ pub fn build_focus_contours(
         return None;
     }
 
+    let core = tile_archive::contour_grid::CoreTile::new(
+        spec.half_extent_deg,
+        spec.raster_size,
+        tile.lat_bucket,
+        tile.lon_bucket,
+    );
+    let spec = FocusContourSpec {
+        raster_size: core.raster_size,
+        ..spec
+    };
     let build_timer = StageTimer::new(tile, "build_srtm");
     let progress = super::progress::start(
-        cache_db_path, tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket,
+        cache_db_path,
+        tile.zoom_bucket,
+        tile.lat_bucket,
+        tile.lon_bucket,
     );
 
     super::storage::require_room(cache_root).ok()?;
@@ -851,7 +864,7 @@ pub fn build_focus_contours(
         fs::create_dir_all(parent).ok()?;
     }
     let source_timer = StageTimer::new(tile, "local_source");
-    run_gdalwarp(&tiles, &tmp_tif_path, bounds, spec).ok()?;
+    run_gdalwarp(&tiles, &tmp_tif_path, core.source, spec).ok()?;
     source_timer.finish(0, 0);
 
     if shutdown_requested().load(Ordering::Relaxed) {
@@ -861,17 +874,35 @@ pub fn build_focus_contours(
 
     progress.source_ready();
     let contour_timer = StageTimer::new(tile, "contour");
-    run_gdal_contour(&tmp_tif_path, &tmp_gpkg_path, spec.interval_m, Some(-32768.0)).ok()?;
+    run_gdal_contour(
+        &tmp_tif_path,
+        &tmp_gpkg_path,
+        spec.interval_m,
+        Some(-32768.0),
+    )
+    .ok()?;
     contour_timer.finish(0, 0);
     progress.contours_ready();
-    import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path, Some(&progress)).ok()?;
+    super::db::import_tile_into_cache_clipped(
+        cache_db_path,
+        tile,
+        &tmp_gpkg_path,
+        Some(&progress),
+        Some(core.core),
+    )
+    .ok()?;
 
     // Piggyback: extract 0m coastline from the same warped TIF while we have it.
     let tmp_coast_gpkg_path = tmp_gpkg_path.with_extension("coast.gpkg");
     let _coast_cleanup = TempTileCleanup(&tmp_coast_gpkg_path, &tmp_coast_gpkg_path);
     let coastline_timer = StageTimer::new(tile, "coastline");
     if run_gdal_coastline_0m(&tmp_tif_path, &tmp_coast_gpkg_path).is_ok() {
-        let _ = import_coastline_into_cache(cache_db_path, tile, &tmp_coast_gpkg_path);
+        let _ = super::db::import_coastline_into_cache_clipped(
+            cache_db_path,
+            tile,
+            &tmp_coast_gpkg_path,
+            Some(core.core),
+        );
         coastline_timer.finish(0, 0);
     }
     let _ = fs::remove_file(&tmp_coast_gpkg_path);
@@ -891,7 +922,7 @@ pub fn build_threedep_contours(
     cache_root: &Path,
     cache_db_path: &Path,
     tile: TileKey,
-    bounds: GeoBounds,
+    _bounds: GeoBounds,
     spec: FocusContourSpec,
     download: super::work_slots::DownloadPermit<'_>,
 ) -> Option<()> {
@@ -899,6 +930,16 @@ pub fn build_threedep_contours(
         return None;
     }
 
+    let core = tile_archive::contour_grid::CoreTile::new(
+        spec.half_extent_deg,
+        spec.raster_size,
+        tile.lat_bucket,
+        tile.lon_bucket,
+    );
+    let spec = FocusContourSpec {
+        raster_size: core.raster_size,
+        ..spec
+    };
     let build_timer = StageTimer::new(tile, "build_3dep");
     let progress = super::progress::start(
         cache_db_path,
@@ -918,10 +959,10 @@ pub fn build_threedep_contours(
     let source_timer = StageTimer::new(tile, "download");
     let mut downloaded_bytes = 0;
     let fetched = crate::threedep::fetch_tile_raster_with_progress(
-        bounds.min_lat,
-        bounds.min_lon,
-        bounds.max_lat,
-        bounds.max_lon,
+        core.source.min_lat,
+        core.source.min_lon,
+        core.source.max_lat,
+        core.source.max_lon,
         spec.raster_size,
         &tmp_tif_path,
         |done, total| {
@@ -966,7 +1007,13 @@ pub fn build_threedep_contours(
     }
     contour_timer.finish(0, 0);
     progress.contours_ready();
-    let imported = import_tile_into_cache(cache_db_path, tile, &tmp_gpkg_path, Some(&progress));
+    let imported = super::db::import_tile_into_cache_clipped(
+        cache_db_path,
+        tile,
+        &tmp_gpkg_path,
+        Some(&progress),
+        Some(core.core),
+    );
     cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
     imported.ok()?;
     build_timer.finish(0, 0);
@@ -1266,7 +1313,7 @@ fn tile_name(lat: i32, lon: i32) -> String {
 fn run_gdalwarp(
     tiles: &[PathBuf],
     output_path: &Path,
-    bounds: GeoBounds,
+    bounds: tile_archive::contour_grid::Bounds,
     spec: FocusContourSpec,
 ) -> std::io::Result<()> {
     let mut command = Command::new(gdal_tool_path("gdalwarp"));
@@ -1278,10 +1325,10 @@ fn run_gdalwarp(
         "-dstnodata",
         "-32768",
         "-te",
-        &format!("{:.6}", bounds.min_lon),
-        &format!("{:.6}", bounds.min_lat),
-        &format!("{:.6}", bounds.max_lon),
-        &format!("{:.6}", bounds.max_lat),
+        &format!("{:.15}", bounds.min_lon),
+        &format!("{:.15}", bounds.min_lat),
+        &format!("{:.15}", bounds.max_lon),
+        &format!("{:.15}", bounds.max_lat),
         "-ts",
         &spec.raster_size.to_string(),
         &spec.raster_size.to_string(),

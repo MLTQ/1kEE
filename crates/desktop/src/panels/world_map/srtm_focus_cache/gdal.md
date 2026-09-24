@@ -77,3 +77,8 @@ Owns the desktop-side GDAL pipelines for terrain assets: SRTM focus contours, GE
   writers promptly, and rejects fatal write errors even with a zero exit.
   Prints the first eight stderr lines, the first fatal write error even after
   that limit, and a suppression count per command.
+
+- Earth SRTM/3DEP builds derive a CoreTile from the original spec/key: a disjoint
+  core plus two raster pixels on each side. Sampling density and elevation
+  intervals stay approximately unchanged; the halo is clipped before import.
+  gdalwarp and hosted requests use f64 bounds. No existing tile is rewritten.

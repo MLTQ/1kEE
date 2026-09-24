@@ -27,3 +27,7 @@ Pure-Rust contour extraction for raster terrain tiles. It exists to avoid shelli
 
 ## Notes
 - Sampling stays bilinear so the native path tracks the smoothness of the GDAL-derived raster path reasonably closely.
+
+- build_tile_contours_on_grid accepts f64 source bounds shared with GDAL. Halo
+  samples at adjacent cores use identical positions; final renderer coordinates
+  stay f32. The older GeoBounds entry point delegates to this implementation.

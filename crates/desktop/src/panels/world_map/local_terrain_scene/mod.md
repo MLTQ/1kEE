@@ -60,10 +60,9 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 
 ### Local contour envelope
 
-- **Does**: Requests, builds, and merges a 13×13 local source grid. This keeps
-  overlapping outer-tile contours available at the viewport edge without
-  expanding the globe-mode request envelope; existing AABB culling still
-  limits projection to the local scene.
+- **Does**: Selects enough nonoverlapping Earth cores to cover the oblique
+  viewport. Moon/Mars retain their 13×13 overlapping source envelope and
+  midpoint ownership; existing bounds culling limits projection to the scene.
 - **Interacts with**: `contour_asset.rs` and `srtm_focus_cache` region APIs.
 
 ### Elevation-fill worker scheduling
@@ -183,3 +182,7 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
   half-extent, matching the tile identifiers in its progress snapshot.
   Completed source/build stages, decoded rows, and accepted merge publication
   govern the grid; brightness alone may breathe while work waits.
+
+- Earth selection now follows disjoint core footprints and actual oblique view
+  size, with one spare hosted ring. The coverage test includes worst-case focus
+  displacement within a core. Moon/Mars keep their existing envelope.
