@@ -1,0 +1,11 @@
+Submarine cable routes and landing points in this directory are a snapshot of
+the TeleGeography Submarine Cable Map (https://www.submarinecablemap.com/).
+
+Copyright TeleGeography. Licensed under Creative Commons
+Attribution-NonCommercial-ShareAlike 3.0 Unported (CC BY-NC-SA 3.0):
+https://creativecommons.org/licenses/by-nc-sa/3.0/
+
+This licence covers the data files here only. It is separate from the licence
+of the 1kEE source code, and it does not permit commercial use of this data.
+
+Regenerate with: python3 tools/fetch_submarine_cables.py

@@ -18,6 +18,12 @@ detection snapshots to the UI model without owning map rendering.
   thread, and retire worker results during app shutdown.
 - **Interacts with**: `app.rs` and `AppModel`.
 
+### `step`
+- **Does**: Advances the source state machine one frame under the lock: records
+  a finished outcome (backoff, next attempt), *then* decides whether to start
+  the next worker. Pure over `SourceState`, so it is unit-tested directly.
+- **Interacts with**: `tick`, `apply_outcome`.
+
 ### `parse_csv`
 - **Does**: Parse a FIRMS CSV product, resolving columns **by header name**
   rather than position, and drop low-confidence rows.
@@ -52,5 +58,13 @@ detection snapshots to the UI model without owning map rendering.
   coverage. One satellite failing still leaves a usable, thinner layer.
 - The display toggle defaults off, and nothing is fetched until it is turned
   on. A stale cache is preferred over an empty layer when the network fails.
+- **Record before you decide.** An earlier `tick` chose whether to spawn a
+  worker before recording the result that had just arrived. With nothing yet
+  scheduled it started a new request and bumped the generation, which made the
+  fresh result look stale — so every result was discarded and the layer loaded
+  forever. `step` does both in the right order by construction, and
+  `an_arriving_result_is_kept_not_discarded` fails if the order is reversed.
+- Workers call `crate::app::request_repaint()` on completion, so results show
+  up without waiting for the next input event.
 - Verified against a live product: 59,609 rows → 53,706 retained, 2,936 high
   confidence, peak FRP 560 MW.

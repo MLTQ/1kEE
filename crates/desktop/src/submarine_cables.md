@@ -2,54 +2,59 @@
 
 ## Purpose
 
-Provides a cache-first, public-data-only adapter for the TeleGeography
-submarine cable map. It supplies cable routes and landing points as ordinary
-overlay layers without owning any rendering — the shared `GeoJsonLayer`
-pipeline draws them.
+Supplies the built-in submarine cable layer — cable routes and landing points —
+from a TeleGeography snapshot compiled into the binary. It owns no network
+access, no cache, and no rendering: the shared `GeoJsonLayer` pipeline draws it.
 
 ## Components
 
-### `tick` / `shutdown`
-- **Does**: Schedule cache reads and a bounded HTTP refresh off the UI thread,
-  and retire worker results during app shutdown.
-- **Interacts with**: `app.rs` and `AppModel`.
+### Bundled snapshot (`submarine_cables/`)
+- **Does**: Holds `cables.geojson` and `landings.geojson`, trimmed to the
+  properties the renderer uses (cable name and colour, landing name) with
+  coordinates rounded to 4 dp (~11 m). Pulled in with `include_str!`.
+- **Interacts with**: `tools/fetch_submarine_cables.py`, which regenerates it.
 
-### `load` / `fetch` / `build_layer`
-- **Does**: Resolve a fresh cache, then the two public endpoints, then a stale
-  cache; parse each payload into a named built-in layer and reject a response
-  too small to be genuine.
-- **Interacts with**: `model::GeoJsonLayer::parse`, `reqwest`.
+### `tick`
+- **Does**: On the first frame the layer is enabled, parses the snapshot on a
+  background thread; once parsed, installs the layers into the model and wakes
+  the UI. Returns immediately while the layer is off or already installed.
+- **Interacts with**: `app.rs`, `AppModel`, `crate::app::request_repaint`.
 
-### Cache helpers (`cache_dir`, `read_cache`, `write_cache`)
-- **Does**: Resolve the cache location the same way `deflock_source` does, read
-  both payloads together, and persist them through temporary files.
-- **Interacts with**: `settings_store`, the effective asset/data root.
+### `build_layer`
+- **Does**: Parses one payload into a named built-in layer: fixed layer colour,
+  visible, labels off.
+- **Interacts with**: `model::GeoJsonLayer::parse`.
 
 ### Provenance constants
-- **Does**: Supply TeleGeography attribution text and link for the layer
-  drawer.
+- **Does**: Supply TeleGeography attribution text and link for the layer drawer.
 - **Interacts with**: `panels/layer_drawer.rs`.
 
 ## Contracts
 
 | Dependent | Expects | Breaking changes |
 |---|---|---|
-| `AppModel` | Layers arrive fully parsed and ready to render | Emitting partially-parsed layers, or one of the pair without the other |
-| `app.rs` | `tick` is non-blocking and does nothing while the layer is off | Performing HTTP or disk work on the UI thread, or fetching before the operator opts in |
+| `AppModel` | Both layers arrive together, fully parsed | Installing one layer without the other |
+| `app.rs` | `tick` is non-blocking and does nothing while the layer is off | Parsing on the UI thread, or before the operator opts in |
 | World-map renderers | Input is a plain `&[GeoJsonLayer]`, same as user uploads | Introducing a cable-specific geometry or renderer path |
-| `layer_drawer` | Toggling labels mutates only `show_labels` on the existing layers | Rebuilding or refetching layers to change a display flag |
+| `layer_drawer` | Toggling labels replaces the model's layers; `tick` never overwrites them afterwards | Re-installing the parsed snapshot while layers are present |
 
 ## Notes
 
-- The display toggle defaults off, and **nothing is fetched until it is turned
-  on** — a session that never opens the layer does no network or disk work.
-- Both payloads are cached together and only written once both parsed, so a
-  half-written pair can never be read back as a complete snapshot.
-- Cables carry a per-cable `color` property, which `GeoJsonFeature::color`
-  now honours; the layer colour is only a fallback.
+- **Why bundled rather than fetched.** Cables change a handful of times a year.
+  A runtime fetch bought freshness nobody needs at the cost of network access,
+  a cache, and failure states. Refresh by running
+  `python3 tools/fetch_submarine_cables.py` and committing the result.
+- The earlier fetching version never displayed anything: its `tick` decided
+  whether to start a worker *before* recording the finished result, so every
+  result was discarded as stale and the status stayed on "loading…". Nothing
+  here is scheduled any more, so that class of bug cannot recur.
+  `fire_source::step` guards the same ordering for the live fire feed.
+- The parse result lives in a process-wide `OnceLock` and is shared with the
+  model by `Arc`, so it is parsed at most once per run.
 - Built-in layers start with `show_labels: false`. The globe view has no
-  viewport culling for labels, and ~2,600 cable and landing names drawn at once
-  is unreadable. The names stay on the features for the drawer's label toggle
-  and any future hit-testing.
-- A stale cache is preferred over an empty layer when the network fails, so the
-  overlay keeps working offline.
+  viewport culling for labels, and ~2,600 names drawn at once is unreadable.
+- `bundled_snapshot_parses` is the guard on every regeneration — the app has no
+  fallback if the committed snapshot is bad.
+- **Licence.** The snapshot is TeleGeography data under CC BY-NC-SA 3.0, which
+  is separate from this repository's MIT/Apache code licence and does not
+  permit commercial use. See `submarine_cables/LICENSE`.

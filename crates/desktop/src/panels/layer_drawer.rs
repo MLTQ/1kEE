@@ -169,8 +169,8 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
 
                 ui.checkbox(&mut model.show_submarine_cables, "Submarine cables")
                     .on_hover_text(
-                        "Cable routes and landing points from TeleGeography. Loaded on first \
-                         enable and cached locally for a day.",
+                        "Cable routes and landing points from a bundled TeleGeography \
+                         snapshot. Works offline; no network access.",
                     );
                 ui.small(
                     egui::RichText::new(&model.submarine_cable_status).color(theme::text_muted()),

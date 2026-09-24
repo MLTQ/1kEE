@@ -145,12 +145,9 @@ pub fn tick(model: &mut AppModel) {
     }
 
     let cache_dir = Some(cache_dir(model.selected_root.as_deref()));
+    let now = Instant::now();
 
-    let mut finished = None;
-    let mut should_spawn = false;
-    let generation;
-
-    {
+    let (finished, step) = {
         let mut state = source_state().lock().unwrap();
 
         if state.cache_dir != cache_dir {
@@ -160,40 +157,97 @@ pub fn tick(model: &mut AppModel) {
             state.failures = 0;
         }
 
+        let mut finished = None;
         if let Some(receiver) = &state.worker {
             match receiver.try_recv() {
-                Ok(outcome) => {
-                    state.worker = None;
-                    finished = Some(outcome);
-                }
+                Ok(outcome) => finished = Some(outcome),
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {
-                    state.worker = None;
-                    state.failures = state.failures.saturating_add(1);
-                    state.next_attempt = Some(Instant::now() + backoff(state.failures));
-                    model.fire_status = "worker stopped unexpectedly".into();
+                    finished = Some(WorkerOutcome::Failed {
+                        generation: state.generation,
+                        message: "worker stopped unexpectedly".into(),
+                    });
                 }
+            }
+            if finished.is_some() {
+                state.worker = None;
             }
         }
 
-        let due = state
-            .next_attempt
-            .map(|at| Instant::now() >= at)
-            .unwrap_or(true);
+        let step = step(&mut state, finished.as_ref(), model.show_active_fires, now);
+        (finished, step)
+    };
 
-        if model.show_active_fires && state.worker.is_none() && due {
-            should_spawn = true;
-            state.generation = state.generation.wrapping_add(1);
-        }
-        generation = state.generation;
+    if let (Some(outcome), true) = (finished, step.accepted) {
+        apply_outcome(model, outcome, step.retry_in);
     }
+    if let Some(generation) = step.spawn_generation {
+        spawn_worker(model, generation, cache_dir);
+    }
+}
+
+/// What `tick` should do this frame, decided under the state lock.
+#[derive(Debug, PartialEq)]
+struct Step {
+    /// The finished outcome belongs to the current request and should reach
+    /// the model. `false` for a result from a superseded request.
+    accepted: bool,
+    /// Set when the outcome was a failure: how long until the next attempt.
+    retry_in: Option<Duration>,
+    /// Start a worker for this request generation.
+    spawn_generation: Option<u64>,
+}
+
+/// Advance the source state machine by one frame.
+///
+/// Recording a finished outcome and deciding whether to start the next worker
+/// are one function on purpose. Recording is what schedules the next attempt,
+/// so deciding first sees "no worker, nothing scheduled", starts a new request,
+/// and bumps the generation — which then makes the result that just arrived
+/// look stale and get thrown away. Done in that order every result is
+/// discarded and the layer loads forever.
+fn step(
+    state: &mut SourceState,
+    finished: Option<&WorkerOutcome>,
+    wanted: bool,
+    now: Instant,
+) -> Step {
+    let mut accepted = false;
+    let mut retry_in = None;
 
     if let Some(outcome) = finished {
-        apply_outcome(model, outcome);
+        let generation = match outcome {
+            WorkerOutcome::Loaded { generation, .. } | WorkerOutcome::Failed { generation, .. } => {
+                *generation
+            }
+        };
+        if generation == state.generation {
+            accepted = true;
+            match outcome {
+                WorkerOutcome::Loaded { .. } => {
+                    state.failures = 0;
+                    state.next_attempt = Some(now + REFRESH_INTERVAL);
+                }
+                WorkerOutcome::Failed { .. } => {
+                    state.failures = state.failures.saturating_add(1);
+                    let retry = backoff(state.failures);
+                    state.next_attempt = Some(now + retry);
+                    retry_in = Some(retry);
+                }
+            }
+        }
     }
 
-    if should_spawn {
-        spawn_worker(model, generation, cache_dir);
+    let due = state.next_attempt.is_none_or(|at| now >= at);
+    let spawn_generation = (wanted && state.worker.is_none() && due).then(|| {
+        state.generation = state.generation.wrapping_add(1);
+        state.generation
+    });
+
+    Step {
+        accepted,
+        retry_in,
+        spawn_generation,
     }
 }
 
@@ -212,6 +266,8 @@ fn spawn_worker(model: &mut AppModel, generation: u64, cache_dir: Option<PathBuf
         .name("firms-active-fires".into())
         .spawn(move || {
             let _ = sender.send(load(generation, cache_dir.as_deref()));
+            // Wake the UI so the result is applied without waiting for input.
+            crate::app::request_repaint();
         });
 
     match spawned {
@@ -438,18 +494,16 @@ fn write_cache(dir: &Path, bodies: &[String]) -> Result<(), String> {
     fs::rename(&temp, &path).map_err(|error| error.to_string())
 }
 
-fn apply_outcome(model: &mut AppModel, outcome: WorkerOutcome) {
-    let current = source_state().lock().unwrap().generation;
+/// Push an accepted outcome into the model. Source state (backoff, next
+/// attempt) has already been recorded by [`step`].
+fn apply_outcome(model: &mut AppModel, outcome: WorkerOutcome, retry_in: Option<Duration>) {
     match outcome {
         WorkerOutcome::Loaded {
-            generation,
             detections,
             from_cache,
             cache_warning,
+            ..
         } => {
-            if generation != current {
-                return;
-            }
             let count = detections.len();
             let high = detections
                 .iter()
@@ -462,28 +516,12 @@ fn apply_outcome(model: &mut AppModel, outcome: WorkerOutcome) {
             if let Some(warning) = cache_warning {
                 model.push_log(format!("Active fires: {warning}"));
             }
-
-            let mut state = source_state().lock().unwrap();
-            state.failures = 0;
-            state.next_attempt = Some(Instant::now() + REFRESH_INTERVAL);
         }
-        WorkerOutcome::Failed {
-            generation,
-            message,
-        } => {
-            if generation != current {
-                return;
-            }
-            let mut state = source_state().lock().unwrap();
-            state.failures = state.failures.saturating_add(1);
-            let retry = backoff(state.failures);
-            state.next_attempt = Some(Instant::now() + retry);
-            drop(state);
-
+        WorkerOutcome::Failed { message, .. } => {
             model.fire_status = "unavailable".into();
+            let minutes = retry_in.map_or(0, |retry| retry.as_secs() / 60);
             model.push_log(format!(
-                "Active fire load failed ({message}); retrying in {} min.",
-                retry.as_secs() / 60
+                "Active fire load failed ({message}); retrying in {minutes} min."
             ));
         }
     }
@@ -543,5 +581,80 @@ mod tests {
         let parsed = parse_csv("latitude,longitude,confidence\n1.0,2.0,high\n", "X");
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].frp_mw, 0.0);
+    }
+
+    fn loaded(generation: u64) -> WorkerOutcome {
+        WorkerOutcome::Loaded {
+            generation,
+            detections: Vec::new(),
+            from_cache: false,
+            cache_warning: None,
+        }
+    }
+
+    #[test]
+    fn an_arriving_result_is_kept_not_discarded() {
+        // Regression: tick used to decide whether to spawn *before* recording
+        // the finished result. With nothing scheduled yet it started a new
+        // request, bumped the generation, and the result that had just arrived
+        // was then rejected as stale — forever, so the layer never loaded.
+        let now = Instant::now();
+        let mut state = SourceState::default();
+
+        let first = step(&mut state, None, true, now);
+        let generation = first
+            .spawn_generation
+            .expect("enabling should start a fetch");
+
+        let arrived = step(&mut state, Some(&loaded(generation)), true, now);
+        assert!(
+            arrived.accepted,
+            "the result for the live request must be applied"
+        );
+        assert_eq!(
+            arrived.spawn_generation, None,
+            "no refetch right after success"
+        );
+        assert_eq!(state.next_attempt, Some(now + REFRESH_INTERVAL));
+    }
+
+    #[test]
+    fn a_failure_is_kept_and_backs_off() {
+        let now = Instant::now();
+        let mut state = SourceState::default();
+        let generation = step(&mut state, None, true, now).spawn_generation.unwrap();
+
+        let failed = WorkerOutcome::Failed {
+            generation,
+            message: "boom".into(),
+        };
+        let result = step(&mut state, Some(&failed), true, now);
+        assert!(result.accepted);
+        assert_eq!(result.retry_in, Some(INITIAL_BACKOFF));
+        assert_eq!(result.spawn_generation, None, "must wait out the backoff");
+
+        // Once the backoff elapses it tries again.
+        let later = step(&mut state, None, true, now + INITIAL_BACKOFF);
+        assert!(later.spawn_generation.is_some());
+    }
+
+    #[test]
+    fn a_superseded_result_is_ignored() {
+        let now = Instant::now();
+        let mut state = SourceState::default();
+        let old = step(&mut state, None, true, now).spawn_generation.unwrap();
+        state.generation += 1; // e.g. the data root changed mid-request
+
+        let result = step(&mut state, Some(&loaded(old)), false, now);
+        assert!(!result.accepted);
+    }
+
+    #[test]
+    fn nothing_starts_while_the_layer_is_off() {
+        let mut state = SourceState::default();
+        assert_eq!(
+            step(&mut state, None, false, Instant::now()).spawn_generation,
+            None
+        );
     }
 }

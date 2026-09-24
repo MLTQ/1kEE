@@ -24,10 +24,10 @@ event → nearby cameras → attempted feed connection.
   and KML/KMZ layer import (`model/geojson_layer.rs`, `model/kml_layer.rs`).
 - **OSM ingest** — planet PBF / Overpass import pipeline producing cached feature cells
   (`osm_ingest/`).
-- **Public geospatial layers** — submarine cables and landing points from
-  TeleGeography (`submarine_cables.rs`) and NASA FIRMS active-fire detections
-  (`fire_source.rs`, rendered by `panels/world_map/fire_layer.rs`). Both are
-  keyless, default to off, and cache locally.
+- **Public geospatial layers** — submarine cables and landing points from a
+  bundled TeleGeography snapshot (`submarine_cables.rs`, works offline) and live
+  NASA FIRMS active-fire detections (`fire_source.rs`, rendered by
+  `panels/world_map/fire_layer.rs`, cached locally). Both default to off.
 - **Terrain & bodies** — GEBCO / SRTM / Natural Earth elevation, the Yale Bright
   Star Catalogue and planetary ephemeris, and a replay timeline.
 - **Multiplayer** — a companion web view that mirrors the analyst's live view onto a
@@ -61,7 +61,7 @@ All keys are entered in-app under **Settings → APIs** and saved locally to
 | Webcams | [Windy Webcams](https://api.windy.com/webcams) | Yes — free tier |
 | New York traffic cams | [511NY](https://511ny.org/) | Yes — free |
 | Flights (ADS-B) | [OpenSky](https://opensky-network.org/) | No — anonymous, rate-limited |
-| Submarine cables | [TeleGeography](https://www.submarinecablemap.com/) | No |
+| Submarine cables | [TeleGeography](https://www.submarinecablemap.com/) | No — bundled snapshot, no network |
 | Active fires | [NASA FIRMS](https://firms.modaps.eosdis.nasa.gov/) | No |
 
 ### Terrain & map data
@@ -121,4 +121,8 @@ boundaries.
 - `crates/desktop/src/stellar_catalog.rs` is generated. Regenerate it from the
   Yale Bright Star Catalogue with `python3 tools/generate_star_catalog.py`,
   which preserves the curated common names already in the file.
+- The submarine cable snapshot in `crates/desktop/src/submarine_cables/` is
+  likewise generated: refresh it with `python3 tools/fetch_submarine_cables.py`.
+  That data is TeleGeography's, licensed CC BY-NC-SA 3.0 (non-commercial) —
+  separate from this repository's code licence.
 - Project planning uses the `beads` (`bd`) issue tracker in `.beads/`.

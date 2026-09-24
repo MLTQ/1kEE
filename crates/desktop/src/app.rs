@@ -85,7 +85,6 @@ impl Drop for DashboardApp {
         usgs_stream::shutdown();
         camera_registry::shutdown();
         deflock_source::shutdown();
-        submarine_cables::shutdown();
         fire_source::shutdown();
         panels::world_map::srtm_focus_cache::terminate_active_gdal_jobs();
     }
