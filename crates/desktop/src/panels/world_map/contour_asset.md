@@ -5,6 +5,17 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 
 ## Components
 
+### Earth source fallback
+- `contour_fallback.rs` selects the display tier independently of camera zoom.
+  The finest SRTM tier owns a separate retained cache, also used for normal
+  bucket-six requests, and is not subject to the coarse-view path-count cap.
+  `load_earth_source_region` runs the common bounded asynchronous pipeline for
+  both base and hosted sources. A cache reset clears both and rejects late
+  worker publication through their existing epochs.
+- `LocalContourLoad.source_zoom` and `build_radius` identify the returned
+  source's progress grid; they do not change projection scale. Fine cached
+  tiles remain usable even if hosted coverage probing is unavailable.
+
 ### `LocalRegionCache`
 - **Does**: Tracks currently visible local-terrain tiles, a generation-safe
   single in-flight SQLite/WKB batch, a wide decoded return-pan envelope,

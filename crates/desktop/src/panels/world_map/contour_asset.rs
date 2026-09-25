@@ -16,6 +16,8 @@ use srtm_focus_cache::progress::BuildSnapshot;
 mod loading;
 #[path = "contour_reader.rs"]
 mod reader;
+#[path = "contour_fallback.rs"]
+mod fallback;
 use reader::spawn_local_read;
 
 #[cfg(test)]
@@ -25,6 +27,7 @@ mod read_tests;
 // ── Module-level cache statics ────────────────────────────────────────────────
 // Lifted to module scope so blast_tile_caches() can clear them all at once.
 static LOCAL_CONTOUR_CACHE: OnceLock<Mutex<LocalRegionCache>> = OnceLock::new();
+static EARTH_BASE_CONTOUR_CACHE: OnceLock<Mutex<LocalRegionCache>> = OnceLock::new();
 static LUNAR_LOCAL_CONTOUR_CACHE: OnceLock<Mutex<LocalRegionCache>> = OnceLock::new();
 static GLOBE_CONTOUR_CACHE: OnceLock<Mutex<GlobeRegionCache>> = OnceLock::new();
 static LUNAR_GLOBE_CONTOUR_CACHE: OnceLock<Mutex<GlobeRegionCache>> = OnceLock::new();
@@ -51,9 +54,15 @@ const LOCAL_MANIFEST_SNAPSHOT_TTL: Duration = Duration::from_millis(350);
 /// local terrain view.  Does NOT delete anything from disk; the SQLite cache
 /// files are untouched and tiles will be re-read (not re-built) on demand.
 pub fn blast_tile_caches() {
+    fallback::reset();
     srtm_focus_cache::progress::clear();
     srtm_focus_cache::clear_contour_build_backoffs();
     if let Some(c) = LOCAL_CONTOUR_CACHE.get() {
+        if let Ok(mut g) = c.lock() {
+            g.reset_all();
+        }
+    }
+    if let Some(c) = EARTH_BASE_CONTOUR_CACHE.get() {
         if let Ok(mut g) = c.lock() {
             g.reset_all();
         }
@@ -113,13 +122,19 @@ pub fn blast_tile_caches() {
 /// The world-map repaint scheduler uses this in front of the paint pass, so it
 /// must remain an in-memory check rather than opening the cache database again.
 pub fn local_contours_pending(active_body: crate::model::ActiveBody) -> bool {
+    if active_body == crate::model::ActiveBody::Earth {
+        return fallback::pending();
+    }
     let cache = match active_body {
         crate::model::ActiveBody::Earth => LOCAL_CONTOUR_CACHE.get(),
         crate::model::ActiveBody::Moon => LUNAR_LOCAL_CONTOUR_CACHE.get(),
         crate::model::ActiveBody::Mars => MARS_LOCAL_CONTOUR_CACHE.get(),
     };
-    cache
-        .and_then(|cache| cache.lock().ok())
+    cache.map(local_cache_pending).unwrap_or(true)
+}
+
+fn local_cache_pending(cache: &Mutex<LocalRegionCache>) -> bool {
+    cache.lock().ok()
         .map(|cache| {
             cache.load_in_flight.is_some()
                 || cache
@@ -142,6 +157,9 @@ pub struct ContourPath {
 /// exact current manifest refreshes in the background.
 #[derive(Clone)]
 pub struct LocalContourLoad {
+    /// Address grid of the returned terrain, independent of camera zoom.
+    pub source_zoom: f32,
+    pub build_radius: i32,
     pub contours: Option<Arc<Vec<ContourPath>>>,
     pub ready_buckets: HashSet<(i32, i32)>,
     pub loading_progress: HashMap<(i32, i32), f32>,
@@ -1039,11 +1057,25 @@ pub fn load_srtm_region_for_view(
     build_radius: i32,
     ctx: egui::Context,
 ) -> LocalContourLoad {
+    fallback::load(
+        selected_root, scene_anchor, viewport_center, zoom,
+        prefetch_radius, build_radius, ctx,
+    )
+}
+
+fn load_earth_source_region(
+    cache: &'static Mutex<LocalRegionCache>,
+    selected_root: Option<&Path>,
+    scene_anchor: GeoPoint,
+    viewport_center: GeoPoint,
+    zoom: f32,
+    prefetch_radius: i32,
+    build_radius: i32,
+    ctx: egui::Context,
+) -> LocalContourLoad {
     let prefetch_radius = prefetch_radius.clamp(0, 16);
     let build_radius = build_radius.clamp(0, prefetch_radius);
 
-    let cache: &'static Mutex<LocalRegionCache> =
-        LOCAL_CONTOUR_CACHE.get_or_init(|| Mutex::new(LocalRegionCache::default()));
     let bucket_step = srtm_focus_cache::half_extent_for_zoom(zoom) * 0.45;
     let center_lat_bucket = (viewport_center.lat / bucket_step).round() as i32;
     let center_lon_bucket = (viewport_center.lon / bucket_step).round() as i32;
@@ -1079,8 +1111,13 @@ pub fn load_srtm_region_for_view(
         zoom,
         build_radius,
     );
-    let per_asset_budget =
+    let mut per_asset_budget =
         srtm_focus_cache::zoom::per_asset_feature_budget(zoom, assets.reader_assets().len());
+    // This tier also supplies deep-zoom fallback. Its short contours must not
+    // be discarded using the old coarse-view, CPU-rendering feature budget.
+    if srtm_focus_cache::zoom_bucket_for_zoom(zoom) == fallback::BASE_BUCKET {
+        per_asset_budget = usize::MAX;
+    }
     let scene_key = SceneKey {
         root: selected_root.map(Path::to_path_buf),
         anchor_lat_bucket: (scene_anchor.lat * 20.0).round() as i32,
@@ -1164,6 +1201,8 @@ pub fn load_srtm_region_for_view(
     }
     let loading = loading::snapshot(cache, &assets, state);
     LocalContourLoad {
+        source_zoom: zoom,
+        build_radius,
         contours,
         ready_buckets: loading.ready_buckets,
         loading_progress: loading.fractions,
@@ -1295,6 +1334,8 @@ pub fn load_lunar_region_for_view(
     }
     let loading = loading::snapshot(cache, &assets, state);
     LocalContourLoad {
+        source_zoom: zoom,
+        build_radius,
         contours,
         ready_buckets: loading.ready_buckets,
         loading_progress: loading.fractions,
@@ -1425,6 +1466,8 @@ pub fn load_mars_region_for_view(
     }
     let loading = loading::snapshot(cache, &assets, state);
     LocalContourLoad {
+        source_zoom: zoom,
+        build_radius,
         contours,
         ready_buckets: loading.ready_buckets,
         loading_progress: loading.fractions,

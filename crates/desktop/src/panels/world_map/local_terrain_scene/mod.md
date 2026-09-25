@@ -132,6 +132,12 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 
 ### 3DEP deep zoom
 
+- Earth requests now pass through `contour_fallback.rs`. If fine tiles do not
+  cover the viewport, SRTM stays visible at the full requested camera zoom.
+  The Earth loading grid uses the returned source zoom/radius, while projection
+  and unrelated overlays continue using the camera zoom. The transition loader
+  uses the same source-selection path.
+
 - **Does**: `local_render_zoom` no longer clamps the tile spec at 20. The 3DEP
   tiers continue the ladder to `LOCAL_ZOOM_MAX`, so tile detail keeps improving
   across the whole visual zoom range instead of freezing two thirds of the way
