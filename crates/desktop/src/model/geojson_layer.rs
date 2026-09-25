@@ -346,7 +346,7 @@ fn extract_color(props: &Value) -> Option<[u8; 4]> {
 ///
 /// Alpha is fixed at the same 220 the layer palette uses so a per-feature
 /// colour cannot make a feature render more opaque than the rest of its layer.
-fn parse_hex_color(raw: &str) -> Option<[u8; 4]> {
+pub(crate) fn parse_hex_color(raw: &str) -> Option<[u8; 4]> {
     let hex = raw.trim().trim_start_matches('#');
     if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;

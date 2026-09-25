@@ -10,9 +10,11 @@ Usage:
 
     python3 tools/fetch_submarine_cables.py
 
-The snapshot is trimmed to what the renderer uses — each cable's name and
-colour, each landing point's name — and coordinates are rounded to 4 decimal
-places (about 11 m), which is far below anything visible on the globe.
+The snapshot keeps what the app shows: each cable's route, colour, length,
+owners and ready-for-service date, and each landing point's country and the
+cables that land there. Landing details come from inverting the per-cable
+records (~710 requests, one per cable system), which is far cheaper than fetching every landing point
+(~1,900). Coordinates are rounded to 4 decimal places (about 11 m).
 
 Data: TeleGeography Submarine Cable Map, CC BY-NC-SA 3.0. See the LICENSE file
 written alongside the snapshot.
@@ -22,11 +24,17 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 CABLE_URL = "https://www.submarinecablemap.com/api/v3/cable/cable-geo.json"
 LANDING_URL = "https://www.submarinecablemap.com/api/v3/landing-point/landing-point-geo.json"
+CABLE_DETAIL_URL = "https://www.submarinecablemap.com/api/v3/cable/{id}.json"
+
+# Be gentle with a free public endpoint: a few requests in flight at once.
+DETAIL_WORKERS = 4
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = REPO_ROOT / "crates" / "desktop" / "src" / "submarine_cables"
@@ -55,11 +63,43 @@ Regenerate with: python3 tools/fetch_submarine_cables.py
 """
 
 
-def fetch(url: str) -> dict:
-    print(f"fetching {url}", file=sys.stderr)
+def fetch(url: str, quiet: bool = False) -> dict:
+    if not quiet:
+        print(f"fetching {url}", file=sys.stderr)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=120) as response:
-        return json.load(response)
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                return json.load(response)
+        except Exception:
+            if attempt == 2:
+                raise
+            time.sleep(2 * (attempt + 1))
+    raise AssertionError("unreachable")
+
+
+def fetch_cable_details(cable_ids: list[str]) -> dict[str, dict]:
+    """Fetch every cable's detail record, keyed by cable id."""
+    print(f"fetching {len(cable_ids)} cable detail records", file=sys.stderr)
+
+    def one(cable_id: str):
+        return cable_id, fetch(CABLE_DETAIL_URL.format(id=cable_id), quiet=True)
+
+    details = {}
+    with ThreadPoolExecutor(max_workers=DETAIL_WORKERS) as pool:
+        for done, (cable_id, record) in enumerate(pool.map(one, cable_ids), start=1):
+            details[cable_id] = record
+            if done % 100 == 0:
+                print(f"  {done}/{len(cable_ids)}", file=sys.stderr)
+    return details
+
+
+def clean(value):
+    """Normalise empty strings to None so the app sees one 'missing' shape."""
+    if isinstance(value, str):
+        value = value.strip()
+        return value or None
+    return value
 
 
 def round_coords(value):
@@ -96,9 +136,36 @@ def write(path: Path, collection: dict) -> None:
           f"{path.stat().st_size / 1024:.0f} KiB)", file=sys.stderr)
 
 
+def enrich(cables: dict, landings: dict, details: dict[str, dict]) -> None:
+    """Attach cable details to cables, and the inverted cable list to landings."""
+    landing_info: dict[str, dict] = {}
+    for feature in cables["features"]:
+        props = feature["properties"]
+        record = details.get(props.get("id"), {})
+        for key in ("length", "owners", "rfs", "url"):
+            if clean(record.get(key)) is not None:
+                props[key] = clean(record.get(key))
+        if record.get("rfs_year"):
+            props["rfs_year"] = record["rfs_year"]
+        if record.get("is_planned"):
+            props["is_planned"] = True
+        for landing in record.get("landing_points") or []:
+            info = landing_info.setdefault(landing["id"], {"country": None, "cables": []})
+            info["country"] = info["country"] or clean(landing.get("country"))
+            info["cables"].append(props["id"])
+
+    for feature in landings["features"]:
+        props = feature["properties"]
+        info = landing_info.get(props.get("id"), {})
+        if info.get("country"):
+            props["country"] = info["country"]
+        props["cables"] = sorted(set(info.get("cables", [])))
+
+
 def main() -> int:
-    cables = trim(fetch(CABLE_URL), keep=("name", "color"))
-    landings = trim(fetch(LANDING_URL), keep=("name",))
+    raw_cables = fetch(CABLE_URL)
+    cables = trim(raw_cables, keep=("id", "name", "color"))
+    landings = trim(fetch(LANDING_URL), keep=("id", "name"))
 
     if len(cables["features"]) < MIN_CABLES or len(landings["features"]) < MIN_LANDINGS:
         print(
@@ -107,6 +174,13 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+
+    cable_ids = sorted({f["properties"]["id"] for f in cables["features"] if "id" in f["properties"]})
+    details = fetch_cable_details(cable_ids)
+    enrich(cables, landings, details)
+
+    linked = sum(1 for f in landings["features"] if f["properties"]["cables"])
+    print(f"{linked}/{len(landings['features'])} landing points linked to a cable", file=sys.stderr)
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     write(OUT_DIR / "cables.geojson", cables)

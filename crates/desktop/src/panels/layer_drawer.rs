@@ -180,23 +180,50 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                     egui::RichText::new(&model.submarine_cable_status).color(theme::text_muted()),
                 );
                 if model.show_submarine_cables && !model.submarine_cable_layers.is_empty() {
-                    // Names live on the features either way; this only controls
-                    // whether the globe draws ~2,600 of them at once.
-                    let mut show_labels = model
-                        .submarine_cable_layers
-                        .first()
-                        .is_some_and(|layer| layer.show_labels);
-                    if ui
-                        .checkbox(&mut show_labels, "Cable labels")
-                        .on_hover_text("Draws every cable and landing name. Dense at world zoom.")
-                        .changed()
-                    {
-                        let mut layers = (*model.submarine_cable_layers).clone();
-                        for layer in &mut layers {
-                            layer.show_labels = show_labels;
+                    use crate::submarine_cables::{CABLE_LAYER_INDEX, LANDING_LAYER_INDEX};
+                    ui.indent("submarine_cable_options", |ui| {
+                        let mut show_landings = model
+                            .submarine_cable_layers
+                            .get(LANDING_LAYER_INDEX)
+                            .is_some_and(|layer| layer.visible);
+                        if ui
+                            .checkbox(&mut show_landings, "Landing points")
+                            .on_hover_text(
+                                "Coastal stations where cables come ashore. Hover for the \
+                                 station, click for every cable that lands there.",
+                            )
+                            .changed()
+                        {
+                            model.update_submarine_cable_layers(|layers| {
+                                if let Some(layer) = layers.get_mut(LANDING_LAYER_INDEX) {
+                                    layer.visible = show_landings;
+                                }
+                            });
+                            if !show_landings {
+                                model.selected_landing_point = None;
+                            }
                         }
-                        model.replace_submarine_cable_layers(layers);
-                    }
+
+                        // Names live on the features either way; this only
+                        // controls whether the globe draws ~2,600 of them at once.
+                        let mut show_labels = model
+                            .submarine_cable_layers
+                            .get(CABLE_LAYER_INDEX)
+                            .is_some_and(|layer| layer.show_labels);
+                        if ui
+                            .checkbox(&mut show_labels, "Labels")
+                            .on_hover_text(
+                                "Draws every cable and landing name. Dense at world zoom.",
+                            )
+                            .changed()
+                        {
+                            model.update_submarine_cable_layers(|layers| {
+                                for layer in layers {
+                                    layer.show_labels = show_labels;
+                                }
+                            });
+                        }
+                    });
                 }
                 ui.horizontal_wrapped(|ui| {
                     ui.hyperlink_to("Submarine Cable Map", crate::submarine_cables::PROJECT_URL);

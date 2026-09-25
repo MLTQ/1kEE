@@ -26,10 +26,11 @@ optional external overlays without owning their data pipelines.
 
 ### Submarine cable control
 
-- **Does**: Exposes the optional TeleGeography cable/landing overlay, its
-  cache/refresh status, a label toggle, and explicit attribution.
+- **Does**: Exposes the optional TeleGeography cable overlay, its status, and
+  explicit attribution; once loaded, indented toggles for landing points and
+  labels. Hiding landing points also closes any open landing detail panel.
 - **Interacts with**: `AppModel::show_submarine_cables`, `submarine_cables.rs`,
-  and `AppModel::replace_submarine_cable_layers` for the label toggle.
+  and `AppModel::update_submarine_cable_layers` for both toggles.
 
 ### Active fire control
 

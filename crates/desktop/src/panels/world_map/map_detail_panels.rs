@@ -208,3 +208,149 @@ pub(super) fn draw_flight_detail_panel(ctx: &egui::Context, model: &mut AppModel
         model.selected_flight_icao24 = None;
     }
 }
+
+const LANDING_ACCENT: egui::Color32 = egui::Color32::from_rgb(255, 220, 50);
+
+/// Ring the selected landing point, if it is among the projected markers.
+/// Called by both scenes after they project landing points.
+pub(super) fn ring_selected_landing(
+    painter: &egui::Painter,
+    markers: &[(usize, egui::Pos2)],
+    model: &AppModel,
+) {
+    let Some(selected) = model.selected_landing_point else {
+        return;
+    };
+    if let Some((_, pos)) = markers.iter().find(|(index, _)| *index == selected) {
+        painter.circle_stroke(*pos, 9.0, egui::Stroke::new(1.5, LANDING_ACCENT));
+        painter.circle_stroke(
+            *pos,
+            13.0,
+            egui::Stroke::new(1.0, LANDING_ACCENT.gamma_multiply(0.35)),
+        );
+    }
+}
+
+/// Detail panel for a clicked cable landing point: the station, and every
+/// cable that comes ashore there with its owners, length and service date.
+pub(super) fn draw_landing_detail_panel(ctx: &egui::Context, model: &mut AppModel) {
+    let Some(index) = model.selected_landing_point else {
+        return;
+    };
+    // Hiding the layer (or cables entirely) closes the panel.
+    let landing = crate::submarine_cables::landing_points_visible(model)
+        .then(crate::submarine_cables::catalog)
+        .flatten()
+        .and_then(|catalog| Some((catalog, catalog.landings.get(index)?)));
+    let Some((catalog, landing)) = landing else {
+        model.selected_landing_point = None;
+        return;
+    };
+
+    let planned = landing
+        .cables
+        .iter()
+        .filter(|&&cable| catalog.cables[cable].is_planned)
+        .count();
+    let mut open = true;
+
+    egui::Window::new("Landing Point")
+        .id("landing_detail_panel".into())
+        .open(&mut open)
+        .default_size(egui::vec2(340.0, 380.0))
+        .resizable(true)
+        .collapsible(false)
+        .frame(
+            egui::Frame::window(&ctx.style())
+                .fill(theme::window_fill())
+                .stroke(egui::Stroke::new(1.0, LANDING_ACCENT.gamma_multiply(0.5))),
+        )
+        .show(ctx, |ui| {
+            ui.colored_label(LANDING_ACCENT, "CABLE LANDING STATION");
+            ui.heading(&landing.name);
+            ui.add_space(6.0);
+
+            egui::Grid::new("landing_fields")
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    let mut row = |label: &str, value: &str| {
+                        ui.colored_label(theme::text_muted(), label);
+                        ui.label(value);
+                        ui.end_row();
+                    };
+                    if let Some(country) = &landing.country {
+                        row("Country", country);
+                    }
+                    row(
+                        "Position",
+                        &format!(
+                            "{:.4}°N  {:.4}°E",
+                            landing.location.lat, landing.location.lon
+                        ),
+                    );
+                    let cables = match planned {
+                        0 => landing.cables.len().to_string(),
+                        planned => format!("{} ({planned} planned)", landing.cables.len()),
+                    };
+                    row("Cables", &cables);
+                });
+
+            if landing.cables.is_empty() {
+                return;
+            }
+            ui.add_space(6.0);
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for &cable_index in &landing.cables {
+                        let cable = &catalog.cables[cable_index];
+                        let [r, g, b, _] = cable.color;
+                        ui.horizontal(|ui| {
+                            let (dot, _) =
+                                ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                            ui.painter().circle_filled(
+                                dot.center(),
+                                4.0,
+                                egui::Color32::from_rgb(r, g, b),
+                            );
+                            match &cable.url {
+                                Some(url) => {
+                                    ui.hyperlink_to(egui::RichText::new(&cable.name).strong(), url);
+                                }
+                                None => {
+                                    ui.strong(&cable.name);
+                                }
+                            }
+                        });
+
+                        let mut facts = Vec::new();
+                        if cable.is_planned {
+                            facts.push(match cable.rfs_year {
+                                Some(year) => format!("Planned {year}"),
+                                None => "Planned".to_owned(),
+                            });
+                        } else if let Some(rfs) = cable.rfs.as_ref() {
+                            facts.push(format!("In service {rfs}"));
+                        }
+                        if let Some(length) = &cable.length {
+                            facts.push(length.clone());
+                        }
+                        if !facts.is_empty() {
+                            ui.small(
+                                egui::RichText::new(facts.join(" · ")).color(theme::text_muted()),
+                            );
+                        }
+                        if let Some(owners) = &cable.owners {
+                            ui.small(egui::RichText::new(owners).color(theme::text_muted()));
+                        }
+                        ui.add_space(4.0);
+                    }
+                });
+        });
+
+    if !open {
+        model.selected_landing_point = None;
+    }
+}

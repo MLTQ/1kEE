@@ -144,6 +144,9 @@ pub struct AppModel {
     pub show_submarine_cables: bool,
     /// Human-readable cache/refresh state for the submarine cable source.
     pub submarine_cable_status: String,
+    /// Landing point shown in the detail panel, as an index into
+    /// `submarine_cables::catalog().landings` (and the landing layer).
+    pub selected_landing_point: Option<usize>,
     /// NASA FIRMS active-fire detections from the last 24 hours.
     pub active_fires: Arc<Vec<FireDetection>>,
     /// Optional public active-fire overlay. Off until the operator enables it.
@@ -312,6 +315,7 @@ impl AppModel {
             submarine_cable_layers: Arc::new(Vec::new()),
             show_submarine_cables: false,
             submarine_cable_status: "not loaded".into(),
+            selected_landing_point: None,
             active_fires: Arc::new(Vec::new()),
             show_active_fires: false,
             fire_status: "not loaded".into(),
@@ -460,9 +464,11 @@ impl AppModel {
         self.deflock_snapshot_revision
     }
 
-    /// Replaces the submarine cable overlay layers with a freshly loaded set.
-    pub fn replace_submarine_cable_layers(&mut self, layers: Vec<GeoJsonLayer>) {
-        self.submarine_cable_layers = Arc::new(layers);
+    /// Edit the installed submarine cable layers in place (visibility, label
+    /// flags). The parsed snapshot is shared, so the first edit takes a private
+    /// copy; later edits reuse it.
+    pub fn update_submarine_cable_layers(&mut self, edit: impl FnOnce(&mut Vec<GeoJsonLayer>)) {
+        edit(Arc::make_mut(&mut self.submarine_cable_layers));
     }
 
     /// Replaces the active-fire snapshot and advances its cache revision even

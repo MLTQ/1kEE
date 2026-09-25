@@ -28,6 +28,9 @@ pub struct GlobeScene {
     pub flight_markers: Vec<(String, egui::Pos2)>,
     /// (source_url, object_id, screen_pos) for ArcGIS feature click detection.
     pub arcgis_feature_markers: Vec<(String, i64, egui::Pos2)>,
+    /// (index into `submarine_cables::catalog().landings`, screen_pos) for
+    /// landing-point hover and click detection.
+    pub landing_point_markers: Vec<(usize, egui::Pos2)>,
     /// Terrain elevation (metres) at the beam contact point, if available.
     pub beam_elevation_m: Option<f32>,
 }
@@ -189,13 +192,18 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     }
 
     // ── Submarine cables (drawn under user imports) ────────────────────────
-    if model.show_submarine_cables && !model.submarine_cable_layers.is_empty() {
+    let mut landing_point_markers = Vec::new();
+    if model.show_submarine_cables
+        && model.active_body == crate::model::ActiveBody::Earth
+        && !model.submarine_cable_layers.is_empty()
+    {
         geography::draw_geojson_layers(
             painter,
             &layout,
             &model.globe_view,
             &model.submarine_cable_layers,
         );
+        landing_point_markers = project_landing_points(painter, &layout, &model.globe_view, model);
     }
 
     // ── GeoJSON user overlay layers ────────────────────────────────────────
@@ -468,8 +476,37 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         ship_markers,
         flight_markers,
         arcgis_feature_markers,
+        landing_point_markers,
         beam_elevation_m: None,
     }
+}
+
+/// Project visible landing points for hover/click hit-testing and ring the
+/// selected one. The dots themselves are drawn by the cable layer.
+fn project_landing_points(
+    painter: &egui::Painter,
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    model: &AppModel,
+) -> Vec<(usize, egui::Pos2)> {
+    if !crate::submarine_cables::landing_points_visible(model) {
+        return Vec::new();
+    }
+    let Some(catalog) = crate::submarine_cables::catalog() else {
+        return Vec::new();
+    };
+    let markers: Vec<_> = catalog
+        .landings
+        .iter()
+        .enumerate()
+        .filter_map(|(index, landing)| {
+            projection::project_geo(layout, view, landing.location, 0.0)
+                .filter(|point| point.front_facing)
+                .map(|point| (index, point.pos))
+        })
+        .collect();
+    super::map_detail_panels::ring_selected_landing(painter, &markers, model);
+    markers
 }
 
 /// Paint the optional active-fire overlay from a cached mesh when the data and

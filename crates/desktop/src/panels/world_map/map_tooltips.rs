@@ -204,3 +204,50 @@ pub(super) fn draw_flight_hover_tooltip(
                 });
         });
 }
+
+pub(super) fn draw_landing_hover_tooltip(
+    ctx: &egui::Context,
+    model: &AppModel,
+    scene: &globe_scene::GlobeScene,
+    hover_pos: Option<egui::Pos2>,
+) {
+    let Some(pointer) = hover_pos else { return };
+    let Some(&(index, marker_pos)) = scene
+        .landing_point_markers
+        .iter()
+        .find(|(_, marker)| marker.distance(pointer) <= 9.0)
+    else {
+        return;
+    };
+    // The detail panel already shows everything for the selected station.
+    if model.selected_landing_point == Some(index) {
+        return;
+    }
+    let Some(catalog) = crate::submarine_cables::catalog() else {
+        return;
+    };
+    let Some(landing) = catalog.landings.get(index) else {
+        return;
+    };
+
+    let accent = egui::Color32::from_rgb(255, 220, 50);
+    egui::Area::new("landing_hover_tooltip".into())
+        .fixed_pos(marker_pos + egui::vec2(14.0, -8.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(theme::panel_fill(238))
+                .stroke(egui::Stroke::new(1.0, accent.gamma_multiply(0.5)))
+                .corner_radius(8.0)
+                .inner_margin(egui::Margin::same(8))
+                .show(ui, |ui| {
+                    ui.colored_label(accent, "Cable landing station");
+                    ui.strong(&landing.name);
+                    let count = landing.cables.len();
+                    ui.small(match count {
+                        1 => "1 cable · click for details".to_owned(),
+                        n => format!("{n} cables · click for details"),
+                    });
+                });
+        });
+}

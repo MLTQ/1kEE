@@ -3,15 +3,17 @@
 ## Purpose
 
 Supplies the built-in submarine cable layer — cable routes and landing points —
-from a TeleGeography snapshot compiled into the binary. It owns no network
-access, no cache, and no rendering: the shared `GeoJsonLayer` pipeline draws it.
+from a TeleGeography snapshot compiled into the binary, plus the catalogue of
+detail behind the landing-point tooltip and panel. It owns no network access, no
+cache, and no rendering: the shared `GeoJsonLayer` pipeline draws it.
 
 ## Components
 
 ### Bundled snapshot (`submarine_cables/`)
-- **Does**: Holds `cables.geojson` and `landings.geojson`, trimmed to the
-  properties the renderer uses (cable name and colour, landing name) with
-  coordinates rounded to 4 dp (~11 m). Pulled in with `include_str!`.
+- **Does**: Holds `cables.geojson` (route, name, colour, length, owners,
+  ready-for-service date, planned flag, URL) and `landings.geojson` (name,
+  country, ids of the cables landing there), coordinates rounded to 4 dp
+  (~11 m). Pulled in with `include_str!`.
 - **Interacts with**: `tools/fetch_submarine_cables.py`, which regenerates it.
 
 ### `tick`
@@ -19,6 +21,19 @@ access, no cache, and no rendering: the shared `GeoJsonLayer` pipeline draws it.
   background thread; once parsed, installs the layers into the model and wakes
   the UI. Returns immediately while the layer is off or already installed.
 - **Interacts with**: `app.rs`, `AppModel`, `crate::app::request_repaint`.
+
+### `CableCatalog` / `CableInfo` / `LandingPoint` / `catalog`
+- **Does**: One entry per cable system (route segments collapsed) and per
+  landing station, with each station's cables as indices sorted by name.
+  `catalog()` exposes it once parsed.
+- **Interacts with**: `map_tooltips::draw_landing_hover_tooltip`,
+  `map_detail_panels::draw_landing_detail_panel`, both scenes' hit-testing.
+
+### `landing_points_visible`
+- **Does**: Single answer to "are landing dots on screen": cables enabled, on
+  Earth, and the landing layer not hidden. Hit-testing, tooltips and the panel
+  all key off it, so a hidden dot can never be hovered or clicked.
+- **Interacts with**: globe/local scenes, `map_detail_panels`.
 
 ### `build_layer`
 - **Does**: Parses one payload into a named built-in layer: fixed layer colour,
@@ -36,7 +51,8 @@ access, no cache, and no rendering: the shared `GeoJsonLayer` pipeline draws it.
 | `AppModel` | Both layers arrive together, fully parsed | Installing one layer without the other |
 | `app.rs` | `tick` is non-blocking and does nothing while the layer is off | Parsing on the UI thread, or before the operator opts in |
 | World-map renderers | Input is a plain `&[GeoJsonLayer]`, same as user uploads | Introducing a cable-specific geometry or renderer path |
-| `layer_drawer` | Toggling labels replaces the model's layers; `tick` never overwrites them afterwards | Re-installing the parsed snapshot while layers are present |
+| `layer_drawer` | Toggling labels or landing points edits the installed layers; `tick` never overwrites them afterwards | Re-installing the parsed snapshot while layers are present |
+| Map hit-testing | Feature `i` of the landing layer is `catalog().landings[i]` | Building the landing layer from anything but the catalogue |
 
 ## Notes
 
@@ -49,6 +65,14 @@ access, no cache, and no rendering: the shared `GeoJsonLayer` pipeline draws it.
   result was discarded as stale and the status stayed on "loading…". Nothing
   here is scheduled any more, so that class of bug cannot recur.
   `fire_source::step` guards the same ordering for the live fire feed.
+- **Landing detail comes from inverting the cable records.** Each cable's
+  detail lists its landing points, so ~710 requests (one per cable system) yield every station's
+  country and cable list; fetching per station would take ~1,900. All 1,925
+  stations link to at least one cable in the current snapshot.
+- The landing layer is **built from the catalogue**, not parsed separately, so
+  map indices and catalogue indices cannot drift apart
+  (`landing_layer_and_catalogue_are_index_aligned`).
+- Cables are Earth-only: both scenes skip them on the Moon and Mars.
 - The parse result lives in a process-wide `OnceLock` and is shared with the
   model by `Arc`, so it is parsed at most once per run.
 - Built-in layers start with `show_labels: false`. The globe view has no

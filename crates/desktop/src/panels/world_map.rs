@@ -184,6 +184,16 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
                         model.selected_arcgis_feature = Some(key);
                     }
                 }
+                // Landing points last: their dots sit under cables and are the
+                // least specific target, so any other marker wins a tie.
+                else if let Some(&(index, _)) = scene
+                    .landing_point_markers
+                    .iter()
+                    .find(|(_, marker)| marker.distance(pointer) <= 9.0)
+                {
+                    model.selected_landing_point =
+                        (model.selected_landing_point != Some(index)).then_some(index);
+                }
             }
         }
 
@@ -192,8 +202,10 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         map_tooltips::draw_camera_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
         map_tooltips::draw_ship_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
         map_tooltips::draw_flight_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
+        map_tooltips::draw_landing_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
         map_detail_panels::draw_ship_detail_panel(ui.ctx(), model);
         map_detail_panels::draw_flight_detail_panel(ui.ctx(), model);
+        map_detail_panels::draw_landing_detail_panel(ui.ctx(), model);
         draw_arcgis_detail_panel(ui.ctx(), model);
         if let Some(hover) = response.hover_pos() {
             if !model.globe_view.local_mode {
