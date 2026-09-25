@@ -8,6 +8,7 @@ mod camera_source_catalog;
 mod city_catalog;
 mod deflock_source;
 mod event_store;
+mod elevation_sources;
 mod feature_heights;
 mod fire_source;
 mod factal_stream;

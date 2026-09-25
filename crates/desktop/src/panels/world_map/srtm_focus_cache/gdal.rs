@@ -912,12 +912,12 @@ pub fn build_focus_contours(
     Some(())
 }
 
-/// Build one contour tile from USGS 3DEP 1 m bare-earth elevation.
+/// Build one contour tile from hosted bare-earth elevation (USGS or international).
 ///
-/// Unlike the SRTM path there is no local tile mosaic to warp: the image
-/// service clips and resamples server-side, so a whole tile arrives as one
-/// GeoTIFF already in the requested bounds and pixel size. Only the resulting
-/// contour geometry is kept; the downloaded raster is a build temporary.
+/// The provider clips remotely or assembles a small source window locally.
+/// Both paths supply a GeoTIFF in the requested bounds and pixel size to the
+/// shared contour pipeline. Only the resulting contour geometry is kept;
+/// the downloaded raster is a build temporary.
 pub fn build_threedep_contours(
     cache_root: &Path,
     cache_db_path: &Path,
@@ -958,18 +958,43 @@ pub fn build_threedep_contours(
 
     let source_timer = StageTimer::new(tile, "download");
     let mut downloaded_bytes = 0;
-    let fetched = crate::threedep::fetch_tile_raster_with_progress(
-        core.source.min_lat,
-        core.source.min_lon,
-        core.source.max_lat,
-        core.source.max_lon,
-        spec.raster_size,
-        &tmp_tif_path,
-        |done, total| {
-            downloaded_bytes = done;
-            progress.source_bytes(done, total);
-        },
-    );
+    let mut on_bytes = |done, total| {
+        downloaded_bytes = done;
+        progress.source_bytes(done, total);
+    };
+    let center = crate::model::GeoPoint {
+        lat: ((core.source.min_lat + core.source.max_lat) * 0.5) as f32,
+        lon: ((core.source.min_lon + core.source.max_lon) * 0.5) as f32,
+    };
+    let fetched = if crate::elevation_sources::possible_at(center) {
+        match crate::elevation_sources::fetch(
+            core.source,
+            spec.raster_size,
+            spec.raster_size,
+            &tmp_tif_path,
+            &mut on_bytes,
+        ) {
+            Ok(_) => true,
+            Err(crate::elevation_sources::Error::NoCoverage) => {
+                super::builders::record_international_uncovered(tile);
+                false
+            }
+            Err(crate::elevation_sources::Error::Failed(message)) => {
+                eprintln!("[1kEE] elevation source: {message}");
+                false
+            }
+        }
+    } else {
+        crate::threedep::fetch_tile_raster_with_progress(
+            core.source.min_lat,
+            core.source.min_lon,
+            core.source.max_lat,
+            core.source.max_lon,
+            spec.raster_size,
+            &tmp_tif_path,
+            on_bytes,
+        )
+    };
     if !fetched {
         cleanup_temp_tile_artifacts(&tmp_tif_path, &tmp_gpkg_path);
         return None;
@@ -1520,3 +1545,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 }
+
+#[cfg(test)]
+#[path = "international_build_tests.rs"]
+mod international_tests;

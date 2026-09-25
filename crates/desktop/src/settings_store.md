@@ -1,6 +1,8 @@
 # settings_store.rs
 
 ## Purpose
+The legacy `threedep_enabled` and chunk-budget keys also govern international
+elevation providers, preserving existing saved settings without migration.
 Persists the desktop app's local configuration so it survives restarts. That now includes the Factal API key, live camera-source keys, the opt-in Project Eyes On directory scope and request rate, path overrides for the asset root, data roots, GDAL tool discovery, and the operator-selected contour line thickness.
 
 ## Components

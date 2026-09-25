@@ -58,7 +58,8 @@ fn within_service_area(point: GeoPoint) -> bool {
 pub enum Coverage {
     /// Not probed yet. A background probe may have been scheduled.
     Unknown,
-    /// 1 m (or finer) source exists here.
+    /// Detailed source may be fetched here. International screens are confirmed
+    /// by raster reads; Japan can fall back through its 5 m and 10 m products.
     Fine,
     /// The point is served, but only by coarser products (10 m / 30 m), or it
     /// lies outside 3DEP entirely.
@@ -91,6 +92,9 @@ pub fn coverage_at(point: GeoPoint) -> Coverage {
     if !is_enabled() {
         return Coverage::Coarse;
     }
+    if crate::elevation_sources::possible_at(point) {
+        return Coverage::Fine;
+    }
     if !within_service_area(point) {
         return Coverage::Coarse;
     }
@@ -107,7 +111,13 @@ pub fn coverage_at(point: GeoPoint) -> Coverage {
 /// Blocking coverage lookup for background workers that are already off the UI
 /// thread and cannot proceed without an answer.
 pub fn coverage_at_blocking(point: GeoPoint) -> Coverage {
-    if !is_enabled() || !within_service_area(point) {
+    if !is_enabled() {
+        return Coverage::Coarse;
+    }
+    if crate::elevation_sources::possible_at(point) {
+        return Coverage::Fine;
+    }
+    if !within_service_area(point) {
         return Coverage::Coarse;
     }
     let cell = coverage_cell(point);
@@ -325,43 +335,63 @@ fn download_chunk(derived_root: &Path, key: ChunkKey) -> Option<PathBuf> {
     std::fs::create_dir_all(&root).ok()?;
 
     let (width, height) = request_size(key);
-    let bbox = format!(
-        "{},{},{},{}",
-        key.min_lon(),
-        key.min_lat(),
-        key.max_lon(),
-        key.max_lat()
-    );
-    let size = format!("{width},{height}");
-
-    let response = http_client()
-        .get(format!("{SERVICE}/exportImage"))
-        .query(&[
-            ("bbox", bbox.as_str()),
-            ("bboxSR", "4326"),
-            ("imageSR", "4326"),
-            ("size", size.as_str()),
-            ("format", "tiff"),
-            ("pixelType", "F32"),
-            ("noData", "-999999"),
-            ("interpolation", "RSP_BilinearInterpolation"),
-            ("f", "image"),
-        ])
-        .send()
-        .ok()?;
-
-    if !response.status().is_success() {
-        return None;
-    }
-    let bytes = response.bytes().ok()?;
-    // The service answers errors with an HTML page and a 200-shaped body, so
-    // the TIFF magic number is the only trustworthy success signal.
-    if !looks_like_tiff(&bytes) {
-        return None;
-    }
-
     let raw_path = root.join(format!("lat{}_lon{}.raw.tif", key.lat, key.lon));
-    std::fs::write(&raw_path, &bytes).ok()?;
+    if crate::elevation_sources::possible_at(key.center()) {
+        let bounds = crate::elevation_sources::Bounds {
+            min_lon: key.min_lon().into(),
+            min_lat: key.min_lat().into(),
+            max_lon: key.max_lon().into(),
+            max_lat: key.max_lat().into(),
+        };
+        match crate::elevation_sources::fetch(bounds, width, height, &raw_path, |_, _| {}) {
+            Ok(_) => {}
+            Err(crate::elevation_sources::Error::NoCoverage) => {
+                let _ = std::fs::write(empty_marker_path(derived_root, key), b"");
+                return None;
+            }
+            Err(crate::elevation_sources::Error::Failed(message)) => {
+                eprintln!("[1kEE] elevation sample: {message}");
+                return None;
+            }
+        }
+    } else {
+        let bbox = format!(
+            "{},{},{},{}",
+            key.min_lon(),
+            key.min_lat(),
+            key.max_lon(),
+            key.max_lat()
+        );
+        let size = format!("{width},{height}");
+
+        let response = http_client()
+            .get(format!("{SERVICE}/exportImage"))
+            .query(&[
+                ("bbox", bbox.as_str()),
+                ("bboxSR", "4326"),
+                ("imageSR", "4326"),
+                ("size", size.as_str()),
+                ("format", "tiff"),
+                ("pixelType", "F32"),
+                ("noData", "-999999"),
+                ("interpolation", "RSP_BilinearInterpolation"),
+                ("f", "image"),
+            ])
+            .send()
+            .ok()?;
+
+        if !response.status().is_success() {
+            return None;
+        }
+        let bytes = response.bytes().ok()?;
+        // The service answers errors with an HTML page and a 200-shaped body, so
+        // the TIFF magic number is the only trustworthy success signal.
+        if !looks_like_tiff(&bytes) {
+            return None;
+        }
+
+        std::fs::write(&raw_path, &bytes).ok()?;
+    }
 
     let final_path = chunk_path(derived_root, key);
     let ok = compress_to_cog(&raw_path, &final_path);

@@ -5,6 +5,14 @@ Owns the desktop-side GDAL pipelines for terrain assets: SRTM focus contours, GE
 
 ## Components
 
+### International hosted contour builds
+- The historical `build_threedep_contours` entrypoint also dispatches eligible
+  windows through `elevation_sources`. Exact core/halo bounds, download/staging
+  admission, processing permits, progress and clipped SQLite import stay shared.
+- Confirmed no-coverage keeps SRTM fallback active instead of importing an empty
+  fine tile. Service and decoder errors are logged and retryable. Intermediate
+  provider rasters are cleaned even on failed builds.
+
 ### `run_command_with_timeout`
 - **Does**: Runs GDAL tools with timeout and shutdown-aware cancellation.
 - **Interacts with**: `active_children`, app shutdown flow.
@@ -82,3 +90,6 @@ Owns the desktop-side GDAL pipelines for terrain assets: SRTM focus contours, GE
   core plus two raster pixels on each side. Sampling density and elevation
   intervals stay approximately unchanged; the halo is clipped before import.
   gdalwarp and hosted requests use f64 bounds. No existing tile is rewritten.
+
+- `international_build_tests.rs` exercises a complete Tokyo source-to-contour
+  cache build and verifies source rasters are removed after publication.

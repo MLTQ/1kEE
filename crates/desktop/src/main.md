@@ -8,6 +8,8 @@ application with the map-oriented window configuration.
 ## Components
 
 ### Module declarations
+- `elevation_sources` supplies bounded international terrain acquisition to the
+  existing Earth contour and point-sampling pipelines.
 - **Does**: Makes source adapters, model modules, map panels, and application
   lifecycle code available inside the desktop binary.
 - **Interacts with**: all crate-local modules.

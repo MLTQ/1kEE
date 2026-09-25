@@ -92,12 +92,11 @@ pub struct AppSettings {
     /// `contour_stroke_scale` as a backwards-compatible legacy fallback.
     #[serde(default)]
     pub contour_stroke_width_px: Option<f32>,
-    /// Enables on-demand USGS 3DEP 1 m elevation fetches for the deep local
-    /// zoom tiers. Only requests data for the small area under the viewport,
-    /// and only inside the United States where 1 m source exists.
+    /// Enables on-demand detailed elevation from USGS and international
+    /// providers. The persisted key is retained for settings compatibility.
     #[serde(default = "default_threedep_enabled")]
     pub threedep_enabled: bool,
-    /// Ceiling in gigabytes for the cached 3DEP chunk store.
+    /// Ceiling in gigabytes for the shared elevation chunk store.
     #[serde(default = "default_threedep_cache_budget_gb")]
     pub threedep_cache_budget_gb: f32,
     /// Ceiling in gigabytes for local contour geometry resident on the GPU.

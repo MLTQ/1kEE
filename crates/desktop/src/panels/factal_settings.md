@@ -34,7 +34,12 @@ Renders the app settings window for the desktop app. This file is the user-facin
   total, with empty and repeated-page termination fallbacks.
 - Asset/data/derived/SRTM/planet/GDAL overrides are intentionally optional; leaving them blank means “use the executable folder defaults and PATH-based GDAL tools.”
 
-### USGS 3DEP section
+### Detailed Terrain section
+
+- The existing streaming toggle now covers USGS plus six international
+  providers. Expandable source credits link to official data/licence pages.
+  Contour rasters are temporary; only sampled elevation chunks use the displayed
+  cache budget. The help text keeps USGS-only hillshade scope explicit.
 
 - **Does**: Toggles on-demand 3DEP 1 m streaming and sets the chunk cache
   ceiling, with a live readout of how much of that budget is in use.

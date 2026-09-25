@@ -8,6 +8,12 @@ SQLite assets immediately.
 
 ## Components
 
+### International hosted terrain
+- Deep tiers may use `elevation_sources` candidates as well as USGS. Actual
+  all-nodata/absent international windows get a bounded, resettable no-source
+  memo; transport/decoder failures retain retry backoff. Cache manifest hits
+  still precede every source/memo check, preserving existing offline data.
+
 ### `ensure_*_bucket_asset`
 
 - **Does**: Returns a ready cache asset when present; otherwise, when allowed,

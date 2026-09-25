@@ -589,12 +589,12 @@ fn tab_paths(ui: &mut egui::Ui, model: &mut AppModel) {
     ui.add_space(8.0);
     ui.separator();
     ui.add_space(4.0);
-    ui.strong("USGS 3DEP 1 m Elevation");
+    ui.strong("Detailed Terrain");
     ui.label(
         egui::RichText::new(
-            "Streams 1 m bare-earth elevation for the deep local zoom tiers, on demand \
-             and only for the area in view.  United States coverage only; everywhere \
-             else keeps using SRTM.",
+            "Loads detailed terrain for the area in view from official sources in the US, \
+             England, France, the Netherlands, Switzerland, New Zealand and Japan. \
+             Where finer data is missing, the existing terrain stays visible.",
         )
         .small()
         .color(theme::text_muted()),
@@ -602,12 +602,24 @@ fn tab_paths(ui: &mut egui::Ui, model: &mut AppModel) {
     ui.add_space(4.0);
     ui.checkbox(
         &mut model.settings_threedep_enabled,
-        "Enable 3DEP streaming",
+        "Stream detailed terrain",
     )
     .on_hover_text(
-        "Contours below the SRTM resolution floor, 1 m elevation for markers and \
-         layers, and the hillshade drape all depend on this.",
+        "Fetch elevation for contours, markers and map layers as you explore. \
+         Downloaded contour rasters are removed after processing. The hillshade \
+         drape currently uses the USGS service in the US.",
     );
+
+    ui.collapsing("Elevation sources and credits", |ui| {
+        ui.hyperlink_to(
+            "United States — USGS 3DEP, 1 m",
+            "https://www.usgs.gov/3d-elevation-program",
+        );
+        for provider in crate::elevation_sources::PROVIDERS {
+            ui.hyperlink_to(provider.label(), provider.url());
+        }
+        ui.small("Contour geometry is derived by 1kEE. Coverage and survey dates vary by location.");
+    });
 
     ui.horizontal(|ui| {
         ui.label("Chunk cache budget");
@@ -621,7 +633,7 @@ fn tab_paths(ui: &mut egui::Ui, model: &mut AppModel) {
             .logarithmic(true),
         )
         .on_hover_text(
-            "Ceiling for cached 1 m elevation chunks.  Least-recently-used chunks are \
+            "Ceiling for cached elevation chunks.  Least-recently-used chunks are \
              evicted past this; contours already extracted from them are kept.",
         );
     });

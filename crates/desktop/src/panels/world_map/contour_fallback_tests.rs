@@ -143,9 +143,9 @@ fn cold_deep_zoom_reads_base_then_upgrades_to_cached_fine_tiles() {
     let db = derived.join("terrain/srtm_focus_cache.sqlite");
     let connection = srtm_focus_cache::db::open_cache_db(&db).unwrap();
     let center = GeoPoint {
-        lat: 48.85,
-        lon: 2.35,
-    }; // outside USGS service bounds
+        lat: -33.86,
+        lon: 151.21,
+    }; // Sydney: outside every hosted provider, so this remains offline
     let insert = |zoom: f32, radius: i32| {
         let spec = srtm_focus_cache::zoom::spec_for_zoom(zoom);
         let step = spec.half_extent_deg * 0.45;

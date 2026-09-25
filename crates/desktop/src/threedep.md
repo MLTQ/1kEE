@@ -9,6 +9,16 @@ exists under a point, and pulls only the small area currently in view.
 
 ## Components
 
+### International dispatch
+- The existing sampling/cache API also accepts geographic candidates from
+  `elevation_sources`; their raster fetch confirms actual coverage. Japan may
+  use 5/10 m where 1 m is absent. `Coverage::Fine` therefore means detailed
+  source candidate for these adapters, rather than a proven 1 m survey.
+- International point chunks use the same bounded decoded/chunk caches and
+  budget as USGS, retaining the historical `3dep_1m` directory for compatibility.
+  Confirmed nodata writes an empty marker; network errors never do. Server
+  hillshade remains a USGS-only feature.
+
 ### `coverage_at` / `coverage_at_blocking`
 
 - **Does**: Reports whether 3DEP publishes 1 m source under a point, on a 0.05°

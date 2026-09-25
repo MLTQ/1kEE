@@ -79,6 +79,22 @@ fn threedep_uncovered_tiles() -> &'static Mutex<HashSet<TileKey>> {
     UNCOVERED.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+fn international_uncovered_tiles() -> &'static Mutex<HashSet<TileKey>> {
+    static UNCOVERED: OnceLock<Mutex<HashSet<TileKey>>> = OnceLock::new();
+    UNCOVERED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Only confirmed absence/all-nodata, never a network or decoder failure.
+pub fn record_international_uncovered(tile: TileKey) {
+    if let Ok(mut tiles) = international_uncovered_tiles().lock() {
+        if tiles.len() >= MAX_TRACKED_SOURCELESS_TILES {
+            tiles.clear();
+        }
+        tiles.insert(tile);
+    }
+    bump_manifest_revision();
+}
+
 /// Record a deep-tier bucket that 3DEP cannot serve at 1 m. Only a resolved
 /// negative probe reaches here; an unprobed bucket stays outstanding so it is
 /// retried once its probe lands.
@@ -100,6 +116,9 @@ pub fn sourceless_tile_set() -> HashSet<TileKey> {
         .map(|guard| guard.tiles.clone())
         .unwrap_or_default();
     if let Ok(guard) = threedep_uncovered_tiles().lock() {
+        tiles.extend(guard.iter().copied());
+    }
+    if let Ok(guard) = international_uncovered_tiles().lock() {
         tiles.extend(guard.iter().copied());
     }
     tiles
@@ -254,6 +273,9 @@ fn clear_failed_build(
 /// user who fixed a missing source or freed storage can retry immediately.
 pub fn clear_failed_build_backoffs() {
     clear_sourceless_tiles();
+    if let Ok(mut tiles) = international_uncovered_tiles().lock() {
+        tiles.clear();
+    }
     for failures in [failed_builds(), lunar_failed_builds(), mars_failed_builds()] {
         if let Ok(mut failures) = failures.lock() {
             failures.clear();
@@ -336,9 +358,16 @@ pub fn ensure_bucket_asset(
         return None;
     }
 
-    // The deep tiers source USGS 3DEP instead of SRTM, whose ~30 m posting
-    // cannot support their sub-5 m intervals.
+    // Deep tiers use hosted detailed terrain instead of SRTM, whose ~30 m
+    // posting cannot support their sub-5 m intervals.
     let uses_threedep = spec_uses_threedep(&spec);
+    if uses_threedep
+        && international_uncovered_tiles()
+            .lock()
+            .is_ok_and(|tiles| tiles.contains(&tile))
+    {
+        return None;
+    }
 
     // A bucket over open ocean has no SRTM source file to contour. That is a
     // permanent property of the terrain, not a build failure: schedule nothing,
