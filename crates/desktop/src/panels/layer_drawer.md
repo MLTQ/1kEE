@@ -24,6 +24,12 @@ optional external overlays without owning their data pipelines.
   and explicit DeFlock/OpenStreetMap attribution links.
 - **Interacts with**: `AppModel::show_deflock_alprs` and `deflock_source.rs`.
 
+### Flock cameras and devices
+- Independent local-inventory toggle, counts, provenance link and reload button.
+  Defaults to active/in-service records; optional inclusion exposes other status
+  records without describing planned equipment as confirmed operating cameras.
+- Reload only schedules the background TSV reader; it performs no inline I/O.
+
 ### Submarine cable control
 
 - **Does**: Exposes the optional TeleGeography cable overlay, its status, and

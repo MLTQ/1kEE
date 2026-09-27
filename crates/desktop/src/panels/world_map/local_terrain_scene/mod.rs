@@ -103,6 +103,10 @@ struct FireLocalMeshKey {
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct DeflockLocalMeshKey {
     snapshot_revision: u64,
+    flock_revision: u64,
+    show_deflock: bool,
+    show_flock: bool,
+    include_other_statuses: bool,
     focus_lat: u32,
     focus_lon: u32,
     local_yaw: u32,
@@ -932,14 +936,17 @@ fn draw_deflock_alprs(
     model: &AppModel,
 ) {
     if model.active_body != crate::model::ActiveBody::Earth
-        || !model.show_deflock_alprs
-        || model.deflock_alpr_locations.is_empty()
+        || (!model.show_deflock_alprs && !model.flock.show)
     {
         return;
     }
 
     let key = DeflockLocalMeshKey {
         snapshot_revision: model.deflock_snapshot_revision(),
+        flock_revision: model.flock.revision,
+        show_deflock: model.show_deflock_alprs,
+        show_flock: model.flock.show,
+        include_other_statuses: model.flock.include_other_statuses,
         focus_lat: viewport_center.lat.to_bits(),
         focus_lon: viewport_center.lon.to_bits(),
         local_yaw: view.local_yaw.to_bits(),
@@ -969,22 +976,21 @@ fn draw_deflock_alprs(
                 // from the same rotated/pitched projection as its marker.
                 let bearing_step_degrees = ((extent_x_km / 111.32) * 0.25).clamp(0.0005, 0.05);
                 let projected: Vec<_> = model
-                    .deflock_alpr_locations
-                    .iter()
-                    .filter_map(|location| {
+                    .public_camera_positions()
+                    .filter_map(|(location, direction_degrees)| {
                         projection::project_local(
                             layout,
                             view,
                             viewport_center,
-                            location.location,
+                            location,
                             0.0,
                             extent_x_km,
                             extent_y_km,
                         )
                         .map(|point| {
                             let screen_direction = deflock_layer::bearing_target(
-                                location.location,
-                                location.direction_degrees,
+                                location,
+                                direction_degrees,
                                 bearing_step_degrees,
                             )
                             .and_then(|target| {

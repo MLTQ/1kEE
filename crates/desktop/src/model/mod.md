@@ -63,6 +63,12 @@ source pollers.
   toggle, and source status without embedding fetch logic in map renderers.
 - **Interacts with**: `deflock_source.rs` and the world-map ALPR overlay.
 
+### Flock inventory
+- `flock` owns the local TSV reader state, compact snapshot, independent visibility
+  and service-status filter. It starts empty and loads only authentic file data.
+- `public_camera_positions` chains enabled DeFlock and Flock positions for batched
+  rendering without mixing their identities, metadata or source attribution.
+
 ### `replace_deflock_alpr_locations`
 
 - **Does**: Replaces the public ALPR snapshot and advances a monotonic revision

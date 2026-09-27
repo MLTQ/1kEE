@@ -129,6 +129,8 @@ pub struct AppModel {
     /// Public DeFlock-compatible ALPR locations loaded from the local cache or
     /// a transparent OpenStreetMap refresh.
     pub deflock_alpr_locations: Arc<Vec<DeflockAlprLocation>>,
+    /// User-downloaded Flock positions, with their own provenance and filters.
+    pub flock: crate::flock_source::Source,
     /// Optional public ALPR overlay. It remains off until the operator enables it.
     pub show_deflock_alprs: bool,
     /// Human-readable cache/refresh state for the public ALPR source.
@@ -309,6 +311,7 @@ impl AppModel {
             arcgis_features: Arc::new(Vec::new()),
             selected_arcgis_feature: None,
             deflock_alpr_locations: Arc::new(Vec::new()),
+            flock: crate::flock_source::Source::default(),
             show_deflock_alprs: false,
             deflock_status: "cache pending".into(),
             deflock_snapshot_revision: 0,
@@ -458,6 +461,21 @@ impl AppModel {
     pub fn replace_deflock_alpr_locations(&mut self, locations: Vec<DeflockAlprLocation>) {
         self.deflock_alpr_locations = Arc::new(locations);
         self.deflock_snapshot_revision = self.deflock_snapshot_revision.wrapping_add(1);
+    }
+
+    /// Shared batched map input, keeping the two source inventories independent.
+    pub(crate) fn public_camera_positions(
+        &self,
+    ) -> impl Iterator<Item = (GeoPoint, Option<f32>)> + '_ {
+        self.deflock_alpr_locations
+            .iter()
+            .take(if self.show_deflock_alprs {
+                self.deflock_alpr_locations.len()
+            } else {
+                0
+            })
+            .map(|camera| (camera.location, camera.direction_degrees))
+            .chain(self.flock.visible_positions().map(|point| (point, None)))
     }
 
     pub(crate) fn deflock_snapshot_revision(&self) -> u64 {

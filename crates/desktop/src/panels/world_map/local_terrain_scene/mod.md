@@ -192,3 +192,11 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 - Earth selection now follows disjoint core footprints and actual oblique view
   size, with one spare hosted ring. The coverage test includes worst-case focus
   displacement within a core. Moon/Mars keep their existing envelope.
+
+### Local Flock inventory rendering
+
+The existing batched public-position mesh also accepts the independent Flock
+TSV snapshot through `AppModel::public_camera_positions`. Its cache key includes
+both source revisions, both visibility flags, and the inactive-record filter.
+Filtering or reloading cannot reuse stale geometry; Earth-only projection and
+culling stay unchanged. No point-count drawing limit truncates the inventory.

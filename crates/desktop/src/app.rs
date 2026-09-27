@@ -114,6 +114,7 @@ impl eframe::App for DashboardApp {
         usgs_stream::tick(&mut self.model);
         camera_registry::tick(&mut self.model);
         deflock_source::tick(&mut self.model);
+        self.model.flock.tick(self.model.selected_root.as_deref());
         submarine_cables::tick(&mut self.model);
         fire_source::tick(&mut self.model);
 

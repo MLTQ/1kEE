@@ -11,6 +11,7 @@ mod event_store;
 mod elevation_sources;
 mod feature_heights;
 mod fire_source;
+mod flock_source;
 mod factal_stream;
 mod flight_tracks;
 mod gruve;

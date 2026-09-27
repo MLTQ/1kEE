@@ -33,6 +33,10 @@ UI-thread coordinator for `AppModel`.
   shutdown alongside other source adapters.
 - **Interacts with**: `deflock_source.rs`.
 
+### Local Flock inventory
+- Ticks the UI-owned local TSV reader before map rendering. Reads and parsing
+  stay on one worker; dropping the model disconnects any pending result.
+
 ### `Drop for DashboardApp`
 - **Does**: Signals background source workers and active terrain jobs to stop.
 - **Interacts with**: source shutdown hooks and world-map terrain cache.

@@ -79,6 +79,10 @@ struct FireGlobeMeshKey {
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct DeflockGlobeMeshKey {
     snapshot_revision: u64,
+    flock_revision: u64,
+    show_deflock: bool,
+    show_flock: bool,
+    include_other_statuses: bool,
     yaw: u32,
     pitch: u32,
     radius: u32,
@@ -571,15 +575,18 @@ fn draw_deflock_alprs(
     view: &GlobeViewState,
     model: &AppModel,
 ) {
-    if !model.show_deflock_alprs
-        || model.active_body != crate::model::ActiveBody::Earth
-        || model.deflock_alpr_locations.is_empty()
+    if model.active_body != crate::model::ActiveBody::Earth
+        || (!model.show_deflock_alprs && !model.flock.show)
     {
         return;
     }
 
     let key = DeflockGlobeMeshKey {
         snapshot_revision: model.deflock_snapshot_revision(),
+        flock_revision: model.flock.revision,
+        show_deflock: model.show_deflock_alprs,
+        show_flock: model.flock.show,
+        include_other_statuses: model.flock.include_other_statuses,
         yaw: view.yaw.to_bits(),
         pitch: view.pitch.to_bits(),
         radius: layout.radius.to_bits(),
@@ -598,15 +605,14 @@ fn draw_deflock_alprs(
             Some((cached_key, mesh)) if *cached_key == key => Arc::clone(mesh),
             _ => {
                 let projected: Vec<_> = model
-                    .deflock_alpr_locations
-                    .iter()
-                    .filter_map(|location| {
-                        projection::project_geo(layout, view, location.location, 0.0)
+                    .public_camera_positions()
+                    .filter_map(|(location, direction_degrees)| {
+                        projection::project_geo(layout, view, location, 0.0)
                             .filter(|point| point.front_facing)
                             .map(|point| {
                                 let screen_direction = deflock_layer::bearing_target(
-                                    location.location,
-                                    location.direction_degrees,
+                                    location,
+                                    direction_degrees,
                                     0.05,
                                 )
                                 .and_then(|target| {

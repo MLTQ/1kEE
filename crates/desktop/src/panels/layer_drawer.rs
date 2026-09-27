@@ -159,6 +159,19 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
 
                 // ── PUBLIC DATA ────────────────────────────────────────────
                 section_label(ui, "PUBLIC DATA");
+                ui.checkbox(&mut model.flock.show, "Flock cameras & devices")
+                    .on_hover_text("Downloaded position inventory. Shows records marked active and in service; includes some non-camera equipment. These are map locations, not live feeds.");
+                ui.small(egui::RichText::new(&model.flock.status).color(theme::text_muted()));
+                if model.flock.show {
+                    ui.checkbox(&mut model.flock.include_other_statuses, "Include planned / inactive records");
+                }
+                ui.horizontal(|ui| {
+                    ui.hyperlink_to("Flock Surveillance dataset", crate::flock_source::SOURCE_URL);
+                    if ui.small_button("Reload file").clicked() {
+                        model.flock.reload();
+                    }
+                });
+                ui.add_space(4.0);
                 ui.checkbox(&mut model.show_deflock_alprs, "DeFlock / OSM ALPR");
                 ui.small(egui::RichText::new(&model.deflock_status).color(theme::text_muted()));
                 ui.horizontal_wrapped(|ui| {

@@ -93,3 +93,11 @@ model and viewport into an egui-painted `GlobeScene` each frame.
 - The selected physical width alters only contour uniforms, preserving cached
   geometry. Multiplier-only legacy settings resolve to their prior pixel width
   before routing, except that an old sub-pixel value is raised to 1 px.
+
+### Local Flock inventory rendering
+
+The existing batched public-position mesh also accepts the independent Flock
+TSV snapshot through `AppModel::public_camera_positions`. Its cache key includes
+both source revisions, both visibility flags, and the inactive-record filter.
+Filtering or reloading cannot reuse stale geometry; Earth-only projection and
+culling stay unchanged. No point-count drawing limit truncates the inventory.
