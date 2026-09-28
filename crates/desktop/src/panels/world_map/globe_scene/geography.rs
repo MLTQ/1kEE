@@ -284,16 +284,23 @@ pub(super) fn draw_geojson_layers(
     layout: &GlobeLayout,
     view: &GlobeViewState,
     layers: &[GeoJsonLayer],
+    cables: Option<&crate::submarine_cables::CableCatalog>,
 ) {
     puffin::profile_function!();
-    for layer in layers {
+    for (layer_index, layer) in layers.iter().enumerate() {
         if !layer.visible {
             continue;
         }
-        for feature in &layer.features {
+        for (feature_index, feature) in layer.features.iter().enumerate() {
             let [r, g, b, a] = feature.color.unwrap_or(layer.color);
             let color = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
-            draw_geojson_feature(painter, layout, view, &feature.geometry, color);
+            let cable = cables.filter(|_| layer_index == crate::submarine_cables::CABLE_LAYER_INDEX)
+                .and_then(|catalog| catalog.route_cables.get(feature_index).map(|&i| &catalog.cables[i]));
+            let pointer = cable.and_then(|_| super::super::infrastructure_hover::pointer());
+            let distance = draw_geojson_feature(painter, layout, view, &feature.geometry, color, pointer);
+            if let Some(cable) = cable {
+                super::super::infrastructure_hover::cable(cable, distance);
+            }
             if layer.show_labels {
                 draw_feature_label(painter, layout, view, feature, color);
             }
@@ -307,41 +314,32 @@ fn draw_geojson_feature(
     view: &GlobeViewState,
     geometry: &GeoJsonGeometry,
     color: egui::Color32,
-) {
+    pointer: Option<egui::Pos2>,
+) -> f32 {
+    let mut distance = f32::INFINITY;
+    let mut line = |pts: &[GeoPoint]| {
+        distance = distance.min(super::projection::draw_geo_path_with_pointer(
+            painter, layout, view, pts, 0.012, color, pointer,
+        ));
+    };
     match geometry {
         GeoJsonGeometry::Point(pt) => {
             if let Some(proj) = project_geo(layout, view, *pt, 0.0) {
                 if proj.front_facing {
                     painter.circle_filled(proj.pos, 3.5, color);
-                    painter.circle_stroke(
-                        proj.pos,
-                        6.0,
-                        egui::Stroke::new(1.0, color.gamma_multiply(0.4)),
-                    );
+                    painter.circle_stroke(proj.pos, 6.0, egui::Stroke::new(1.0, color.gamma_multiply(0.4)));
                 }
             }
         }
-        GeoJsonGeometry::LineString(pts) => {
-            draw_geo_path(painter, layout, view, pts, 0.012, color, 0.25);
-        }
-        GeoJsonGeometry::MultiLineString(lines) => {
-            for line in lines {
-                draw_geo_path(painter, layout, view, line, 0.012, color, 0.25);
-            }
-        }
-        GeoJsonGeometry::Polygon(rings) => {
-            for ring in rings {
-                draw_geo_path(painter, layout, view, ring, 0.012, color, 0.25);
-            }
+        GeoJsonGeometry::LineString(pts) => line(pts),
+        GeoJsonGeometry::MultiLineString(lines) | GeoJsonGeometry::Polygon(lines) => {
+            for pts in lines { line(pts); }
         }
         GeoJsonGeometry::MultiPolygon(polys) => {
-            for poly in polys {
-                for ring in poly {
-                    draw_geo_path(painter, layout, view, ring, 0.012, color, 0.25);
-                }
-            }
+            for poly in polys { for pts in poly { line(pts); } }
         }
     }
+    distance
 }
 
 fn draw_feature_label(

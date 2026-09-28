@@ -34,3 +34,5 @@ layers, plus geographic overlay helpers and planetary labels.
   setting.
 - Lunar and Martian feature labels remain available when the Contours toggle is
   off; the toggle suppresses only the terrain linework.
+
+The optional cable catalogue enables route picking by feature index only for the built-in cable layer. Picking reuses the drawn front-facing runs; user imports never inherit cable metadata.

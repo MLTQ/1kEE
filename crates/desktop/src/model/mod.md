@@ -112,4 +112,15 @@ Public pipelines use `show_pipeline`, `pipeline_filters` (source/product/status)
 
 ### Startup layer visibility
 
-Only Events, Contours, Bathymetry and Coastline start enabled. Camera markers, Flock, graticule, reticle, the local targeting beam and stellar/planet overlays start hidden alongside the other optional layers. Layer controls can enable them during the session; source/product filters remain independent of parent-layer visibility.
+Events, Webcams, Contours, Bathymetry and Coastline start enabled. Flock, graticule, reticle, the local targeting beam and stellar/planet overlays start hidden alongside the other optional layers. Layer controls can enable them during the session; source/product filters remain independent of parent-layer visibility.
+
+### Event-follow selection
+
+`event_follow` observes only completed live Factal snapshots, independently of USGS
+refreshes and historical replay. `tick_event_follow` selects the new target and
+opens its brief without snapping the camera; replacement cannot refocus an active
+flight. A followed record remains available for its brief after paging out.
+Manual event/city selection, replay, leaving Earth or leaving cinematic mode stops
+following. Webcams default on; the independent Flock inventory remains off.
+
+`map_events` includes the followed target after it has paged out, so its marker and brief stay tied to the continuing orbit without repopulating the live feed list.

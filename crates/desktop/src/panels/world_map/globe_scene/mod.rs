@@ -207,13 +207,14 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             &layout,
             &model.globe_view,
             &model.submarine_cable_layers,
+            crate::submarine_cables::catalog(),
         );
         landing_point_markers = project_landing_points(painter, &layout, &model.globe_view, model);
     }
 
     // ── GeoJSON user overlay layers ────────────────────────────────────────
     if !model.geojson_layers.is_empty() {
-        geography::draw_geojson_layers(painter, &layout, &model.globe_view, &model.geojson_layers);
+        geography::draw_geojson_layers(painter, &layout, &model.globe_view, &model.geojson_layers, None);
     }
 
     if model.show_reticle {
@@ -291,8 +292,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         Vec::new()
     } else {
         model
-            .events
-            .iter()
+            .map_events()
             .filter_map(|event| {
                 let base = projection::project_geo_unit_surface(
                     &layout,

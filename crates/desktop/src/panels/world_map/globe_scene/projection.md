@@ -41,3 +41,7 @@ interactive globe overlays.
 - Vector coastlines and contours are rendered in small positive shells, but
   paint order keeps interactive surface indicators above them without requiring
   a larger marker radius.
+
+`draw_geo_path_with_pointer` returns the nearest drawn segment distance while projecting once. Hidden hemisphere/near-plane points split both the painted path and picking path, so no invisible bridge is hoverable. Ordinary paths call it with no pointer.
+
+The path picking regression tests a visible stroke and a hidden-hemisphere interruption, which must never create a hoverable bridge.

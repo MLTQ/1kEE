@@ -1,6 +1,7 @@
 mod arcgis;
 mod cameras;
 mod events;
+mod event_follow;
 mod flights;
 mod geo;
 mod geojson_layer;
@@ -58,6 +59,7 @@ pub struct AppModel {
     /// ICAO24 hex of the currently-selected flight (for detail panel).
     pub selected_flight_icao24: Option<String>,
     pub globe_view: GlobeViewState,
+    pub event_follow: event_follow::EventFollow,
     pub focused_city_id: Option<String>,
     pub cinematic_mode: bool,
     pub show_layer_drawer: bool,
@@ -260,6 +262,7 @@ impl AppModel {
             selected_track_mmsi: None,
             selected_flight_icao24: None,
             globe_view: GlobeViewState::from_focus(GeoPoint { lat: 0.0, lon: 0.0 }),
+            event_follow: event_follow::EventFollow::default(),
             focused_city_id: None,
             cinematic_mode: false,
             show_layer_drawer: false,
@@ -267,7 +270,7 @@ impl AppModel {
             active_body: ActiveBody::Earth,
             map_theme: crate::theme::MapTheme::Topo,
             show_event_markers: true,
-            show_camera_markers: false,
+            show_camera_markers: true,
             show_coastlines: true,
             show_graticule: false,
             show_reticle: false,
@@ -647,6 +650,14 @@ impl AppModel {
     pub fn selected_event(&self) -> Option<&EventRecord> {
         let selected_id = self.selected_event_id.as_deref()?;
         self.events.iter().find(|event| event.id == selected_id)
+            .or_else(|| self.event_follow.target().filter(|event| event.id == selected_id))
+    }
+
+    /// Include the current idle target after it has paged out of the live feed.
+    pub fn map_events(&self) -> impl Iterator<Item = &EventRecord> {
+        self.events.iter().chain(self.event_follow.target().filter(|target| {
+            self.event_follow.enabled() && !self.events.iter().any(|e| e.id == target.id)
+        }))
     }
 
     pub fn selected_event_has_factal_brief(&self) -> bool {
@@ -706,6 +717,7 @@ impl AppModel {
     }
 
     pub fn select_event(&mut self, event_id: &str) {
+        self.stop_event_follow();
         if self.selected_event_id.as_deref() == Some(event_id) && self.focused_city_id.is_none() {
             return;
         }
@@ -730,6 +742,7 @@ impl AppModel {
     }
 
     pub fn focus_city(&mut self, city_id: &str) {
+        self.stop_event_follow();
         let Some(city) = city_catalog::by_id(city_id) else {
             return;
         };
@@ -740,6 +753,7 @@ impl AppModel {
     }
 
     pub fn clear_city_focus(&mut self) {
+        self.stop_event_follow();
         if self.focused_city_id.take().is_some() {
             self.push_log("City focus cleared; returning to event-driven focus.".into());
             if let Some(event) = self.selected_event() {
@@ -749,6 +763,7 @@ impl AppModel {
     }
 
     pub fn replace_factal_events(&mut self, events: Vec<EventRecord>) {
+        self.event_follow.observe(&events);
         // USGS quake events arrive on an independent poll and must survive a
         // Factal refresh; everything else is replaced wholesale.
         let mut merged = events;
@@ -776,7 +791,7 @@ impl AppModel {
         let previous_selected = self.selected_event_id.clone();
         self.events = events;
 
-        if self.events.is_empty() {
+        if self.events.is_empty() && !self.event_follow.enabled() {
             self.selected_event_id = None;
             self.selected_camera_id = None;
             return;
@@ -784,13 +799,15 @@ impl AppModel {
 
         let retained_selection = previous_selected
             .as_deref()
-            .filter(|selected_id| self.events.iter().any(|event| event.id == *selected_id))
+            .filter(|selected_id| self.events.iter().any(|event| event.id == *selected_id)
+                || (self.event_follow.enabled() && self.event_follow.target().is_some_and(|event| event.id == *selected_id)))
             .map(str::to_owned);
 
         self.selected_event_id =
             retained_selection.or_else(|| self.events.first().map(|event| event.id.clone()));
         let new_event_focus = if self.selected_event_id != previous_selected
             && self.focused_city_id.is_none()
+            && !self.event_follow.enabled()
         {
             self.selected_event().map(|event| event.location)
         } else {
@@ -952,10 +969,44 @@ impl AppModel {
         self.nearby_camera_cache.get_mut().take();
     }
 
+    pub fn toggle_event_follow(&mut self) {
+        if self.event_follow.enabled() {
+            self.stop_event_follow();
+        } else if self.active_body == ActiveBody::Earth {
+            self.cinematic_mode = true;
+            self.replay_mode = false;
+            self.replay_state = None;
+            self.globe_view.meander_mode = false;
+            self.globe_view.auto_spin = false;
+            self.event_follow.enable(&self.events);
+        }
+    }
+
+    pub fn stop_event_follow(&mut self) {
+        if self.event_follow.enabled() {
+            self.event_follow.stop();
+            self.globe_view.stop_motion();
+        }
+    }
+
+    pub fn tick_event_follow(&mut self, now: f64) {
+        if self.active_body != ActiveBody::Earth || self.replay_mode || !self.cinematic_mode {
+            self.stop_event_follow();
+            return;
+        }
+        if let Some(id) = self.event_follow.tick(&mut self.globe_view, now) {
+            self.focused_city_id = None;
+            self.selected_event_id = Some(id);
+            self.selected_camera_id = self.nearby_cameras(250.0).first().map(|c| c.id.clone());
+            self.factal_brief_open = true;
+        }
+    }
+
     /// Enter or exit replay mode.  On enter: loads history from the local
     /// store for the configured window and starts playback.  If the store is
     /// empty and an API key is set, triggers a background history fetch.
     pub fn toggle_replay(&mut self) {
+        self.stop_event_follow();
         if self.replay_mode {
             // Exit replay
             self.replay_mode = false;

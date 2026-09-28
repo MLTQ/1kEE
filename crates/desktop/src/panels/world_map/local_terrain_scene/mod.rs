@@ -570,14 +570,13 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 
     let event_markers: Vec<(String, egui::Pos2)> = if !should_show_local_event_indicators(
         model.active_body,
-        model.cinematic_mode,
+        model.cinematic_mode && !model.event_follow.enabled(),
         model.show_event_markers,
     ) {
         Vec::new()
     } else {
         model
-            .events
-            .iter()
+            .map_events()
             .filter_map(|event| {
                 // Cheap pre-cull: skip events well outside the viewport.
                 let dlat = (event.location.lat - viewport_center.lat).abs();
@@ -756,6 +755,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             extent_x_km,
             extent_y_km,
             &model.submarine_cable_layers,
+            crate::submarine_cables::catalog(),
         );
         landing_point_markers = project_landing_points_local(
             painter,
@@ -776,6 +776,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             extent_x_km,
             extent_y_km,
             &model.geojson_layers,
+            None,
         );
     }
     ui_overlays::draw_legend(
@@ -2265,6 +2266,7 @@ fn draw_geojson_layers_local(
     extent_x_km: f32,
     extent_y_km: f32,
     layers: &[crate::model::GeoJsonLayer],
+    cables: Option<&crate::submarine_cables::CableCatalog>,
 ) {
     use crate::model::{GeoJsonGeometry, ring_centroid};
 
@@ -2279,14 +2281,16 @@ fn draw_geojson_layers_local(
     let in_view_pt =
         |p: &GeoPoint| p.lat >= min_lat && p.lat <= max_lat && p.lon >= min_lon && p.lon <= max_lon;
 
-    for layer in layers {
+    for (layer_index, layer) in layers.iter().enumerate() {
         if !layer.visible {
             continue;
         }
-        for feature in &layer.features {
+        for (feature_index, feature) in layer.features.iter().enumerate() {
             let [r, g, b, a] = feature.color.unwrap_or(layer.color);
             let color = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
             let stroke = egui::Stroke::new(1.5, color);
+            let cable = cables.filter(|_| layer_index == crate::submarine_cables::CABLE_LAYER_INDEX)
+                .and_then(|catalog| catalog.route_cables.get(feature_index).map(|&i| &catalog.cables[i]));
 
             // ── Draw geometry ─────────────────────────────────────────────
             match &feature.geometry {
@@ -2320,6 +2324,7 @@ fn draw_geojson_layers_local(
                         extent_x_km,
                         extent_y_km,
                         stroke,
+                        cable,
                     );
                 }
                 GeoJsonGeometry::MultiLineString(lines) => {
@@ -2333,6 +2338,7 @@ fn draw_geojson_layers_local(
                             extent_x_km,
                             extent_y_km,
                             stroke,
+                            cable,
                         );
                     }
                 }
@@ -2347,6 +2353,7 @@ fn draw_geojson_layers_local(
                             extent_x_km,
                             extent_y_km,
                             stroke,
+                            cable,
                         );
                     }
                 }
@@ -2362,6 +2369,7 @@ fn draw_geojson_layers_local(
                                 extent_x_km,
                                 extent_y_km,
                                 stroke,
+                                cable,
                             );
                         }
                     }
@@ -2426,6 +2434,7 @@ fn project_and_draw_line(
     extent_x_km: f32,
     extent_y_km: f32,
     stroke: egui::Stroke,
+    cable: Option<&crate::submarine_cables::CableInfo>,
 ) {
     let projected: Vec<egui::Pos2> = pts
         .iter()
@@ -2434,6 +2443,12 @@ fn project_and_draw_line(
         })
         .map(|pp| pp.pos)
         .collect();
+    if let (Some(cable), Some(pointer)) = (cable, super::infrastructure_hover::pointer()) {
+        let distance = projected.windows(2).map(|pair| {
+            super::infrastructure_hover::line_distance(pointer, pair[0], pair[1])
+        }).fold(f32::INFINITY, f32::min);
+        super::infrastructure_hover::cable(cable, distance);
+    }
     if projected.len() >= 2 {
         painter.add(egui::Shape::line(projected, stroke));
     }

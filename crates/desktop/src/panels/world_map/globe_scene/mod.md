@@ -105,3 +105,7 @@ culling stay unchanged. No point-count drawing limit truncates the inventory.
 Public fuel routes draw on Earth through `pipeline_globe`, using the existing GPU line pass and a baked overview. Orbit and zoom update only uniforms. Pipelines use perspective unit-sphere horizon culling; other contour layers retain their previous behavior. GlobeLayout is Copy for immutable projection inputs.
 
 Offshore installation diamonds use cached projected meshes. Unit-sphere perspective horizon culling prevents markers appearing on the hidden far side; hover indices are generated only from drawn points.
+
+Built-in cable drawing receives its source catalogue for route hover; uploaded overlays receive none. The existing landing point indices and visibility contract remain intact.
+
+Event markers use `map_events`, including an active idle target that has aged out of the live page.

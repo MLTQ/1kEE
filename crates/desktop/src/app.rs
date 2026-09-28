@@ -117,6 +117,7 @@ impl eframe::App for DashboardApp {
         self.model.flock.tick(self.model.selected_root.as_deref());
         submarine_cables::tick(&mut self.model);
         fire_source::tick(&mut self.model);
+        self.model.tick_event_follow(ctx.input(|i| i.time));
 
         // Advance stellar time.
         if self.model.show_stellar_correspondence {
@@ -151,10 +152,13 @@ impl eframe::App for DashboardApp {
 
         if !self.model.cinematic_mode {
             panels::render_header(ctx, &mut self.model);
-            panels::render_factal_brief(ctx, &mut self.model);
             panels::render_factal_settings(ctx, &mut self.model);
             panels::render_terrain_library(ctx, &mut self.model);
             panels::render_stellar_observatory(ctx, &mut self.model);
+        }
+
+        if !self.model.cinematic_mode || self.model.event_follow.enabled() {
+            panels::render_factal_brief(ctx, &mut self.model);
         }
 
         // These panels are toggled independently of cinematic mode.

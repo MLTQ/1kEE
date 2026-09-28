@@ -17,3 +17,9 @@ hover position; off-canvas/covered/dragging pointers never start a hit query.
   infrastructure owns the tooltip, preventing multiple stacked cards.
 
 Headless egui regression verifies actual card text (operator, unknown status, depth, attribution, static-position caveat and overlap summary), including a near-edge pointer.
+
+Cable routes share the collector, deduplicated by TeleGeography ID. Cards show published owners, length, service date and planned flag, and identify schematic route accuracy. A planned flag being false is not presented as proof of current operation.
+
+`prefer_landing` suppresses cable route candidates at a visible landing dot so the existing station tooltip remains accessible. Other infrastructure retains its normal priority.
+
+Cable regression checks fragment deduplication, published fields/source and landing tooltip priority.

@@ -54,3 +54,5 @@ UI-thread coordinator for `AppModel`.
 
 - Network or disk-heavy source work belongs in source-module workers; this file
   only schedules and applies ready results.
+
+Event follow advances after source polling, before panels read the selection. Its brief remains visible in cinematic mode; other cinematic chrome behavior is unchanged.

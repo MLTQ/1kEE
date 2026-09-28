@@ -53,7 +53,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         .inner_margin(egui::Margin::same(14));
 
     panel_frame.show(ui, |ui| {
-        if model.globe_view.auto_spin || (model.cinematic_mode && model.globe_view.meander_mode) {
+        if model.event_follow.moving() || model.globe_view.auto_spin || (model.cinematic_mode && model.globe_view.meander_mode) {
             ui.ctx().request_repaint();
         } else if local_terrain_scene::has_pending_cache(model) {
             // Faster repaint while tile pulse animation is running (~30 fps)
@@ -115,10 +115,10 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
                 .request_repaint_after(std::time::Duration::from_millis(250));
         }
 
+        draw_layer_bar(ui, model);
         let local_terrain_mode = local_terrain_scene::is_active(model);
         layer_import::ensure_visible_road_layers(model, local_terrain_mode);
         layer_import::ensure_visible_water_layers(model, local_terrain_mode);
-        draw_layer_bar(ui, model);
 
         ui.add_space(8.0);
 
@@ -130,7 +130,12 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         let (response, painter) = ui.allocate_painter(desired, egui::Sense::click_and_drag());
         let rect = response.rect;
 
-        camera::apply_interaction(ui.ctx(), &response, &mut model.globe_view);
+        if camera::manual_input(ui.ctx(), &response) {
+            model.stop_event_follow();
+        }
+        if !model.event_follow.enabled() {
+            camera::apply_interaction(ui.ctx(), &response, &mut model.globe_view);
+        }
         infrastructure_hover::begin(response.hover_pos().filter(|_| !response.dragged()));
         let scene = if local_terrain_mode {
             local_terrain_scene::paint(&painter, rect, model, ui.ctx().input(|input| input.time))
@@ -206,6 +211,9 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         }
 
         super::render_replay_controls(ui, model);
+        if response.hover_pos().is_some_and(|pointer| scene.landing_point_markers.iter().any(|(_, p)| p.distance(pointer) <= 9.0)) {
+            infrastructure_hover::prefer_landing();
+        }
         if !infrastructure_hover::show(ui.ctx()) {
             map_tooltips::draw_event_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
             map_tooltips::draw_camera_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
@@ -248,6 +256,7 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                 if ui.add(egui::Button::new(egui::RichText::new("GLOBE").color(globe_text).small()).fill(globe_fill).corner_radius(4.0)).clicked()
                     && model.globe_view.local_mode
                 {
+                    model.stop_event_follow();
                     model.globe_view.local_mode = false;
                 }
 
@@ -261,6 +270,7 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                     .clicked()
                     && !model.globe_view.local_mode
                 {
+                    model.stop_event_follow();
                     model.globe_view.local_center = model.globe_view.globe_center_latlon();
                     model.globe_view.local_mode = true;
                 }
@@ -327,12 +337,25 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                     if ui.add(egui::Button::new(egui::RichText::new("CINEMATIC").color(cin_text).small()).fill(cin_fill).corner_radius(4.0)).clicked() {
                         model.cinematic_mode = !model.cinematic_mode;
                         if !model.cinematic_mode {
+                            model.stop_event_follow();
                             model.globe_view.meander_mode = false;
                         }
                     }
 
                     // MEANDER (only while cinematic is on)
                     if model.cinematic_mode {
+                        if model.active_body == crate::model::ActiveBody::Earth {
+                            let following = model.event_follow.enabled();
+                            let fill = if following { active_fill } else { egui::Color32::TRANSPARENT };
+                            let text = if following { active_text } else { inactive_text };
+                            if ui.add(egui::Button::new(egui::RichText::new("FOLLOW EVENTS").color(text).small()).fill(fill).corner_radius(4.0))
+                                .on_hover_text("Follow new Factal events: 10-second approach, brief, then orbit. Keeps Globe/Local view. Drag, scroll or arrows to stop.")
+                                .clicked()
+                            {
+                                model.toggle_event_follow();
+                                ui.ctx().request_repaint();
+                            }
+                        }
                         let view = &mut model.globe_view;
                         let (mn_fill, mn_text) = if view.meander_mode {
                             (egui::Color32::from_rgb(20, 80, 140), egui::Color32::from_rgb(100, 195, 255))
@@ -343,7 +366,12 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                             .on_hover_text("Smooth random-walk camera drift")
                             .clicked()
                         {
-                            view.meander_mode = !view.meander_mode;
+                            let enable = !view.meander_mode;
+                            if enable {
+                                model.event_follow.stop();
+                                view.stop_motion();
+                            }
+                            view.meander_mode = enable;
                         }
                         if view.meander_mode {
                             ui.spacing_mut().slider_width = 72.0;

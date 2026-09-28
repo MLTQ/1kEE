@@ -25,6 +25,16 @@ pub struct GlobeLod {
     pub backface_alpha: f32,
 }
 
+/// Only navigation over the canvas interrupts an idle flight, not a hover or
+/// typing into the brief/settings windows.
+pub fn manual_input(ctx: &egui::Context, response: &egui::Response) -> bool {
+    response.dragged() || (response.hovered() && ctx.input(|i| {
+        i.raw_scroll_delta.y.abs() > f32::EPSILON
+            || [egui::Key::ArrowLeft, egui::Key::ArrowRight, egui::Key::ArrowUp, egui::Key::ArrowDown]
+                .iter().any(|&key| i.key_down(key))
+    }))
+}
+
 pub fn apply_interaction(
     ctx: &egui::Context,
     response: &egui::Response,

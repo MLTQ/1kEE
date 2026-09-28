@@ -271,12 +271,31 @@ pub(super) fn draw_geo_path(
     front_color: egui::Color32,
     _backface_alpha: f32,
 ) {
+    draw_geo_path_with_pointer(painter, layout, view, path, altitude_scale, front_color, None);
+}
+
+/// Draw and pick the same visible runs without projecting the route twice.
+pub(super) fn draw_geo_path_with_pointer(
+    painter: &egui::Painter,
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    path: &[GeoPoint],
+    altitude_scale: f32,
+    front_color: egui::Color32,
+    pointer: Option<egui::Pos2>,
+) -> f32 {
     let stroke = egui::Stroke::new(1.15, front_color.gamma_multiply(0.92));
     let mut segment: Vec<egui::Pos2> = Vec::new();
+    let mut distance = f32::INFINITY;
 
     for point in path {
         match project_geo_flat(layout, view, *point, altitude_scale) {
-            Some(p) if p.front_facing => segment.push(p.pos),
+            Some(p) if p.front_facing => {
+                if let (Some(pointer), Some(&previous)) = (pointer, segment.last()) {
+                    distance = distance.min(super::super::infrastructure_hover::line_distance(pointer, previous, p.pos));
+                }
+                segment.push(p.pos);
+            }
             _ => {
                 // Back-facing or behind near-plane — break the current segment.
                 // Always clear (even a single-point orphan) to prevent the orphan
@@ -292,5 +311,33 @@ pub(super) fn draw_geo_path(
 
     if segment.len() >= 2 {
         painter.add(egui::Shape::line(segment, stroke));
+    }
+    distance
+}
+
+#[cfg(test)]
+mod path_pick_tests {
+    use super::*;
+
+    #[test]
+    fn picks_visible_strokes_but_never_bridges_hidden_points() {
+        let ctx = egui::Context::default();
+        let view = GlobeViewState::from_focus(GeoPoint { lat: 0.0, lon: 0.0 });
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1000.0, 700.0));
+        let layout = super::super::globe_layout(rect, &view);
+        let a = GeoPoint { lat: 0.0, lon: -15.0 };
+        let b = GeoPoint { lat: 0.0, lon: 15.0 };
+        let behind = GeoPoint { lat: 0.0, lon: 180.0 };
+        let pa = project_geo_flat(&layout, &view, a, 0.012).unwrap().pos;
+        let pb = project_geo_flat(&layout, &view, b, 0.012).unwrap().pos;
+        let pointer = pa.lerp(pb, 0.5);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::background());
+            let pick = |pts: &[GeoPoint], pointer| draw_geo_path_with_pointer(
+                &painter, &layout, &view, pts, 0.012, egui::Color32::WHITE, pointer);
+            assert!(pick(&[a, b], Some(pointer)) < 0.001);
+            assert!(pick(&[a, behind, b], Some(pointer)).is_infinite());
+            assert!(pick(&[a, b], None).is_infinite());
+        });
     }
 }

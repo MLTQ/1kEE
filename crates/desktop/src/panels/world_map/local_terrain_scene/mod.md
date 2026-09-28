@@ -204,3 +204,9 @@ culling stay unchanged. No point-count drawing limit truncates the inventory.
 Public fuel routes load quarter-degree archive tiles on workers and draw regardless of available contours. OSM remains an independent optional local pipeline layer. Geographic projection keys include focus, oblique view, extents, layout and clip rectangle.
 
 Offshore platforms share the public-route projection inputs at sea level and draw independently of contour availability. Cached meshes and hover use the same projection; their toggle/filter state is separate from pipelines.
+
+Local cable hover reuses the exact projected route vertices during painting. Only the explicitly supplied built-in catalogue supplies metadata, and hidden layers do not offer candidates.
+
+Event follow permits event indicators during cinematic playback so the orbit has a visible event reference. Ordinary cinematic meander still hides them.
+
+Event markers use `map_events` so a followed target stays visible after aging out of the live page.

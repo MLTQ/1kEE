@@ -8,16 +8,19 @@ pub(super) const RADIUS: f32 = 7.0;
 enum Detail {
     Pipeline(Info),
     Platform(Platform),
+    Cable(crate::submarine_cables::CableInfo),
 }
 impl Detail {
     fn id(&self) -> (&str, &str) {
         match self {
             Self::Pipeline(p) => (&p.source, &p.source_id),
             Self::Platform(p) => (&p.source, &p.source_id),
+            Self::Cable(c) => ("TeleGeography", &c.id),
         }
     }
     fn name(&self) -> &str {
         match self {
+            Self::Cable(c) => &c.name,
             Self::Pipeline(p) => {
                 if p.name.is_empty() {
                     "Unnamed pipeline"
@@ -37,7 +40,7 @@ impl Detail {
     fn priority(&self) -> u8 {
         match self {
             Self::Platform(_) => 0,
-            Self::Pipeline(_) => 1,
+            Self::Pipeline(_) | Self::Cable(_) => 1,
         }
     }
 }
@@ -60,6 +63,16 @@ pub(super) fn begin(pointer: Option<Pos2>) {
         f.hits.clear();
     });
 }
+/// Keep the existing landing-station tooltip reachable at route endpoints.
+pub(super) fn prefer_landing() {
+    FRAME.with(|frame| {
+        frame
+            .borrow_mut()
+            .hits
+            .retain(|h| !matches!(h.detail, Detail::Cable(_)))
+    });
+}
+
 pub(super) fn pointer() -> Option<Pos2> {
     FRAME.with(|f| f.borrow().pointer)
 }
@@ -91,6 +104,15 @@ pub(super) fn pipeline(info: &Info, distance: f32) {
         || Detail::Pipeline(info.clone()),
         &info.source,
         &info.source_id,
+        1,
+        distance,
+    );
+}
+pub(super) fn cable(info: &crate::submarine_cables::CableInfo, distance: f32) {
+    offer(
+        || Detail::Cable(info.clone()),
+        "TeleGeography",
+        &info.id,
         1,
         distance,
     );
@@ -129,6 +151,30 @@ fn source_name(source: &str) -> &str {
 fn rows(detail: &Detail) -> Vec<(&'static str, String)> {
     let mut rows = Vec::new();
     match detail {
+        Detail::Cable(c) => {
+            rows.push(("Type", "Submarine communications cable".into()));
+            if c.is_planned {
+                rows.push(("Status", "Planned in source snapshot".into()));
+            }
+            for (label, value) in [
+                ("Owners", &c.owners),
+                ("Length", &c.length),
+                ("Ready for service", &c.rfs),
+            ] {
+                if let Some(value) = value {
+                    rows.push((label, value.clone()));
+                }
+            }
+            if c.rfs.is_none() {
+                if let Some(year) = c.rfs_year {
+                    rows.push(("Ready for service", year.to_string()));
+                }
+            }
+            rows.push((
+                "Route",
+                "Schematic published route; not a surveyed seabed position".into(),
+            ));
+        }
         Detail::Pipeline(p) => {
             rows.push(("Type", format!("{} pipeline", p.product)));
             rows.push((
@@ -232,6 +278,33 @@ pub(super) fn show(ctx: &Context) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cable_fragments_share_metadata_and_leave_landings_reachable() {
+        let cable_info = crate::submarine_cables::CableInfo {
+            id: "test-cable".into(),
+            name: "Test cable".into(),
+            color: [0; 4],
+            length: Some("402 km".into()),
+            owners: Some("Example owner".into()),
+            rfs: Some("2028".into()),
+            rfs_year: Some(2028),
+            is_planned: true,
+            url: None,
+        };
+        begin(Some(Pos2::ZERO));
+        cable(&cable_info, 4.0);
+        cable(&cable_info, 2.0);
+        FRAME.with(|f| assert_eq!(f.borrow().hits.len(), 1));
+        let data = rows(&Detail::Cable(cable_info));
+        assert!(data.contains(&("Owners", "Example owner".into())));
+        assert!(data.contains(&("Length", "402 km".into())));
+        assert!(data.contains(&("Ready for service", "2028".into())));
+        assert!(data.contains(&("Status", "Planned in source snapshot".into())));
+        assert!(data.contains(&("Source", "TeleGeography".into())));
+        prefer_landing();
+        FRAME.with(|f| assert!(f.borrow().hits.is_empty()));
+    }
+
     #[test]
     fn repeated_fragments_deduplicate_and_frame_reset_clears_hits() {
         let info = Info {

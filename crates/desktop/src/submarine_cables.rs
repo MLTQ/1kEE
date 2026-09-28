@@ -44,6 +44,7 @@ pub const LANDING_LAYER_COLOR: [u8; 4] = [255, 220, 50, 210];
 /// drawn as separate segments); the catalogue holds each cable once.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CableInfo {
+    pub id: String,
     pub name: String,
     pub color: [u8; 4],
     pub length: Option<String>,
@@ -73,6 +74,8 @@ pub struct LandingPoint {
 #[derive(Debug, Default)]
 pub struct CableCatalog {
     pub cables: Vec<CableInfo>,
+    /// Cable index for every route feature, including repeated system fragments.
+    pub route_cables: Vec<usize>,
     pub landings: Vec<LandingPoint>,
 }
 
@@ -155,6 +158,9 @@ pub fn tick(model: &mut AppModel) {
 fn parse_bundled() -> Result<Bundle, String> {
     let cable_layer = build_layer(CABLE_LAYER_NAME, BUNDLED_CABLES, CABLE_LAYER_COLOR)?;
     let catalog = parse_catalog(BUNDLED_CABLES, BUNDLED_LANDINGS)?;
+    if cable_layer.features.len() != catalog.route_cables.len() {
+        return Err("Cable route geometry and metadata are not aligned".into());
+    }
     let landing_layer = landing_layer(&catalog);
     Ok(Bundle {
         layers: Arc::new(vec![cable_layer, landing_layer]),
@@ -206,14 +212,17 @@ fn parse_catalog(cables_body: &str, landings_body: &str) -> Result<CableCatalog,
     for feature in features(cables_body, CABLE_LAYER_NAME)? {
         let props = &feature["properties"];
         let (Some(id), Some(name)) = (text(props, "id"), text(props, "name")) else {
-            continue;
+            return Err("Cable route missing source ID or name".into());
         };
         // A cable drawn as several route segments appears once per segment.
-        if index_by_id.contains_key(&id) {
+        if let Some(&index) = index_by_id.get(&id) {
+            catalog.route_cables.push(index);
             continue;
         }
-        index_by_id.insert(id, catalog.cables.len());
+        catalog.route_cables.push(catalog.cables.len());
+        index_by_id.insert(id.clone(), catalog.cables.len());
         catalog.cables.push(CableInfo {
+            id,
             color: text(props, "color")
                 .and_then(|hex| crate::model::parse_hex_color(&hex))
                 .unwrap_or(CABLE_LAYER_COLOR),
@@ -326,6 +335,21 @@ mod tests {
     }
 
     #[test]
+    fn every_route_fragment_resolves_to_its_source_system() {
+        let bundle = parse_bundled().unwrap();
+        for (feature, &index) in bundle.layers[CABLE_LAYER_INDEX]
+            .features
+            .iter()
+            .zip(&bundle.catalog.route_cables)
+        {
+            assert_eq!(
+                feature.label.as_deref(),
+                Some(bundle.catalog.cables[index].name.as_str())
+            );
+        }
+    }
+
+    #[test]
     fn landing_layer_and_catalogue_are_index_aligned() {
         // Map clicks resolve a landing by its feature index, so the two lists
         // must describe the same station at every position.
@@ -393,6 +417,7 @@ mod tests {
             "segments of one cable collapse to one entry"
         );
 
+        assert_eq!(catalog.route_cables, vec![0, 0, 1]);
         let alpha = &catalog.cables[0];
         assert_eq!(alpha.color, [0x00, 0xaa, 0xff, 220]);
         assert_eq!(alpha.length.as_deref(), Some("402 km"));

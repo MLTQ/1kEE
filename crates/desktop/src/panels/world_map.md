@@ -53,3 +53,5 @@ Implements the main geographic canvas for the demo. The current version wraps an
 `platform_layer` loads static offshore inventories asynchronously and caches batched markers for both globe and local views. `platform_controls` exposes source/status/facility filters.
 
 Infrastructure hover begins with the canvas response before scene paint and renders one card afterward. It suppresses other marker cards while active and resets every frame; pipeline_pick supplies efficient globe line hits.
+
+FOLLOW EVENTS sits beside MEANDER in cinematic mode on Earth. It retains the chosen Globe/Local view, requests animation repaints, and skips the manual inertia controller while active. Canvas navigation or a mode switch cancels follow; MEANDER and REPLAY are exclusive. The scene mode is read after the layer bar so a mode toggle takes effect in the same frame. Cable route cards use the shared infrastructure hover collector; landing dots retain their original hover card.

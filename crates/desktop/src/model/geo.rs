@@ -78,6 +78,19 @@ impl GlobeViewState {
         self.reset_local_camera();
     }
 
+    /// Cancel every momentum source when an idle controller takes/releases control.
+    pub fn stop_motion(&mut self) {
+        self.auto_spin = false;
+        self.meander_mode = false;
+        self.vel_yaw = 0.0;
+        self.vel_pitch = 0.0;
+        self.vel_local_lat = 0.0;
+        self.vel_local_lon = 0.0;
+        self.vel_local_yaw = 0.0;
+        self.vel_local_pitch = 0.0;
+        self.key_hold_secs = 0.0;
+    }
+
     pub fn reset_local_camera(&mut self) {
         self.local_yaw = -0.65;
         self.local_pitch = 0.98;

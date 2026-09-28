@@ -82,3 +82,9 @@ cache, and no rendering: the shared `GeoJsonLayer` pipeline draws it.
 - **Licence.** The snapshot is TeleGeography data under CC BY-NC-SA 3.0, which
   is separate from this repository's MIT/Apache code licence and does not
   permit commercial use. See `submarine_cables/LICENSE`.
+
+### Route metadata identity
+
+CableInfo retains the source ID. `route_cables` maps every rendered cable feature to its unique system, including repeated fragments. Bundled parsing rejects a route/metadata count mismatch; route hover must resolve by these indices, never by a display name.
+
+Tests also check every bundled route label against its mapped cable, and repeated fragment IDs against the same system index.
