@@ -37,7 +37,7 @@ pub struct Source {
 impl Default for Source {
     fn default() -> Self {
         Self {
-            show: true,
+            show: false,
             include_other_statuses: false,
             status: "local file pending".into(),
             snapshot: Arc::new(Snapshot::default()),
@@ -157,6 +157,7 @@ mod tests {
             }),
             ..Default::default()
         };
+        source.show = true;
         assert_eq!(source.visible_positions().count(), 1);
         source.include_other_statuses = true;
         assert_eq!(source.visible_positions().count(), 2);
@@ -178,7 +179,10 @@ mod tests {
             "lat\tlon\tOBJECTID\tactive\tstatus\n40\t-74\t1\t1\tinService\n",
         )
         .unwrap();
-        let mut source = Source::default();
+        let mut source = Source {
+            show: true,
+            ..Source::default()
+        };
         let drain = |source: &mut Source, path: &Path| {
             source.tick_path(path.to_owned());
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

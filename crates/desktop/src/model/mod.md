@@ -109,3 +109,7 @@ source pollers.
 Public pipelines use `show_pipeline`, `pipeline_filters` (source/product/status), and `pipeline_osm` for the independent local OSM layer. Filters start with historical/planned records hidden; unknown status remains visible.
 
 - Offshore platform visibility defaults off; `platform_filters` keeps public-source and historic/planned/support installation options independent of pipelines.
+
+### Startup layer visibility
+
+Only Events, Contours, Bathymetry and Coastline start enabled. Camera markers, Flock, graticule, reticle, the local targeting beam and stellar/planet overlays start hidden alongside the other optional layers. Layer controls can enable them during the session; source/product filters remain independent of parent-layer visibility.

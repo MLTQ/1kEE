@@ -18,11 +18,12 @@ validated positions and service eligibility; it does not invent OSM identities
 or claim every device is an ALPR camera. Revision and filter state invalidate
 the shared globe/local marker meshes. No automatic HTTP requests or live feeds.
 Hidden inventories are skipped before iteration rather than scanned per marker.
-The local layer defaults on, remains empty until its file loads, and supports
+The local layer defaults off, remains empty until its file loads, and supports
 manual reload after the file is replaced. Reload work runs only in a worker.
 
 `rotationAngle` is retained in the original file but not rendered as a compass
 bearing: its orientation convention has not been established.
 
+Tests explicitly enable visibility before checking service filtering and reloads.
 Lifecycle tests verify that malformed reloads retain the displayed snapshot and
 that changing the data root removes old positions, even if the new file is missing.
