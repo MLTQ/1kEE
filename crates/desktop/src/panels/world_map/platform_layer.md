@@ -19,3 +19,5 @@ worker. No network access or planet parsing happens during map painting.
 - Defaults hide historic/planned/subsea/support records. Sources may contain
   multiple structures in a complex; nearby points are not merged arbitrarily.
 - UI source access uses try_lock, with no disk or heavy mesh work under mutex.
+
+Visible diamonds feed the common infrastructure_hover card. Platforms take priority over coincident pipeline lines; nearby installation identities are retained in overlap summaries.

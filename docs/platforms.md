@@ -73,3 +73,13 @@ Use Reload after replacing a snapshot while the app is running.
   namespace preservation and exact world-copy fidelity. Real-data validation
   reconciles all record and filter counts with the saved manifest.
 - Live visual verification was unavailable because the Mac was locked.
+
+## Shared hover cards
+
+Platform diamonds and pipelines now share one screen-constrained hover card in
+both scenes. Platform markers take priority over lines, and coincident records
+are named in an overlap summary. Available operator, product, facility type,
+status, dates, water depth, coordinates and source ID are shown. Static-location
+and unknown-operation caveats remain explicit. Hover uses cached metadata and
+does not trigger downloads or archive rebuilding. Headless egui tests verify
+the actual card text, including overlapping pipeline and platform records.

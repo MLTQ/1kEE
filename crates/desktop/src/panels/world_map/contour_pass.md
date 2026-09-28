@@ -95,3 +95,5 @@ perspective unit-sphere horizon, existing contour layers retain zero. Size stays
 - `main.rs` separately raises `max_buffer_size` to whatever the adapter
   reports, which reduces how often the split is needed but is not what makes it
   safe — the split has to hold on any device.
+
+`SegmentInstance::endpoints` exposes the immutable uploaded unit-sphere endpoints for exact, camera-independent pipeline hit indexing. Buffer layout is unchanged.

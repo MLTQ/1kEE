@@ -192,6 +192,18 @@ fn draw_infra(
                 continue;
             }
         }
+        if prefix == "pipeline" && let Some(pointer) = super::infrastructure_hover::pointer() {
+            let distance = pts.windows(2).map(|p| super::infrastructure_hover::line_distance(pointer,p[0],p[1]))
+                .fold(f32::INFINITY,f32::min);
+            if distance <= super::infrastructure_hover::RADIUS {
+                super::infrastructure_hover::pipeline(&tile_archive::pipelines::Info {
+                    source: "osm".into(), source_id: feat.way_id.to_string(), name: feat.name.clone().unwrap_or_default(),
+                    operator: String::new(), owner: String::new(), product: feat.class.clone(),
+                    status: "Not provided in the local cache".into(), accuracy: "OpenStreetMap geometry; precision varies".into(),
+                    historical: false, planned: false,
+                },distance);
+            }
+        }
         painter.add(egui::Shape::line(pts, stroke));
     }
 }

@@ -184,11 +184,8 @@ pub(super) fn draw(
         color: crate::theme::pipeline_oil_color(),
         clip: painter.clip_rect(),
     };
-    let pointer = painter
-        .ctx()
-        .pointer_hover_pos()
-        .filter(|p| painter.clip_rect().contains(*p));
-    let hit = MESHES.with(|cache| {
+    let pointer = super::infrastructure_hover::pointer();
+    MESHES.with(|cache| {
         let mut cache = cache.borrow_mut();
         let slot = &mut cache[usize::from(local)];
         if slot.as_ref().is_none_or(|p| p.key != key) {
@@ -196,54 +193,15 @@ pub(super) fn draw(
         }
         let prepared = slot.as_ref().unwrap();
         painter.add(egui::Shape::Mesh(prepared.mesh.clone()));
-        pointer.and_then(|pointer| {
-            prepared
-                .hits
-                .iter()
-                .map(|(pos, i)| (pos.distance_sq(pointer), *i))
-                .filter(|(d, _)| *d <= 49.0)
-                .min_by(|a, b| a.0.total_cmp(&b.0))
-                .map(|(_, i)| i)
-        })
+        if let Some(pointer) = pointer {
+            for &(pos, index) in &prepared.hits {
+                let distance = pointer.distance(pos);
+                if distance <= super::infrastructure_hover::RADIUS {
+                    super::infrastructure_hover::platform(&inventory.platforms[index], distance);
+                }
+            }
+        }
     });
-    if let (Some(index), Some(pointer)) = (hit, pointer) {
-        let p = &inventory.platforms[index];
-        egui::Area::new(egui::Id::new("platform-tooltip"))
-            .order(egui::Order::Tooltip)
-            .interactable(false)
-            .fixed_pos(pointer + egui::vec2(14.0, 14.0))
-            .show(painter.ctx(), |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_max_width(380.0);
-                    ui.strong(if p.name.is_empty() {
-                        "Offshore installation"
-                    } else {
-                        &p.name
-                    });
-                    ui.label(format!("{} · {}", p.country, p.kind));
-                    ui.label(format!("Status: {}", p.status));
-                    for (label, value) in [
-                        ("Operator", &p.operator),
-                        ("Production", &p.product),
-                        ("Function", &p.function),
-                        ("Installed / valid from", &p.installed),
-                        ("Removed / valid to", &p.removed),
-                    ] {
-                        if !value.is_empty() {
-                            ui.label(format!("{label}: {value}"));
-                        }
-                    }
-                    if let Some(depth) = p.water_depth_m {
-                        ui.label(format!("Water depth: {depth:.0} m"));
-                    }
-                    ui.small(format!(
-                        "{} · {} · {:.5}, {:.5}",
-                        p.source, p.source_id, p.lat, p.lon
-                    ));
-                    ui.small("Static inventory location; not a live rig position.");
-                });
-            });
-    }
 }
 
 pub(crate) fn controls(ui: &mut egui::Ui, filter: &mut Filter) {

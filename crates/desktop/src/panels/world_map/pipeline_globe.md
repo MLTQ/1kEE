@@ -8,7 +8,12 @@ Keys include source root, filters and palette. Reload generations reject stale
 jobs, buffers use monotonic versions, and large retired snapshots are dropped
 outside the shared lock. One worker is active at a time. No arbitrary line budget
 truncates routes. Source/status controls and provenance are shared with the local
-layer; per-route hover details are currently available in local view.
+layer; hover details work in both views through infrastructure_hover.
+
+A worker-built pipeline_pick BVH carries exact GPU segment endpoints and source
+feature owners. Camera motion never rebuilds the index; a pointer query projects
+only nearby candidate segments. Batch, index and immutable metadata share one
+version/root/filter key, so hits always describe the geometry being drawn.
 
 The ignored real-data test checks every eligible overview segment reaches the
 GPU batch and measures one-time preparation without touching the source archive.

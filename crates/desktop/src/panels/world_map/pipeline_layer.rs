@@ -187,54 +187,15 @@ pub(super) fn draw(
         return;
     };
     painter.add(egui::Shape::Mesh(prepared.mesh.clone()));
-    if let Some(pointer) = painter
-        .ctx()
-        .pointer_hover_pos()
-        .filter(|p| painter.clip_rect().contains(*p))
-    {
-        let mut closest = (6.0f32, None);
+    if let Some(pointer) = super::infrastructure_hover::pointer() {
         for hit in &prepared.hits {
-            if !Rect::from_two_pos(hit.a, hit.b)
-                .expand(6.0)
-                .contains(pointer)
-            {
-                continue;
+            let distance = super::infrastructure_hover::line_distance(pointer, hit.a, hit.b);
+            if distance <= super::infrastructure_hover::RADIUS {
+                super::infrastructure_hover::pipeline(
+                    &prepared.data.features[hit.feature].info,
+                    distance,
+                );
             }
-            let delta = hit.b - hit.a;
-            let t = ((pointer - hit.a).dot(delta) / delta.length_sq().max(0.001)).clamp(0.0, 1.0);
-            let distance = pointer.distance(hit.a + delta * t);
-            if distance < closest.0 {
-                closest = (distance, Some(hit.feature));
-            }
-        }
-        if let Some(index) = closest.1 {
-            let info = &prepared.data.features[index].info;
-            egui::Area::new(egui::Id::new("pipeline-tooltip"))
-                .order(egui::Order::Tooltip)
-                .interactable(false)
-                .fixed_pos(pointer + egui::vec2(14.0, 14.0))
-                .show(painter.ctx(), |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.set_max_width(380.0);
-                        ui.strong(if info.name.is_empty() {
-                            "Pipeline"
-                        } else {
-                            &info.name
-                        });
-                        ui.label(format!(
-                            "{} · {} · {}",
-                            info.product, info.status, info.source
-                        ));
-                        if !info.operator.is_empty() {
-                            ui.label(format!("Operator: {}", info.operator));
-                        }
-                        if !info.owner.is_empty() {
-                            ui.label(format!("Owner: {}", info.owner));
-                        }
-                        ui.small(format!("Source ID: {}", info.source_id));
-                        ui.small(&info.accuracy);
-                    });
-                });
         }
     }
 }
@@ -309,7 +270,7 @@ pub(crate) fn controls(ui: &mut egui::Ui, filter: &mut Filter) {
     });
     ui.checkbox(&mut filter.planned, "Include planned / construction");
     ui.checkbox(&mut filter.historical, "Include inactive / historical");
-    ui.small("Unspecified status remains visible. Sources can overlap; route accuracy varies. Hover a route in local view for details.");
+    ui.small("Unspecified status remains visible. Sources can overlap; route accuracy varies. Hover a route in either view for details.");
     if let Some(status) = super::pipeline_globe::status() {
         ui.small(status);
     }

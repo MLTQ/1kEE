@@ -4,8 +4,8 @@ Enable **Layers → Infrastructure → Pipelines**. Public routes appear in both
 globe and local views. Product toggles separate gas, oil, and liquids/mixed;
 source toggles select EIA, GEM and BSEE. Planned/construction and historical
 routes are hidden by default. Unspecified status remains visible and is labeled
-as such. Local-view hover shows the source ID, name, owner/operator and status.
-The existing OSM pipeline layer remains independently toggleable in local view.
+as such. Hover in both globe and local views shows the source ID, name, owner/operator, status and route-accuracy caveat.
+The existing OSM pipeline layer remains independently toggleable in local view; its hover card shows the retained name, class and way ID, with unavailable status identified explicitly.
 
 ## Installed snapshot
 
@@ -90,3 +90,20 @@ ONEKEE_PIPELINE_ARCHIVE=/path/Derived/pipelines.1ka \
   -- --ignored --nocapture
 python3 -m unittest discover -s scripts -p 'test_fetch_pipelines.py'
 ```
+
+## Hover interaction
+
+Hover within seven logical pixels of a visible line. Repeated tile fragments
+collapse to one identity; nearby/overlapping routes are listed below the closest
+record, up to four additional names/IDs plus the total count. Platform diamonds
+have priority at shared locations. Cards clear when their layer/filter changes
+or the pointer leaves the map, and hide while dragging.
+
+Globe picking indexes the same filtered unit-sphere segments sent to the GPU;
+source attributes stay attached to that exact batch. A background-built BVH
+avoids full-scene projection during mouse movement. Release QA on the installed
+244,778-segment overview built the index in ~38 ms once; 160 representative
+screen queries took ~0.33 ms total with ~25 exact segment tests per query.
+These are index-only timings, not complete UI frame latency. Synthetic tests
+compare hits against brute force across rotations, zoom and horizon rejection;
+a real-data test confirms Siri–Mobarak is hoverable over the Gulf.

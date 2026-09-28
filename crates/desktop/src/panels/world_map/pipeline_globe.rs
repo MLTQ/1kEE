@@ -23,6 +23,8 @@ struct Batch {
     key: Key,
     version: u64,
     instances: Arc<Vec<SegmentInstance>>,
+    picking: super::pipeline_pick::Index,
+    data: Arc<Snapshot>,
 }
 #[derive(Default)]
 struct Store {
@@ -86,11 +88,14 @@ pub(super) fn draw(
                     bounds: None,
                 }))
             });
-            let instances = prepare(&data.features, key.filter, key.colors);
+            let (instances, owners) = prepare(&data.features, key.filter, key.colors);
+            let picking = super::pipeline_pick::Index::new(&instances, owners);
             let batch = Arc::new(Batch {
                 key,
                 version: VERSION.fetch_add(1, Ordering::Relaxed),
                 instances: Arc::new(instances),
+                picking,
+                data: data.clone(),
             });
             let mut retired = None;
             if let Ok(mut state) = store().lock() {
@@ -106,6 +111,20 @@ pub(super) fn draw(
     let batch = state.batch.clone().filter(|b| b.key == key);
     drop(state);
     if let Some(batch) = batch {
+        if let Some(pointer) = super::infrastructure_hover::pointer() {
+            batch.picking.query(
+                &batch.instances,
+                layout,
+                view,
+                pointer,
+                |owner, distance| {
+                    super::infrastructure_hover::pipeline(
+                        &batch.data.features[owner].info,
+                        distance,
+                    );
+                },
+            );
+        }
         painter.add(
             ContourCallback::new(
                 ContourLayer::Pipelines,
@@ -135,9 +154,14 @@ fn prepare(
     features: &[tile_archive::pipelines::Feature],
     filter: Filter,
     colors: [egui::Color32; 3],
-) -> Vec<SegmentInstance> {
+) -> (Vec<SegmentInstance>, Vec<usize>) {
     let mut instances = Vec::new();
-    for f in features.iter().filter(|f| filter.accepts(&f.info)) {
+    let mut owners = Vec::new();
+    for (owner, f) in features
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| filter.accepts(&f.info))
+    {
         let mut color = colors[match f.info.product.as_str() {
             "gas" => 0,
             "oil" => 1,
@@ -150,6 +174,7 @@ fn prepare(
         }
         for pair in f.points.windows(2) {
             if pair[0] != pair[1] {
+                owners.push(owner);
                 instances.push(SegmentInstance::line(
                     GeoPoint {
                         lat: pair[0].lat,
@@ -164,7 +189,7 @@ fn prepare(
             }
         }
     }
-    instances
+    (instances, owners)
 }
 
 #[cfg(test)]
@@ -177,7 +202,8 @@ mod tests {
         let reader = tile_archive::Reader::open(Path::new(&path)).unwrap();
         let features = tile_archive::pipelines::load(&reader, None).unwrap();
         let start = std::time::Instant::now();
-        let instances = prepare(&features, Filter::default(), [egui::Color32::WHITE; 3]);
+        let (instances, owners) = prepare(&features, Filter::default(), [egui::Color32::WHITE; 3]);
+        assert_eq!(instances.len(), owners.len());
         let expected: usize = features
             .iter()
             .filter(|f| Filter::default().accepts(&f.info))

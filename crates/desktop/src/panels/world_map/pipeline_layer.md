@@ -22,3 +22,5 @@ No downloads, source JSON parsing or PBF scans happen during rendering.
 - UI reads use a nonblocking mutex attempt, clone the prepared snapshot handle,
   and release the lock before painting. Workers drop retired large snapshots
   outside the mutex so mesh replacement cannot block the UI on deallocation.
+
+Local hits feed infrastructure_hover instead of painting their own Area. Repeated tile fragments deduplicate by source ID; overlapping routes share one card with source/accuracy metadata.

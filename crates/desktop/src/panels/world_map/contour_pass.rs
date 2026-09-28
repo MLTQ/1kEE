@@ -123,6 +123,9 @@ pub struct SegmentInstance {
 const _: () = assert!(std::mem::size_of::<SegmentInstance>() == 28);
 
 impl SegmentInstance {
+    /// Exact uploaded endpoints for CPU picking; keeps projection inputs aligned.
+    pub(super) fn endpoints(&self) -> [[f32; 3]; 2] { [self.a, self.b] }
+
     /// Public surface overlays reuse the same immutable GPU line batches.
     pub fn line(a: GeoPoint, b: GeoPoint, color: egui::Color32) -> Self {
         Self { a: unit_vec(a), b: unit_vec(b), color: linear_u8(color) }

@@ -8,6 +8,8 @@ mod pipeline_layer;
 mod platform_layer;
 pub(crate) use platform_layer::controls as platform_controls;
 mod pipeline_globe;
+mod pipeline_pick;
+mod infrastructure_hover;
 pub(crate) use pipeline_layer::controls as pipeline_controls;
 mod power_layer;
 pub(crate) mod contour_asset;
@@ -129,6 +131,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         let rect = response.rect;
 
         camera::apply_interaction(ui.ctx(), &response, &mut model.globe_view);
+        infrastructure_hover::begin(response.hover_pos().filter(|_| !response.dragged()));
         let scene = if local_terrain_mode {
             local_terrain_scene::paint(&painter, rect, model, ui.ctx().input(|input| input.time))
         } else {
@@ -203,11 +206,13 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         }
 
         super::render_replay_controls(ui, model);
-        map_tooltips::draw_event_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
-        map_tooltips::draw_camera_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
-        map_tooltips::draw_ship_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
-        map_tooltips::draw_flight_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
-        map_tooltips::draw_landing_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
+        if !infrastructure_hover::show(ui.ctx()) {
+            map_tooltips::draw_event_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
+            map_tooltips::draw_camera_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
+            map_tooltips::draw_ship_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
+            map_tooltips::draw_flight_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
+            map_tooltips::draw_landing_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
+        }
         map_detail_panels::draw_ship_detail_panel(ui.ctx(), model);
         map_detail_panels::draw_flight_detail_panel(ui.ctx(), model);
         map_detail_panels::draw_landing_detail_panel(ui.ctx(), model);
