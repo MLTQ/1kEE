@@ -1,8 +1,12 @@
-//! Feed identity and smooth camera motion for the live-event idle mode.
+//! Ranked event touring and smooth camera motion for the live-event idle mode.
 use super::{EventRecord, GeoPoint, GlobeViewState};
-use std::collections::HashSet;
+#[path = "event_tour.rs"]
+mod event_tour;
+use event_tour::EventTour;
 
-const FLIGHT_SECONDS: f64 = 10.0;
+const MAX_FLIGHT_SECONDS: f64 = 10.0;
+const MIN_FLIGHT_SECONDS: f64 = 0.65;
+const ORBIT_SECONDS: f64 = 10.0;
 const ORBIT_RATE: f64 = 0.035;
 // Latitude, unwrapped longitude, log zoom, local yaw, local pitch.
 type Pose = [f64; 5];
@@ -10,8 +14,7 @@ type Pose = [f64; 5];
 #[derive(Default)]
 pub struct EventFollow {
     enabled: bool,
-    seen: HashSet<String>,
-    pending: Option<EventRecord>,
+    tour: EventTour,
     target: Option<EventRecord>,
     flight: Option<Flight>,
     velocity: Pose,
@@ -19,6 +22,7 @@ pub struct EventFollow {
 
 struct Flight {
     started: f64,
+    duration: f64,
     local: bool,
     start: Pose,
     end: Pose,
@@ -40,36 +44,35 @@ impl EventFollow {
         self.enabled && self.flight.is_some()
     }
 
-    /// Poll updates are not arrivals. Remember identities even while disabled,
-    /// and pick the newest geolocated Factal record if a poll contains a burst.
+    pub fn tour_position(&self) -> Option<(usize, usize)> {
+        self.target
+            .as_ref()
+            .and_then(|target| self.tour.position(&target.id))
+    }
+
+    /// Each successful live payload replaces the ranked tour, including updated
+    /// severity/brief metadata. Repeated payloads preserve the active stop.
     pub fn observe(&mut self, events: &[EventRecord]) {
-        let fresh = newest(events.iter().filter(|e| {
-            let new = self.seen.insert(e.id.clone());
-            new && valid(e)
-        }))
-        .cloned();
         if self.enabled {
-            if let Some(event) = fresh {
-                self.pending = Some(event);
-            }
-            // Preserve the followed brief when the item ages out of the live page.
-            if let Some(target) = &mut self.target {
-                if let Some(updated) = events.iter().find(|e| e.id == target.id) {
-                    *target = updated.clone();
-                }
+            self.tour
+                .refresh(events, self.target.as_ref().map(|e| e.id.as_str()));
+            if let Some(target) = &mut self.target
+                && let Some(updated) = events.iter().find(|e| e.id == target.id)
+            {
+                *target = updated.clone();
             }
         }
     }
 
     pub fn enable(&mut self, events: &[EventRecord]) {
         self.enabled = true;
-        self.seen.extend(events.iter().map(|e| e.id.clone()));
-        self.pending = newest(events.iter().filter(|e| valid(e))).cloned();
+        self.tour = EventTour::default();
+        self.tour.refresh(events, None);
     }
 
     pub fn stop(&mut self) {
         self.enabled = false;
-        self.pending = None;
+        self.tour = EventTour::default();
         self.flight = None;
         self.velocity = [0.0; 5];
     }
@@ -87,7 +90,16 @@ impl EventFollow {
             apply(view, pose);
             self.velocity = velocity;
         }
-        let selected = self.pending.take().map(|event| {
+        let next = self.tour.take_pending().or_else(|| {
+            let dwell_finished = self
+                .flight
+                .as_ref()
+                .is_none_or(|flight| now >= flight.started + flight.duration + ORBIT_SECONDS);
+            dwell_finished
+                .then(|| self.tour.next(self.target.as_ref().map(|e| e.id.as_str())))
+                .flatten()
+        });
+        let selected = next.map(|event| {
             if self.flight.is_none() {
                 self.velocity = view_velocity(view);
             }
@@ -101,28 +113,6 @@ impl EventFollow {
         }
         selected
     }
-}
-
-fn valid(event: &EventRecord) -> bool {
-    event.factal_brief.is_some()
-        && event.location.lat.is_finite()
-        && event.location.lon.is_finite()
-        && event.location.lat.abs() <= 90.0
-        && event.location.lon.abs() <= 180.0
-}
-
-fn newest<'a>(events: impl Iterator<Item = &'a EventRecord>) -> Option<&'a EventRecord> {
-    events.max_by(|a, b| timestamp(a).cmp(&timestamp(b)).then(a.id.cmp(&b.id)))
-}
-
-fn timestamp(event: &EventRecord) -> i64 {
-    event
-        .factal_brief
-        .as_ref()
-        .and_then(|b| b.occurred_at_raw.as_deref())
-        .filter(|s| s.is_ascii() && s.len() >= 10)
-        .and_then(crate::event_store::parse_iso_to_unix)
-        .unwrap_or(0)
 }
 
 fn pose(view: &GlobeViewState) -> Pose {
@@ -203,14 +193,23 @@ impl Flight {
             lat,
             lon,
             if local { 9.5f64.ln() } else { 35.0f64.ln() },
-            if local { start[3] + 0.25 } else { start[3] },
+            start[3],
             if local { 0.90 } else { start[4] },
         ];
+        // Size the travel from the camera's current position to its arrival
+        // pose, not from the previous event's coordinates (retargets can happen
+        // anywhere along a flight or orbit).
+        if !local {
+            end[0] += 0.8;
+        }
+        let duration = flight_duration(start, end);
+        if local {
+            end[3] = start[3] + ORBIT_RATE * duration;
+        }
         let mut final_velocity = [0.0; 5];
         if local {
             final_velocity[3] = ORBIT_RATE;
         } else {
-            end[0] += 0.8;
             final_velocity[1] = 0.8 / lat.to_radians().cos().max(0.15) * ORBIT_RATE;
         }
         let excursion = (distance / if local { 8.0 } else { 70.0 }).clamp(0.0, 1.0);
@@ -219,6 +218,7 @@ impl Flight {
             near_zoom + ((if local { 1.0f64 } else { 0.8f64 }).ln() - near_zoom) * excursion;
         Self {
             started: now,
+            duration,
             local,
             start,
             end,
@@ -232,8 +232,8 @@ impl Flight {
 
     fn sample(&self, now: f64) -> (Pose, Pose) {
         let elapsed = (now - self.started).max(0.0);
-        if elapsed >= FLIGHT_SECONDS {
-            let t = elapsed - FLIGHT_SECONDS;
+        if elapsed >= self.duration {
+            let t = elapsed - self.duration;
             let mut p = self.end;
             let mut v = [0.0; 5];
             if self.local {
@@ -258,25 +258,51 @@ impl Flight {
                 self.initial_velocity[i],
                 self.final_velocity[i],
                 elapsed,
-                FLIGHT_SECONDS,
+                self.duration,
             );
         }
         if self.zoom_out {
-            (p[2], v[2]) = if elapsed < 3.0 {
+            let widen_seconds = self.duration * 0.3;
+            (p[2], v[2]) = if elapsed < widen_seconds {
                 curve(
                     self.start[2],
                     self.wide_zoom,
                     self.initial_velocity[2],
                     0.0,
                     elapsed,
-                    3.0,
+                    widen_seconds,
                 )
             } else {
-                curve(self.wide_zoom, self.end[2], 0.0, 0.0, elapsed - 3.0, 7.0)
+                curve(
+                    self.wide_zoom,
+                    self.end[2],
+                    0.0,
+                    0.0,
+                    elapsed - widen_seconds,
+                    self.duration - widen_seconds,
+                )
             };
         }
         (p, v)
     }
+}
+
+/// Great-circle distance makes nearby/date-line/polar hops quick. A modest
+/// allowance for large zoom changes keeps an initial close-by approach smooth.
+fn flight_duration(start: Pose, end: Pose) -> f64 {
+    let lat0 = start[0].to_radians();
+    let lat1 = end[0].to_radians();
+    let dlat = lat1 - lat0;
+    let dlon = wrap(end[1] - start[1]).to_radians();
+    let h = ((dlat * 0.5).sin().powi(2) + lat0.cos() * lat1.cos() * (dlon * 0.5).sin().powi(2))
+        .clamp(0.0, 1.0);
+    let km = 2.0 * 6371.0 * h.sqrt().asin();
+    let travel =
+        MIN_FLIGHT_SECONDS + (MAX_FLIGHT_SECONDS - MIN_FLIGHT_SECONDS) * (km / 6000.0).sqrt();
+    let zoom = (end[2] - start[2]).abs() * 0.65;
+    travel
+        .max(zoom)
+        .clamp(MIN_FLIGHT_SECONDS, MAX_FLIGHT_SECONDS)
 }
 
 /// Quintic Hermite: prescribed endpoint velocities and zero endpoint acceleration.

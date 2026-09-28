@@ -349,7 +349,7 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                             let fill = if following { active_fill } else { egui::Color32::TRANSPARENT };
                             let text = if following { active_text } else { inactive_text };
                             if ui.add(egui::Button::new(egui::RichText::new("FOLLOW EVENTS").color(text).small()).fill(fill).corner_radius(4.0))
-                                .on_hover_text("Follow new Factal events: 10-second approach, brief, then orbit. Keeps Globe/Local view. Drag, scroll or arrows to stop.")
+                                .on_hover_text("Tour the six most severe Factal events. Travel takes up to 10 seconds, then orbit for 10 seconds. Keeps Globe/Local view. Drag, scroll or arrows to stop.")
                                 .clicked()
                             {
                                 model.toggle_event_follow();

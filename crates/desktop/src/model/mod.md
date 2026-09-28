@@ -124,3 +124,7 @@ Manual event/city selection, replay, leaving Earth or leaving cinematic mode sto
 following. Webcams default on; the independent Flock inventory remains off.
 
 `map_events` includes the followed target after it has paged out, so its marker and brief stay tied to the continuing orbit without repopulating the live feed list.
+
+FOLLOW EVENTS now tours the six highest-severity records from each successful
+Factal payload. Every timed stop uses the same `tick_event_follow` selection and
+brief-opening path; source replacement still cannot snap the active camera.

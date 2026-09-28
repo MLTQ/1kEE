@@ -22,3 +22,7 @@ Renders the operator-facing Factal detail window for the currently selected live
 - The raw JSON is shown read-only so the window is an inspection surface, not an editor.
 
 Event-follow mode uses a separate, narrower right-anchored window placement with vertical scrolling to keep the map center clear. Ordinary brief placement is preserved separately. The window can be closed during an orbit; the next new target reopens it.
+
+During event follow, the brief displays “Event tour · N of M” for the current
+record's rank in the latest payload's queue (up to six stops). A current record
+that has left the refreshed queue keeps its brief but omits the rank indicator.

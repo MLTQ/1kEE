@@ -15,6 +15,7 @@ pub fn render_factal_brief(ctx: &egui::Context, model: &mut AppModel) {
         return;
     };
 
+    let tour_position = model.event_follow.tour_position();
     let mut window = egui::Window::new("Factal Brief")
         .open(&mut model.factal_brief_open)
         .default_width(520.0)
@@ -29,6 +30,9 @@ pub fn render_factal_brief(ctx: &egui::Context, model: &mut AppModel) {
             .vscroll(true);
     }
     window.show(ctx, |ui| {
+            if let Some((position, total)) = tour_position {
+                ui.small(format!("Event tour · {position} of {total}"));
+            }
             ui.heading(event.title.as_str());
             ui.colored_label(event.severity.color(), event.severity.label());
             ui.label(event.location_name.as_str());
