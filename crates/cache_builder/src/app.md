@@ -49,3 +49,6 @@ Provides the minimal egui desktop shell for the offline cache-builder. It is the
 - Earth cache scan paints guaranteed core coverage instead of overlapping source
   footprints. Newly completed Earth tiles publish core bounds too; old cache
   entries can still contain additional geometry outside that guaranteed area.
+
+- GUI vector packs also include a `pipelines.1ka` beside the selected `osm`
+  directory when present; the worker reports the actual included source path.

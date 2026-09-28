@@ -8,7 +8,7 @@
 // that touch the far hemisphere — matching the CPU segment breaker exactly.
 //
 // The Rust `ContourUniforms` struct in contour_pass.rs must stay byte-for-byte
-// in sync with `Uniforms` below (64 bytes).
+// in sync with `Uniforms` below (80 bytes).
 
 struct Uniforms {
     center: vec2<f32>,        // globe centre, logical points
@@ -27,7 +27,7 @@ struct Uniforms {
     stroke_half_px: f32,      // half stroke width, physical pixels
     feather_px: f32,          // AA feather, physical pixels
     pixels_per_point: f32,
-    _pad0: f32,
+    horizon_z: f32,           // surface pipelines use the perspective horizon
     _pad1: f32,
     _pad2: f32,
 }
@@ -56,7 +56,7 @@ fn project(unit: vec3<f32>) -> vec3<f32> {
     let y2 = p.y * u.pitch_cos - z1 * u.pitch_sin;
     let z2 = p.y * u.pitch_sin + z1 * u.pitch_cos;
     let depth = u.camera_distance - z2;
-    if (depth <= 0.05 || z2 < 0.0) {
+    if (depth <= 0.05 || z2 < u.horizon_z) {
         return vec3<f32>(0.0, 0.0, -1.0);
     }
     let perspective = u.radius_focal / depth;

@@ -32,3 +32,5 @@ Entry point for the offline cache-builder companion binary. It keeps the CLI sur
 - `archive_space.rs` reports destination capacity during archive conversion.
 - `pbf_nodes` provides optional original-PBF node indexing; `planet_lookup` shares
   the existing feature pipeline between flat and compact node storage.
+
+- `pipelines` dispatches offline public fuel-route import via `pipelines.rs`.

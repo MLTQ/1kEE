@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 pub enum Command {
     Gui,
     PackArchive(crate::archive_pack::Command),
+    Pipelines(crate::pipelines::Command),
     RoadsBbox(BboxCommand),
     ContoursBbox(ContoursBboxCommand),
     PlanetAll(PlanetAllCommand),
@@ -103,6 +104,7 @@ where
     match command.as_str() {
         "gui" => Ok(Command::Gui),
         "pack-archive" => crate::archive_pack::parse(args).map(Command::PackArchive),
+        "pipelines" => crate::pipelines::parse(args).map(Command::Pipelines),
         "roads-bbox" => parse_roads_bbox(args).map(Command::RoadsBbox),
         "contours-bbox" => parse_contours_bbox(args).map(Command::ContoursBbox),
         "planet-all" => parse_planet_all(args).map(Command::PlanetAll),
@@ -430,6 +432,9 @@ fn usage() -> String {
   one-thousand-electric-eye-cache-builder pack-archive --out <Derived/world.1ka>
       [--osm-cache-dir <Derived/osm>] [--earth-contours <database>]
       [--moon-contours <database>] [--mars-contours <database>]
+      [--pipelines <Derived/pipelines.1ka>]
+  one-thousand-electric-eye-cache-builder pipelines --input <routes.jsonl>
+      --manifest <manifest.json> --out <Derived/pipelines.1ka>
   one-thousand-electric-eye-cache-builder roads-bbox \\
       --planet <planet.osm.pbf> --cache-dir <Derived/osm> \\
       --min-lat <f32> --max-lat <f32> --min-lon <f32> --max-lon <f32> \\

@@ -6,6 +6,7 @@ pub mod contour_clip;
 pub mod contour_grid;
 pub mod contours;
 pub mod gpkg;
+pub mod pipelines;
 pub mod vector;
 
 pub const FILE_NAME: &str = "world.1ka";

@@ -101,3 +101,5 @@ TSV snapshot through `AppModel::public_camera_positions`. Its cache key includes
 both source revisions, both visibility flags, and the inactive-record filter.
 Filtering or reloading cannot reuse stale geometry; Earth-only projection and
 culling stay unchanged. No point-count drawing limit truncates the inventory.
+
+Public fuel routes draw on Earth through `pipeline_globe`, using the existing GPU line pass and a baked overview. Orbit and zoom update only uniforms. Pipelines use perspective unit-sphere horizon culling; other contour layers retain their previous behavior. GlobeLayout is Copy for immutable projection inputs.

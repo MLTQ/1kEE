@@ -47,3 +47,5 @@ Implements the main geographic canvas for the demo. The current version wraps an
 - Camera dots now represent the whole normalized registry; selected-event link
   lines remain limited to nearby cameras. Clicking a dot opens the separate
   live-feed egui window.
+
+`pipeline_layer` owns public fuel-route reads/local mesh caching; `pipeline_globe` owns immutable GPU line batches; `pipeline_controls` exposes its filters/reload/provenance in the layer drawer.

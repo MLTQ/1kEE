@@ -200,3 +200,5 @@ TSV snapshot through `AppModel::public_camera_positions`. Its cache key includes
 both source revisions, both visibility flags, and the inactive-record filter.
 Filtering or reloading cannot reuse stale geometry; Earth-only projection and
 culling stay unchanged. No point-count drawing limit truncates the inventory.
+
+Public fuel routes load quarter-degree archive tiles on workers and draw regardless of available contours. OSM remains an independent optional local pipeline layer. Geographic projection keys include focus, oblique view, extents, layout and clip rectangle.

@@ -70,3 +70,5 @@ optional external overlays without owning their data pipelines.
 - Legacy multiplier-only settings display their equivalent current pixel width
   until the operator moves the control. Only old sub-pixel values are raised to
   the new visible minimum.
+
+The Pipelines section delegates public source/product/status filters and reload to `world_map::pipeline_controls`. An independent OSM local-view toggle retains the original infrastructure layer.

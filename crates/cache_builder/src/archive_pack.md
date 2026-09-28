@@ -23,3 +23,7 @@ world.1ka archive. Imports full-detail vector geometry and converts contours to 
 
 - Regression covers publication including a nonempty date-line cell, refusing
   an existing destination, and contextual failures/cleanup after invalid input.
+
+- `--pipelines FILE` copies the independent FUEL namespace and provenance into
+  the new world snapshot. With an OSM source, a sibling `pipelines.1ka` is also
+  detected automatically. Its CRC-checked tiles never replace OSM PIPE records.

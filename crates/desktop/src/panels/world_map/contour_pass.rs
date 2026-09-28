@@ -41,9 +41,10 @@ pub enum ContourLayer {
     Bathymetry,
     LunarTopo,
     MarsTopo,
+    Pipelines,
 }
 
-const LAYER_COUNT: usize = 6;
+const LAYER_COUNT: usize = 7;
 /// wgpu requires dynamic uniform offsets to be 256-aligned on most hardware.
 const UNIFORM_STRIDE: u64 = 256;
 
@@ -56,6 +57,7 @@ impl ContourLayer {
             ContourLayer::Bathymetry => 3,
             ContourLayer::LunarTopo => 4,
             ContourLayer::MarsTopo => 5,
+            ContourLayer::Pipelines => 6,
         }
     }
 }
@@ -78,7 +80,8 @@ impl ContourLayer {
 //   56       4   stroke_half_px    f32
 //   60       4   feather_px        f32
 //   64       4   pixels_per_point  f32
-//   68      12   _pad0.._pad2      f32 ×3
+//   68       4   horizon_z         f32
+//   72       8   _pad1.._pad2       f32 ×2
 //   80 bytes total
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -97,7 +100,8 @@ struct ContourUniforms {
     stroke_half_px: f32,
     feather_px: f32,
     pixels_per_point: f32,
-    _pad: [f32; 3],
+    horizon_z: f32,
+    _pad: [f32; 2],
 }
 
 // Mirror of the WGSL `Uniforms` struct in `contour_lines.wgsl` — same guard as
@@ -117,6 +121,13 @@ pub struct SegmentInstance {
 }
 
 const _: () = assert!(std::mem::size_of::<SegmentInstance>() == 28);
+
+impl SegmentInstance {
+    /// Public surface overlays reuse the same immutable GPU line batches.
+    pub fn line(a: GeoPoint, b: GeoPoint, color: egui::Color32) -> Self {
+        Self { a: unit_vec(a), b: unit_vec(b), color: linear_u8(color) }
+    }
+}
 
 #[inline]
 fn unit_vec(p: GeoPoint) -> [f32; 3] {
@@ -177,6 +188,20 @@ pub(crate) fn contour_feather_px(stroke_width_px: f32) -> f32 {
 #[cfg(test)]
 mod buffer_split_tests {
     use super::instances_per_buffer;
+
+    #[test]
+    fn surface_pipeline_slot_and_horizon_leave_contours_unchanged() {
+        use super::*;
+        let layout = crate::panels::world_map::globe_scene::GlobeLayout {
+            center: egui::Pos2::ZERO, radius: 300.0, focal_length: 2.0, camera_distance: 3.0,
+        };
+        let view = GlobeViewState::from_focus(GeoPoint { lat: 0.0, lon: 0.0 });
+        let callback = |layer| ContourCallback::new(layer, 1, Arc::new(Vec::new()), &layout, &view, 0.0, 1.0, 1.5, 1.0);
+        assert_eq!(callback(ContourLayer::Pipelines).uniforms.horizon_z, 1.0/3.0);
+        assert_eq!(callback(ContourLayer::SrtmGlobe).uniforms.horizon_z, 0.0);
+        assert!((ContourLayer::Pipelines.slot() as usize) < LAYER_COUNT);
+        assert_ne!(ContourLayer::Pipelines.slot(), ContourLayer::MarsTopo.slot());
+    }
 
     /// wgpu's default limit is 256 MiB. A global contour layer reached 287 MB
     /// in one allocation, which is a hard `create_buffer` validation panic, so
@@ -587,7 +612,8 @@ impl ContourCallback {
                 stroke_half_px: contour_stroke_half_px(stroke_width_px),
                 feather_px: contour_feather_px(stroke_width_px),
                 pixels_per_point,
-                _pad: [0.0; 3],
+                horizon_z: if layer == ContourLayer::Pipelines { 1.0 / layout.camera_distance } else { 0.0 },
+                _pad: [0.0; 2],
             },
         }
     }

@@ -410,8 +410,26 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             model.selected_root.as_deref(),
             viewport_center,
             render_zoom,
-            model.show_pipeline,
+            model.show_pipeline && model.pipeline_osm,
         );
+        if model.show_pipeline && let Some(root) = model.selected_root.as_deref() {
+            let view = model.globe_view;
+            let bounds = local_geo_bounds(viewport_center, view.local_zoom);
+            let extent = visual_half_extent_for_zoom(view.local_zoom);
+            let x_km = (extent*111.32*viewport_center.lat.to_radians().cos().abs().max(0.2)).max(1.0);
+            let y_km = (extent*111.32).max(1.0);
+            let clip = painter.clip_rect();
+            let key = [viewport_center.lat, viewport_center.lon, view.local_yaw, view.local_pitch,
+                view.local_layer_spread, x_km, y_km, layout.center.x, layout.center.y,
+                layout.focus_center.x, layout.focus_center.y, layout.width, layout.height,
+                layout.horizontal_scale, clip.min.x, clip.min.y, clip.max.x, clip.max.y]
+                .map(f32::to_bits).to_vec();
+            super::pipeline_layer::draw(painter, root,
+                Some([bounds.min_lat,bounds.max_lat,bounds.min_lon,bounds.max_lon]), key,
+                model.pipeline_filters, move |point| {
+                    project_local(&layout, &view, viewport_center, point, 0.0, x_km, y_km).map(|p| p.pos)
+                });
+        }
         super::infra_layer::draw_aeroways(
             painter,
             &layout,

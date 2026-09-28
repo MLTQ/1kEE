@@ -153,6 +153,12 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                 section_label(ui, "INFRASTRUCTURE");
                 ui.checkbox(&mut model.show_power, "Power lines");
                 ui.checkbox(&mut model.show_pipeline, "Pipelines");
+                if model.show_pipeline {
+                    ui.indent("pipeline-options", |ui| {
+                        super::world_map::pipeline_controls(ui, &mut model.pipeline_filters);
+                        ui.checkbox(&mut model.pipeline_osm, "OSM pipelines (local view)");
+                    });
+                }
                 ui.checkbox(&mut model.show_comm, "Comms towers");
                 ui.checkbox(&mut model.show_surveillance, "Surveillance");
                 ui.add_space(6.0);

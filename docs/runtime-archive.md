@@ -144,3 +144,10 @@ cargo test --release -p one-thousand-electric-eye-desktop \
 
 Tracked under `1kee-vgj` (this slice), `1kee-i7c` (complete archive), and `1kee-6ws`
 (runtime integration). See [cache-builder.md](cache-builder.md) for the wider plan.
+
+## Public fuel pipeline extension
+
+See [pipelines.md](pipelines.md). `Derived/pipelines.1ka` can supply public
+pipelines independently or be included in a new world pack with `--pipelines`.
+FUEL/grid 3 stores quarter-degree detail tiles and a globe overview, with complete
+source/status/attribution metadata. Existing OSM PIPE data remains independent.

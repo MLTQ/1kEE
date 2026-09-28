@@ -14,6 +14,7 @@ mod node_store;
 mod planet_all;
 mod pbf_nodes;
 mod planet_lookup;
+mod pipelines;
 mod roads;
 mod srtm;
 mod util;
@@ -29,6 +30,7 @@ fn run() -> Result<(), String> {
     match args::parse(std::env::args().skip(1))? {
         args::Command::Gui => launch_gui(),
         args::Command::PackArchive(command) => archive_pack::run(command),
+        args::Command::Pipelines(command) => pipelines::run(command),
         args::Command::RoadsBbox(command) => roads::build_bbox_cache(command),
         args::Command::PlanetAll(command) => planet_all::build_planet_cache(command),
         args::Command::ContoursBbox(command) => {

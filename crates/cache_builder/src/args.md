@@ -36,3 +36,5 @@ Parses the cache-builder CLI without pulling in a heavier argument framework yet
 - `PlanetAllCommand::node_storage` selects `flat` (default, compatible with old
   builds) or opt-in `indexed-pbf` via `--node-storage`. Unknown modes fail parsing.
   Compact mode stores its index and resume state separately within `tmp_dir`.
+
+- `pipelines` builds a standalone archive from normalized JSONL and provenance.

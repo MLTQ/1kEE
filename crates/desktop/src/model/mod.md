@@ -105,3 +105,5 @@ source pollers.
 - New contour widths are normalized to a visible physical-pixel range. The
   legacy multiplier remains private only as a settings migration path, so a
   missing newer field does not change existing map output.
+
+Public pipelines use `show_pipeline`, `pipeline_filters` (source/product/status), and `pipeline_osm` for the independent local OSM layer. Filters start with historical/planned records hidden; unknown status remains visible.

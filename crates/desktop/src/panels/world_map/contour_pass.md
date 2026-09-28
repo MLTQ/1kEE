@@ -6,6 +6,12 @@ Renders globe contour polylines as cached, GPU-instanced line segments. It
 keeps per-frame work to uniform updates and an instanced draw while geometry is
 rebuilt only when source contours or their palette changes.
 
+Public pipelines use a seventh independent slot and `SegmentInstance::line`.
+Their geometry is prepared on a worker; camera movement updates only uniforms.
+The prior padding float at offset 68 is now `horizon_z`: pipelines use the
+perspective unit-sphere horizon, existing contour layers retain zero. Size stays
+80 bytes and the WGSL contract is updated together.
+
 ## Components
 
 ### `ContourCallback`
@@ -89,4 +95,3 @@ rebuilt only when source contours or their palette changes.
 - `main.rs` separately raises `max_buffer_size` to whatever the adapter
   reports, which reduces how often the split is needed but is not what makes it
   safe — the split has to hold on any device.
-

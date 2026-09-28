@@ -556,6 +556,7 @@ impl BuilderApp {
         self.active_job = Some(spawn_job(BuildJob::PackArchive(crate::archive_pack::Command {
             out,
             osm: Some(osm),
+            pipelines: None,
             terrain: Vec::new(),
         })));
     }
