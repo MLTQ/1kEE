@@ -49,3 +49,5 @@ Implements the main geographic canvas for the demo. The current version wraps an
   live-feed egui window.
 
 `pipeline_layer` owns public fuel-route reads/local mesh caching; `pipeline_globe` owns immutable GPU line batches; `pipeline_controls` exposes its filters/reload/provenance in the layer drawer.
+
+`platform_layer` loads static offshore inventories asynchronously and caches batched markers for both globe and local views. `platform_controls` exposes source/status/facility filters.

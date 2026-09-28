@@ -90,6 +90,8 @@ pub struct AppModel {
     // Infrastructure layers
     pub show_power: bool,
     pub show_rail: bool,
+    pub show_platforms: bool,
+    pub platform_filters: tile_archive::platforms::Filter,
     pub show_pipeline: bool,
     pub pipeline_filters: tile_archive::pipelines::Filter,
     pub pipeline_osm: bool,
@@ -284,6 +286,8 @@ impl AppModel {
             show_admin: false,
             show_power: false,
             show_rail: false,
+            show_platforms: false,
+            platform_filters: tile_archive::platforms::Filter::default(),
             show_pipeline: false,
             pipeline_filters: tile_archive::pipelines::Filter::default(),
             pipeline_osm: true,

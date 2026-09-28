@@ -34,3 +34,5 @@ Entry point for the offline cache-builder companion binary. It keeps the CLI sur
   the existing feature pipeline between flat and compact node storage.
 
 - `pipelines` dispatches offline public fuel-route import via `pipelines.rs`.
+
+- `platforms` builds a static offshore inventory archive from normalized source data.

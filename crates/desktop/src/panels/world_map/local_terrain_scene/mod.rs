@@ -412,7 +412,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             render_zoom,
             model.show_pipeline && model.pipeline_osm,
         );
-        if model.show_pipeline && let Some(root) = model.selected_root.as_deref() {
+        if (model.show_pipeline || model.show_platforms) && let Some(root) = model.selected_root.as_deref() {
             let view = model.globe_view;
             let bounds = local_geo_bounds(viewport_center, view.local_zoom);
             let extent = visual_half_extent_for_zoom(view.local_zoom);
@@ -424,11 +424,18 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 layout.focus_center.x, layout.focus_center.y, layout.width, layout.height,
                 layout.horizontal_scale, clip.min.x, clip.min.y, clip.max.x, clip.max.y]
                 .map(f32::to_bits).to_vec();
-            super::pipeline_layer::draw(painter, root,
-                Some([bounds.min_lat,bounds.max_lat,bounds.min_lon,bounds.max_lon]), key,
-                model.pipeline_filters, move |point| {
+            if model.show_pipeline {
+                super::pipeline_layer::draw(painter, root,
+                    Some([bounds.min_lat,bounds.max_lat,bounds.min_lon,bounds.max_lon]), key.clone(),
+                    model.pipeline_filters, move |point| {
+                        project_local(&layout, &view, viewport_center, point, 0.0, x_km, y_km).map(|p| p.pos)
+                    });
+            }
+            if model.show_platforms {
+                super::platform_layer::draw(painter, root, true, key, model.platform_filters, |point| {
                     project_local(&layout, &view, viewport_center, point, 0.0, x_km, y_km).map(|p| p.pos)
                 });
+            }
         }
         super::infra_layer::draw_aeroways(
             painter,

@@ -8,6 +8,7 @@ pub struct Command {
     pub out: PathBuf,
     pub osm: Option<PathBuf>,
     pub pipelines: Option<PathBuf>,
+    pub platforms: Option<PathBuf>,
     pub terrain: Vec<(i32, PathBuf)>,
 }
 
@@ -15,6 +16,7 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut out = None;
     let mut osm = None;
     let mut pipelines = None;
+    let mut platforms = None;
     let mut terrain = Vec::new();
     let mut args = args;
     while let Some(flag) = args.next() {
@@ -26,15 +28,16 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
             "--out" => out = Some(value),
             "--osm-cache-dir" => osm = Some(value),
             "--pipelines" => pipelines = Some(value),
+            "--platforms" => platforms = Some(value),
             "--earth-contours" => terrain.push((0, value)),
             "--moon-contours" => terrain.push((1, value)),
             "--mars-contours" => terrain.push((2, value)),
             _ => return Err(format!("Unknown archive option {flag}")),
         }
     }
-    if osm.is_none() && pipelines.is_none() && terrain.is_empty() {
+    if osm.is_none() && pipelines.is_none() && platforms.is_none() && terrain.is_empty() {
         return Err(
-            "Specify --osm-cache-dir, --pipelines and/or --earth-contours, --moon-contours, --mars-contours"
+            "Specify --osm-cache-dir, --pipelines, --platforms and/or --earth-contours, --moon-contours, --mars-contours"
                 .into(),
         );
     }
@@ -46,6 +49,7 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Command, String> {
         out: out.ok_or("Missing --out")?,
         osm,
         pipelines,
+        platforms,
         terrain,
     })
 }
@@ -105,6 +109,15 @@ pub fn run_with_progress(cmd: Command, progress: &mut dyn FnMut(String)) -> Resu
             progress(format!("Including public pipelines from {}", path.display()));
             let reader = tile_archive::Reader::open(&path)?;
             count += tile_archive::pipelines::copy_into(&reader, &mut writer)?;
+        }
+        let platforms = cmd.platforms.clone().or_else(|| {
+            let path = cmd.osm.as_ref()?.parent()?.join(tile_archive::platforms::FILE_NAME);
+            path.is_file().then_some(path)
+        });
+        if let Some(path) = platforms {
+            space.check(progress)?;
+            progress(format!("Including offshore platforms from {}", path.display()));
+            count += tile_archive::platforms::copy_into(&tile_archive::Reader::open(&path)?, &mut writer)?;
         }
         for (body, path) in &cmd.terrain {
             count += pack_contours(&mut writer, *body, path, progress, &mut space)?;
@@ -348,6 +361,7 @@ mod tests {
             out: out.clone(),
             osm: Some(osm.clone()),
             pipelines: None,
+            platforms: None,
             terrain: Vec::new(),
         };
         run_with_progress(command(), &mut |_| {}).unwrap();
@@ -377,6 +391,7 @@ mod tests {
                     out: failed.clone(),
                     osm: Some(osm.clone()),
                     pipelines: None,
+                    platforms: None,
                     terrain: Vec::new()
                 },
                 &mut |_| {}
@@ -396,6 +411,7 @@ mod tests {
                 out: failed.clone(),
                 osm: Some(osm),
                 pipelines: None,
+                platforms: None,
                 terrain: Vec::new(),
             },
             &mut |_| {},

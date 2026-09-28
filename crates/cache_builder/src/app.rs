@@ -557,6 +557,7 @@ impl BuilderApp {
             out,
             osm: Some(osm),
             pipelines: None,
+            platforms: None,
             terrain: Vec::new(),
         })));
     }

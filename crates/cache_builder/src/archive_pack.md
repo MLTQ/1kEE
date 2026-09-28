@@ -27,3 +27,5 @@ world.1ka archive. Imports full-detail vector geometry and converts contours to 
 - `--pipelines FILE` copies the independent FUEL namespace and provenance into
   the new world snapshot. With an OSM source, a sibling `pipelines.1ka` is also
   detected automatically. Its CRC-checked tiles never replace OSM PIPE records.
+
+- `--platforms FILE` imports validated RIGS records/provenance. GUI/OSM packs detect sibling `platforms.1ka`, independently of pipelines.

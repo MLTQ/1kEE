@@ -38,3 +38,5 @@ Parses the cache-builder CLI without pulling in a heavier argument framework yet
   Compact mode stores its index and resume state separately within `tmp_dir`.
 
 - `pipelines` builds a standalone archive from normalized JSONL and provenance.
+
+- `platforms` builds a static offshore inventory archive from normalized source data.

@@ -103,3 +103,5 @@ Filtering or reloading cannot reuse stale geometry; Earth-only projection and
 culling stay unchanged. No point-count drawing limit truncates the inventory.
 
 Public fuel routes draw on Earth through `pipeline_globe`, using the existing GPU line pass and a baked overview. Orbit and zoom update only uniforms. Pipelines use perspective unit-sphere horizon culling; other contour layers retain their previous behavior. GlobeLayout is Copy for immutable projection inputs.
+
+Offshore installation diamonds use cached projected meshes. Unit-sphere perspective horizon culling prevents markers appearing on the hidden far side; hover indices are generated only from drawn points.

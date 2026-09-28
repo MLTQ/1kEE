@@ -52,3 +52,5 @@ Provides the minimal egui desktop shell for the offline cache-builder. It is the
 
 - GUI vector packs also include a `pipelines.1ka` beside the selected `osm`
   directory when present; the worker reports the actual included source path.
+
+- GUI vector packs likewise detect sibling `platforms.1ka` and preserve its inventory metadata in the new world archive.

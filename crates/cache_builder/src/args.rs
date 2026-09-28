@@ -5,6 +5,7 @@ pub enum Command {
     Gui,
     PackArchive(crate::archive_pack::Command),
     Pipelines(crate::pipelines::Command),
+    Platforms(crate::platforms::Command),
     RoadsBbox(BboxCommand),
     ContoursBbox(ContoursBboxCommand),
     PlanetAll(PlanetAllCommand),
@@ -105,6 +106,7 @@ where
         "gui" => Ok(Command::Gui),
         "pack-archive" => crate::archive_pack::parse(args).map(Command::PackArchive),
         "pipelines" => crate::pipelines::parse(args).map(Command::Pipelines),
+        "platforms" => crate::platforms::parse(args).map(Command::Platforms),
         "roads-bbox" => parse_roads_bbox(args).map(Command::RoadsBbox),
         "contours-bbox" => parse_contours_bbox(args).map(Command::ContoursBbox),
         "planet-all" => parse_planet_all(args).map(Command::PlanetAll),
@@ -432,7 +434,8 @@ fn usage() -> String {
   one-thousand-electric-eye-cache-builder pack-archive --out <Derived/world.1ka>
       [--osm-cache-dir <Derived/osm>] [--earth-contours <database>]
       [--moon-contours <database>] [--mars-contours <database>]
-      [--pipelines <Derived/pipelines.1ka>]
+      [--pipelines <Derived/pipelines.1ka>] [--platforms <Derived/platforms.1ka>]
+  one-thousand-electric-eye-cache-builder platforms --input <platforms.json> --out <Derived/platforms.1ka>
   one-thousand-electric-eye-cache-builder pipelines --input <routes.jsonl>
       --manifest <manifest.json> --out <Derived/pipelines.1ka>
   one-thousand-electric-eye-cache-builder roads-bbox \\

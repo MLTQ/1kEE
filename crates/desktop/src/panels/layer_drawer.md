@@ -72,3 +72,5 @@ optional external overlays without owning their data pipelines.
   the new visible minimum.
 
 The Pipelines section delegates public source/product/status filters and reload to `world_map::pipeline_controls`. An independent OSM local-view toggle retains the original infrastructure layer.
+
+Oil & gas platforms is an independent infrastructure toggle. Its delegated controls identify static coverage and expose optional historical, construction and support installations.

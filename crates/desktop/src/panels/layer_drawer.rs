@@ -159,6 +159,12 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                         ui.checkbox(&mut model.pipeline_osm, "OSM pipelines (local view)");
                     });
                 }
+                ui.checkbox(&mut model.show_platforms, "Oil & gas platforms");
+                if model.show_platforms {
+                    ui.indent("platform-options", |ui| {
+                        super::world_map::platform_controls(ui, &mut model.platform_filters);
+                    });
+                }
                 ui.checkbox(&mut model.show_comm, "Comms towers");
                 ui.checkbox(&mut model.show_surveillance, "Surveillance");
                 ui.add_space(6.0);

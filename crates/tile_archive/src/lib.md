@@ -28,3 +28,5 @@ read-only connections, never a shared connection mutex.
 - contour_grid and contour_clip share Earth core ownership, aligned source halos
   and strict f64 GeoPackage clipping across both builders. Existing archive
   readers and CTF1 payloads remain compatible.
+
+- `platforms`: small validated offshore inventories in the independent RIGS/grid-4 namespace, copyable into world archives.

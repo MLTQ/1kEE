@@ -151,3 +151,10 @@ See [pipelines.md](pipelines.md). `Derived/pipelines.1ka` can supply public
 pipelines independently or be included in a new world pack with `--pipelines`.
 FUEL/grid 3 stores quarter-degree detail tiles and a globe overview, with complete
 source/status/attribution metadata. Existing OSM PIPE data remains independent.
+
+## Offshore installation extension
+
+See [platforms.md](platforms.md). `Derived/platforms.1ka` holds the small public
+inventory independently or can be copied with `pack-archive --platforms`.
+RIGS/grid 4 stores versioned point records and provenance in a single payload;
+world packing preserves original bytes and existing layer namespaces.

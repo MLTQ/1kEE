@@ -202,3 +202,5 @@ Filtering or reloading cannot reuse stale geometry; Earth-only projection and
 culling stay unchanged. No point-count drawing limit truncates the inventory.
 
 Public fuel routes load quarter-degree archive tiles on workers and draw regardless of available contours. OSM remains an independent optional local pipeline layer. Geographic projection keys include focus, oblique view, extents, layout and clip rectangle.
+
+Offshore platforms share the public-route projection inputs at sea level and draw independently of contour availability. Cached meshes and hover use the same projection; their toggle/filter state is separate from pipelines.

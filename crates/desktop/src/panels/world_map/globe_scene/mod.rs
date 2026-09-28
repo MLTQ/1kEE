@@ -354,6 +354,17 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         && let Some(root) = model.selected_root.as_deref() {
         super::pipeline_globe::draw(painter, root, &layout, &model.globe_view, model.pipeline_filters);
     }
+    if model.show_platforms && model.active_body == crate::model::ActiveBody::Earth
+        && let Some(root) = model.selected_root.as_deref() {
+        let view = model.globe_view;
+        let key = [view.yaw, view.pitch, layout.center.x, layout.center.y,
+            layout.radius, layout.focal_length, layout.camera_distance].map(f32::to_bits).to_vec();
+        super::platform_layer::draw(painter, root, false, key, model.platform_filters, |point| {
+            projection::project_geo_unit_surface(&layout, &view, point)
+                .filter(|p| p.depth >= (1.0 + 1.0 / layout.camera_distance) * 0.5)
+                .map(|p| p.pos)
+        });
+    }
     draw_deflock_alprs(painter, &layout, &model.globe_view, model);
 
     // ── AIS ship markers ──────────────────────────────────────────────────

@@ -15,6 +15,7 @@ mod planet_all;
 mod pbf_nodes;
 mod planet_lookup;
 mod pipelines;
+mod platforms;
 mod roads;
 mod srtm;
 mod util;
@@ -31,6 +32,7 @@ fn run() -> Result<(), String> {
         args::Command::Gui => launch_gui(),
         args::Command::PackArchive(command) => archive_pack::run(command),
         args::Command::Pipelines(command) => pipelines::run(command),
+        args::Command::Platforms(command) => platforms::run(command),
         args::Command::RoadsBbox(command) => roads::build_bbox_cache(command),
         args::Command::PlanetAll(command) => planet_all::build_planet_cache(command),
         args::Command::ContoursBbox(command) => {
