@@ -132,6 +132,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 
     let layout = layout(rect);
     let Some(focus) = model.terrain_focus_location() else {
+        contour_asset::leave_local_view();
         ui_overlays::draw_empty_state(painter, rect, "No terrain focus selected");
         return GlobeScene {
             event_markers: Vec::new(),
@@ -146,6 +147,14 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 
     let viewport_center = model.globe_view.local_center;
     let render_zoom = local_render_zoom(model.globe_view.local_zoom);
+    let half = visual_half_extent_for_zoom(model.globe_view.local_zoom);
+    let extent_x = (half * 111.32 * viewport_center.lat.to_radians().cos().abs().max(0.2)).max(1.0);
+    let extent_y = (half * 111.32).max(1.0);
+    contour_asset::set_local_viewport(
+        model.active_body,
+        projection::local_projection_params(&layout, &model.globe_view, viewport_center, extent_x, extent_y),
+        rect.intersect(painter.clip_rect()),
+    );
     // Earth core tiles cover disjoint ground. Select enough to cover the
     // oblique viewport, including a focus near the edge of its center core.
     let prefetch_radius =
@@ -1922,7 +1931,13 @@ fn gpu_contour_batches(
     load: &contour_asset::LocalContourLoad,
     painter: &egui::Painter,
 ) -> Vec<local_contour_pass::LocalTileBatch> {
-    if model.active_body != crate::model::ActiveBody::Earth || load.tiles.is_empty() {
+    let visible = if model.active_body == crate::model::ActiveBody::Earth && model.show_contours {
+        load.tiles.iter().map(|tile| tile.id).collect()
+    } else {
+        std::collections::HashSet::new()
+    };
+    local_contour_pass::retain_instances(&visible);
+    if visible.is_empty() {
         return Vec::new();
     }
 

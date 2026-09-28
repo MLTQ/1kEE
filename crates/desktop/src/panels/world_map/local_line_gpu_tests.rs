@@ -109,6 +109,7 @@ fn roads_and_contours_render_together_and_deferred_uploads_complete() {
                     egui::Order::Foreground,
                     egui::Id::new("test"),
                 ));
+                painter.add(residency_callback(rect, ctx));
                 painter.add(
                     LocalContourCallback::new(
                         LocalContourPass::Surface,
@@ -208,4 +209,65 @@ fn roads_and_contours_render_together_and_deferred_uploads_complete() {
     // Separate slots preserve the contour's thinner stroke alongside roads.
     assert!(pixels[(14 * 64 + 30) * 4] < 100);
     assert!(pixels[(30 * 64 + 30) * 4] > 200);
+
+    // GC executes after all prepares, preserves later road callbacks, releases
+    // absent layers even below budget, and permits return-view uploads.
+    for (show_contour, show_roads, expected) in [
+        (true, false, 1),
+        (false, false, 0),
+        (false, true, 3),
+        (false, true, 4),
+    ] {
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(rect),
+                ..Default::default()
+            },
+            |ctx| {
+                let painter = ctx.layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("test"),
+                ));
+                painter.add(residency_callback(rect, ctx));
+                for (enabled, pass, batches) in [
+                    (
+                        show_contour,
+                        LocalContourPass::Surface,
+                        vec![contour.clone()],
+                    ),
+                    (show_roads, LocalContourPass::Roads, road_batches.clone()),
+                ] {
+                    if enabled {
+                        painter.add(
+                            LocalContourCallback::new(
+                                pass,
+                                batches,
+                                &params,
+                                1.0,
+                                2.0,
+                                4.0,
+                                ctx.clone(),
+                            )
+                            .into_paint_callback(rect),
+                        );
+                    }
+                }
+            },
+        );
+        let jobs = ctx.tessellate(output.shapes, output.pixels_per_point);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let commands = renderer.update_buffers(&device, &queue, &mut encoder, &jobs, &screen);
+        queue.submit(
+            commands
+                .into_iter()
+                .chain(std::iter::once(encoder.finish())),
+        );
+        device.poll(wgpu::Maintain::Wait);
+        let res = renderer
+            .callback_resources
+            .get::<LocalContourPassResources>()
+            .unwrap();
+        assert_eq!(res.tiles.len(), expected);
+        assert_eq!(res.resident_bytes, expected as u64 * 32);
+    }
 }

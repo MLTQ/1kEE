@@ -19,6 +19,9 @@ mod reader;
 #[path = "contour_fallback.rs"]
 mod fallback;
 use reader::spawn_local_read;
+#[path = "contour_residency.rs"]
+mod residency;
+pub(crate) use residency::{leave_local_view, set_local_viewport};
 
 #[cfg(test)]
 #[path = "contour_read_tests.rs"]
@@ -41,9 +44,6 @@ const CONTOUR_READ_RETRY_DELAY: Duration = Duration::from_millis(250);
 /// Keep local-view reads responsive even when the prefetch envelope includes
 /// many cached tiles. The next repaint claims the following nearest batch.
 const LOCAL_CONTOUR_READ_BATCH_SIZE: usize = 8;
-/// Keep a wide decoded-tile envelope while the viewport moves, without
-/// retaining an unbounded trail across a long local-terrain session.
-const LOCAL_CONTOUR_RETAIN_RADIUS: i32 = 16;
 /// Refresh a stationary local manifest periodically so companion cache-builder
 /// writes become visible without polling SQLite every paint.
 const LOCAL_MANIFEST_SNAPSHOT_TTL: Duration = Duration::from_millis(350);
@@ -163,6 +163,8 @@ pub struct LocalContourLoad {
     pub contours: Option<Arc<Vec<ContourPath>>>,
     pub ready_buckets: HashSet<(i32, i32)>,
     pub loading_progress: HashMap<(i32, i32), f32>,
+    /// Cells deliberately excluded by the current screen footprint.
+    pub culled_buckets: HashSet<(i32, i32)>,
     pub status: srtm_focus_cache::FocusContourRegionStatus,
     /// The same tiles the merge flattens, handed out unflattened for the GPU
     /// contour pass. Each `Arc` is stable once loaded, which is what lets the
@@ -348,6 +350,7 @@ impl GlobeRegionCache {
 }
 
 struct LocalRegionCache {
+    residency: residency::Residency,
     scene_key: Option<SceneKey>,
     manifest_snapshot: Option<LocalManifestSnapshot>,
     /// Most recent manifest request, which may be newer than the published
@@ -391,6 +394,7 @@ struct LocalRegionCache {
 impl Default for LocalRegionCache {
     fn default() -> Self {
         Self {
+            residency: residency::Residency::default(),
             scene_key: None,
             manifest_snapshot: None,
             manifest_requested_key: None,
@@ -422,6 +426,7 @@ impl LocalRegionCache {
     }
 
     fn clear_entries_for_new_scene(&mut self) {
+        self.residency.clear_geometry_metadata();
         self.entries.clear();
         self.read_progress.clear();
         self.published_tiles.clear();
@@ -437,6 +442,7 @@ impl LocalRegionCache {
     }
 
     fn reset_all(&mut self) {
+        self.residency = residency::Residency::default();
         self.scene_key = None;
         self.manifest_snapshot = None;
         self.manifest_requested_key = None;
@@ -457,15 +463,10 @@ fn retain_local_entries(
     cache: &mut LocalRegionCache,
     center_lat_bucket: i32,
     center_lon_bucket: i32,
+    source_radius: i32,
 ) {
-    let before = cache.entries.len();
-    cache.entries.retain(|key, _| {
-        local_tile_distance(key, center_lat_bucket, center_lon_bucket)
-            <= LOCAL_CONTOUR_RETAIN_RADIUS
-    });
-
-    if cache.entries.len() != before {
-        cache.mark_entries_changed();
+    if cache.residency.set_window(center_lat_bucket, center_lon_bucket, source_radius) {
+        residency::prune(cache);
     }
 }
 
@@ -693,7 +694,7 @@ fn begin_local_read(
                 lon_bucket: asset.lon_bucket,
                 zoom_bucket: asset.zoom_bucket,
             };
-            (!cache.entries.contains_key(&key) && !cache.in_flight.contains(&key))
+            (cache.residency.wanted(&key) && !cache.entries.contains_key(&key) && !cache.in_flight.contains(&key))
                 .then(|| (key, asset.clone()))
         })
         .collect();
@@ -781,7 +782,8 @@ fn finish_local_read(
         let mut changed = false;
         if let Some(loaded) = loaded {
             for (key, contours) in loaded {
-                if !cache.entries.contains_key(&key) {
+                cache.residency.record(key.clone(), residency::Bounds::from_contours(&contours));
+                if cache.residency.wanted(&key) && !cache.entries.contains_key(&key) {
                     cache.entries.insert(key, Arc::new(contours));
                     changed = true;
                 }
@@ -1141,6 +1143,7 @@ fn load_earth_source_region(
             guard.scene_key = Some(scene_key);
             guard.clear_entries_for_new_scene();
         }
+        retain_local_entries(&mut guard, center_lat_bucket, center_lon_bucket, prefetch_radius);
         guard.last_status = Some(state.status);
         begin_local_read(
             &mut guard,
@@ -1167,7 +1170,6 @@ fn load_earth_source_region(
     // decode arrivals can contain thousands of paths, and cloning them on the
     // paint thread caused the visible tile-arrival hitch.
     let (contours, merge, tiles) = if let Ok(mut guard) = cache.lock() {
-        retain_local_entries(&mut guard, center_lat_bucket, center_lon_bucket);
         let tiles = guard
             .entries
             .iter()
@@ -1206,6 +1208,7 @@ fn load_earth_source_region(
         contours,
         ready_buckets: loading.ready_buckets,
         loading_progress: loading.fractions,
+        culled_buckets: loading.culled_buckets,
         status: loading.status,
         tiles,
     }
@@ -1282,6 +1285,7 @@ pub fn load_lunar_region_for_view(
             guard.scene_key = Some(scene_key);
             guard.clear_entries_for_new_scene();
         }
+        retain_local_entries(&mut guard, center_lat_bucket, center_lon_bucket, prefetch_radius);
         guard.last_status = Some(state.status);
         (!assets.reader_assets().is_empty())
             .then(|| {
@@ -1309,7 +1313,6 @@ pub fn load_lunar_region_for_view(
     }
 
     let (contours, merge) = if let Ok(mut guard) = cache.lock() {
-        retain_local_entries(&mut guard, center_lat_bucket, center_lon_bucket);
         let merge = begin_local_merge(
             &mut guard,
             LocalMergeSpec {
@@ -1339,6 +1342,7 @@ pub fn load_lunar_region_for_view(
         contours,
         ready_buckets: loading.ready_buckets,
         loading_progress: loading.fractions,
+        culled_buckets: loading.culled_buckets,
         status: loading.status,
         // Lunar and Mars keep the CPU renderer; see `LocalContourLoad::tiles`.
         tiles: Vec::new(),
@@ -1414,6 +1418,7 @@ pub fn load_mars_region_for_view(
             guard.scene_key = Some(scene_key);
             guard.clear_entries_for_new_scene();
         }
+        retain_local_entries(&mut guard, center_lat_bucket, center_lon_bucket, prefetch_radius);
         guard.last_status = Some(state.status);
         (!assets.reader_assets().is_empty())
             .then(|| {
@@ -1441,7 +1446,6 @@ pub fn load_mars_region_for_view(
     }
 
     let (contours, merge) = if let Ok(mut guard) = cache.lock() {
-        retain_local_entries(&mut guard, center_lat_bucket, center_lon_bucket);
         let merge = begin_local_merge(
             &mut guard,
             LocalMergeSpec {
@@ -1471,6 +1475,7 @@ pub fn load_mars_region_for_view(
         contours,
         ready_buckets: loading.ready_buckets,
         loading_progress: loading.fractions,
+        culled_buckets: loading.culled_buckets,
         status: loading.status,
         // Lunar and Mars keep the CPU renderer; see `LocalContourLoad::tiles`.
         tiles: Vec::new(),
@@ -2741,9 +2746,9 @@ mod tests {
     }
 
     #[test]
-    fn local_retention_window_prunes_only_distant_tiles() {
-        let retained = test_cache_key(LOCAL_CONTOUR_RETAIN_RADIUS, 0);
-        let distant = test_cache_key(LOCAL_CONTOUR_RETAIN_RADIUS + 1, 0);
+    fn local_retention_window_prunes_tiles_outside_the_current_source_window() {
+        let retained = test_cache_key(2, 0);
+        let distant = test_cache_key(3, 0);
         let mut cache = LocalRegionCache::default();
         cache
             .entries
@@ -2753,7 +2758,7 @@ mod tests {
             .insert(distant.clone(), Arc::new(vec![test_contour(20.0)]));
         cache.mark_entries_changed();
 
-        retain_local_entries(&mut cache, 0, 0);
+        retain_local_entries(&mut cache, 0, 0, 2);
 
         assert!(cache.entries.contains_key(&retained));
         assert!(!cache.entries.contains_key(&distant));

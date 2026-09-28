@@ -25,3 +25,7 @@ The outer coordinator joins all workers before clearing the single-flight
 batch. Successfully published tiles survive a later query failure or panic.
 No SQLite work or decoding runs under the cache mutex. Globe readers retain
 their existing single-reader behavior.
+
+Decoded bounds are computed before locking. Readers retain bounds metadata for
+offscreen results but discard their geometry; progress cannot resurrect an
+evicted tile. Remaining visible requests in the same batch still complete.

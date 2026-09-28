@@ -12,7 +12,8 @@ road detail, and the Moon/Mars pipelines remain independent of this choice.
   transitions between hosted tiers, so fallback works on cold starts and pans.
 - `covers_view` requires actual decoded and published tiles for every core
   intersecting the padded oblique viewport. Known-uncovered progress cells do
-  not count. Empty decoded tiles are valid. The spare prefetch ring is excluded.
+  not count. Empty decoded tiles and deliberately culled screen cells are valid.
+  The spare prefetch ring is excluded.
 - `base_radius` translates the camera footprint onto the SRTM address grid;
   maximum zoom needs only nine base tiles.
 - `choose` displays one complete source tier and its matching loading snapshot.

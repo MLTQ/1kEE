@@ -137,6 +137,10 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
             camera::apply_interaction(ui.ctx(), &response, &mut model.globe_view);
         }
         infrastructure_hover::begin(response.hover_pos().filter(|_| !response.dragged()));
+        painter.add(local_contour_pass::residency_callback(rect, ui.ctx()));
+        if !local_terrain_mode {
+            contour_asset::leave_local_view();
+        }
         let scene = if local_terrain_mode {
             local_terrain_scene::paint(&painter, rect, model, ui.ctx().input(|input| input.time))
         } else {

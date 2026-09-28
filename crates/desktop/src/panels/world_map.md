@@ -58,3 +58,8 @@ FOLLOW EVENTS sits beside MEANDER in cinematic mode on Earth. It retains the cho
 
 The FOLLOW EVENTS tooltip describes the six-stop severity tour, travel capped at
 ten seconds with faster nearby hops, and ten-second orbit dwell.
+
+The canvas submits local line residency cleanup on every frame. Its finish-prepare
+callback drops unused contour/road GPU buffers after all live batches are marked.
+Leaving local mode releases local decoded tiles and CPU contour instances;
+subsequent globe-transition loading is independent of the old local viewport.

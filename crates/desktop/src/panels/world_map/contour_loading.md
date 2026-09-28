@@ -18,3 +18,7 @@ into the local scene's progress snapshot without filesystem work on paint.
 | `contour_asset.rs` | Short cache lock and atomic reads only | Disk access, new workers, or copying geometry on paint |
 | Loading grid | A disk manifest is not the same as completed loading | Hiding cells before decode/publication |
 | Root/zoom changes | Keys include full asset path and zoom; clears remove publication state | Reusing old published tiles in a new scene |
+
+Viewport-culled cells are marked complete without requiring resident geometry.
+`culled_buckets` is distinct from missing/no-source coverage and passes to the
+fine-tier fallback check, preventing offscreen eviction from blocking takeover.

@@ -30,7 +30,7 @@
 use eframe::egui_wgpu;
 use eframe::wgpu;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -172,7 +172,26 @@ pub struct LocalTileBatch {
 #[derive(Default)]
 struct TileInstances {
     current: Option<(u64, Arc<Vec<LocalSegmentInstance>>)>,
-    building: Option<u64>,
+    building: Option<(u64, u64)>, // geometry version and unique worker ticket
+}
+
+static BUILD_TICKET: AtomicU64 = AtomicU64::new(1);
+
+fn finish_instance_build(
+    cache: &mut HashMap<LocalTileId, TileInstances>,
+    id: LocalTileId,
+    version: u64,
+    ticket: u64,
+    instances: Option<Vec<LocalSegmentInstance>>,
+) {
+    if let Some(entry) = cache.get_mut(&id)
+        && entry.building == Some((version, ticket))
+    {
+        entry.building = None;
+        if let Some(instances) = instances {
+            entry.current = Some((version, Arc::new(instances)));
+        }
+    }
 }
 
 fn instance_cache() -> &'static Mutex<HashMap<LocalTileId, TileInstances>> {
@@ -200,6 +219,7 @@ pub fn instances_for_tile(
 ) -> Option<LocalTileBatch> {
     let version = version_key(contours, palette);
 
+    let ticket;
     {
         let mut guard = instance_cache().lock().ok()?;
         let entry = guard.entry(id).or_default();
@@ -212,10 +232,11 @@ pub fn instances_for_tile(
                 instances: instances.clone(),
             });
         }
-        if entry.building == Some(version) {
+        if entry.building.is_some_and(|(v, _)| v == version) {
             return None;
         }
-        entry.building = Some(version);
+        ticket = BUILD_TICKET.fetch_add(1, Ordering::Relaxed);
+        entry.building = Some((version, ticket));
     }
 
     let contours = contours.clone();
@@ -242,20 +263,16 @@ pub fn instances_for_tile(
             }));
 
             if let Ok(mut guard) = instance_cache().lock() {
-                let entry = guard.entry(id).or_default();
-                entry.building = None;
-                // A panicked build releases the gate and leaves any previous
-                // instances displayable rather than wedging the tile.
-                if let Ok(instances) = built {
-                    entry.current = Some((version, Arc::new(instances)));
-                }
+                finish_instance_build(&mut guard, id, version, ticket, built.ok());
             }
             ctx.request_repaint();
         })
         .is_err()
         && let Ok(mut guard) = instance_cache().lock()
+        && let Some(entry) = guard.get_mut(&id)
+        && entry.building == Some((version, ticket))
     {
-        guard.entry(id).or_default().building = None;
+        entry.building = None;
     }
     None
 }
@@ -265,6 +282,14 @@ pub fn instances_for_tile(
 pub fn clear_instances() {
     if let Ok(mut guard) = instance_cache().lock() {
         guard.clear();
+    }
+}
+
+/// Release CPU segment copies as soon as their source tiles leave the view.
+/// Removed worker tickets cannot recreate their entries after finishing.
+pub fn retain_instances(visible: &HashSet<LocalTileId>) {
+    if let Ok(mut guard) = instance_cache().lock() {
+        guard.retain(|id, _| visible.contains(id));
     }
 }
 
@@ -637,6 +662,35 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
     }
 }
 
+/// Always submitted by the map, including frames with no contour/road draws.
+/// Cleanup must run after *all* prepare calls, when every live batch is marked.
+pub fn residency_callback(rect: egui::Rect, ctx: &egui::Context) -> egui::PaintCallback {
+    egui_wgpu::Callback::new_paint_callback(rect, ResidencyCallback { frame: ctx.cumulative_pass_nr() })
+}
+
+struct ResidencyCallback {
+    frame: u64,
+}
+
+impl egui_wgpu::CallbackTrait for ResidencyCallback {
+    fn finish_prepare(
+        &self,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        _encoder: &mut wgpu::CommandEncoder,
+        resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        if let Some(res) = resources.get_mut::<LocalContourPassResources>() {
+            res.tiles.retain(|_, tile| tile.last_used == self.frame);
+            res.resident_bytes = res.tiles.values().map(|tile| tile.bytes).sum();
+            res.publish_resident_bytes();
+        }
+        Vec::new()
+    }
+
+    fn paint(&self, _info: egui::PaintCallbackInfo, _pass: &mut wgpu::RenderPass<'static>, _resources: &egui_wgpu::CallbackResources) {}
+}
+
 #[cfg(test)]
 #[path = "local_line_gpu_tests.rs"]
 mod gpu_tests;
@@ -644,6 +698,21 @@ mod gpu_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evicted_instance_workers_cannot_resurrect_or_overwrite_returned_tiles() {
+        let id = LocalTileId { zoom_bucket: 6, lat_bucket: 0, lon_bucket: 0 };
+        let mut cache = HashMap::new();
+        finish_instance_build(&mut cache, id, 1, 10, Some(vec![]));
+        assert!(cache.is_empty());
+        cache.insert(id, TileInstances { current: None, building: Some((1, 11)) });
+        finish_instance_build(&mut cache, id, 1, 10, Some(vec![]));
+        assert!(cache[&id].current.is_none());
+        assert_eq!(cache[&id].building, Some((1, 11)));
+        finish_instance_build(&mut cache, id, 1, 11, Some(vec![]));
+        assert!(cache[&id].current.is_some());
+        assert!(cache[&id].building.is_none());
+    }
 
     #[test]
     fn the_uniform_block_matches_the_shader_layout() {

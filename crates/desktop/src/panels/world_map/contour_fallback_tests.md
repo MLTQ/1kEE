@@ -17,3 +17,6 @@ Run the integration test with `cargo test -p one-thousand-electric-eye-desktop
 cold_deep_zoom_reads_base_then_upgrades_to_cached_fine_tiles -- --ignored
 --test-threads=1`. The normal unit suite excludes it to avoid global-cache
 interference with other scene tests.
+
+The fine-tier coverage test also distinguishes deliberately culled cells from
+missing visible tiles, so residency pruning cannot force permanent base fallback.

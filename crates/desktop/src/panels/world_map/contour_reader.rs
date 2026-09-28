@@ -7,6 +7,7 @@ pub(super) fn publish_tile(
     key: CacheKey,
     contours: Vec<ContourPath>,
 ) -> bool {
+    let bounds = residency::Bounds::from_contours(&contours);
     let Ok(mut cache) = cache.lock() else {
         return false;
     };
@@ -15,6 +16,10 @@ pub(super) fn publish_tile(
     }
     cache.in_flight.remove(&key);
     cache.read_progress.remove(&key);
+    cache.residency.record(key.clone(), bounds);
+    if !cache.residency.wanted(&key) {
+        return true; // The batch may still contain visible tiles.
+    }
     if let std::collections::hash_map::Entry::Vacant(entry) = cache.entries.entry(key) {
         entry.insert(Arc::new(contours));
         cache.mark_entries_changed();
@@ -61,6 +66,7 @@ pub(super) fn spawn_local_read(
                                         if let Ok(mut guard) = cache.lock()
                                             && guard.load_epoch == epoch
                                             && guard.load_in_flight == Some(epoch)
+                                            && guard.residency.wanted(key)
                                             && total > 0
                                         {
                                             guard

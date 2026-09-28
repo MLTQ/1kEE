@@ -4,6 +4,7 @@ use super::*;
 pub(super) struct Snapshot {
     pub ready_buckets: HashSet<(i32, i32)>,
     pub fractions: HashMap<(i32, i32), f32>,
+    pub culled_buckets: HashSet<(i32, i32)>,
     pub status: srtm_focus_cache::FocusContourRegionStatus,
 }
 
@@ -20,10 +21,44 @@ pub(super) fn snapshot(
         .map(|(&bucket, progress)| (bucket, progress.fraction()))
         .collect();
     let mut guard = cache.lock().ok();
+    let mut culled_buckets = HashSet::new();
+    if let Some(cache) = guard.as_ref()
+        && let Some(window) = cache.manifest_requested_key.as_ref()
+    {
+        let path = assets
+            .display_assets()
+            .first()
+            .map(|a| a.path.clone())
+            .or_else(|| cache.entries.keys().next().map(|k| k.path.clone()))
+            .unwrap_or_default();
+        for lat in window.center_lat_bucket - window.build_radius
+            ..=window.center_lat_bucket + window.build_radius
+        {
+            for lon in window.center_lon_bucket - window.build_radius
+                ..=window.center_lon_bucket + window.build_radius
+            {
+                let key = CacheKey {
+                    path: path.clone(),
+                    zoom_bucket: window.zoom_bucket,
+                    lat_bucket: lat,
+                    lon_bucket: lon,
+                };
+                if !cache.residency.wanted(&key) {
+                    culled_buckets.insert((lat, lon));
+                    if ready.insert((lat, lon)) {
+                        status.ready_assets = (status.ready_assets + 1).min(status.total_assets);
+                        if assets.build_progress.contains_key(&(lat, lon)) {
+                            status.pending_assets = status.pending_assets.saturating_sub(1);
+                        }
+                    }
+                }
+            }
+        }
+    }
     for asset in assets.display_assets() {
         let bucket = (asset.lat_bucket, asset.lon_bucket);
         // Ignore assets outside the currently counted build window.
-        if !ready.contains(&bucket) {
+        if !ready.contains(&bucket) || culled_buckets.contains(&bucket) {
             continue;
         }
         let key = CacheKey {
@@ -71,6 +106,7 @@ pub(super) fn snapshot(
     Snapshot {
         ready_buckets: ready,
         fractions,
+        culled_buckets,
         status,
     }
 }

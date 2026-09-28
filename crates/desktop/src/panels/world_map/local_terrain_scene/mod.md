@@ -210,3 +210,12 @@ Local cable hover reuses the exact projected route vertices during painting. Onl
 Event follow permits event indicators during cinematic playback so the orbit has a visible event reference. Ordinary cinematic meander still hides them.
 
 Event markers use `map_events` so a followed target stays visible after aging out of the live page.
+
+### Visible tile residency
+
+Before loading, the scene supplies the exact projection and clip rectangle to
+`contour_residency`. Decoded tiles outside it are unloaded, with an eight-point
+edge guard and elevation-aware bounds. Both Earth source tiers are pruned;
+Moon/Mars preserve their ownership envelope for tiles that can cross the view.
+GPU instance residency follows the displayed Earth tiles, and hidden contours
+release their instance copies. Disk cache contents are unchanged.

@@ -39,6 +39,7 @@ fn frame(zoom: f32, radius: i32, with_lines: bool) -> LocalContourLoad {
             .map(|t| (t.id.lat_bucket, t.id.lon_bucket))
             .collect(),
         loading_progress: HashMap::new(),
+        culled_buckets: HashSet::new(),
         status: srtm_focus_cache::FocusContourRegionStatus {
             ready_assets: tiles.len(),
             pending_assets: 0,
@@ -123,6 +124,18 @@ fn fine_arrivals_remain_visible_if_no_base_source_exists() {
     let fine = frame(60.0, 0, true);
     let chosen = choose(fine, frame(BASE_ZOOM, 1, false));
     assert_eq!(chosen.source_zoom, 60.0);
+}
+
+#[test]
+fn culled_cells_do_not_block_fine_takeover_but_missing_visible_cells_do() {
+    let center = GeoPoint { lat: 0.0, lon: 0.0 };
+    let mut fine = frame(60.0, 2, true);
+    fine.tiles.retain(|t| t.id.lon_bucket != 2);
+    assert!(!covers_view(&fine, center, 60.0));
+    fine.culled_buckets.extend((-2..=2).map(|lat| (lat, 2)));
+    assert!(covers_view(&fine, center, 60.0));
+    fine.tiles.retain(|t| (t.id.lat_bucket, t.id.lon_bucket) != (0, 0));
+    assert!(!covers_view(&fine, center, 60.0));
 }
 
 /// Uses the public asynchronous loader and a temporary SQLite cache, never

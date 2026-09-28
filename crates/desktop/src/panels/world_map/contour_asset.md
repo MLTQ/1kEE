@@ -18,8 +18,8 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 
 ### `LocalRegionCache`
 - **Does**: Tracks currently visible local-terrain tiles, a generation-safe
-  single in-flight SQLite/WKB batch, a wide decoded return-pan envelope,
-  background manifest/merge workers, and zoom fallback geometry. It merges
+  single in-flight SQLite/WKB batch, bounds metadata for unloaded tiles,
+  background manifest/merge workers, screen-space residency, and zoom fallback geometry. It merges
   the active 13×13 source envelope off-thread so overlapping Moon/Mars
   contours owned by an outer tile cannot vanish at the visible edge or stall
   paint; the local draw pass performs its existing geographic AABB cull before
@@ -112,10 +112,10 @@ Loads contour geometry from disk into in-memory render caches for both local ter
   any failed-build cooldowns after a user fixes storage/source availability.
 - Ready-but-empty tiles are cached as empty results, avoiding repeated SQLite
   reads for nodata terrain while preserving an existing zoom fallback.
-- Local terrain retains a bounded 12-tile return-pan envelope. Its full local
-  prefetch envelope is both the merge source and build window, ensuring a cold
-  outer Moon/Mars ownership tile cannot leave a gap at the visible edge. The
-  globe keeps its own smaller fetch behavior.
+- Local terrain retains decoded tiles only within the current source window
+  and projected viewport. Geometry bounds are measured on reader workers and
+  survive as small, bounded metadata after eviction. Legacy and Moon/Mars
+  full footprints remain candidates until their actual bounds are known.
 - Local manifest selections are reused while the viewport remains in the same
   bucket. Their refresh and on-demand build selection happen in a single
   worker; in-process builder completion invalidates them immediately, while a
@@ -126,9 +126,9 @@ Loads contour geometry from disk into in-memory render caches for both local ter
   owns read scheduling, so a root, zoom, or envelope change correctly reports
   unknown terrain rather than reusing stale data.
 - A local read batch is intentionally eight tiles, with at most two readers
-  and immediate per-tile publication. The full 13×13 envelope is
-  still retained and eventually decoded, but small center-first arrivals avoid
-  a burst of thousands of new paths in one frame.
+  and immediate per-tile publication. Only candidates intersecting the current
+  viewport are decoded; small center-first arrivals avoid a burst of thousands
+  of new paths in one frame.
 - Full tile flattening and lunar/Mars ownership partitioning use an immutable
   `Arc` snapshot on a background worker. A result only replaces the displayed
   merge if its cache revision and requested camera window still match.
@@ -179,8 +179,13 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 
 - GeoPackage decoding is shared with archive creation through `tile_archive::gpkg`. Packed CTF1 tiles already contain the renderer’s f32 coordinates; the runtime validates counts and skips GeoPackage parsing and f64 conversion.
 
-- Earth local requests use the core-aware viewport envelope. Retention reaches
-  16 rings and deep tiers keep the previous 10,000-feature per-asset floor so
+- Earth local requests use the core-aware viewport envelope. Deep tiers keep
+  the previous 10,000-feature per-asset floor so
   selecting more small cores does not silently reduce detail in legacy tiles.
   Globe Earth requests five rings to retain former coverage with smaller cores.
   Legacy full-footprint geometry and existing .1ka reads are preserved.
+
+- `contour_residency.rs` uses actual oblique projection and worker-computed
+  bounds to evict offscreen geometry. Both Earth tiers receive each camera
+  update; late readers cannot repopulate an excluded tile. Merges replace the
+  previous snapshot asynchronously; empty windows release it immediately.

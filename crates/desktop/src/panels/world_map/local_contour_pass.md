@@ -21,7 +21,7 @@ uniform slot and a typed cache namespace so roads never overwrite contour tiles.
 - **Interacts with**: `contour_asset::LocalContourLoad::tiles`, Rayon.
 - **Rationale**: Geometry is keyed **per source tile**, not per merged set.
   Each tile's `Arc<Vec<ContourPath>>` is stable once loaded, so its instances
-  are built once, uploaded once, and never touched again. A tile arriving
+  are built and uploaded once while resident. A tile arriving
   mid-navigation allocates its own buffer and disturbs nothing.
 
 ### `LocalSegmentInstance`
@@ -30,7 +30,7 @@ uniform slot and a typed cache namespace so roads never overwrite contour tiles.
   baked premultiplied-linear colour, and a major/minor flag. 32 bytes.
 - **Rationale**: Endpoints are raw geography and the shader applies the whole
   transform, so a tile's instances stay valid under any camera motion — panning,
-  rotating and zooming never rebuild or re-upload anything.
+  rotating and zooming reuse resident buffers; returning after eviction reloads them.
 
 ### `LocalContourCallback`
 
@@ -86,8 +86,9 @@ uniform slot and a typed cache namespace so roads never overwrite contour tiles.
   envelope over consecutive frames instead of stalling on one.
 - The upload cap is three batches per callback; roads use at most 2 MiB batches.
   Deferred uploads request repaint; stale versions are never painted in place
-  of requested geometry. egui's pass counter drives eviction even without any
-  contour pass. Current/previous-pass entries survive other callbacks preparing.
+  of requested geometry. The map submits a residency callback even with no
+  line passes. After all prepares it drops GPU buffers unused by this frame,
+  including hidden layers. Later road prepares cannot lose their live buffers.
 - Road/contour hardware regression in `local_line_gpu_tests.rs` checks actual
   shader pixels at joins, separate widths, and completion of deferred uploads.
 - A single tile can exceed the device's `max_buffer_size` on its own — a dense
@@ -99,3 +100,10 @@ uniform slot and a typed cache namespace so roads never overwrite contour tiles.
   pins the arithmetic the vertex shader was transcribed from. wgpu validates the
   vertex attribute layout against the shader at pipeline creation, so that class
   of mismatch fails loudly at startup.
+
+- `retain_instances` releases CPU segment copies for absent source tiles.
+  Monotonic build tickets prevent late or superseded workers from recreating
+  an evicted entry or overwriting its return-pan replacement.
+- `residency_callback` frees every GPU batch unused in the current egui pass
+  during `finish_prepare`, after all contour/road preparations have completed.
+  This runs regardless of the memory budget or whether any line layer is shown.

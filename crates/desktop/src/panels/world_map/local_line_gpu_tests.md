@@ -12,3 +12,8 @@ GPU callback preparation and painting, using a private 64×64 offscreen texture.
 - Test creates no window and does not alter user caches, settings or running app.
 - Run with `cargo test -p one-thousand-electric-eye-desktop
   roads_and_contours_render_together -- --ignored --nocapture` (one line).
+
+The same hardware test includes residency cleanup before draw callbacks. It
+checks that later road callbacks survive cleanup, absent layers release their
+buffers even below budget, a frame without line draws reaches zero bytes, and
+returning roads reupload completely across the normal upload limit.

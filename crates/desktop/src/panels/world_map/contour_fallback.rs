@@ -106,7 +106,7 @@ fn covers_view(load: &LocalContourLoad, center: GeoPoint, view_zoom: f32) -> boo
         })
         .map(|tile| (tile.id.lat_bucket, tile.id.lon_bucket))
         .collect();
-    (lat_min..=lat_max).all(|lat| (lon_min..=lon_max).all(|lon| decoded.contains(&(lat, lon))))
+    (lat_min..=lat_max).all(|lat| (lon_min..=lon_max).all(|lon| decoded.contains(&(lat, lon)) || load.culled_buckets.contains(&(lat, lon))))
 }
 
 fn has_geometry(load: &LocalContourLoad) -> bool {
