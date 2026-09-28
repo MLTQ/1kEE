@@ -17,10 +17,10 @@ dorking path.
 
 ### `fetch`
 
-- **Does**: Walks through Insecam's source-advertised page count, with
-  empty/repeated-page fallbacks, deduplicates advertised public-IP URLs, reuses
-  fresh metadata, enriches cache misses concurrently, and returns normalized
-  `CameraFeed` records.
+- **Does**: Loads saved verified endpoints immediately. For a scope without a
+  cache, or an explicit Search again request, walks Insecam listings and checks
+  candidates concurrently. Check saved endpoints probes only saved feed URLs.
+  Returns normalized `CameraFeed` records.
 - **Interacts with**: `CameraFeed` in `model/cameras.rs` and the shared blocking
   HTTP client owned by `camera_registry.rs`.
 - **Rationale**: Network work remains off the UI thread; request starts are
@@ -64,9 +64,18 @@ dorking path.
 - Pagination has no fixed 1kEE page/count ceiling. It follows the page total in
   Insecam's `pagenavigator` markup; the first empty or fully repeated page also
   ends the crawl, and HTTP 404/410 responses are treated as the end.
-- Completed directory crawls are reused for 30 minutes; successful camera
-  enrichment is reused for six hours and negative results for 30 minutes.
+- Verified endpoints persist through `endpoints.rs` without automatic expiry.
+  Ordinary startup/polls do not crawl or probe a populated/initialized scope.
+  Explicit discovery bypasses the short-lived listing/enrichment reuse caches.
+  Successful probes are checkpointed before the whole job finishes; failed
+  refreshes preserve the last good cache. Rechecks use the same 16-worker pool
+  limit and shared request pacer as discovery.
 - Insecam documents its coordinates as approximate. 1kEE preserves them as
   source metadata rather than presenting them as surveyed positions.
 - Project Eyes On is MIT-licensed by Y0oshi; this implementation is an original
   Rust adaptation of its pipeline design.
+
+`fetch_with_store` separates durable reuse from live discovery/rechecking for
+fixture-driven verification. Disk errors surface as registry errors rather than
+silently causing a startup crawl. Cached reachability is historical, labeled
+with verification age; newly discovered unverified feeds are not published.

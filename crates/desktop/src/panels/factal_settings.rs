@@ -7,6 +7,9 @@ use crate::settings_store;
 use crate::terrain_assets;
 use crate::theme;
 
+#[path = "camera_endpoint_settings.rs"]
+mod camera_endpoints;
+
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum SettingsTab {
     #[default]
@@ -311,9 +314,10 @@ fn tab_apis(ui: &mut egui::Ui, model: &mut AppModel) {
     ui.small(
         "Blank country means the global popularity listing. Scanning follows the directory's \
          advertised page count, with empty/repeated-page fallbacks. Request starts are paced \
-         globally; recent directory, location, and feed results are reused. Coordinates are \
+         globally. Saved working endpoints are reused on startup and ordinary polls. Coordinates are \
          approximate source metadata.",
     );
+    camera_endpoints::render(ui, model);
 
     ui.add_space(14.0);
     ui.separator();

@@ -49,3 +49,10 @@ Renders the app settings window for the desktop app. This file is the user-facin
   so both need to be visible and adjustable rather than implicit. The budget is
   a ceiling on cached elevation chunks only — contours already extracted from
   them are kept in the focus cache and survive eviction.
+
+### Saved directory endpoints
+
+`camera_endpoint_settings.rs` adds Search again, Check saved endpoints, Remove
+failed and per-endpoint Forget controls below the directory scope settings.
+Disk work runs on workers; network operations use the existing cancellable
+registry worker and request pace. Ordinary Poll Now reuses saved endpoints.

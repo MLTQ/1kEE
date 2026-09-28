@@ -136,6 +136,13 @@ pub(super) fn prune_expired() {
         .prune_expired();
 }
 
+/// Explicit discovery bypasses the short-lived listing/enrichment cache.
+pub(super) fn invalidate_scope(scope: &str) {
+    let mut cache = cache().lock().unwrap_or_else(|p| p.into_inner());
+    cache.directories.remove(scope);
+    cache.enrichments.clear();
+}
+
 pub(super) fn directory_scope_key(country_code: Option<&str>) -> String {
     country_code
         .filter(|code| !code.trim().is_empty())

@@ -5,6 +5,7 @@
 //! discover advertised feeds, deduplicate them, read coordinates from the
 //! directory's own detail pages, and perform a paced reachability probe.
 
+pub mod endpoints;
 mod runtime;
 
 use crate::model::{CameraConnectionState, CameraFeed, GeoPoint};
@@ -37,6 +38,9 @@ pub struct EyesOnPipelineConfig {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EyesOnPipelineProgress {
+    SavedEndpoints {
+        count: usize,
+    },
     DirectoryPages {
         completed: usize,
         total: Option<usize>,
@@ -81,6 +85,152 @@ pub fn fetch<F>(
 ) -> Result<Vec<CameraFeed>, String>
 where
     F: Fn(EyesOnPipelineProgress) + Sync,
+{
+    let store = endpoints::Store::open_default()?;
+    fetch_with_store(client, config, cancelled, on_progress, &store)
+}
+
+fn fetch_with_store<F>(
+    client: &Client,
+    config: &EyesOnPipelineConfig,
+    cancelled: &AtomicBool,
+    on_progress: F,
+    store: &endpoints::Store,
+) -> Result<Vec<CameraFeed>, String>
+where
+    F: Fn(EyesOnPipelineProgress) + Sync,
+{
+    if cancelled.load(Ordering::Acquire) {
+        return Err("camera scan cancelled".into());
+    }
+    let scope = runtime::directory_scope_key(config.country_code.as_deref());
+    let plan = store
+        .plan(&scope)
+        .map_err(|e| format!("Camera endpoint cache: {e}"))?;
+    if plan.action == endpoints::Action::Cached {
+        on_progress(EyesOnPipelineProgress::SavedEndpoints {
+            count: plan.snapshot.endpoints.len(),
+        });
+        return Ok(plan
+            .snapshot
+            .endpoints
+            .into_iter()
+            .map(|entry| entry.camera)
+            .collect());
+    }
+    if plan.action == endpoints::Action::Check {
+        return recheck_saved(client, config, cancelled, &on_progress, store, &scope, plan);
+    }
+    // A discovery request always walks current listings and checks current feeds.
+    runtime::invalidate_scope(&scope);
+    let cameras = discover(client, config, cancelled, &on_progress, &|camera| {
+        store
+            .record(&scope, plan.revision, camera)
+            .map_err(|e| e.to_string())
+    })?;
+    if !store
+        .complete(&scope, plan.revision, plan.action)
+        .map_err(|e| e.to_string())?
+    {
+        return Err("camera cache changed during discovery".into());
+    }
+    // Preserve previously verified endpoints absent from today's listing.
+    // New unverified discoveries are intentionally not published or persisted.
+    drop(cameras);
+    Ok(store
+        .snapshot(&scope)
+        .map_err(|e| e.to_string())?
+        .endpoints
+        .into_iter()
+        .map(|entry| entry.camera)
+        .collect())
+}
+
+fn recheck_saved<F>(
+    client: &Client,
+    config: &EyesOnPipelineConfig,
+    cancelled: &AtomicBool,
+    on_progress: &F,
+    store: &endpoints::Store,
+    scope: &str,
+    plan: endpoints::Plan,
+) -> Result<Vec<CameraFeed>, String>
+where
+    F: Fn(EyesOnPipelineProgress) + Sync,
+{
+    let pacer = RequestPacer::new(config.requests_per_minute);
+    let total = plan.snapshot.endpoints.len();
+    let reachable = AtomicUsize::new(0);
+    let completed = AtomicUsize::new(0);
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(ENRICHMENT_WORKERS)
+        .thread_name(|index| format!("camera-recheck-{index}"))
+        .build()
+        .map_err(|e| e.to_string())?;
+    pool.install(|| {
+        plan.snapshot
+            .endpoints
+            .into_par_iter()
+            .try_for_each(|entry| -> Result<(), String> {
+                if cancelled.load(Ordering::Acquire) {
+                    return Err("camera check cancelled".into());
+                }
+                let mut camera = entry.camera;
+                let (kind, status) = probe_feed(client, &camera.stream_url, &pacer, cancelled)
+                    .ok_or("camera check cancelled")?;
+                if cancelled.load(Ordering::Acquire) {
+                    return Err("camera check cancelled".into());
+                }
+                camera.kind = kind;
+                camera.status = status;
+                if !store
+                    .record(scope, plan.revision, &camera)
+                    .map_err(|e| e.to_string())?
+                {
+                    return Err("camera cache changed during check".into());
+                }
+                if status == CameraConnectionState::Reachable {
+                    reachable.fetch_add(1, Ordering::AcqRel);
+                }
+                let done = completed.fetch_add(1, Ordering::AcqRel) + 1;
+                on_progress(EyesOnPipelineProgress::FeedChecks {
+                    completed: done,
+                    total,
+                    geolocated: total,
+                    reachable: reachable.load(Ordering::Acquire),
+                    reused: 0,
+                });
+                Ok(())
+            })
+    })?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err("camera check cancelled".into());
+    }
+    if !store
+        .complete(scope, plan.revision, plan.action)
+        .map_err(|e| e.to_string())?
+    {
+        return Err("camera cache changed during check".into());
+    }
+    Ok(store
+        .snapshot(scope)
+        .map_err(|e| e.to_string())?
+        .endpoints
+        .into_iter()
+        .map(|entry| entry.camera)
+        .collect())
+}
+
+fn discover<F, S>(
+    client: &Client,
+    config: &EyesOnPipelineConfig,
+    cancelled: &AtomicBool,
+    on_progress: &F,
+    save: &S,
+) -> Result<Vec<CameraFeed>, String>
+where
+    F: Fn(EyesOnPipelineProgress) + Sync,
+    S: Fn(&CameraFeed) -> Result<bool, String> + Sync,
 {
     runtime::prune_expired();
     let pacer = RequestPacer::new(config.requests_per_minute);
@@ -130,19 +280,22 @@ where
         .thread_name(|index| format!("camera-enrichment-{index}"))
         .build()
         .map_err(|error| error.to_string())?;
-    let fresh: Vec<Option<CameraFeed>> = pool.install(|| {
+    let fresh: Result<Vec<Option<CameraFeed>>, String> = pool.install(|| {
         pending
             .into_par_iter()
             .map(|candidate| {
                 if cancelled.load(Ordering::Acquire) {
-                    return None;
+                    return Ok(None);
                 }
                 let camera = enrich_candidate(client, &candidate, &pacer, cancelled);
                 if cancelled.load(Ordering::Acquire) {
-                    return None;
+                    return Ok(None);
                 }
                 runtime::store_enrichment(&candidate, camera.clone());
                 if let Some(camera) = &camera {
+                    if !save(camera)? {
+                        return Err("camera cache changed during discovery".into());
+                    }
                     geolocated.fetch_add(1, Ordering::AcqRel);
                     if camera.status == CameraConnectionState::Reachable {
                         reachable.fetch_add(1, Ordering::AcqRel);
@@ -156,7 +309,7 @@ where
                     reachable: reachable.load(Ordering::Acquire),
                     reused,
                 });
-                camera
+                Ok(camera)
             })
             .collect()
     });
@@ -164,7 +317,7 @@ where
     if cancelled.load(Ordering::Acquire) {
         return Err("camera scan cancelled".into());
     }
-    cameras.extend(fresh.into_iter().flatten());
+    cameras.extend(fresh?.into_iter().flatten());
     cameras.sort_by(|left, right| left.id.cmp(&right.id));
     Ok(cameras)
 }

@@ -42,6 +42,9 @@ normalization.
 
 ## Notes
 
-- Caches are memory-only and are discarded when 1kEE exits.
+- These short-lived caches remain memory-only. Durable verified endpoints are
+  owned by sibling `endpoints.rs`; startup and regular polls use that store.
+- `invalidate_scope` makes explicit discovery refresh listing/enrichment data
+  even when the previous in-process crawl is still within its TTL.
 - A changed camera id, URL, detail URL, brand, or location hint forces fresh
   enrichment.

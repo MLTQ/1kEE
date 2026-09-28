@@ -163,7 +163,7 @@ pub fn tick(model: &mut AppModel) {
             model.camera_registry_status = "syncing".into();
             model.camera_registry_scanning = true;
             model.camera_registry_progress = 0.01;
-            model.camera_registry_progress_label = "Starting camera discovery…".into();
+            model.camera_registry_progress_label = "Loading camera sources…".into();
         }
     }
 }
@@ -200,14 +200,9 @@ fn apply_outcome(model: &mut AppModel, generation: u64, outcome: PollOutcome) {
             cameras,
             source_label,
         } => {
-            if cameras.is_empty() {
-                model.camera_registry_status = "empty".into();
-                model.push_log(format!(
-                    "Camera registry sync completed but returned no cameras from {source_label}."
-                ));
-            } else {
-                model.replace_camera_registry(cameras, &source_label);
-            }
+            // An intentionally emptied endpoint cache must clear old markers,
+            // including when the settings window closed before its worker ended.
+            model.replace_camera_registry(cameras, &source_label);
         }
         PollOutcome::Error(error) => {
             model.camera_registry_status = "error".into();
@@ -231,6 +226,10 @@ fn report_progress(progress: &Sender<PollProgress>, fraction: f32, label: impl I
 
 fn eyes_on_poll_progress(scope: &str, progress: EyesOnPipelineProgress) -> PollProgress {
     match progress {
+        EyesOnPipelineProgress::SavedEndpoints { count } => PollProgress {
+            fraction: 0.95,
+            label: format!("Loaded {count} saved {scope} camera endpoint(s)"),
+        },
         EyesOnPipelineProgress::DirectoryPages {
             completed,
             total,

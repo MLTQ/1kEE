@@ -14,7 +14,9 @@ Runs the live camera registry polling loop for the desktop app. This module owns
 - **Rationale**: Keeps network fetches off the UI thread while letting the app refresh camera metadata around the current focus
 
 ### `invalidate`
-- **Does**: Cancels an active registry worker and forces the next app tick to treat the current camera-source configuration and focus location as stale and refresh again immediately
+- **Does**: Cancels an active registry worker and schedules a new provider poll.
+  Saved directory endpoints remain cached unless Settings explicitly requests
+  discovery or rechecking through the endpoint store.
 - **Interacts with**: `factal_settings.rs`
 
 ### `fetch_511ny_cameras`
@@ -59,3 +61,7 @@ Runs the live camera registry polling loop for the desktop app. This module owns
 - Registry adapters remain metadata-oriented. The Project Eyes On adapter adds
   a paced header/reachability probe; actual snapshot/MJPEG reading starts
   only after a user opens a pip in `camera_feed_viewer.rs`.
+
+Saved endpoint reuse has its own progress label. Successful empty results now
+replace the previous registry, so forgetting the last endpoint clears old markers
+even if the Settings window closes before its cache worker completes.
