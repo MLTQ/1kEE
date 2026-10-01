@@ -30,6 +30,22 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                 // ── BASE ─────────────────────────────────────────────────────
                 section_label(ui, "BASE");
                 ui.checkbox(&mut model.show_event_markers, "Events");
+                ui.checkbox(&mut model.show_camera_markers, "Webcams");
+                ui.label("Marker size");
+                let mut marker_percent = model.marker_scale() * 100.0;
+                let response = ui.add(
+                    egui::Slider::new(&mut marker_percent,
+                        settings_store::MIN_MARKER_SCALE * 100.0..=settings_store::MAX_MARKER_SCALE * 100.0)
+                        .step_by(5.0).suffix("%").max_decimals(0)
+                ).on_hover_text("Sizes webcam and event markers in both views, including light-spire height and glow. Saved between launches.");
+                if response.changed() {
+                    model.set_marker_scale(marker_percent / 100.0);
+                }
+                if (response.drag_stopped() || (response.changed() && !response.dragged()))
+                    && let Err(error) = model.save_settings()
+                {
+                    model.push_log(format!("Marker size save failed: {error}"));
+                }
                 ui.checkbox(&mut model.show_coastlines, "Coastline");
                 ui.checkbox(&mut model.show_bathymetry, "Bathymetry");
                 ui.checkbox(&mut model.show_graticule, "Graticule");

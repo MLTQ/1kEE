@@ -74,3 +74,9 @@ optional external overlays without owning their data pipelines.
 The Pipelines section delegates public source/product/status filters and reload to `world_map::pipeline_controls`. An independent OSM local-view toggle retains the original infrastructure layer.
 
 Oil & gas platforms is an independent infrastructure toggle. Its delegated controls identify static coverage and expose optional historical, construction and support installations.
+
+### Marker size
+The Base section exposes Webcams and a 25–200% Marker size slider for webcam/event
+glyphs in both views. Changes paint immediately and save on release or keyboard
+adjustment using the existing settings flow. Height, ground strike and glow scale
+together; unrelated point layers retain their own styles.

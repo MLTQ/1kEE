@@ -20,7 +20,7 @@ marker styling from scene composition and geographic projection.
   `FlightTrack::category`.
 
 ### Event and camera marker helpers
-- **Does**: Paints event beams/flares, green camera pips, and links between
+- **Does**: Paints event beams/flares, camera links, and links between
   selected events and cameras.
 - **Interacts with**: `globe_scene/mod.rs` and `ProjectedPoint`.
 
@@ -38,3 +38,7 @@ marker styling from scene composition and geographic projection.
   projected list can feed drawing, click handling, and hover handling.
 - Draw helpers must not filter or reorder their input; that would diverge their
   output from `GlobeScene` hit-test vectors.
+
+Event/replay beam widths, ground strikes and selection/spawn rings accept the
+shared marker scale. Camera spires are drawn by the shared `marker_style::draw_camera_spire` helper.
+`marker_style::draw_beam` supplies the common taper, also used by local webcams.

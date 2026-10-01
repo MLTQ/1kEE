@@ -34,7 +34,7 @@ model and viewport into an egui-painted `GlobeScene` each frame.
   sphere, so negative synthetic terrain offsets must not pull indicators
   inside the visible globe.
 
-### Global camera-dot layer
+### Global webcam spire layer
 
 - **Does**: Projects every normalized registry camera on Earth while retaining
   event-to-camera links only for the selected event's 250 km nearby subset.
@@ -109,3 +109,7 @@ Offshore installation diamonds use cached projected meshes. Unit-sphere perspect
 Built-in cable drawing receives its source catalogue for route hover; uploaded overlays receive none. The existing landing point indices and visibility contract remain intact.
 
 Event markers use `map_events`, including an active idle target that has aged out of the live page.
+
+Webcam/event output now carries `MapMarker` base/tip/scale geometry for identical
+hover/click picking. Events and replay tips scale radially from the sphere; globe
+webcams use shorter green surface-normal spires. Event-camera links still use ground anchors.

@@ -3,6 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+pub(crate) const MIN_MARKER_SCALE: f32 = 0.25;
+pub(crate) const MAX_MARKER_SCALE: f32 = 2.0;
+
 const SETTINGS_FILE: &str = ".1kee_settings.json";
 
 /// The default keeps the contour renderer byte-for-byte equivalent to the
@@ -92,6 +95,9 @@ pub struct AppSettings {
     /// `contour_stroke_scale` as a backwards-compatible legacy fallback.
     #[serde(default)]
     pub contour_stroke_width_px: Option<f32>,
+    /// Relative size of webcam and event markers in both map views.
+    #[serde(default = "default_marker_scale")]
+    pub marker_scale: f32,
     /// Enables on-demand detailed elevation from USGS and international
     /// providers. The persisted key is retained for settings compatibility.
     #[serde(default = "default_threedep_enabled")]
@@ -124,10 +130,23 @@ impl Default for AppSettings {
             prefer_overpass: false,
             contour_stroke_scale: DEFAULT_CONTOUR_STROKE_SCALE,
             contour_stroke_width_px: None,
+            marker_scale: default_marker_scale(),
             threedep_enabled: true,
             threedep_cache_budget_gb: DEFAULT_THREEDEP_CACHE_BUDGET_GB,
             local_contour_vram_budget_gb: DEFAULT_LOCAL_CONTOUR_VRAM_BUDGET_GB,
         }
+    }
+}
+
+fn default_marker_scale() -> f32 {
+    1.0
+}
+
+pub(crate) fn normalize_marker_scale(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(MIN_MARKER_SCALE, MAX_MARKER_SCALE)
+    } else {
+        default_marker_scale()
     }
 }
 
@@ -422,6 +441,7 @@ fn normalize_settings(mut settings: AppSettings) -> AppSettings {
         normalize_local_contour_vram_budget_gb(settings.local_contour_vram_budget_gb);
     settings.planet_path = normalize_optional_owned(settings.planet_path);
     settings.gdal_bin_dir = normalize_optional_owned(settings.gdal_bin_dir);
+    settings.marker_scale = normalize_marker_scale(settings.marker_scale);
     settings.contour_stroke_scale = normalize_contour_stroke_scale(settings.contour_stroke_scale);
     settings.contour_stroke_width_px =
         normalize_optional_contour_stroke_width_px(settings.contour_stroke_width_px);
@@ -514,6 +534,23 @@ fn path_from_optional(text: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn marker_size_survives_serialization_and_normalizes_legacy_or_invalid_values() {
+        let legacy: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.marker_scale, 1.0);
+        let mut settings = legacy;
+        settings.marker_scale = 0.55;
+        let json = serde_json::to_string(&settings).unwrap();
+        let restored = normalize_settings(serde_json::from_str(&json).unwrap());
+        assert_eq!(restored.marker_scale, 0.55);
+        settings.marker_scale = f32::NAN;
+        assert_eq!(normalize_settings(settings.clone()).marker_scale, 1.0);
+        settings.marker_scale = 100.0;
+        assert_eq!(normalize_settings(settings.clone()).marker_scale, MAX_MARKER_SCALE);
+        settings.marker_scale = -1.0;
+        assert_eq!(normalize_settings(settings).marker_scale, MIN_MARKER_SCALE);
+    }
 
     #[test]
     fn contour_stroke_settings_default_to_the_legacy_visual_weight() {

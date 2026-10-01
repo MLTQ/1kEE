@@ -219,3 +219,8 @@ edge guard and elevation-aware bounds. Both Earth source tiers are pruned;
 Moon/Mars preserve their ownership envelope for tiles that can cross the view.
 GPU instance residency follows the displayed Earth tiles, and hidden contours
 release their instance copies. Disk cache contents are unchanged.
+
+Webcam/event spires share saved marker sizing. Bases still sample the displayed
+terrain; tips extend along the projector’s screen-up vertical axis at a stable
+logical-point height. `MapMarker` returns the exact drawn base/tip/scale for hover
+and click picking, independent of terrain availability. Links use ground bases.

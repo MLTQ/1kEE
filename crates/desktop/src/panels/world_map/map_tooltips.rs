@@ -1,4 +1,4 @@
-use super::globe_scene;
+use super::{globe_scene, marker_style};
 use crate::model::{AppModel, FlightCategory};
 use crate::theme;
 
@@ -12,20 +12,15 @@ pub(super) fn draw_event_hover_tooltip(
         return;
     };
 
-    let Some((event_id, marker_pos)) = scene
-        .event_markers
-        .iter()
-        .find(|(_, marker)| marker.distance(pointer) <= 12.0)
-    else {
+    let Some(marker) = marker_style::pick(&scene.event_markers, pointer) else {
         return;
     };
-
-    let Some(event) = model.events.iter().find(|event| event.id == *event_id) else {
+    let Some(event) = model.map_events().find(|event| event.id == marker.id) else {
         return;
     };
 
     egui::Area::new("event_hover_tooltip".into())
-        .fixed_pos(*marker_pos + egui::vec2(14.0, -8.0))
+        .fixed_pos(pointer + egui::vec2(14.0, -8.0))
         .interactable(false)
         .show(ctx, |ui| {
             egui::Frame::new()
@@ -50,19 +45,15 @@ pub(super) fn draw_camera_hover_tooltip(
     let Some(pointer) = hover_pos else {
         return;
     };
-    let Some((camera_id, marker_pos)) = scene
-        .camera_markers
-        .iter()
-        .find(|(_, marker)| marker.distance(pointer) <= 10.0)
-    else {
+    let Some(marker) = marker_style::pick(&scene.camera_markers, pointer) else {
         return;
     };
-    let Some(camera) = model.cameras.iter().find(|camera| camera.id == *camera_id) else {
+    let Some(camera) = model.cameras.iter().find(|camera| camera.id == marker.id) else {
         return;
     };
 
     egui::Area::new("camera_hover_tooltip".into())
-        .fixed_pos(*marker_pos + egui::vec2(14.0, -8.0))
+        .fixed_pos(pointer + egui::vec2(14.0, -8.0))
         .interactable(false)
         .show(ctx, |ui| {
             egui::Frame::new()

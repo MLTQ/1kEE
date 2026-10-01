@@ -1,3 +1,4 @@
+use super::super::marker_style::{MapMarker, draw_beam};
 use crate::model::{ActiveFlare, EventRecord, FlightCategory, FlightTrack, MovingTrack};
 use crate::theme;
 
@@ -162,20 +163,21 @@ pub(super) fn draw_event_marker(
     event: &EventRecord,
     is_selected: bool,
     time: f64,
+    scale: f32,
 ) {
     let col = event.severity.color();
-    draw_beam(painter, base.pos, tip, col, 1.0);
+    draw_beam(painter, base.pos, tip, col, 1.0, scale);
 
     // ── Ground strike ────────────────────────────────────────────────────────
     if is_selected {
         let pulse = 9.0 + ((time as f32 * 2.6).sin() + 1.0) * 3.5;
         painter.circle_stroke(
             base.pos,
-            pulse,
-            egui::Stroke::new(1.3, theme::marker_glow_warm()),
+            pulse * scale,
+            egui::Stroke::new(1.3 * scale, theme::marker_glow_warm()),
         );
     }
-    draw_ground_strike(painter, base.pos, col, 1.0);
+    draw_ground_strike(painter, base.pos, col, 1.0, scale);
 }
 
 /// Draw a replay flare: same beam geometry but alpha-faded, plus a one-shot
@@ -186,30 +188,31 @@ pub(super) fn draw_replay_flare(
     tip: egui::Pos2,
     flare: &ActiveFlare,
     wall_elapsed: f64,
+    scale: f32,
 ) {
     let alpha = flare.alpha(wall_elapsed);
     if alpha <= 0.005 {
         return;
     }
     let col = flare.event.severity.color();
-    draw_beam(painter, base.pos, tip, col, alpha);
-    draw_ground_strike(painter, base.pos, col, alpha);
+    draw_beam(painter, base.pos, tip, col, alpha, scale);
+    draw_ground_strike(painter, base.pos, col, alpha, scale);
 
     // Expanding spawn ring — one-shot, fades and grows outward.
     let ring_a = flare.ring_alpha(wall_elapsed);
     if ring_a > 0.005 {
-        let ring_r = flare.ring_radius(wall_elapsed);
+        let ring_r = flare.ring_radius(wall_elapsed) * scale;
         painter.circle_stroke(
             base.pos,
             ring_r,
-            egui::Stroke::new(1.8 * ring_a, col.gamma_multiply(ring_a * 0.75)),
+            egui::Stroke::new(1.8 * ring_a * scale, col.gamma_multiply(ring_a * 0.75)),
         );
         // Second inner ring for more pop on Critical.
         if matches!(flare.event.severity, crate::model::EventSeverity::Critical) {
             painter.circle_stroke(
                 base.pos,
                 ring_r * 0.6,
-                egui::Stroke::new(1.2 * ring_a, col.gamma_multiply(ring_a * 0.5)),
+                egui::Stroke::new(1.2 * ring_a * scale, col.gamma_multiply(ring_a * 0.5)),
             );
         }
     }
@@ -217,107 +220,34 @@ pub(super) fn draw_replay_flare(
 
 // ── Shared beam primitives ────────────────────────────────────────────────────
 
-fn draw_beam(
+fn draw_ground_strike(
     painter: &egui::Painter,
-    base: egui::Pos2,
-    tip: egui::Pos2,
+    pos: egui::Pos2,
     col: egui::Color32,
     alpha: f32,
+    scale: f32,
 ) {
-    let dx = tip.x - base.x;
-    let dy = tip.y - base.y;
-
-    // Atmospheric halos — taper in both width and alpha toward the tip.
-    const HALO_SEGS: u32 = 7;
-    for i in 0..HALO_SEGS {
-        let t0 = i as f32 / HALO_SEGS as f32;
-        let t1 = (i + 1) as f32 / HALO_SEGS as f32;
-        let tm = (t0 + t1) * 0.5;
-        let a = (1.0 - tm).powi(2) * alpha;
-        let p0 = egui::pos2(base.x + dx * t0, base.y + dy * t0);
-        let p1 = egui::pos2(base.x + dx * t1, base.y + dy * t1);
-        painter.line_segment(
-            [p0, p1],
-            egui::Stroke::new((22.0 * a).max(0.5), col.gamma_multiply(0.04 * a)),
-        );
-        painter.line_segment(
-            [p0, p1],
-            egui::Stroke::new((11.0 * a).max(0.5), col.gamma_multiply(0.08 * a)),
-        );
-        painter.line_segment(
-            [p0, p1],
-            egui::Stroke::new((4.5 * a).max(0.5), col.gamma_multiply(0.16 * a)),
-        );
-    }
-
-    // Tapering core — cubic alpha, narrows to a spike.
-    const SEGS: u32 = 14;
-    for i in 0..SEGS {
-        let t0 = i as f32 / SEGS as f32;
-        let t1 = (i + 1) as f32 / SEGS as f32;
-        let tm = (t0 + t1) * 0.5;
-        let falloff = 1.0 - tm;
-        let a = falloff.powi(3) * alpha;
-        let w_glow = (4.0 * falloff.powf(0.7)).max(0.4);
-        let w_core = (1.7 * falloff.powf(0.7)).max(0.3);
-        let p0 = egui::pos2(base.x + dx * t0, base.y + dy * t0);
-        let p1 = egui::pos2(base.x + dx * t1, base.y + dy * t1);
-        painter.line_segment(
-            [p0, p1],
-            egui::Stroke::new(w_glow, col.gamma_multiply(a * 0.30)),
-        );
-        painter.line_segment(
-            [p0, p1],
-            egui::Stroke::new(w_core, col.gamma_multiply(a * 0.96)),
-        );
-    }
-}
-
-fn draw_ground_strike(painter: &egui::Painter, pos: egui::Pos2, col: egui::Color32, alpha: f32) {
     painter.circle_stroke(
         pos,
-        6.5,
-        egui::Stroke::new(9.0, col.gamma_multiply(0.06 * alpha)),
+        6.5 * scale,
+        egui::Stroke::new(9.0 * scale, col.gamma_multiply(0.06 * alpha)),
     );
     painter.circle_stroke(
         pos,
-        4.8,
-        egui::Stroke::new(1.1, col.gamma_multiply(0.60 * alpha)),
+        4.8 * scale,
+        egui::Stroke::new(1.1 * scale, col.gamma_multiply(0.60 * alpha)),
     );
-    painter.circle_filled(pos, 2.5, col.gamma_multiply(alpha));
-}
-
-pub(super) fn draw_camera_marker(
-    painter: &egui::Painter,
-    marker: ProjectedPoint,
-    is_selected: bool,
-) {
-    let radius = 3.0 + marker.depth;
-    let color = if is_selected {
-        theme::marker_camera_ring()
-    } else {
-        theme::camera_color()
-    };
-
-    painter.circle_stroke(
-        marker.pos,
-        radius + 5.5,
-        egui::Stroke::new(5.5, color.gamma_multiply(0.07)),
-    );
-    painter.circle_filled(marker.pos, radius, color);
-    if is_selected {
-        painter.circle_stroke(marker.pos, radius + 3.2, egui::Stroke::new(1.1, color));
-    }
+    painter.circle_filled(pos, 2.5 * scale, col.gamma_multiply(alpha));
 }
 
 pub(super) fn draw_camera_links(
     painter: &egui::Painter,
     event_marker: egui::Pos2,
-    camera_markers: &[(String, egui::Pos2)],
+    camera_markers: &[MapMarker],
 ) {
-    for (_, marker) in camera_markers {
+    for marker in camera_markers {
         painter.line_segment(
-            [event_marker, *marker],
+            [event_marker, marker.base],
             egui::Stroke::new(0.8, theme::camera_color().gamma_multiply(0.36)),
         );
     }

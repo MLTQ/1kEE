@@ -68,6 +68,7 @@ pub struct AppModel {
     pub map_theme: crate::theme::MapTheme,
     pub show_event_markers: bool,
     pub show_camera_markers: bool,
+    marker_scale: f32,
     pub show_coastlines: bool,
     pub show_graticule: bool,
     pub show_reticle: bool,
@@ -271,6 +272,7 @@ impl AppModel {
             map_theme: crate::theme::MapTheme::Topo,
             show_event_markers: true,
             show_camera_markers: true,
+            marker_scale: app_settings.marker_scale,
             show_coastlines: true,
             show_graticule: false,
             show_reticle: false,
@@ -542,6 +544,14 @@ impl AppModel {
         ));
     }
 
+    pub fn marker_scale(&self) -> f32 {
+        self.marker_scale
+    }
+
+    pub fn set_marker_scale(&mut self, scale: f32) {
+        self.marker_scale = settings_store::normalize_marker_scale(scale);
+    }
+
     pub fn save_settings(&mut self) -> std::io::Result<()> {
         let settings = settings_store::AppSettings {
             factal_api_key: self.factal_api_key.trim().to_owned(),
@@ -565,6 +575,7 @@ impl AppModel {
             prefer_overpass: self.settings_prefer_overpass,
             contour_stroke_scale: self.legacy_contour_stroke_scale,
             contour_stroke_width_px: self.contour_stroke_width_px,
+            marker_scale: self.marker_scale,
             threedep_enabled: self.settings_threedep_enabled,
             threedep_cache_budget_gb: settings_store::normalize_threedep_cache_budget_gb(
                 self.settings_threedep_cache_budget_gb,
@@ -603,6 +614,7 @@ impl AppModel {
         self.legacy_contour_stroke_scale =
             settings_store::normalize_contour_stroke_scale(settings.contour_stroke_scale);
         self.contour_stroke_width_px = settings.contour_stroke_width_px;
+        self.set_marker_scale(settings.marker_scale);
         self.windy_webcams_api_key = settings.windy_webcams_api_key.trim().to_owned();
         self.ny511_api_key = settings.ny511_api_key.trim().to_owned();
         self.eyes_on_enabled = settings.eyes_on_enabled;

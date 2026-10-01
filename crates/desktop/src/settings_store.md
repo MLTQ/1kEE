@@ -50,3 +50,8 @@ Persists the desktop app's local configuration so it survives restarts. That now
   the visible `1..=16 px` range.
 - Legacy `eyes_on_max_pages` JSON fields are ignored. Saving settings replaces
   that obsolete fixed page count with `eyes_on_requests_per_minute`.
+
+### Marker size
+`marker_scale` defaults to 1.0 for legacy settings, persists the shared webcam/event
+size, and normalizes finite values to 0.25–2.0; invalid values restore the default.
+Serialization coverage checks saved scale, legacy default and invalid/clamped values.

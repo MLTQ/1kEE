@@ -31,3 +31,7 @@ scene, keeping labels aligned with painted and clickable glyphs.
 |---|---|---|
 | `world_map.rs` | Hover helpers are cheap, non-mutating, and safe to call every frame | Performing network or model mutations |
 | Scene renderers | Tooltip hit targets use the same marker positions returned for click handling | Reprojecting markers independently |
+
+Event/webcam cards share `marker_style::pick` with clicks, using the painted size
+and visible spire rather than fixed-radius dots. Cards appear beside the pointer;
+followed events remain available through `map_events` after leaving the live page.

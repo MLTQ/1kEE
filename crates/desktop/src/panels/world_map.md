@@ -63,3 +63,7 @@ The canvas submits local line residency cleanup on every frame. Its finish-prepa
 callback drops unused contour/road GPU buffers after all live batches are marked.
 Leaving local mode releases local decoded tiles and CPU contour instances;
 subsequent globe-transition loading is independent of the old local viewport.
+
+Webcam/event hover and clicks now use shared `marker_style::pick` geometry,
+including the visible lower spire and scaled ground target. The closest target
+wins within each layer; existing cross-layer click priority remains intact.

@@ -8,21 +8,6 @@ responsive when an Earth-only raw SRTM fallback is needed.
 
 ## Components
 
-### `draw_markers`
-
-- **Does**: Projects and draws event beams and nearby camera markers in local
-  terrain space.
-- **Interacts with**: `projection.rs`, `srtm_stream.rs`, and local scene paint.
-
-### `marker_elevation_m`
-
-- **Does**: Uses a cached SRTM sample when available; otherwise starts a
-  deduplicated preload and retains the existing ground-level fallback.
-- **Interacts with**: `srtm_stream::peek_elevation_m` and
-  `request_elevation_preload`.
-- **Rationale**: A marker must never synchronously decompress a GeoTIFF or
-  invoke GDAL on the egui paint thread.
-
 ### `marker_surface_elevation_m`
 
 - **Does**: Prefers a supplied elevation sampled from the currently displayed
@@ -44,3 +29,10 @@ responsive when an Earth-only raw SRTM fallback is needed.
 - The transient Earth fallback is visually consistent with the pre-existing
   missing-terrain behavior; worker completion asks egui for a repaint
   automatically. Moon and Mars never initiate an Earth SRTM preload.
+
+### Scaled event and webcam spires
+Events retain their severity color and 110-point default height. Webcams use a
+green 76-point light spire, small ground strike and selected ring. Scene-supplied
+scale affects widths/rings as well as height. Events use `marker_style::draw_beam`; webcams use its shared `draw_camera_spire`.
+The unused legacy `draw_markers` composition path was removed; the local scene
+is the single source of marker visibility, ground projection and hit geometry.

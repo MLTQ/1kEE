@@ -128,3 +128,7 @@ following. Webcams default on; the independent Flock inventory remains off.
 FOLLOW EVENTS now tours the six highest-severity records from each successful
 Factal payload. Every timed stop uses the same `tick_event_follow` selection and
 brief-opening path; source replacement still cannot snap the active camera.
+
+### Marker size
+`marker_scale()` and `set_marker_scale()` own the normalized 25–200% webcam/event
+size. Startup, settings reload and save retain it independently of layer toggles.

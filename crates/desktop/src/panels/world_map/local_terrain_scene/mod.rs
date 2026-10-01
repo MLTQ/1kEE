@@ -1,3 +1,4 @@
+use super::marker_style::{MapMarker, local_tip, draw_camera_spire};
 pub(super) mod deflock_layer;
 pub(super) mod dissolve;
 pub(super) mod geography;
@@ -575,9 +576,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
 
-    const EVENT_BEAM_HEIGHT_PX: f32 = 110.0;
-
-    let event_markers: Vec<(String, egui::Pos2)> = if !should_show_local_event_indicators(
+    let event_markers: Vec<MapMarker> = if !should_show_local_event_indicators(
         model.active_body,
         model.cinematic_mode && !model.event_follow.enabled(),
         model.show_event_markers,
@@ -613,30 +612,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                     extent_x_km,
                     extent_y_km,
                 )?;
-                // Tip: project the same point 1 km higher, then cap the
-                // screen-space length so beams don't vary wildly with tilt.
-                let tip = projection::project_local(
-                    &layout,
-                    &model.globe_view,
-                    viewport_center,
-                    event.location,
-                    elev + 1000.0,
-                    extent_x_km,
-                    extent_y_km,
-                )
-                .map(|sky| {
-                    let dx = sky.pos.x - ground.pos.x;
-                    let dy = sky.pos.y - ground.pos.y;
-                    let len = (dx * dx + dy * dy).sqrt().max(0.1);
-                    egui::pos2(
-                        ground.pos.x + dx / len * EVENT_BEAM_HEIGHT_PX,
-                        ground.pos.y + dy / len * EVENT_BEAM_HEIGHT_PX,
-                    )
-                })
-                .unwrap_or(egui::pos2(
-                    ground.pos.x,
-                    ground.pos.y - EVENT_BEAM_HEIGHT_PX,
-                ));
+                let tip = local_tip(ground.pos, markers::EVENT_BEAM_HEIGHT, model.marker_scale());
                 markers::draw_event_marker(
                     painter,
                     ground,
@@ -644,15 +620,16 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                     event,
                     model.selected_event_id.as_deref() == Some(event.id.as_str()),
                     time,
+                    model.marker_scale(),
                 );
-                Some((event.id.clone(), ground.pos))
+                Some(MapMarker::new(&event.id, ground.pos, tip, model.marker_scale()))
             })
             .collect()
     };
 
     // Nearby cameras are Earth data, so never project them into lunar or
     // Martian terrain (nor ask the Earth SRTM cache for an alien-body point).
-    let camera_markers: Vec<(String, egui::Pos2)> =
+    let camera_markers: Vec<MapMarker> =
         if model.active_body != crate::model::ActiveBody::Earth || !model.show_camera_markers {
             Vec::new()
         } else {
@@ -686,12 +663,15 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                         extent_y_km,
                     )
                     .map(|projected| {
-                        markers::draw_camera_marker(
+                        let tip = local_tip(projected.pos, markers::CAMERA_BEAM_HEIGHT, model.marker_scale());
+                        draw_camera_spire(
                             painter,
-                            projected,
+                            projected.pos,
+                            tip,
                             model.selected_camera_id.as_deref() == Some(camera.id.as_str()),
+                            model.marker_scale(),
                         );
-                        (camera.id.clone(), projected.pos)
+                        MapMarker::new(&camera.id, projected.pos, tip, model.marker_scale())
                     })
                 })
                 .collect()
@@ -719,13 +699,13 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     // Camera link lines anchor to the selected event if one exists.
     let anchor = event_markers
         .iter()
-        .find(|(id, _)| model.selected_event_id.as_deref() == Some(id.as_str()))
+        .find(|marker| model.selected_event_id.as_deref() == Some(marker.id.as_str()))
         .or_else(|| event_markers.first())
-        .map(|(_, pos)| *pos);
+        .map(|marker| marker.base);
     let nearby = model.nearby_camera_snapshot(250.0);
     let nearby_markers: Vec<_> = camera_markers
         .iter()
-        .filter(|(camera_id, _)| nearby.iter().any(|camera| camera.id == *camera_id))
+        .filter(|marker| nearby.iter().any(|camera| camera.id == marker.id))
         .cloned()
         .collect();
     markers::draw_camera_links(painter, anchor, &nearby_markers);

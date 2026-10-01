@@ -24,6 +24,7 @@ mod layer_import;
 mod local_terrain_scene;
 mod map_detail_panels;
 mod map_tooltips;
+mod marker_style;
 mod road_layer;
 #[path = "world_map/srtm_focus_cache/mod.rs"]
 pub(crate) mod srtm_focus_cache;
@@ -177,18 +178,10 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
                     } else {
                         model.selected_track_mmsi = Some(*mmsi);
                     }
-                } else if let Some((camera_id, _)) = scene
-                    .camera_markers
-                    .iter()
-                    .find(|(_, marker)| marker.distance(pointer) <= 9.0)
-                {
-                    model.open_camera_feed(camera_id);
-                } else if let Some((event_id, _)) = scene
-                    .event_markers
-                    .iter()
-                    .find(|(_, marker)| marker.distance(pointer) <= 11.0)
-                {
-                    model.select_event(event_id);
+                } else if let Some(marker) = marker_style::pick(&scene.camera_markers, pointer) {
+                    model.open_camera_feed(&marker.id);
+                } else if let Some(marker) = marker_style::pick(&scene.event_markers, pointer) {
+                    model.select_event(&marker.id);
                 } else if let Some((src_url, obj_id, _)) = scene
                     .arcgis_feature_markers
                     .iter()
@@ -315,7 +308,7 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                     let camera_fill = if model.show_camera_markers { active_fill } else { egui::Color32::TRANSPARENT };
                     let camera_text = if model.show_camera_markers { active_text } else { inactive_text };
                     if ui.add(egui::Button::new(egui::RichText::new(format!("Cameras  {camera_count}")).color(camera_text).small()).fill(camera_fill).corner_radius(4.0))
-                        .on_hover_text("Show / hide geolocated camera dots")
+                        .on_hover_text("Show / hide geolocated webcam markers")
                         .clicked()
                     {
                         model.show_camera_markers = !model.show_camera_markers;

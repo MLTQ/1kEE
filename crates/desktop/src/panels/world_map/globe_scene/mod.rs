@@ -1,3 +1,4 @@
+use super::marker_style::{MapMarker, draw_camera_spire};
 use crate::arcgis_source;
 use crate::model::{AppModel, ArcGisFeature, GeoPoint, GlobeViewState};
 use crate::theme;
@@ -20,8 +21,8 @@ mod projection;
 pub use projection::project_geo;
 
 pub struct GlobeScene {
-    pub event_markers: Vec<(String, egui::Pos2)>,
-    pub camera_markers: Vec<(String, egui::Pos2)>,
+    pub event_markers: Vec<MapMarker>,
+    pub camera_markers: Vec<MapMarker>,
     /// MMSI → screen position for click/hover detection.
     pub ship_markers: Vec<(u64, egui::Pos2)>,
     /// ICAO24 → screen position for hover detection.
@@ -271,7 +272,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 .filter(|base| base.front_facing) else {
                     continue;
                 };
-                let extra_r = (135.0 / layout.radius).clamp(0.060, 0.220);
+                let extra_r = (135.0 / layout.radius).clamp(0.060, 0.220) * model.marker_scale();
                 let tip = projection::project_geo_unit_surface_elevated(
                     &layout,
                     &model.globe_view,
@@ -280,7 +281,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 )
                 .map(|p| p.pos)
                 .unwrap_or(base.pos);
-                markers::draw_replay_flare(painter, base, tip, flare, wall_elapsed);
+                markers::draw_replay_flare(painter, base, tip, flare, wall_elapsed, model.marker_scale());
             }
         }
     }
@@ -307,7 +308,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 // is on the limb, the tip projects far from the base (full
                 // beam).  This eliminates the "spinning" artefact caused by
                 // computing the direction in screen space.
-                let extra_r = (135.0 / layout.radius).clamp(0.060, 0.220);
+                let extra_r = (135.0 / layout.radius).clamp(0.060, 0.220) * model.marker_scale();
                 let tip = projection::project_geo_unit_surface_elevated(
                     &layout,
                     &model.globe_view,
@@ -323,8 +324,9 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                     event,
                     selected_event_id == Some(event.id.as_str()),
                     time,
+                    model.marker_scale(),
                 );
-                Some((event.id.clone(), base.pos))
+                Some(MapMarker::new(&event.id, base.pos, tip, model.marker_scale()))
             })
             .collect()
     };
@@ -342,8 +344,14 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                     .filter(|projected| projected.front_facing)
                     .map(|projected| {
                         let is_selected = selected_camera_id == Some(camera.id.as_str());
-                        markers::draw_camera_marker(painter, projected, is_selected);
-                        (camera.id.clone(), projected.pos)
+                        // Same surface-normal projection as event spires, with
+                        // a shorter height to keep the webcam layer distinct.
+                        let extra_r = (94.0 / layout.radius).clamp(0.042, 0.153) * model.marker_scale();
+                        let tip = projection::project_geo_unit_surface_elevated(
+                            &layout, &model.globe_view, camera.location, extra_r,
+                        ).map(|p| p.pos).unwrap_or(projected.pos);
+                        draw_camera_spire(painter, projected.pos, tip, is_selected, model.marker_scale());
+                        MapMarker::new(&camera.id, projected.pos, tip, model.marker_scale())
                     })
             })
             .collect()
@@ -432,16 +440,16 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             Vec::new()
         };
 
-    if let Some((_, event_marker)) = event_markers
+    if let Some(event_marker) = event_markers
         .iter()
-        .find(|(event_id, _)| selected_event_id == Some(event_id.as_str()))
+        .find(|marker| selected_event_id == Some(marker.id.as_str()))
     {
         let nearby_markers: Vec<_> = camera_markers
             .iter()
-            .filter(|(camera_id, _)| nearby.iter().any(|camera| camera.id == *camera_id))
+            .filter(|marker| nearby.iter().any(|camera| camera.id == marker.id))
             .cloned()
             .collect();
-        markers::draw_camera_links(painter, *event_marker, &nearby_markers);
+        markers::draw_camera_links(painter, event_marker.base, &nearby_markers);
     }
     draw_legend(painter, rect, &layout, &model.globe_view, &lod);
 
