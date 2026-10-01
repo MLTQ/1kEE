@@ -233,18 +233,11 @@ view where the coarsest existing source cannot cover the screen with fewer.
 Event-follow arrival at zoom 9.5 requests 81 instead of 529 tiles. The same
 policy applies to all three bodies without changing persisted address grids.
 
-`handoff.rs` retains one prior displayed generation until geographic coverage,
-CPU merge publication, and Earth GPU uploads permit replacement. Candidate
-batches upload without drawing overlapping tiers. Progress describes the new
-request while prior terrain remains visible. Offscreen tile references are
-pruned using worker bounds; the last old CPU merge survives until replacement
-or until all its tiles leave view. Root/body changes, exit, and cache reset clear
-the handoff. CPU-only Moon/Mars use the same coverage gate.
-
-### Progressive LOD repair
-
-The scene now prepares a background composition of ready source cores before
-GPU staging. Missing edge cells retain coarse pieces only in their own gaps;
-they cannot block the rest of a detail upgrade. CPU and GPU share clipped
-geometry and source progress still describes actual loading. See `composition`
-and `handoff` for geometric ownership, worker coalescing, and publication.
+`handoff.rs` prepares a background composition of ready source cores before GPU
+staging. Missing edge cells retain coarse pieces only in their own gaps; they
+cannot block the rest of a detail upgrade. Candidate batches upload without
+drawing overlapping tiers, while the prior picture remains visible. CPU and
+GPU share clipped geometry; CPU-only Moon/Mars publish directly. Progress still
+describes actual loading. Offscreen tile references are pruned by owned cores
+and elevation bounds. Root/body changes, exit, and cache reset clear the handoff.
+See `composition` and `handoff` for ownership, coalescing, and publication.
