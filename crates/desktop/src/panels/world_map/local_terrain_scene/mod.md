@@ -224,3 +224,19 @@ Webcam/event spires share saved marker sizing. Bases still sample the displayed
 terrain; tips extend along the projector’s screen-up vertical axis at a stable
 logical-point height. `MapMarker` returns the exact drawn base/tip/scale for hover
 and click picking, independent of terrain availability. Links use ground bases.
+
+### Bounded LOD and display handoff
+
+`lod.rs` separates source selection from camera projection. It prefers 81 tiles,
+allows 121 to prevent threshold oscillation, and uses at most 225 at the widest
+view where the coarsest existing source cannot cover the screen with fewer.
+Event-follow arrival at zoom 9.5 requests 81 instead of 529 tiles. The same
+policy applies to all three bodies without changing persisted address grids.
+
+`handoff.rs` retains one prior displayed generation until geographic coverage,
+CPU merge publication, and Earth GPU uploads permit replacement. Candidate
+batches upload without drawing overlapping tiers. Progress describes the new
+request while prior terrain remains visible. Offscreen tile references are
+pruned using worker bounds; the last old CPU merge survives until replacement
+or until all its tiles leave view. Root/body changes, exit, and cache reset clear
+the handoff. CPU-only Moon/Mars use the same coverage gate.

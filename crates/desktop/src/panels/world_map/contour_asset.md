@@ -19,8 +19,8 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 ### `LocalRegionCache`
 - **Does**: Tracks currently visible local-terrain tiles, a generation-safe
   single in-flight SQLite/WKB batch, bounds metadata for unloaded tiles,
-  background manifest/merge workers, screen-space residency, and zoom fallback geometry. It merges
-  the active 13×13 source envelope off-thread so overlapping Moon/Mars
+  background manifest/merge workers, screen-space residency. It merges
+  the selected source envelope off-thread so overlapping Moon/Mars
   contours owned by an outer tile cannot vanish at the visible edge or stall
   paint; the local draw pass performs its existing geographic AABB cull before
   projection.
@@ -189,3 +189,15 @@ Loads contour geometry from disk into in-memory render caches for both local ter
   bounds to evict offscreen geometry. Both Earth tiers receive each camera
   update; late readers cannot repopulate an excluded tile. Merges replace the
   previous snapshot asynchronously; empty windows release it immediately.
+
+### Coverage-preserving local LOD
+
+`load_srtm_lod_region` accepts separate source/camera zooms. Source keys now
+depend on root and tier; changing the followed event does not invalidate nearby
+terrain. Earth/Moon/Mars expose immutable tile identities and reader-computed
+bounds, synchronized with the published CPU merge (decoded empty cells are also
+valid). The scene's `handoff` owns previous display retention; loader caches can
+prepare a new grid without erasing what is drawn. Manual reset clears both.
+
+The merge-publication regression pins tile metadata to the CPU generation that
+actually contains it, including empty cells and arrivals between snapshots.

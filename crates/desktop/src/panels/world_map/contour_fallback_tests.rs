@@ -27,6 +27,7 @@ fn frame(zoom: f32, radius: i32, with_lines: bool) -> LocalContourLoad {
                     lon_bucket: lon,
                 },
                 contours: Arc::clone(&lines),
+                bounds: None,
             });
         }
     }
@@ -86,6 +87,7 @@ fn fine_takeover_requires_visible_tiles_but_not_the_prefetch_ring() {
             lon_bucket: 2,
         },
         contours: Arc::new(vec![]),
+        bounds: None,
     });
     assert!(!covers_view(&fine, center, 60.0)); // wrong tier cannot fill the hole
 }

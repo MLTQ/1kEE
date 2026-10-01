@@ -296,7 +296,6 @@ pub fn retain_instances(visible: &HashSet<LocalTileId>) {
 // ── GPU resources ────────────────────────────────────────────────────────────
 
 struct TileGpu {
-    version: u64,
     /// One tile can exceed the device's `max_buffer_size` on its own — a dense
     /// bucket-10 tile is ~4.3 M segments — so its geometry is split across as
     /// many vertex buffers as the limit requires.
@@ -309,7 +308,7 @@ pub struct LocalContourPassResources {
     pipeline: wgpu::RenderPipeline,
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    tiles: HashMap<LocalBatchId, TileGpu>,
+    tiles: HashMap<(LocalBatchId, u64), TileGpu>,
     resident_bytes: u64,
 }
 
@@ -321,6 +320,14 @@ const MAX_TILE_UPLOADS_PER_FRAME: usize = 3;
 /// Mirror of the resident byte count, so the settings panel can report GPU use
 /// without reaching into `CallbackResources` from outside a paint callback.
 static RESIDENT_BYTES: AtomicU64 = AtomicU64::new(0);
+
+// Published only after every callback has prepared and residency is finalized.
+static GPU_READY: OnceLock<Mutex<HashSet<(LocalBatchId, u64)>>> = OnceLock::new();
+
+pub fn batches_uploaded(batches: &[LocalTileBatch]) -> bool {
+    let Ok(ready) = GPU_READY.get_or_init(Default::default).lock() else { return false; };
+    batches.iter().all(|b| b.instances.is_empty() || ready.contains(&(b.id, b.version)))
+}
 
 /// Bytes of local contour and road geometry currently resident on the GPU.
 pub fn resident_bytes() -> u64 {
@@ -450,7 +457,7 @@ impl LocalContourPassResources {
         if self.resident_bytes <= budget_bytes {
             return;
         }
-        let mut evictable: Vec<(LocalBatchId, u64, u64)> = self
+        let mut evictable: Vec<_> = self
             .tiles
             .iter()
             // All callbacks prepare before any paints. Preserve the previous
@@ -484,6 +491,7 @@ pub struct LocalContourCallback {
     uniforms: LocalContourUniforms,
     ctx: egui::Context,
     frame: u64,
+    upload_only: bool,
 }
 
 impl LocalContourCallback {
@@ -506,6 +514,7 @@ impl LocalContourCallback {
     ) -> Self {
         let pixels_per_point = ctx.pixels_per_point();
         Self {
+            upload_only: false,
             frame: ctx.cumulative_pass_nr(),
             ctx,
             pass,
@@ -548,6 +557,13 @@ impl LocalContourCallback {
         }
     }
 
+    /// Stage buffers while the previous terrain is still being drawn. Do not
+    /// overwrite the visible pass's uniforms or draw overlapping detail levels.
+    pub fn upload_only(mut self) -> Self {
+        self.upload_only = true;
+        self
+    }
+
     /// egui-wgpu executes paint callbacks with the GPU viewport set to `rect`
     /// (in physical pixels), so the NDC transform must be relative to it.
     pub fn into_paint_callback(mut self, rect: egui::Rect) -> egui::PaintCallback {
@@ -573,11 +589,13 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
             return Vec::new();
         };
 
-        queue.write_buffer(
-            &res.uniform_buf,
-            self.pass.slot() as u64 * UNIFORM_STRIDE,
-            bytemuck::bytes_of(&self.uniforms),
-        );
+        if !self.upload_only {
+            queue.write_buffer(
+                &res.uniform_buf,
+                self.pass.slot() as u64 * UNIFORM_STRIDE,
+                bytemuck::bytes_of(&self.uniforms),
+            );
+        }
 
         // The clock also advances when contours are hidden and only roads draw.
         let frame = self.frame;
@@ -587,11 +605,8 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
             if batch.instances.is_empty() {
                 continue;
             }
-            let stale = res
-                .tiles
-                .get(&batch.id)
-                .map(|gpu| gpu.version != batch.version)
-                .unwrap_or(true);
+            let key = (batch.id, batch.version);
+            let stale = !res.tiles.contains_key(&key);
 
             if stale {
                 if uploads >= MAX_TILE_UPLOADS_PER_FRAME {
@@ -607,9 +622,8 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
                     &batch.instances,
                 );
                 if let Some(previous) = res.tiles.insert(
-                    batch.id,
+                    key,
                     TileGpu {
-                        version: batch.version,
                         chunks,
                         bytes,
                         last_used: frame,
@@ -618,11 +632,14 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
                     res.resident_bytes = res.resident_bytes.saturating_sub(previous.bytes);
                 }
                 res.resident_bytes += bytes;
-            } else if let Some(gpu) = res.tiles.get_mut(&batch.id) {
+            } else if let Some(gpu) = res.tiles.get_mut(&key) {
                 gpu.last_used = frame;
             }
         }
 
+        // The UI sees the published upload set on its next pass, including
+        // when this was the last pending upload and no loader is still active.
+        if uploads > 0 { self.ctx.request_repaint(); }
         let budget = settings_store::local_contour_vram_budget_bytes();
         res.enforce_budget(budget, frame);
         res.publish_resident_bytes();
@@ -635,6 +652,9 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
         render_pass: &mut wgpu::RenderPass<'static>,
         resources: &egui_wgpu::CallbackResources,
     ) {
+        if self.upload_only {
+            return;
+        }
         let Some(res) = resources.get::<LocalContourPassResources>() else {
             return;
         };
@@ -645,12 +665,9 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
             &[self.pass.slot() * UNIFORM_STRIDE as u32],
         );
         for batch in &self.batches {
-            let Some(gpu) = res.tiles.get(&batch.id) else {
+            let Some(gpu) = res.tiles.get(&(batch.id, batch.version)) else {
                 continue;
             };
-            if gpu.version != batch.version {
-                continue;
-            }
             for chunk in &gpu.chunks {
                 if chunk.count == 0 {
                     continue;
@@ -684,6 +701,9 @@ impl egui_wgpu::CallbackTrait for ResidencyCallback {
             res.tiles.retain(|_, tile| tile.last_used == self.frame);
             res.resident_bytes = res.tiles.values().map(|tile| tile.bytes).sum();
             res.publish_resident_bytes();
+            if let Ok(mut ready) = GPU_READY.get_or_init(Default::default).lock() {
+                *ready = res.tiles.keys().copied().collect();
+            }
         }
         Vec::new()
     }

@@ -4,9 +4,9 @@ use crate::model::ActiveBody;
 use crate::panels::world_map::local_terrain_scene::projection::LocalProjectionParams;
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Bounds {
-    min: [f32; 3], // longitude, latitude, elevation
-    max: [f32; 3],
+pub(crate) struct Bounds {
+    pub(crate) min: [f32; 3], // longitude, latitude, elevation
+    pub(crate) max: [f32; 3],
 }
 
 impl Bounds {
@@ -32,14 +32,14 @@ impl Bounds {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct Viewport {
-    projection: LocalProjectionParams,
-    rect: egui::Rect,
-    body: ActiveBody,
+pub(crate) struct Viewport {
+    pub(crate) projection: LocalProjectionParams,
+    pub(crate) rect: egui::Rect,
+    pub(crate) body: ActiveBody,
 }
 
 impl Viewport {
-    fn intersects(self, bounds: Bounds) -> bool {
+    pub(crate) fn intersects(self, bounds: Bounds) -> bool {
         // The local transform is affine. The eight projected box corners
         // enclose every contour, including elevated terrain and crossing lines.
         let points: [egui::Pos2; 8] = std::array::from_fn(|i| {
@@ -127,6 +127,10 @@ pub(super) struct Residency {
 }
 
 impl Residency {
+    pub(super) fn geometry_bounds(&self, key: &CacheKey) -> Option<Bounds> {
+        self.bounds.get(key).copied().flatten()
+    }
+
     pub(super) fn wanted(&self, key: &CacheKey) -> bool {
         if self
             .window
@@ -204,6 +208,7 @@ pub(crate) fn set_local_viewport(
 /// Drop local residency when leaving the local scene. Globe transition loads
 /// without a local viewport are left alone on subsequent frames.
 pub(crate) fn leave_local_view() {
+    super::super::local_terrain_scene::handoff::reset();
     for slot in [
         &LOCAL_CONTOUR_CACHE,
         &EARTH_BASE_CONTOUR_CACHE,
@@ -235,7 +240,6 @@ pub(super) fn prune(cache: &mut LocalRegionCache) {
         // Empty views have no replacement worker, so release immediately.
         if cache.entries.is_empty() {
             cache.merged = None;
-            cache.zoom_fallback = None;
         }
     }
 }

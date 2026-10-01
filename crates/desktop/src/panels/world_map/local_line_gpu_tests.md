@@ -17,3 +17,8 @@ The same hardware test includes residency cleanup before draw callbacks. It
 checks that later road callbacks survive cleanup, absent layers release their
 buffers even below budget, a frame without line draws reaches zero bytes, and
 returning roads reupload completely across the normal upload limit.
+
+The same offscreen test stages four replacement tiles over two upload frames.
+Pixel readback verifies the old terrain remains visible, staging is invisible,
+new uniforms do not corrupt old drawing, and the complete replacement appears
+on the next frame. An overlapping ID with a different version tests coexistence.

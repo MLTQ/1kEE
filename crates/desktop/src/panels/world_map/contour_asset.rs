@@ -20,7 +20,7 @@ mod reader;
 mod fallback;
 use reader::spawn_local_read;
 #[path = "contour_residency.rs"]
-mod residency;
+pub(crate) mod residency;
 pub(crate) use residency::{leave_local_view, set_local_viewport};
 
 #[cfg(test)]
@@ -55,6 +55,7 @@ const LOCAL_MANIFEST_SNAPSHOT_TTL: Duration = Duration::from_millis(350);
 /// files are untouched and tiles will be re-read (not re-built) on demand.
 pub fn blast_tile_caches() {
     fallback::reset();
+    super::local_terrain_scene::handoff::reset();
     srtm_focus_cache::progress::clear();
     srtm_focus_cache::clear_contour_build_backoffs();
     if let Some(c) = LOCAL_CONTOUR_CACHE.get() {
@@ -170,10 +171,8 @@ pub struct LocalContourLoad {
     /// contour pass. Each `Arc` is stable once loaded, which is what lets the
     /// pass build and upload a tile's geometry exactly once.
     ///
-    /// Populated for Earth only. Lunar and Mars merges apply exclusive midpoint
-    /// ownership to de-overlap their tiles, which the per-tile path would have
-    /// to reproduce; they keep the CPU renderer, where geometry volume is not a
-    /// problem.
+    /// Also populated for Moon/Mars coverage checks. Those bodies retain the
+    /// CPU renderer because their merges apply exclusive midpoint ownership.
     pub tiles: Vec<LocalTileGeometry>,
 }
 
@@ -182,6 +181,7 @@ pub struct LocalContourLoad {
 pub struct LocalTileGeometry {
     pub id: super::local_contour_pass::LocalTileId,
     pub contours: Arc<Vec<ContourPath>>,
+    pub(crate) bounds: Option<residency::Bounds>,
 }
 
 #[derive(Clone, Hash, PartialEq, Eq)]
@@ -369,10 +369,6 @@ struct LocalRegionCache {
     /// (each finishing thread calls ctx.request_repaint(), which would
     /// otherwise trigger another batch of thread spawns for still-loading tiles).
     in_flight: HashSet<CacheKey>,
-    /// Contours from the previous zoom level, kept as a fallback placeholder
-    /// while tiles at the new zoom level are building / loading.  Cleared as
-    /// soon as the new zoom has at least one tile in `entries`.
-    zoom_fallback: Option<Arc<Vec<ContourPath>>>,
     /// Most recently completed flattened merge.  It intentionally remains
     /// drawable while a replacement is built on a worker, so a newly decoded
     /// batch cannot make the paint thread clone the full source envelope.
@@ -404,7 +400,6 @@ impl Default for LocalRegionCache {
             read_progress: HashMap::new(),
             published_tiles: HashSet::new(),
             in_flight: HashSet::new(),
-            zoom_fallback: None,
             merged: None,
             entries_revision: 0,
             merged_key: None,
@@ -448,7 +443,6 @@ impl LocalRegionCache {
         self.manifest_requested_key = None;
         self.manifest_in_flight = None;
         self.last_status = None;
-        self.zoom_fallback = None;
         self.clear_entries_for_new_scene();
     }
 }
@@ -556,9 +550,6 @@ fn finish_local_merge(
     }
 
     if let Some(merged) = merged {
-        if key.partition_bucket_step_bits.is_some() && !merged.is_empty() {
-            cache.zoom_fallback = None;
-        }
         cache.merged = Some(merged);
         cache.published_tiles = published_tiles;
         cache.merged_key = Some(key);
@@ -658,8 +649,6 @@ fn merged_partitioned_local_contours(
 #[derive(Clone, PartialEq, Eq)]
 struct SceneKey {
     root: Option<PathBuf>,
-    anchor_lat_bucket: i32,
-    anchor_lon_bucket: i32,
     zoom_bucket: i32,
 }
 
@@ -1060,15 +1049,38 @@ pub fn load_srtm_region_for_view(
     ctx: egui::Context,
 ) -> LocalContourLoad {
     fallback::load(
-        selected_root, scene_anchor, viewport_center, zoom,
+        selected_root, scene_anchor, viewport_center, zoom, zoom,
         prefetch_radius, build_radius, ctx,
     )
+}
+
+/// Local scene entry with camera scale independent of the bounded source grid.
+pub(crate) fn load_srtm_lod_region(
+    root: Option<&Path>, anchor: GeoPoint, center: GeoPoint,
+    source_zoom: f32, view_zoom: f32, radius: i32, ctx: egui::Context,
+) -> LocalContourLoad {
+    fallback::load(root, anchor, center, source_zoom, view_zoom, radius, radius, ctx)
+}
+
+fn local_tiles(cache: &LocalRegionCache) -> Vec<LocalTileGeometry> {
+    // Snapshot only the tiles represented by this CPU merge. Taking progress
+    // under a later lock must not pair an old merge with newly published cells.
+    cache.entries.iter().filter(|(key, contours)| cache.published_tiles.contains(*key) || contours.is_empty())
+    .map(|(key, contours)| LocalTileGeometry {
+        id: super::local_contour_pass::LocalTileId {
+            zoom_bucket: key.zoom_bucket,
+            lat_bucket: key.lat_bucket,
+            lon_bucket: key.lon_bucket,
+        },
+        contours: Arc::clone(contours),
+        bounds: cache.residency.geometry_bounds(key),
+    }).collect()
 }
 
 fn load_earth_source_region(
     cache: &'static Mutex<LocalRegionCache>,
     selected_root: Option<&Path>,
-    scene_anchor: GeoPoint,
+    _scene_anchor: GeoPoint,
     viewport_center: GeoPoint,
     zoom: f32,
     prefetch_radius: i32,
@@ -1122,8 +1134,6 @@ fn load_earth_source_region(
     }
     let scene_key = SceneKey {
         root: selected_root.map(Path::to_path_buf),
-        anchor_lat_bucket: (scene_anchor.lat * 20.0).round() as i32,
-        anchor_lon_bucket: (scene_anchor.lon * 20.0).round() as i32,
         zoom_bucket: srtm_focus_cache::zoom_bucket_for_zoom(zoom),
     };
 
@@ -1170,21 +1180,7 @@ fn load_earth_source_region(
     // decode arrivals can contain thousands of paths, and cloning them on the
     // paint thread caused the visible tile-arrival hitch.
     let (contours, merge, tiles) = if let Ok(mut guard) = cache.lock() {
-        let tiles = guard
-            .entries
-            .iter()
-            .filter(|(tile, _)| {
-                local_tile_distance(tile, center_lat_bucket, center_lon_bucket) <= prefetch_radius
-            })
-            .map(|(tile, contours)| LocalTileGeometry {
-                id: super::local_contour_pass::LocalTileId {
-                    zoom_bucket: tile.zoom_bucket,
-                    lat_bucket: tile.lat_bucket,
-                    lon_bucket: tile.lon_bucket,
-                },
-                contours: Arc::clone(contours),
-            })
-            .collect();
+        let tiles = local_tiles(&guard);
         let merge = begin_local_merge(
             &mut guard,
             LocalMergeSpec {
@@ -1218,7 +1214,7 @@ fn load_earth_source_region(
 /// stored in `lunar_focus_cache.sqlite`.  Same streaming / caching pattern.
 pub fn load_lunar_region_for_view(
     selected_root: Option<&Path>,
-    scene_anchor: crate::model::GeoPoint,
+    _scene_anchor: crate::model::GeoPoint,
     viewport_center: crate::model::GeoPoint,
     zoom: f32,
     prefetch_radius: i32,
@@ -1270,18 +1266,13 @@ pub fn load_lunar_region_for_view(
     let per_asset_budget = (360usize / assets.reader_assets().len().max(1)).max(120);
     let scene_key = SceneKey {
         root: selected_root.map(Path::to_path_buf),
-        anchor_lat_bucket: (scene_anchor.lat * 20.0).round() as i32,
-        anchor_lon_bucket: (scene_anchor.lon * 20.0).round() as i32,
         zoom_bucket: current_zoom_bucket,
     };
 
     let read = if let Ok(mut guard) = cache.lock() {
         if guard.scene_key.as_ref() != Some(&scene_key) {
-            // Scene changed (usually a zoom level change).  Build a fallback
-            // draw window so the user keeps seeing the old resolution while
-            // the new tiles are building. Do not clone the full retention
-            // envelope just to create this temporary fallback.
-            guard.zoom_fallback = guard.merged.clone();
+            // Display retention lives in local_terrain_scene::handoff; this
+            // cache prepares the replacement without retaining old source keys.
             guard.scene_key = Some(scene_key);
             guard.clear_entries_for_new_scene();
         }
@@ -1312,7 +1303,7 @@ pub fn load_lunar_region_for_view(
         );
     }
 
-    let (contours, merge) = if let Ok(mut guard) = cache.lock() {
+    let (contours, merge, tiles) = if let Ok(mut guard) = cache.lock() {
         let merge = begin_local_merge(
             &mut guard,
             LocalMergeSpec {
@@ -1322,15 +1313,9 @@ pub fn load_lunar_region_for_view(
                 partition_bucket_step: Some(bucket_step),
             },
         );
-        let contours = guard
-            .merged
-            .as_ref()
-            .filter(|merged| !merged.is_empty())
-            .cloned()
-            .or_else(|| guard.zoom_fallback.clone());
-        (contours, merge)
+        (guard.merged.clone(), merge, local_tiles(&guard))
     } else {
-        (None, None)
+        (None, None, Vec::new())
     };
     if let Some(work) = merge {
         spawn_local_merge(cache, work, ctx.clone(), "lunar-local-contour-merge");
@@ -1344,8 +1329,7 @@ pub fn load_lunar_region_for_view(
         loading_progress: loading.fractions,
         culled_buckets: loading.culled_buckets,
         status: loading.status,
-        // Lunar and Mars keep the CPU renderer; see `LocalContourLoad::tiles`.
-        tiles: Vec::new(),
+        tiles,
     }
 }
 
@@ -1353,7 +1337,7 @@ pub fn load_lunar_region_for_view(
 /// stored in `mars_ctx_cache.sqlite`.
 pub fn load_mars_region_for_view(
     selected_root: Option<&Path>,
-    scene_anchor: crate::model::GeoPoint,
+    _scene_anchor: crate::model::GeoPoint,
     viewport_center: crate::model::GeoPoint,
     zoom: f32,
     prefetch_radius: i32,
@@ -1405,16 +1389,12 @@ pub fn load_mars_region_for_view(
     let per_asset_budget = (360usize / assets.reader_assets().len().max(1)).max(120);
     let scene_key = SceneKey {
         root: selected_root.map(Path::to_path_buf),
-        anchor_lat_bucket: (scene_anchor.lat * 20.0).round() as i32,
-        anchor_lon_bucket: (scene_anchor.lon * 20.0).round() as i32,
         zoom_bucket: current_zoom_bucket,
     };
 
     let read = if let Ok(mut guard) = cache.lock() {
         if guard.scene_key.as_ref() != Some(&scene_key) {
-            // Preserve the previous draw window only; older retained tiles
-            // remain decoded for a return pan but do not need cloning here.
-            guard.zoom_fallback = guard.merged.clone();
+            // The scene retains the previous displayed generation separately.
             guard.scene_key = Some(scene_key);
             guard.clear_entries_for_new_scene();
         }
@@ -1445,7 +1425,7 @@ pub fn load_mars_region_for_view(
         );
     }
 
-    let (contours, merge) = if let Ok(mut guard) = cache.lock() {
+    let (contours, merge, tiles) = if let Ok(mut guard) = cache.lock() {
         let merge = begin_local_merge(
             &mut guard,
             LocalMergeSpec {
@@ -1455,15 +1435,9 @@ pub fn load_mars_region_for_view(
                 partition_bucket_step: Some(bucket_step),
             },
         );
-        let contours = guard
-            .merged
-            .as_ref()
-            .filter(|merged| !merged.is_empty())
-            .cloned()
-            .or_else(|| guard.zoom_fallback.clone());
-        (contours, merge)
+        (guard.merged.clone(), merge, local_tiles(&guard))
     } else {
-        (None, None)
+        (None, None, Vec::new())
     };
     if let Some(work) = merge {
         spawn_local_merge(cache, work, ctx.clone(), "mars-local-contour-merge");
@@ -1477,8 +1451,7 @@ pub fn load_mars_region_for_view(
         loading_progress: loading.fractions,
         culled_buckets: loading.culled_buckets,
         status: loading.status,
-        // Lunar and Mars keep the CPU renderer; see `LocalContourLoad::tiles`.
-        tiles: Vec::new(),
+        tiles,
     }
 }
 
@@ -2421,6 +2394,25 @@ mod tests {
             lon_bucket,
             zoom_bucket: 0,
         }
+    }
+
+    #[test]
+    fn local_tile_snapshot_does_not_claim_geometry_missing_from_its_cpu_merge() {
+        let mut cache = LocalRegionCache::default();
+        let old = test_cache_key(0, 0);
+        let arriving = test_cache_key(1, 0);
+        let empty = test_cache_key(2, 0);
+        cache.entries.insert(old.clone(), Arc::new(vec![test_contour(50.0)]));
+        cache.entries.insert(arriving.clone(), Arc::new(vec![test_contour(100.0)]));
+        cache.entries.insert(empty, Arc::new(Vec::new()));
+        cache.published_tiles.insert(old);
+        let snapshot = local_tiles(&cache);
+        assert_eq!(snapshot.len(), 2);
+        assert!(!snapshot.iter().any(|tile| tile.id.lat_bucket == 1));
+        cache.published_tiles.insert(arriving);
+        assert_eq!(local_tiles(&cache).len(), 3);
+        // Publishing a later merge cannot change an already returned snapshot.
+        assert_eq!(snapshot.len(), 2);
     }
 
     fn test_gpkg_linestring() -> Vec<u8> {

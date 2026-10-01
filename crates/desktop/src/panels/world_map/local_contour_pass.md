@@ -63,8 +63,8 @@ uniform slot and a typed cache namespace so roads never overwrite contour tiles.
 - Earth only. Lunar and Mars merges apply exclusive midpoint ownership to
   de-overlap their tiles, which the per-tile path would have to reproduce; they
   keep the CPU renderer, where geometry volume is not a problem.
-- The scene falls back to the CPU stack whenever no batch is ready yet, so the
-  handover is invisible rather than a blank frame.
+- The scene keeps its previous display until every replacement batch is
+  uploaded. Cold starts use the CPU merge while GPU staging completes.
 - Major and minor contours carry different stroke widths, and the CPU width
   formula ends in a `max()` floor. Both widths are therefore computed host-side
   and selected per instance, rather than derived from one width by a multiplier
@@ -107,3 +107,14 @@ uniform slot and a typed cache namespace so roads never overwrite contour tiles.
 - `residency_callback` frees every GPU batch unused in the current egui pass
   during `finish_prepare`, after all contour/road preparations have completed.
   This runs regardless of the memory budget or whether any line layer is shown.
+
+### Staged LOD uploads
+
+`upload_only` prepares candidate buffers without painting or writing visible
+pass uniforms. GPU residency keys include both tile ID and immutable version,
+so preparing a replacement cannot overwrite a still-visible tile. After all
+callbacks prepare, residency publishes the uploaded keys for the next UI pass.
+`batches_uploaded` lets the scene retain old terrain until every replacement
+upload finishes. The last upload also requests repaint to complete the handoff.
+Old and candidate buffers remain live together during staging; the old set is
+released on the next frame after adoption.

@@ -20,3 +20,6 @@ interference with other scene tests.
 
 The fine-tier coverage test also distinguishes deliberately culled cells from
 missing visible tiles, so residency pruning cannot force permanent base fallback.
+
+Fixtures include the optional reader-computed tile bounds carried to the LOD
+handoff. Missing fixture bounds use the tile core for coverage.

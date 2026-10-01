@@ -5,6 +5,8 @@ pub(super) mod geography;
 pub(crate) mod hillshade_layer;
 pub(super) mod markers;
 pub(crate) mod projection;
+mod lod;
+pub(crate) mod handoff;
 pub(super) mod ui_overlays;
 
 // Re-export project_local so sibling modules (road_layer, water_layer) can
@@ -151,51 +153,45 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let half = visual_half_extent_for_zoom(model.globe_view.local_zoom);
     let extent_x = (half * 111.32 * viewport_center.lat.to_radians().cos().abs().max(0.2)).max(1.0);
     let extent_y = (half * 111.32).max(1.0);
-    contour_asset::set_local_viewport(
-        model.active_body,
-        projection::local_projection_params(&layout, &model.globe_view, viewport_center, extent_x, extent_y),
-        rect.intersect(painter.clip_rect()),
-    );
-    // Earth core tiles cover disjoint ground. Select enough to cover the
-    // oblique viewport, including a focus near the edge of its center core.
-    let prefetch_radius =
-        srtm_focus_cache::prefetch_radius_for_zoom(render_zoom, LOCAL_CONTOUR_PREFETCH_RADIUS);
-    let build_radius =
-        srtm_focus_cache::prefetch_radius_for_zoom(render_zoom, LOCAL_CONTOUR_BUILD_RADIUS);
-
+    let projection = projection::local_projection_params(&layout, &model.globe_view, viewport_center, extent_x, extent_y);
+    let clip = rect.intersect(painter.clip_rect());
+    contour_asset::set_local_viewport(model.active_body, projection, clip);
+    let selection = painter.ctx().data_mut(|data| {
+        let id = egui::Id::new(("terrain-source-lod", format!("{:?}", model.active_body)));
+        let previous = data.get_temp::<lod::Selection>(id);
+        let selection = lod::select(model.active_body, render_zoom, previous);
+        data.insert_temp(id, selection);
+        selection
+    });
     let contour_load = match model.active_body {
         crate::model::ActiveBody::Moon => contour_asset::load_lunar_region_for_view(
-            model.selected_root.as_deref(),
-            focus,
-            viewport_center,
-            render_zoom,
-            LOCAL_CONTOUR_PREFETCH_RADIUS,
-            LOCAL_CONTOUR_BUILD_RADIUS,
-            painter.ctx().clone(),
+            model.selected_root.as_deref(), focus, viewport_center,
+            selection.zoom, selection.radius, selection.radius, painter.ctx().clone(),
         ),
         crate::model::ActiveBody::Mars => contour_asset::load_mars_region_for_view(
-            model.selected_root.as_deref(),
-            focus,
-            viewport_center,
-            render_zoom,
-            LOCAL_CONTOUR_PREFETCH_RADIUS,
-            LOCAL_CONTOUR_BUILD_RADIUS,
-            painter.ctx().clone(),
+            model.selected_root.as_deref(), focus, viewport_center,
+            selection.zoom, selection.radius, selection.radius, painter.ctx().clone(),
         ),
-        crate::model::ActiveBody::Earth => contour_asset::load_srtm_region_for_view(
-            model.selected_root.as_deref(),
-            focus,
-            viewport_center,
-            render_zoom,
-            prefetch_radius,
-            build_radius,
-            painter.ctx().clone(),
+        crate::model::ActiveBody::Earth => contour_asset::load_srtm_lod_region(
+            model.selected_root.as_deref(), focus, viewport_center,
+            selection.zoom, render_zoom, selection.radius, painter.ctx().clone(),
         ),
     };
-    let contours = contour_load.contours.clone();
-    // Earth draws contours on the GPU when the pass has geometry ready; the CPU
-    // stack stays as the fallback and remains the only path for Moon and Mars.
-    let gpu_contour_batches = gpu_contour_batches(model, &contour_load, painter);
+    let candidate_batches = gpu_contour_batches(model, &contour_load, painter);
+    if !candidate_batches.is_empty() {
+        painter.add(local_contour_pass::LocalContourCallback::new(
+            local_contour_pass::LocalContourPass::Surface, candidate_batches.clone(),
+            &projection, 1.0, 1.0, 1.0, painter.ctx().clone(),
+        ).upload_only().into_paint_callback(clip));
+    }
+    let display = handoff::select(
+        model.selected_root.as_deref(),
+        contour_asset::residency::Viewport { body: model.active_body, projection, rect: clip.expand(8.0) },
+        render_zoom, &contour_load, candidate_batches,
+        model.active_body == crate::model::ActiveBody::Earth && model.show_contours,
+    );
+    let contours = display.contours;
+    let gpu_contour_batches = display.batches;
     let use_gpu_contours = !gpu_contour_batches.is_empty();
     let cache_status = match model.active_body {
         crate::model::ActiveBody::Moon | crate::model::ActiveBody::Mars => None,
@@ -207,14 +203,14 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     if still_loading {
         match model.active_body {
             crate::model::ActiveBody::Moon => {
-                let half_extent = srtm_focus_cache::lunar_half_extent_for_zoom(render_zoom);
+                let half_extent = srtm_focus_cache::lunar_half_extent_for_zoom(contour_load.source_zoom);
                 dissolve::draw_tile_pulse_grid(
                     painter,
                     &layout,
                     &model.globe_view,
                     viewport_center,
-                    render_zoom,
-                    LOCAL_CONTOUR_BUILD_RADIUS,
+                    contour_load.source_zoom,
+                    contour_load.build_radius,
                     time,
                     &contour_load.ready_buckets,
                     &contour_load.loading_progress,
@@ -227,12 +223,12 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                     &layout,
                     &model.globe_view,
                     viewport_center,
-                    render_zoom,
-                    LOCAL_CONTOUR_BUILD_RADIUS,
+                    contour_load.source_zoom,
+                    contour_load.build_radius,
                     time,
                     &contour_load.ready_buckets,
                     &contour_load.loading_progress,
-                    Some(srtm_focus_cache::mars_half_extent_for_zoom(render_zoom)),
+                    Some(srtm_focus_cache::mars_half_extent_for_zoom(contour_load.source_zoom)),
                 );
             }
             crate::model::ActiveBody::Earth => {
@@ -1054,13 +1050,14 @@ pub fn paint_transition_overlay(
 
     let viewport_center = model.globe_view.local_center;
     let render_zoom = local_render_zoom(model.globe_view.local_zoom);
-    let Some(contours) = contour_asset::load_srtm_region_for_view(
+    let selection = lod::select(crate::model::ActiveBody::Earth, render_zoom, None);
+    let Some(contours) = contour_asset::load_srtm_lod_region(
         model.selected_root.as_deref(),
         focus,
         viewport_center,
+        selection.zoom,
         render_zoom,
-        srtm_focus_cache::prefetch_radius_for_zoom(render_zoom, LOCAL_CONTOUR_PREFETCH_RADIUS),
-        srtm_focus_cache::prefetch_radius_for_zoom(render_zoom, LOCAL_CONTOUR_BUILD_RADIUS),
+        selection.radius,
         painter.ctx().clone(),
     )
     .contours
@@ -1111,12 +1108,8 @@ pub fn has_pending_cache(model: &AppModel) -> bool {
 }
 
 pub fn local_render_zoom(local_zoom: f32) -> f32 {
-    // local_zoom lives in [LOCAL_ZOOM_MIN, 60] and now drives the tile spec
-    // across its whole range: the 3DEP tiers (zoom_bucket >= 7) continue the
-    // ladder past the point where SRTM stops resolving anything new, so the
-    // former clamp at 20 would have frozen tile detail two thirds of the way
-    // down the zoom range.  Below ~4 the coarsest bucket (zoom_bucket=0,
-    // half_extent=3.6°) still handles the wide-area view.
+    // Camera scale stays continuous. lod::select independently chooses the
+    // source grid that can cover this footprint within its request budget.
     local_zoom.clamp(LOCAL_ZOOM_MIN, LOCAL_ZOOM_MAX)
 }
 
@@ -1911,13 +1904,8 @@ fn gpu_contour_batches(
     load: &contour_asset::LocalContourLoad,
     painter: &egui::Painter,
 ) -> Vec<local_contour_pass::LocalTileBatch> {
-    let visible = if model.active_body == crate::model::ActiveBody::Earth && model.show_contours {
-        load.tiles.iter().map(|tile| tile.id).collect()
-    } else {
-        std::collections::HashSet::new()
-    };
-    local_contour_pass::retain_instances(&visible);
-    if visible.is_empty() {
+    if model.active_body != crate::model::ActiveBody::Earth || !model.show_contours {
+        local_contour_pass::retain_instances(&std::collections::HashSet::new());
         return Vec::new();
     }
 

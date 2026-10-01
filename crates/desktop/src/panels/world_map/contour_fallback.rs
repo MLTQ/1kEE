@@ -20,12 +20,13 @@ pub(super) fn load(
     root: Option<&Path>,
     anchor: GeoPoint,
     center: GeoPoint,
+    source_zoom: f32,
     view_zoom: f32,
     prefetch_radius: i32,
     build_radius: i32,
     ctx: egui::Context,
 ) -> LocalContourLoad {
-    let bucket = srtm_focus_cache::zoom_bucket_for_zoom(view_zoom);
+    let bucket = srtm_focus_cache::zoom_bucket_for_zoom(source_zoom);
     let cache = if bucket == BASE_BUCKET {
         &EARTH_BASE_CONTOUR_CACHE
     } else {
@@ -39,7 +40,7 @@ pub(super) fn load(
         root,
         anchor,
         center,
-        view_zoom,
+        source_zoom,
         prefetch_radius,
         build_radius,
         ctx.clone(),

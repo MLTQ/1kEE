@@ -26,3 +26,7 @@ Cache files remain unchanged; small bounds records avoid repeat offscreen reads.
 ## Validation
 `contour_residency_tests.rs` covers oblique visibility, elevation, crossing lines,
 pan eviction, late readers, metadata reuse, and reloading when a tile returns.
+
+The LOD handoff receives bounds metadata and the same `Viewport` intersection
+test to prune its outgoing generation without rescanning contours. Leaving local
+view clears retained display geometry as well as loader and instance caches.

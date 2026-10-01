@@ -270,4 +270,65 @@ fn roads_and_contours_render_together_and_deferred_uploads_complete() {
         assert_eq!(res.tiles.len(), expected);
         assert_eq!(res.resident_bytes, expected as u64 * 32);
     }
+
+    // Stage more than one frame's uploads while drawing the old generation.
+    // Reuse its tile ID with a different version: staging must not overwrite
+    // either the visible buffer or the visible pass's uniforms.
+    let replacements: Vec<_> = (0..4).map(|n| LocalTileBatch {
+        id: if n == 0 { contour.id } else { LocalBatchId::Contour(LocalTileId {
+            zoom_bucket: 5, lat_bucket: n, lon_bucket: 0,
+        }) },
+        version: 23,
+        instances: Arc::new(vec![LocalSegmentInstance::line(
+            [8.0 + n as f32 * 12.0, -24.0, 0.0],
+            [20.0 + n as f32 * 12.0, -24.0, 0.0],
+            egui::Color32::WHITE, true,
+        )]),
+    }).collect();
+    for frame in 0..3 {
+        let ready = batches_uploaded(&replacements);
+        assert_eq!(ready, frame == 2);
+        let output = ctx.run(egui::RawInput { screen_rect: Some(rect), ..Default::default() }, |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("handoff")));
+            painter.add(residency_callback(rect, ctx));
+            painter.add(LocalContourCallback::new(LocalContourPass::Surface,
+                if ready { replacements.clone() } else { vec![contour.clone()] },
+                &params, 1.0, 2.0, 2.0, ctx.clone()).into_paint_callback(rect));
+            // Deliberately different uniforms; an upload-only callback must
+            // never change the visible pass's opacity or line widths.
+            painter.add(LocalContourCallback::new(LocalContourPass::Surface,
+                replacements.clone(), &params, 0.0, 9.0, 9.0, ctx.clone())
+                .upload_only().into_paint_callback(rect));
+        });
+        let jobs = ctx.tessellate(output.shapes, output.pixels_per_point);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let commands = renderer.update_buffers(&device, &queue, &mut encoder, &jobs, &screen);
+        {
+            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("terrain handoff"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target_view, resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })], depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None,
+            });
+            renderer.render(&mut pass.forget_lifetime(), &jobs, &screen);
+        }
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None, size: 64 * 64 * 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(target.as_image_copy(), wgpu::TexelCopyBufferInfo {
+            buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256), rows_per_image: Some(64) },
+        }, wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 1 });
+        queue.submit(commands.into_iter().chain(std::iter::once(encoder.finish())));
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| { tx.send(r).unwrap(); });
+        device.poll(wgpu::Maintain::Wait);
+        rx.recv().unwrap().unwrap();
+        let pixels = buffer.slice(..).get_mapped_range();
+        for x in 9..55 {
+            assert_eq!(pixels[(16 * 64 + x) * 4] > 200, !ready, "old terrain frame={frame} x={x}");
+            assert_eq!(pixels[(24 * 64 + x) * 4] > 200, ready, "replacement frame={frame} x={x}");
+        }
+    }
 }

@@ -42,3 +42,7 @@ road detail, and the Moon/Mars pipelines remain independent of this choice.
 Companion tests cover missing versus empty tiles, publication, panning, all
 deep zoom footprints, source-grid identity, and a temporary-database cold start
 followed by an offline fine-cache upgrade.
+
+The scene supplies source zoom separately from camera zoom. Fine/base coverage
+and the base envelope use the actual camera footprint; a coarser selected source
+never changes screen scale or expands fallback requests to its nominal camera.
