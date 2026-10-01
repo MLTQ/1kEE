@@ -6,6 +6,7 @@ pub(crate) mod hillshade_layer;
 pub(super) mod markers;
 pub(crate) mod projection;
 mod lod;
+pub(crate) mod composition;
 pub(crate) mod handoff;
 pub(super) mod ui_overlays;
 
@@ -177,7 +178,9 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             selection.zoom, render_zoom, selection.radius, painter.ctx().clone(),
         ),
     };
-    let candidate_batches = gpu_contour_batches(model, &contour_load, painter);
+    let viewport = contour_asset::residency::Viewport { body: model.active_body, projection, rect: clip.expand(8.0) };
+    let candidate = handoff::prepare(model.selected_root.as_deref(), viewport, &contour_load, painter.ctx());
+    let candidate_batches = gpu_contour_batches(model, &candidate.tiles, painter);
     if !candidate_batches.is_empty() {
         painter.add(local_contour_pass::LocalContourCallback::new(
             local_contour_pass::LocalContourPass::Surface, candidate_batches.clone(),
@@ -185,10 +188,9 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         ).upload_only().into_paint_callback(clip));
     }
     let display = handoff::select(
-        model.selected_root.as_deref(),
-        contour_asset::residency::Viewport { body: model.active_body, projection, rect: clip.expand(8.0) },
-        render_zoom, &contour_load, candidate_batches,
+        viewport, candidate, candidate_batches,
         model.active_body == crate::model::ActiveBody::Earth && model.show_contours,
+        painter.ctx(),
     );
     let contours = display.contours;
     let gpu_contour_batches = display.batches;
@@ -1901,7 +1903,7 @@ fn draw_elevation_fill(
 /// CPU stack, so there is never a blank frame during the handover.
 fn gpu_contour_batches(
     model: &AppModel,
-    load: &contour_asset::LocalContourLoad,
+    tiles: &[contour_asset::LocalTileGeometry],
     painter: &egui::Painter,
 ) -> Vec<local_contour_pass::LocalTileBatch> {
     if model.active_body != crate::model::ActiveBody::Earth || !model.show_contours {
@@ -1921,8 +1923,7 @@ fn gpu_contour_batches(
         })) << 32);
 
     let ctx = painter.ctx().clone();
-    load.tiles
-        .iter()
+    tiles.iter()
         .filter_map(|tile| {
             local_contour_pass::instances_for_tile(
                 tile.id,

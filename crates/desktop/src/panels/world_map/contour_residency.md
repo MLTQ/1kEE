@@ -30,3 +30,6 @@ pan eviction, late readers, metadata reuse, and reloading when a tile returns.
 The LOD handoff receives bounds metadata and the same `Viewport` intersection
 test to prune its outgoing generation without rescanning contours. Leaving local
 view clears retained display geometry as well as loader and instance caches.
+
+The background LOD composer reuses `Bounds::from_contours` for clipped output;
+no new geometry scans run on the paint thread.

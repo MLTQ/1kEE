@@ -240,3 +240,11 @@ request while prior terrain remains visible. Offscreen tile references are
 pruned using worker bounds; the last old CPU merge survives until replacement
 or until all its tiles leave view. Root/body changes, exit, and cache reset clear
 the handoff. CPU-only Moon/Mars use the same coverage gate.
+
+### Progressive LOD repair
+
+The scene now prepares a background composition of ready source cores before
+GPU staging. Missing edge cells retain coarse pieces only in their own gaps;
+they cannot block the rest of a detail upgrade. CPU and GPU share clipped
+geometry and source progress still describes actual loading. See `composition`
+and `handoff` for geometric ownership, worker coalescing, and publication.

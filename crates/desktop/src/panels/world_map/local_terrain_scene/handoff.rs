@@ -1,23 +1,22 @@
-//! Keep one displayed terrain generation until its replacement can cover it.
-use super::{
-    super::{
-        contour_asset::{
-            ContourPath, LocalContourLoad, LocalTileGeometry,
-            residency::{Bounds, Viewport},
-        },
-        local_contour_pass::{self, LocalBatchId, LocalTileBatch},
-    },
-    lod,
-};
+//! Coalesced terrain composition and atomic CPU/GPU display publication.
+use super::composition::{self, Frame, Piece, Source};
 use crate::model::ActiveBody;
+use crate::panels::world_map::{
+    contour_asset::{ContourPath, LocalContourLoad, LocalTileGeometry, residency::Viewport},
+    local_contour_pass::{self, LocalBatchId, LocalTileBatch, LocalTileId},
+};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 #[derive(Clone, Default)]
 pub(super) struct Display {
+    frame_id: u64,
     pub contours: Option<Arc<Vec<ContourPath>>>,
     pub batches: Vec<LocalTileBatch>,
     tiles: Vec<LocalTileGeometry>,
@@ -26,26 +25,74 @@ pub(super) struct Display {
 #[derive(Default)]
 struct Handoff {
     identity: Option<(Option<PathBuf>, ActiveBody)>,
+    epoch: u64,
+    generation: u64,
+    tier: Option<i32>,
+    sources: HashMap<LocalTileId, Source>,
+    pieces: HashMap<LocalTileId, Piece>,
+    revision: u64,
+    built_revision: u64,
+    working: Option<u64>,
+    prepared: Option<Frame>,
     display: Display,
 }
-
 static STATE: OnceLock<Mutex<Handoff>> = OnceLock::new();
+static TICKET: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) fn reset() {
     if let Some(state) = STATE.get()
         && let Ok(mut state) = state.lock()
     {
-        *state = Handoff::default();
+        state.clear();
     }
 }
 
-pub(super) fn select(
+/// Prepare a geographic composition, independently of the current camera scale.
+/// A prepared frame remains stable until its GPU upload finishes, so subsequent
+/// read arrivals cannot perpetually replace work that is still being uploaded.
+pub(super) fn prepare(
     root: Option<&Path>,
     view: Viewport,
-    camera_zoom: f32,
-    candidate: &LocalContourLoad,
+    load: &LocalContourLoad,
+    ctx: &egui::Context,
+) -> Frame {
+    let mut state = STATE.get_or_init(Default::default).lock().unwrap();
+    state.observe(root, view, load);
+    if state.working.is_none() && state.prepared.is_none() && state.revision != state.built_revision
+    {
+        let ticket = TICKET.fetch_add(1, Ordering::Relaxed);
+        let (epoch, generation, revision) = (state.epoch, state.generation, state.revision);
+        let sources = state.sources.values().cloned().collect();
+        let previous = state.pieces.clone();
+        state.working = Some(ticket);
+        let ctx = ctx.clone();
+        let worker_ctx = ctx.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("terrain-lod-composition".into())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    composition::compose(view.body, sources, previous)
+                }));
+                if let Ok(mut state) = STATE.get().unwrap().lock() {
+                    state.finish(ticket, epoch, generation, revision, result.ok());
+                }
+                worker_ctx.request_repaint();
+            })
+        {
+            state.working = None;
+            eprintln!("[1kEE] failed to spawn terrain LOD composition: {error}");
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        }
+    }
+    state.candidate()
+}
+
+pub(super) fn select(
+    view: Viewport,
+    candidate: Frame,
     batches: Vec<LocalTileBatch>,
     gpu: bool,
+    ctx: &egui::Context,
 ) -> Display {
     let Ok(mut state) = STATE.get_or_init(Default::default).lock() else {
         return Display::default();
@@ -53,62 +100,177 @@ pub(super) fn select(
     let uploaded = !gpu
         || (batches.len() == candidate.tiles.len()
             && local_contour_pass::batches_uploaded(&batches));
-    state.update(
-        root,
-        view,
-        camera_zoom,
-        candidate,
-        if gpu { batches } else { Vec::new() },
-        uploaded,
-    );
-    if !gpu {
-        state.display.batches.clear();
+    state.publish(candidate, batches, gpu, uploaded);
+    if state.revision != state.built_revision && state.prepared.is_none() {
+        ctx.request_repaint();
     }
+    state.display.prune(view);
     let keep = if gpu {
         state
             .display
             .tiles
             .iter()
-            .chain(&candidate.tiles)
+            .chain(state.prepared.iter().flat_map(|f| &f.tiles))
             .map(|t| t.id)
             .collect()
     } else {
         HashSet::new()
     };
     local_contour_pass::retain_instances(&keep);
-    state.display.clone()
+    // Cold starts can use the composed CPU picture while the first upload is
+    // staged. Subsequent updates always retain the previous displayed frame.
+    if state.display.tiles.is_empty()
+        && let Some(frame) = &state.prepared
+    {
+        Display {
+            frame_id: frame.id,
+            contours: frame.contours.clone(),
+            tiles: frame.tiles.clone(),
+            batches: Vec::new(),
+        }
+    } else {
+        state.display.clone()
+    }
 }
 
 impl Handoff {
-    fn update(
-        &mut self,
-        root: Option<&Path>,
-        view: Viewport,
-        camera_zoom: f32,
-        candidate: &LocalContourLoad,
-        batches: Vec<LocalTileBatch>,
-        uploaded: bool,
-    ) {
+    fn clear(&mut self) {
+        self.identity = None;
+        self.epoch = self.epoch.wrapping_add(1);
+        self.generation = self.generation.wrapping_add(1);
+        self.tier = None;
+        self.sources.clear();
+        self.pieces.clear();
+        self.revision = self.revision.wrapping_add(1);
+        self.built_revision = self.revision;
+        self.prepared = None;
+        self.display = Display::default();
+        // Keep the worker slot occupied until a stale worker returns. Rapid
+        // resets/body switches cannot spawn an unbounded composition fan-out.
+    }
+
+    fn observe(&mut self, root: Option<&Path>, view: Viewport, load: &LocalContourLoad) {
         let identity = (root.map(Path::to_path_buf), view.body);
         if self.identity.as_ref() != Some(&identity) {
+            self.clear();
             self.identity = Some(identity);
-            self.display = Display::default();
         }
         self.display.prune(view);
-        let published = candidate.tiles.iter().all(|tile| {
-            candidate
+        if let Some(frame) = &mut self.prepared {
+            frame
+                .tiles
+                .retain(|t| view.intersects(composition::visible_bounds(view.body, t)));
+            if frame.tiles.is_empty() {
+                frame.contours = None;
+            }
+        }
+        let before = self.sources.len();
+        self.sources
+            .retain(|_, s| view.intersects(composition::visible_bounds(view.body, &s.tile)));
+        if self.sources.len() != before {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        self.pieces.retain(|id, _| self.sources.contains_key(id));
+        let tier = match view.body {
+            ActiveBody::Earth => {
+                super::super::srtm_focus_cache::zoom_bucket_for_zoom(load.source_zoom)
+            }
+            _ => {
+                super::super::srtm_focus_cache::zoom::lunar_spec_for_zoom(load.source_zoom)
+                    .zoom_bucket
+            }
+        };
+        if self.tier != Some(tier) {
+            self.tier = Some(tier);
+            self.generation = self.generation.wrapping_add(1);
+            self.prepared = None;
+            // Reversing the zoom can reuse resident data of this source tier.
+            for source in self
+                .sources
+                .values_mut()
+                .filter(|s| s.tile.id.zoom_bucket == tier)
+            {
+                source.priority = self.generation;
+            }
+            self.revision = self.revision.wrapping_add(1);
+        }
+        for tile in &load.tiles {
+            if !load
                 .ready_buckets
                 .contains(&(tile.id.lat_bucket, tile.id.lon_bucket))
-        });
-        let preserves = preserves_coverage(&self.display.tiles, candidate, view, camera_zoom);
-        // A cold viewport can display CPU arrivals progressively. Once it has a
-        // map, neither the first decoded tile nor the first GPU upload can erase it.
-        if self.display.tiles.is_empty() || (published && uploaded && preserves) {
+                || !view.intersects(composition::visible_bounds(view.body, tile))
+            {
+                continue;
+            }
+            if self.sources.get(&tile.id).is_some_and(|s| {
+                Arc::ptr_eq(&s.tile.contours, &tile.contours) && s.priority == self.generation
+            }) {
+                continue;
+            }
+            self.sources.insert(
+                tile.id,
+                Source {
+                    tile: tile.clone(),
+                    priority: self.generation,
+                },
+            );
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
+    fn finish(
+        &mut self,
+        ticket: u64,
+        epoch: u64,
+        generation: u64,
+        revision: u64,
+        result: Option<composition::Result>,
+    ) {
+        if self.working != Some(ticket) {
+            return;
+        }
+        self.working = None;
+        if self.epoch != epoch || self.generation != generation {
+            return;
+        }
+        self.built_revision = revision;
+        if let Some(mut result) = result {
+            result.frame.id = ticket;
+            if self.revision == revision {
+                self.sources.retain(|id, _| result.pieces.contains_key(id));
+            }
+            self.pieces = result.pieces;
+            self.prepared = Some(result.frame);
+        }
+    }
+
+    fn candidate(&self) -> Frame {
+        self.prepared.clone().unwrap_or_else(|| Frame {
+            id: self.display.frame_id,
+            tiles: self.display.tiles.clone(),
+            contours: self.display.contours.clone(),
+        })
+    }
+
+    fn publish(
+        &mut self,
+        candidate: Frame,
+        batches: Vec<LocalTileBatch>,
+        gpu: bool,
+        uploaded: bool,
+    ) {
+        if uploaded {
+            if self.prepared.as_ref().is_some_and(|f| f.id == candidate.id) {
+                self.prepared = None;
+            }
             self.display = Display {
-                contours: candidate.contours.clone(),
-                batches: if uploaded { batches } else { Vec::new() },
-                tiles: candidate.tiles.clone(),
+                frame_id: candidate.id,
+                contours: candidate.contours,
+                tiles: candidate.tiles,
+                batches: if gpu { batches } else { Vec::new() },
             };
+        } else if !gpu {
+            self.display.batches.clear();
         }
     }
 }
@@ -116,138 +278,15 @@ impl Handoff {
 impl Display {
     fn prune(&mut self, view: Viewport) {
         self.tiles
-            .retain(|tile| view.intersects(tile_bounds(tile, view.body)));
+            .retain(|t| view.intersects(composition::visible_bounds(view.body, t)));
         let ids: HashSet<_> = self.tiles.iter().map(|t| t.id).collect();
         self.batches
-            .retain(|batch| matches!(batch.id, LocalBatchId::Contour(id) if ids.contains(&id)));
+            .retain(|b| matches!(b.id, LocalBatchId::Contour(id) if ids.contains(&id)));
         if self.tiles.is_empty() {
             self.contours = None;
             self.batches.clear();
         }
     }
-}
-
-fn tile_bounds(tile: &LocalTileGeometry, body: ActiveBody) -> Bounds {
-    tile.bounds.unwrap_or_else(|| {
-        let step = lod::step(body, lod::ZOOMS[tile.id.zoom_bucket.clamp(0, 10) as usize]);
-        Bounds {
-            min: [
-                (tile.id.lon_bucket as f32 - 0.5) * step,
-                (tile.id.lat_bucket as f32 - 0.5) * step,
-                0.0,
-            ],
-            max: [
-                (tile.id.lon_bucket as f32 + 0.5) * step,
-                (tile.id.lat_bucket as f32 + 0.5) * step,
-                0.0,
-            ],
-        }
-    })
-}
-
-/// Compare geographic coverage, not tile counts: grids are not nested. Empty
-/// decoded tiles are valid; a failed or unavailable source is not replacement
-/// coverage. Limit checks to the visible ground window, so zooming into part of
-/// a large old tile does not wait for children outside the camera.
-fn preserves_coverage(
-    old: &[LocalTileGeometry],
-    next: &LocalContourLoad,
-    view: Viewport,
-    _camera_zoom: f32,
-) -> bool {
-    let step = lod::step(view.body, next.source_zoom);
-    let decoded: HashSet<_> = next
-        .tiles
-        .iter()
-        .filter(|t| {
-            next.ready_buckets
-                .contains(&(t.id.lat_bucket, t.id.lon_bucket))
-        })
-        .map(|t| (t.id.lat_bucket, t.id.lon_bucket))
-        .collect();
-    old.iter().all(|tile| {
-        // An identical immutable tile needs no geographic replacement test.
-        if next
-            .tiles
-            .iter()
-            .any(|n| n.id == tile.id && Arc::ptr_eq(&n.contours, &tile.contours))
-        {
-            return true;
-        }
-        let bounds = tile_bounds(tile, view.body);
-        let Some(visible) = visible_ground_bounds(view, bounds.min[2], bounds.max[2]) else {
-            return false; // A degenerate camera cannot prove replacement coverage.
-        };
-        let min_lon = bounds.min[0].max(visible.min[0]);
-        let max_lon = bounds.max[0].min(visible.max[0]);
-        let min_lat = bounds.min[1].max(visible.min[1]);
-        let max_lat = bounds.max[1].min(visible.max[1]);
-        if min_lon > max_lon || min_lat > max_lat {
-            return true;
-        }
-        let range = |lo: f32, hi: f32| (lo / step).round() as i32..=(hi / step).round() as i32;
-        range(min_lat, max_lat).all(|lat| {
-            range(min_lon, max_lon).all(|lon| {
-                let overlap = Bounds {
-                    min: [
-                        min_lon.max((lon as f32 - 0.5) * step),
-                        min_lat.max((lat as f32 - 0.5) * step),
-                        bounds.min[2],
-                    ],
-                    max: [
-                        max_lon.min((lon as f32 + 0.5) * step),
-                        max_lat.min((lat as f32 + 0.5) * step),
-                        bounds.max[2],
-                    ],
-                };
-                !view.intersects(overlap)
-                    || decoded.contains(&(lat, lon))
-                    || next.culled_buckets.contains(&(lat, lon))
-            })
-        })
-    })
-}
-
-/// Invert the exact affine projector at both height extremes. This clips checks
-/// to a finite visible region without discarding elevated/distant lines at a
-/// shallow pitch merely because they lie outside the nominal ground envelope.
-fn visible_ground_bounds(view: Viewport, min_height: f32, max_height: f32) -> Option<Bounds> {
-    let p = view.projection;
-    let ground_y = -p.pitch_cos * p.ground_pitch_scale + p.pitch_sin * p.ground_depth_scale;
-    if [ground_y, p.horizontal_scale, p.x_factor, p.y_factor]
-        .iter()
-        .any(|v| !v.is_finite() || v.abs() < 1e-8)
-    {
-        return None;
-    }
-    let mut bounds = Bounds {
-        min: [f32::INFINITY; 3],
-        max: [f32::NEG_INFINITY; 3],
-    };
-    for corner in [
-        view.rect.left_top(),
-        view.rect.right_top(),
-        view.rect.left_bottom(),
-        view.rect.right_bottom(),
-    ] {
-        for height in [min_height, max_height] {
-            let x = (corner.x - p.focus_center_x) / p.horizontal_scale;
-            let elevation = height
-                * p.z_factor
-                * (p.pitch_sin * p.elevation_pitch_scale + p.pitch_cos * p.elevation_depth_scale);
-            let y = (corner.y - p.focus_center_y + elevation) / ground_y;
-            let lon = (x * p.yaw_cos + y * p.yaw_sin) / p.x_factor + p.focus_lon;
-            let lat = (-x * p.yaw_sin + y * p.yaw_cos) / p.y_factor + p.focus_lat;
-            for (i, v) in [lon, lat, height].into_iter().enumerate() {
-                if !v.is_finite() {
-                    return None;
-                }
-                bounds.min[i] = bounds.min[i].min(v);
-                bounds.max[i] = bounds.max[i].max(v);
-            }
-        }
-    }
-    Some(bounds)
 }
 
 #[cfg(test)]

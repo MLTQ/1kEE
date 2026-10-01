@@ -22,3 +22,8 @@ The same offscreen test stages four replacement tiles over two upload frames.
 Pixel readback verifies the old terrain remains visible, staging is invisible,
 new uniforms do not corrupt old drawing, and the complete replacement appears
 on the next frame. An overlapping ID with a different version tests coexistence.
+
+A geographic composition fixture leaves neighboring fine cells permanently
+missing. GPU readback requires the ready fine curve in the middle, retained
+coarse terrain at the sides, and no coarse bridge/overlap in the replaced cell.
+The UI callback clones batch handles so egui can safely repeat a layout pass.

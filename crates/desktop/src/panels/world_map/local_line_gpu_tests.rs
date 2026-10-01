@@ -331,4 +331,65 @@ fn roads_and_contours_render_together_and_deferred_uploads_complete() {
             assert_eq!(pixels[(24 * 64 + x) * 4] > 200, ready, "replacement frame={frame} x={x}");
         }
     }
+    // Actual geographic LOD composition: one finer cell is ready, its edge
+    // neighbors are permanently absent. Fine geometry must appear now, and
+    // the previous coarse line must remain only outside that cell.
+    use crate::panels::world_map::local_terrain_scene::composition::{self, Source};
+    use crate::panels::world_map::contour_asset::{LocalTileGeometry, residency::Bounds};
+    let source = |bucket, priority, y| {
+        let extent = if bucket == 5 { 0.06 } else { 0.03 };
+        let contours = Arc::new(vec![ContourPath { elevation_m: 0.0, points: vec![
+            crate::model::GeoPoint { lon: -extent, lat: y },
+            crate::model::GeoPoint { lon: extent, lat: y },
+        ] }]);
+        Source { priority, tile: LocalTileGeometry {
+            id: LocalTileId { zoom_bucket: bucket, lat_bucket: 0, lon_bucket: 0 },
+            bounds: Bounds::from_contours(&contours), contours,
+        } }
+    };
+    let mixed = composition::compose(crate::model::ActiveBody::Earth,
+        vec![source(5, 1, 0.0), source(6, 2, 0.015)], HashMap::new());
+    let mixed_batches: Vec<_> = mixed.frame.tiles.iter().map(|tile| LocalTileBatch {
+        id: LocalBatchId::Contour(tile.id), version: 91,
+        instances: Arc::new(tile.contours.iter().flat_map(|line| line.points.windows(2).map(|pair|
+            LocalSegmentInstance::line([pair[0].lon, pair[0].lat, 0.0], [pair[1].lon, pair[1].lat, 0.0], egui::Color32::WHITE, true)
+        )).collect()),
+    }).collect();
+    let geographic = LocalProjectionParams { focus_center_x: 32.0, focus_center_y: 32.0,
+        horizontal_scale: 400.0, ground_pitch_scale: 400.0, ..params };
+    let output = ctx.run(egui::RawInput { screen_rect: Some(rect), ..Default::default() }, |ctx| {
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("composed terrain")));
+        painter.add(residency_callback(rect, ctx));
+        painter.add(LocalContourCallback::new(LocalContourPass::Surface, mixed_batches.clone(), &geographic,
+            1.0, 2.0, 2.0, ctx.clone()).into_paint_callback(rect));
+    });
+    let jobs = ctx.tessellate(output.shapes, output.pixels_per_point);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    let commands = renderer.update_buffers(&device, &queue, &mut encoder, &jobs, &screen);
+    {
+        let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("partial LOD composition"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &target_view, resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+            })], depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None,
+        });
+        renderer.render(&mut pass.forget_lifetime(), &jobs, &screen);
+    }
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: 64*64*4,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+    encoder.copy_texture_to_buffer(target.as_image_copy(), wgpu::TexelCopyBufferInfo { buffer: &buffer,
+        layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(256), rows_per_image: Some(64) } },
+        wgpu::Extent3d { width: 64, height: 64, depth_or_array_layers: 1 });
+    queue.submit(commands.into_iter().chain(std::iter::once(encoder.finish())));
+    let (tx,rx) = std::sync::mpsc::channel();
+    buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| { tx.send(r).unwrap(); });
+    device.poll(wgpu::Maintain::Wait); rx.recv().unwrap().unwrap();
+    let pixels = buffer.slice(..).get_mapped_range();
+    for x in (9..16).chain(48..55) { assert!(pixels[(32*64+x)*4] > 200, "lost fallback at {x}"); }
+    for x in 20..44 {
+        assert!(pixels[(26*64+x)*4] > 200, "ready fine terrain blocked at {x}");
+        assert!(pixels[(32*64+x)*4] < 100, "coarse overlap/bridge at {x}");
+    }
+
 }

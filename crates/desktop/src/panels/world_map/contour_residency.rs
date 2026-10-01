@@ -11,7 +11,7 @@ pub(crate) struct Bounds {
 
 impl Bounds {
     /// Computed on the reader, never by scanning geometry during paint.
-    pub(super) fn from_contours(contours: &[ContourPath]) -> Option<Self> {
+    pub(crate) fn from_contours(contours: &[ContourPath]) -> Option<Self> {
         let mut bounds = Self {
             min: [f32::INFINITY; 3],
             max: [f32::NEG_INFINITY; 3],
