@@ -706,7 +706,9 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         .filter(|marker| nearby.iter().any(|camera| camera.id == marker.id))
         .cloned()
         .collect();
-    markers::draw_camera_links(painter, anchor, &nearby_markers);
+    if model.show_camera_links {
+        markers::draw_camera_links(painter, anchor, &nearby_markers);
+    }
     if model.show_coastlines && model.active_body == crate::model::ActiveBody::Earth {
         geography::draw_coastlines_local(
             painter,

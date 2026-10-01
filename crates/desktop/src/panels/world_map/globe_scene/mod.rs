@@ -440,7 +440,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             Vec::new()
         };
 
-    if let Some(event_marker) = event_markers
+    if model.show_camera_links && let Some(event_marker) = event_markers
         .iter()
         .find(|marker| selected_event_id == Some(marker.id.as_str()))
     {

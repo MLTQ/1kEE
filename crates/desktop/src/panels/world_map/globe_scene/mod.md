@@ -112,4 +112,6 @@ Event markers use `map_events`, including an active idle target that has aged ou
 
 Webcam/event output now carries `MapMarker` base/tip/scale geometry for identical
 hover/click picking. Events and replay tips scale radially from the sphere; globe
-webcams use shorter green surface-normal spires. Event-camera links still use ground anchors.
+webcams use shorter green surface-normal spires. Event-camera links use ground
+anchors only when the independent Nearby camera links toggle is enabled. They
+indicate the selected event's 250 km proximity subset, not verified footage.

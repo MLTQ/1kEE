@@ -113,6 +113,9 @@ Public pipelines use `show_pipeline`, `pipeline_filters` (source/product/status)
 ### Startup layer visibility
 
 Events, Webcams, Contours, Bathymetry and Coastline start enabled. Flock, graticule, reticle, the local targeting beam and stellar/planet overlays start hidden alongside the other optional layers. Layer controls can enable them during the session; source/product filters remain independent of parent-layer visibility.
+Camera proximity links are a separate, initially hidden session toggle. They
+indicate only webcams within 250 km of the selected event, never recording,
+orientation or a verified relationship to the incident.
 
 ### Event-follow selection
 

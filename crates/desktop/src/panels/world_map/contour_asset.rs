@@ -18,6 +18,8 @@ mod loading;
 mod reader;
 #[path = "contour_fallback.rs"]
 mod fallback;
+#[path = "globe_contour_merge.rs"]
+mod globe_merge;
 use reader::spawn_local_read;
 #[path = "contour_residency.rs"]
 pub(crate) mod residency;
@@ -292,6 +294,9 @@ struct GlobeRegionCache {
     /// collision-prone per-frame hash over every cached tile.
     tiles_revision: u64,
     merged_revision: Option<u64>,
+    /// One background Earth globe ownership/merge worker; survives resets until
+    /// its stale epoch returns so rapid navigation cannot fan workers out.
+    merge_in_flight: Option<(u64, u64)>,
     /// Generation of tile-reader requests. A scene/cache reset advances this
     /// so a late worker cannot repopulate a newer cache state.
     load_epoch: u64,
@@ -316,6 +321,7 @@ impl Default for GlobeRegionCache {
             merged: None,
             tiles_revision: 0,
             merged_revision: None,
+            merge_in_flight: None,
             load_epoch: 0,
             load_in_flight: None,
             read_retry_at: None,
@@ -326,7 +332,6 @@ impl Default for GlobeRegionCache {
 impl GlobeRegionCache {
     fn mark_tiles_changed(&mut self) {
         self.tiles_revision = self.tiles_revision.wrapping_add(1);
-        self.merged = None;
         self.merged_revision = None;
     }
 
@@ -337,6 +342,7 @@ impl GlobeRegionCache {
         self.in_flight.clear();
         self.order.clear();
         self.mark_tiles_changed();
+        self.merged = None;
         self.load_epoch = self.load_epoch.wrapping_add(1);
         self.read_retry_at = None;
     }
@@ -1460,16 +1466,16 @@ pub fn load_mars_region_for_view(
 /// Differences from `load_srtm_region_for_view`:
 /// - Loads an 11×11 core grid (radius=5), retaining the former wide-tile
 ///   coverage while prefetching neighbors before they scroll into view.
-/// - Cache clears only on zoom-bucket change, not on position; tiles remain
-///   visible while they are near the current centre.
-/// - Evicts by distance from centre when the tile count exceeds `MAX_TILES`.
+/// - Tile inputs change on source-tier/root changes; composed previous-tier
+///   geometry remains available in gaps until its replacements arrive.
+/// - Retains five requested rings plus three rings for legacy halo coverage.
+/// - Partitions legacy overlaps and merges on one coalesced background worker.
 pub fn load_srtm_for_globe(
     selected_root: Option<&Path>,
     center: GeoPoint,
     zoom: f32,
     ctx: egui::Context,
 ) -> Option<Arc<Vec<ContourPath>>> {
-    const MAX_TILES: usize = 1600;
     // Map the actual globe view zoom to a coarse tile spec.  Globe mode caps
     // at bucket 1 (2.2°, 25 m) — finer tiles aren't visible on a globe and
     // cost far too much geometry. Five rings cover the new disjoint cores.
@@ -1485,19 +1491,11 @@ pub fn load_srtm_for_globe(
     let zoom_bucket = srtm_focus_cache::zoom_bucket_for_zoom(tile_zoom);
     let root = selected_root.map(Path::to_path_buf);
 
-    // On zoom-bucket or root change: snapshot current tiles as fallback so the
-    // globe doesn't flash blank while new-resolution tiles are loading.
+    // Retain the already composed picture across zoom changes, never across
+    // data roots. Snapshotting raw wide tiles here would restore overlap.
     if guard.zoom_bucket != zoom_bucket || guard.root != root {
-        let old: Vec<ContourPath> = guard
-            .tiles
-            .values()
-            .flat_map(|v| v.iter().cloned())
-            .collect();
-        guard.zoom_fallback = if old.is_empty() {
-            None
-        } else {
-            Some(Arc::new(old))
-        };
+        guard.zoom_fallback = (guard.root == root)
+            .then(|| guard.merged.clone().or_else(|| guard.zoom_fallback.clone())).flatten();
         guard.zoom_bucket = zoom_bucket;
         guard.root = root;
         guard.clear_tiles_for_new_scene();
@@ -1505,11 +1503,9 @@ pub fn load_srtm_for_globe(
 
     if assets.is_empty() {
         // No SRTM root found; return whatever we already have.
-        return render_globe_tiles(&mut guard);
+        drop(guard);
+        return globe_merge::render(cache, &ctx);
     }
-
-    let feature_budget = srtm_focus_cache::feature_budget_for_zoom(tile_zoom);
-    let per_asset_budget = (feature_budget / assets.len().max(1)).max(120);
 
     let read = begin_globe_read(&mut guard, &assets);
     drop(guard);
@@ -1519,7 +1515,7 @@ pub fn load_srtm_for_globe(
             cache,
             epoch,
             requests,
-            per_asset_budget,
+            usize::MAX, // partition full legacy footprints before any display selection
             ctx.clone(),
             "earth-globe-contour-read",
         );
@@ -1528,19 +1524,18 @@ pub fn load_srtm_for_globe(
     // Re-acquire lock to render and evict from whatever is currently cached.
     let mut guard = cache.lock().ok()?;
 
-    // Evict tiles furthest from centre when over the cap.
-    if guard.tiles.len() > MAX_TILES {
+    // Full source geometry needs bounded residency too. Keep the requested
+    // five rings plus the three-core reach of a legacy footprint, not every
+    // place visited during a long event tour (formerly up to 1600 wide tiles).
+    {
         let half_extent = srtm_focus_cache::half_extent_for_zoom(tile_zoom);
         let bucket_step = half_extent * 0.45;
         let clat = (center.lat / bucket_step).round() as i32;
         let clon = (center.lon / bucket_step).round() as i32;
 
-        // Sort order vec by distance ascending; keep the closest MAX_TILES.
-        guard
-            .order
-            .sort_by_key(|&(lat, lon)| (lat - clat).pow(2) + (lon - clon).pow(2));
         let keep: std::collections::HashSet<(i32, i32)> =
-            guard.order[..MAX_TILES].iter().copied().collect();
+            guard.order.iter().copied().filter(|&(lat, lon)|
+                (lat-clat).abs() <= 8 && (lon-clon).abs() <= 8).collect();
         let previous_len = guard.tiles.len();
         guard.tiles.retain(|k, _| keep.contains(k));
         guard.in_flight.retain(|k| keep.contains(k));
@@ -1550,7 +1545,8 @@ pub fn load_srtm_for_globe(
         }
     }
 
-    render_globe_tiles(&mut guard)
+    drop(guard);
+    globe_merge::render(cache, &ctx)
 }
 
 /// Map globe view zoom to tile spec zoom for the contour cache.

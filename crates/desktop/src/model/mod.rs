@@ -68,6 +68,8 @@ pub struct AppModel {
     pub map_theme: crate::theme::MapTheme,
     pub show_event_markers: bool,
     pub show_camera_markers: bool,
+    /// Optional proximity overlay, not evidence of a camera recording an event.
+    pub show_camera_links: bool,
     marker_scale: f32,
     pub show_coastlines: bool,
     pub show_graticule: bool,
@@ -272,6 +274,7 @@ impl AppModel {
             map_theme: crate::theme::MapTheme::Topo,
             show_event_markers: true,
             show_camera_markers: true,
+            show_camera_links: false,
             marker_scale: app_settings.marker_scale,
             show_coastlines: true,
             show_graticule: false,

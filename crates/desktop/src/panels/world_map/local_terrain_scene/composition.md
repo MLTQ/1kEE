@@ -13,6 +13,8 @@ for every tile in a replacement grid. Missing sources leave old terrain visible.
 - `clip_contours` uses the archive's tested line clipper: insert intersections,
   split at exits, preserve disconnected paths, and assign shared boundary edges.
 - `visible_bounds` culls the owned core and its elevation range.
+- The globe merge reuses `clip_contours` and `subtract` with its own ownership
+  regions, preserving useful legacy geometry beyond missing neighboring cores.
 
 ## Contracts
 Runs on one coalesced worker, never during paint. Source grids and files do not

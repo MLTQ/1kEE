@@ -80,3 +80,7 @@ The Base section exposes Webcams and a 25–200% Marker size slider for webcam/e
 glyphs in both views. Changes paint immediately and save on release or keyboard
 adjustment using the existing settings flow. Height, ground strike and glow scale
 together; unrelated point layers retain their own styles.
+
+Webcams has an independent Nearby camera links toggle, initially off and
+disabled while webcams are hidden. Its tooltip explains the 250 km proximity
+rule and distinguishes it from viewing direction or incident footage.

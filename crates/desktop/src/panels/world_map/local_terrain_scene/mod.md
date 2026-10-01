@@ -241,3 +241,6 @@ GPU share clipped geometry; CPU-only Moon/Mars publish directly. Progress still
 describes actual loading. Offscreen tile references are pruned by owned cores
 and elevation bounds. Root/body changes, exit, and cache reset clear the handoff.
 See `composition` and `handoff` for ownership, coalescing, and publication.
+
+Camera proximity links draw only with the separate Nearby camera links toggle
+enabled, matching globe mode. Webcam spires remain independently visible.

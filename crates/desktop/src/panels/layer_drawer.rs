@@ -31,6 +31,11 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                 section_label(ui, "BASE");
                 ui.checkbox(&mut model.show_event_markers, "Events");
                 ui.checkbox(&mut model.show_camera_markers, "Webcams");
+                ui.indent("webcam_proximity", |ui| {
+                    ui.add_enabled(model.show_camera_markers,
+                        egui::Checkbox::new(&mut model.show_camera_links, "Nearby camera links"))
+                        .on_hover_text("Connects the selected event to webcams within 250 km. Proximity only: it does not indicate a camera's viewing direction or that it recorded the event.");
+                });
                 ui.label("Marker size");
                 let mut marker_percent = model.marker_scale() * 100.0;
                 let response = ui.add(

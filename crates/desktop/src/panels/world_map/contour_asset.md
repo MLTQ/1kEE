@@ -42,6 +42,13 @@ Loads contour geometry from disk into in-memory render caches for both local ter
   background loads, and memoizes the merged contour `Arc` behind a monotonic
   tile-set revision while its tile set is unchanged.
 - **Interacts with**: `load_srtm_for_globe`, `load_lunar_for_globe`.
+- Earth uses `globe_contour_merge` to partition overlapping legacy footprints
+  on one worker. Reads keep complete paths before clipping, removing the old
+  120-path floor/cap that treated a wide legacy tile like a small modern core.
+  Its previous published picture survives revisions; zoom fallback is clipped
+  to uncovered regions and never carried across data roots.
+  Full Earth globe sources stay within the five requested rings plus three
+  legacy halo rings (at most 289 cells), rather than accumulating 1600 wide tiles.
 
 ### `render_globe_tiles` / `merged_partitioned_local_contours`
 
@@ -183,7 +190,8 @@ Loads contour geometry from disk into in-memory render caches for both local ter
   the previous 10,000-feature per-asset floor so
   selecting more small cores does not silently reduce detail in legacy tiles.
   Globe Earth requests five rings to retain former coverage with smaller cores.
-  Legacy full-footprint geometry and existing .1ka reads are preserved.
+  Legacy full-footprint geometry and existing .1ka reads are preserved as source
+  data; Earth globe display ownership prevents repeated opacity accumulation.
 
 - `contour_residency.rs` uses actual oblique projection and worker-computed
   bounds to evict offscreen geometry. Both Earth tiers receive each camera

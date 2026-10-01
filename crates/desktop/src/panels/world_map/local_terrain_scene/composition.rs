@@ -143,7 +143,7 @@ pub(crate) fn compose(
 }
 
 /// Four nonoverlapping strips. Adjacent tiles share exact f64 boundaries.
-fn subtract(a: Rect, b: Rect) -> Vec<Rect> {
+pub(crate) fn subtract(a: Rect, b: Rect) -> Vec<Rect> {
     let left = a.min_lon.max(b.min_lon);
     let right = a.max_lon.min(b.max_lon);
     let bottom = a.min_lat.max(b.min_lat);
@@ -175,7 +175,7 @@ fn subtract(a: Rect, b: Rect) -> Vec<Rect> {
     .collect()
 }
 
-fn clip_contours(tile: &LocalTileGeometry, regions: &[Rect]) -> Arc<Vec<ContourPath>> {
+pub(crate) fn clip_contours(tile: &LocalTileGeometry, regions: &[Rect]) -> Arc<Vec<ContourPath>> {
     // Modern core tiles in unobstructed regions need no geometry copy or GPU
     // rebuild. Clipping is normally limited to legacy tiles and LOD borders.
     if tile.contours.is_empty()
