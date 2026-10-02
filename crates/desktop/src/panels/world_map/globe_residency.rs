@@ -6,8 +6,8 @@ use crate::panels::world_map::{
 };
 use tile_archive::contour_grid::Bounds as Rect;
 
-pub(super) const GPU_BUDGET: usize = 256 * 1024 * 1024;
-const CPU_BUDGET: usize = 384 * 1024 * 1024;
+pub(super) const GPU_BUDGET: usize = 3 * 1024 * 1024 * 1024;
+const CPU_BUDGET: usize = 4 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Copy, Default)]
 pub(super) struct Cost {

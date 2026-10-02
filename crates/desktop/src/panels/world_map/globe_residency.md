@@ -11,8 +11,8 @@ viewport no longer destroys geometry that may be used again on the next pan.
 - `Residency` tracks projected visibility, reader-measured bounds/byte costs,
   last-use timestamps and viewport revisions. Late new reads must still be
   visible, so obsolete navigation cannot fill the retained cache.
-- `prune` keeps offscreen sources until the 256 MiB terrain instance target or
-  384 MiB decoded CPU target is exceeded, then evicts least recently used
+- `prune` keeps offscreen sources until the 3 GiB terrain instance target or
+  4 GiB decoded CPU target is exceeded, then evicts least recently used
   offscreen sources. Returning to a tile refreshes its last use. A 4096-entry
   guard bounds empty-tile metadata. Visible coverage takes priority over these
   targets; this is a residency policy, not the device's single-buffer limit.

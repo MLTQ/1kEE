@@ -50,7 +50,7 @@ Loads contour geometry from disk into in-memory render caches for both local ter
   `globe_residency` checks new reads and late publication against the projected
   viewport, using worker-measured geometry bounds and conservative legacy bounds.
   Already resident sources survive offscreen until byte pressure triggers LRU
-  eviction (256 MiB GPU target, 384 MiB decoded CPU target). Visible coverage
+  eviction (3 GiB GPU target, 4 GiB decoded CPU target). Visible coverage
   remains protected. The request grid grows to seven rings and chooses the
   coarser tier for wide screens, keeping new requests at most 225 cells.
   Hidden/inactive body caches are reset, including Earth below its draw zoom.
