@@ -147,6 +147,54 @@ fn stale_view_merge_cannot_reintroduce_evicted_geometry() {
 }
 
 #[test]
+fn retained_sources_outside_the_current_window_still_compose() {
+    let tiles = HashMap::from([
+        ((0, 0), lines(50.0, -0.4, 0.4, 0.0)),
+        ((0, 40), lines(50.0, 39.3, 39.8, 0.0)),
+    ]);
+    let output = compose_resident(1, &tiles, None, None, globe_residency::GPU_BUDGET);
+    assert!(
+        output
+            .contours
+            .iter()
+            .any(|p| p.points.iter().any(|p| p.lon > 39.0))
+    );
+    assert!(
+        output
+            .contours
+            .iter()
+            .any(|p| p.points.iter().any(|p| p.lon < 1.0))
+    );
+}
+
+#[test]
+fn fallback_only_retires_offscreen_paths_under_budget_pressure() {
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 400.0));
+    let view = crate::model::GlobeViewState::from_focus(GeoPoint { lat: 0.0, lon: 0.0 });
+    let layout = crate::panels::world_map::globe_scene::GlobeLayout {
+        center: rect.center(),
+        radius: 60000.0,
+        focal_length: 2.0,
+        camera_distance: 3.0,
+    };
+    let viewport = globe_residency::Viewport::new(&layout, &view, rect);
+    let mut fallback = (*lines(50.0, -0.01, 0.01, 0.0)).clone();
+    fallback.extend(lines(50.0, 50.0, 50.1, 0.0).iter().cloned());
+    let fallback = Arc::new(fallback);
+    let retained = compose_resident(
+        1,
+        &HashMap::new(),
+        Some(fallback.clone()),
+        Some(viewport),
+        56,
+    );
+    assert_eq!(retained.contours.len(), 2);
+    let trimmed = compose_resident(1, &HashMap::new(), Some(fallback), Some(viewport), 28);
+    assert_eq!(trimmed.contours.len(), 1);
+    assert!(trimmed.contours[0].points[0].lon.abs() < 0.1);
+}
+
+#[test]
 #[ignore = "read-only validation against installed Hilbert cache"]
 fn real_moscow_mixed_cache_coverage_is_disjoint() {
     let path = PathBuf::from("/Volumes/Hilbert/Derived/terrain/srtm_focus_cache.sqlite");

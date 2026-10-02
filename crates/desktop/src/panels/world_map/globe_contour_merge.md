@@ -9,10 +9,14 @@ once instead of accumulating opacity wherever old footprints overlap.
 - `ownership` assigns each decoded tile its native core, including empty tiles.
   Missing neighboring cores may use a legacy halo. Nearest-source ordering and
   rectangle subtraction partition halos without throwing away sparse coverage.
-- `compose_visible` clips complete polylines with intersection endpoints to
-  visible core regions; outgoing zoom geometry survives only in visible gaps
-  outside incoming coverage. It never joins across gaps. Its output replaces
-  both the rendered Arc and the fallback Arc, releasing old travel history.
+- `compose_resident` composes all budget-retained sources, including offscreen
+  history, without clipping to the fixed camera request window. Ownership
+  removes overlapping brightness. Outgoing LOD survives outside incoming
+  coverage; only memory pressure trims its offscreen whole paths, preserving
+  visible gaps. No path truncation or cross-gap joins are introduced.
+- `compose_visible` supplies shared clipping/ownership and a restricted fixture
+  mode for regression tests. Output and fallback instance bytes feed residency
+  accounting, so clipping expansion cannot silently exceed the retention target.
 - `render` coalesces revisions into one worker and retains the previous Arc.
   `finish` rejects reset/root/zoom epochs and obsolete viewport revisions but
   allows coherent intermediate tile arrivals, preventing publication starvation.

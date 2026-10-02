@@ -47,13 +47,16 @@ Loads contour geometry from disk into in-memory render caches for both local ter
   120-path floor/cap that treated a wide legacy tile like a small modern core.
   Its previous published picture survives revisions; zoom fallback is clipped
   to uncovered regions and never carried across data roots.
-  `globe_residency` also checks Earth sources against the projected viewport,
-  using worker-measured geometry bounds and conservative full legacy bounds
-  until known. Reads and late publication use the same predicate. The geographic
-  ceiling remains five requested rings plus three legacy halo rings (289 cells).
+  `globe_residency` checks new reads and late publication against the projected
+  viewport, using worker-measured geometry bounds and conservative legacy bounds.
+  Already resident sources survive offscreen until byte pressure triggers LRU
+  eviction (256 MiB GPU target, 384 MiB decoded CPU target). Visible coverage
+  remains protected. The request grid grows to seven rings and chooses the
+  coarser tier for wide screens, keeping new requests at most 225 cells.
   Hidden/inactive body caches are reset, including Earth below its draw zoom.
-  Viewport revisions invalidate stale merges; old LOD snapshots are replaced
-  by only their still-visible, uncovered portions on the composition worker.
+  Viewport revisions reject stale pressure trims; LOD snapshots retain uncovered
+  coverage, trimming old offscreen paths only under pressure. Camera movement
+  refreshes last use without forcing full composition or GPU instance rebuilds.
 
 ### `render_globe_tiles` / `merged_partitioned_local_contours`
 

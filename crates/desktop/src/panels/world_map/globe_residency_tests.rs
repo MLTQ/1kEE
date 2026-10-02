@@ -106,6 +106,8 @@ fn visible_point_sampling_never_falsely_culls_a_patch() {
 #[test]
 fn long_tour_releases_old_source_arcs_and_keeps_metadata_bounded() {
     let mut cache = GlobeRegionCache::default();
+    cache.residency.gpu_budget = 7 * 28;
+    cache.residency.cpu_budget = usize::MAX;
     let mut old = Vec::new();
     for stop in 0..120 {
         let lon = -150.0 + stop as f32 * 2.5;
@@ -128,12 +130,103 @@ fn long_tour_releases_old_source_arcs_and_keeps_metadata_bounded() {
             .residency
             .record(cell, residency::Bounds::from_contours(&contours));
         cache.tiles.insert(cell, contours);
+        cache
+            .residency
+            .admit(cell, Cost::measure(&cache.tiles[&cell]));
         cache.order.push(cell);
+        prune(&mut cache);
         assert!(cache.tiles.len() < 8);
         assert!(cache.residency.bounds.len() <= 23 * 23);
         assert!(old.iter().filter(|w| w.upgrade().is_some()).count() < 8);
     }
     assert!(old[0].upgrade().is_none());
+}
+
+fn add_tile(cache: &mut GlobeRegionCache, cell: (i32, i32)) -> std::sync::Weak<Vec<ContourPath>> {
+    let lon = cell.1 as f32 * 0.99;
+    cache.residency.view = Some(viewport(lon, 60000.0));
+    cache.residency.configure(1, cell);
+    let contours = Arc::new(vec![ContourPath {
+        elevation_m: 50.0,
+        points: vec![
+            GeoPoint { lat: 0.0, lon },
+            GeoPoint {
+                lat: 0.01,
+                lon: lon + 0.01,
+            },
+        ],
+    }]);
+    let weak = Arc::downgrade(&contours);
+    cache
+        .residency
+        .record(cell, residency::Bounds::from_contours(&contours));
+    cache.residency.admit(cell, Cost::measure(&contours));
+    cache.tiles.insert(cell, contours);
+    cache.order.push(cell);
+    prune(cache);
+    weak
+}
+
+#[test]
+fn budget_retains_offscreen_tiles_and_revisiting_updates_lru_order() {
+    let mut cache = GlobeRegionCache::default();
+    cache.residency.gpu_budget = 2 * 28;
+    let first = add_tile(&mut cache, (0, 0));
+    let second = add_tile(&mut cache, (0, 20));
+    assert!(first.upgrade().is_some()); // no viewport-driven eviction
+    cache.residency.view = Some(viewport(0.0, 60000.0));
+    cache.residency.configure(1, (0, 0));
+    prune(&mut cache);
+    let third = add_tile(&mut cache, (0, 40));
+    assert!(first.upgrade().is_some());
+    assert!(second.upgrade().is_none()); // oldest use, not oldest insertion
+    assert!(third.upgrade().is_some());
+}
+
+#[test]
+fn cpu_pressure_and_observed_gpu_expansion_evict_old_offscreen_tiles() {
+    let mut cache = GlobeRegionCache::default();
+    cache.residency.gpu_budget = 1000;
+    add_tile(&mut cache, (0, 0));
+    let cpu = cache.residency.costs[&(0, 0)].cpu;
+    cache.residency.cpu_budget = cpu;
+    let old = Arc::downgrade(&cache.tiles[&(0, 0)]);
+    add_tile(&mut cache, (0, 20));
+    assert!(old.upgrade().is_none());
+    cache.residency.cpu_budget = usize::MAX;
+    let old = Arc::downgrade(&cache.tiles[&(0, 20)]);
+    add_tile(&mut cache, (0, 40));
+    cache.residency.gpu_budget = 3 * 28;
+    cache.residency.observe_gpu(4 * 28, 0); // clipped output takes twice raw bytes
+    prune(&mut cache);
+    assert!(old.upgrade().is_none());
+    assert!(cache.tiles.contains_key(&(0, 40)));
+}
+
+#[test]
+fn wide_globe_view_uses_coarser_coverage_with_at_most_225_requests() {
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1840.0, 1060.0));
+    let mut state = GlobeViewState::from_focus(GeoPoint {
+        lat: 50.0,
+        lon: 35.0,
+    });
+    state.zoom = 23.33;
+    let layout = crate::panels::world_map::globe_scene::globe_layout(rect, &state);
+    let (zoom, radius) = source_spec(
+        Some(Viewport::new(&layout, &state, rect)),
+        state.local_center,
+        state.zoom,
+    );
+    assert_eq!(srtm_focus_cache::zoom_bucket_for_zoom(zoom), 0);
+    assert!((2 * radius + 1).pow(2) <= 225);
+    assert_eq!(
+        source_spec(
+            Some(viewport(0.0, 60000.0)),
+            GeoPoint { lat: 0.0, lon: 0.0 },
+            23.33
+        ),
+        (1.5, 5)
+    );
 }
 
 #[test]

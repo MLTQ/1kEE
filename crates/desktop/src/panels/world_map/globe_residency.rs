@@ -1,10 +1,44 @@
-//! Conservative globe frustum culling and bounded source/output ownership.
+//! Projected visibility and byte-budgeted globe terrain LRU retention.
 use super::*;
 use crate::model::{ActiveBody, GlobeViewState};
 use crate::panels::world_map::{
     globe_scene::GlobeLayout, local_contour_pass::LocalTileId, local_terrain_scene::composition,
 };
 use tile_archive::contour_grid::Bounds as Rect;
+
+pub(super) const GPU_BUDGET: usize = 256 * 1024 * 1024;
+const CPU_BUDGET: usize = 384 * 1024 * 1024;
+
+#[derive(Clone, Copy, Default)]
+pub(super) struct Cost {
+    gpu: usize,
+    cpu: usize,
+    used: u64,
+}
+
+impl Cost {
+    pub fn measure(contours: &[ContourPath]) -> Self {
+        Self {
+            gpu: gpu_bytes(contours),
+            cpu: std::mem::size_of_val(contours)
+                + contours
+                    .iter()
+                    .map(|p| p.points.capacity() * std::mem::size_of::<GeoPoint>())
+                    .sum::<usize>(),
+            used: 0,
+        }
+    }
+}
+
+pub(super) fn gpu_bytes(contours: &[ContourPath]) -> usize {
+    contours
+        .iter()
+        .map(|p| p.points.len().saturating_sub(1))
+        .sum::<usize>()
+        .saturating_mul(std::mem::size_of::<
+            crate::panels::world_map::contour_pass::SegmentInstance,
+        >())
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct Viewport {
@@ -73,6 +107,12 @@ pub(super) struct Residency {
     pub cells: HashSet<(i32, i32)>,
     pub regions: Vec<Rect>,
     pub revision: u64,
+    costs: HashMap<(i32, i32), Cost>,
+    clock: u64,
+    pub gpu_budget: usize,
+    pub cpu_budget: usize,
+    gpu_factor: f64,
+    fallback_gpu: usize,
 }
 
 impl Residency {
@@ -86,10 +126,20 @@ impl Residency {
         let window = (bucket, center.0, center.1);
         if self.window.is_some_and(|w| w.0 != bucket) {
             self.bounds.clear();
+            self.costs.clear();
         }
         self.window = Some(window);
-        self.bounds
-            .retain(|&(lat, lon), _| (lat - center.0).abs() <= 11 && (lon - center.1).abs() <= 11);
+        self.clock = self.clock.wrapping_add(1);
+        if self.gpu_budget == 0 {
+            self.gpu_budget = GPU_BUDGET;
+        }
+        if self.cpu_budget == 0 {
+            self.cpu_budget = CPU_BUDGET;
+        }
+        self.bounds.retain(|&(lat, lon), _| {
+            self.costs.contains_key(&(lat, lon))
+                || ((lat - center.0).abs() <= 11 && (lon - center.1).abs() <= 11)
+        });
         let mut cells = HashSet::new();
         let mut regions = Vec::new();
         for lat in center.0 - 8..=center.0 + 8 {
@@ -111,16 +161,31 @@ impl Residency {
     }
 
     pub fn record(&mut self, cell: (i32, i32), bounds: Option<residency::Bounds>) {
-        self.bounds.insert(cell, bounds);
+        if self.window.is_some() {
+            self.bounds.insert(cell, bounds);
+        }
+    }
+
+    pub fn admit(&mut self, cell: (i32, i32), mut cost: Cost) {
+        if self.window.is_none() {
+            return;
+        }
+        cost.used = self.clock;
+        self.costs.insert(cell, cost);
+    }
+
+    pub fn observe_gpu(&mut self, bytes: usize, fallback: usize) {
+        self.fallback_gpu = fallback;
+        let raw: usize = self.costs.values().map(|c| c.gpu).sum();
+        if raw > 0 {
+            self.gpu_factor = (bytes.saturating_sub(fallback) as f64 / raw as f64).max(1.0);
+        }
     }
 
     pub fn wanted(&self, cell: (i32, i32)) -> bool {
-        let Some((bucket, lat, lon)) = self.window else {
+        let Some((bucket, _, _)) = self.window else {
             return true;
         };
-        if (cell.0 - lat).abs() > 8 || (cell.1 - lon).abs() > 8 {
-            return false;
-        }
         let owned = core(bucket, cell);
         let bounds = match self.bounds.get(&cell) {
             Some(Some(b)) => Rect {
@@ -182,15 +247,87 @@ pub(crate) fn set_viewport(active: Option<ActiveBody>, view: Option<Viewport>) {
 
 pub(super) fn prune(cache: &mut GlobeRegionCache) {
     let before = cache.tiles.len();
-    cache.tiles.retain(|&id, _| cache.residency.wanted(id));
+    let r = &mut cache.residency;
+    r.costs.retain(|id, _| cache.tiles.contains_key(id));
+    let visible: HashSet<_> = cache
+        .tiles
+        .keys()
+        .copied()
+        .filter(|&id| r.wanted(id))
+        .collect();
+    for id in &visible {
+        if let Some(cost) = r.costs.get_mut(id) {
+            cost.used = r.clock;
+        }
+    }
+    let mut gpu: usize = r.costs.values().map(|c| c.gpu).sum();
+    let mut cpu: usize = r.costs.values().map(|c| c.cpu).sum();
+    let factor = r.gpu_factor.max(1.0);
+    if gpu as f64 * factor + r.fallback_gpu as f64 <= r.gpu_budget as f64
+        && cpu <= r.cpu_budget
+        && cache.tiles.len() <= 4096
+    {
+        return;
+    }
+    let mut oldest: Vec<_> = r
+        .costs
+        .iter()
+        .filter(|(id, _)| !visible.contains(id))
+        .map(|(&id, c)| (c.used, id))
+        .collect();
+    oldest.sort();
+    for (_, id) in oldest {
+        if gpu as f64 * factor + r.fallback_gpu as f64 <= r.gpu_budget as f64
+            && cpu <= r.cpu_budget
+            && cache.tiles.len() <= 4096
+        {
+            break;
+        }
+        if let Some(cost) = r.costs.remove(&id) {
+            gpu = gpu.saturating_sub(cost.gpu);
+            cpu = cpu.saturating_sub(cost.cpu);
+            cache.tiles.remove(&id);
+            r.bounds.remove(&id);
+        }
+    }
     cache.order.retain(|id| cache.tiles.contains_key(id));
     if before != cache.tiles.len() {
         cache.mark_tiles_changed();
     }
-    if cache.residency.cells.is_empty() {
-        cache.merged = None;
-        cache.zoom_fallback = None;
+}
+
+/// Grow the source window when the fine grid cannot cover the screen, keeping
+/// the requested grid at most 15x15. Broad views use the existing coarser tier.
+pub(super) fn source_spec(view: Option<Viewport>, center: GeoPoint, zoom: f32) -> (f32, i32) {
+    let fine = globe_zoom_to_tile_zoom(zoom);
+    let Some(view) = view else {
+        return (fine, 5);
+    };
+    for tile_zoom in [fine, 0.5] {
+        let bucket = srtm_focus_cache::zoom_bucket_for_zoom(tile_zoom);
+        let step = srtm_focus_cache::half_extent_for_zoom(tile_zoom) * 0.45;
+        let cell = (
+            (center.lat / step).round() as i32,
+            (center.lon / step).round() as i32,
+        );
+        for radius in 5_i32..=7 {
+            let outside = radius + 1;
+            let edge_visible = (-outside..=outside).any(|offset| {
+                [
+                    (cell.0 + offset, cell.1 - outside),
+                    (cell.0 + offset, cell.1 + outside),
+                    (cell.0 - outside, cell.1 + offset),
+                    (cell.0 + outside, cell.1 + offset),
+                ]
+                .into_iter()
+                .any(|id| view.intersects(core(bucket, id)))
+            });
+            if !edge_visible {
+                return (tile_zoom, radius);
+            }
+        }
     }
+    (0.5, 7)
 }
 
 #[cfg(test)]

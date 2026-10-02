@@ -273,8 +273,8 @@ struct LocalMergeWork {
 }
 
 /// Per-zoom-level cache for globe-mode SRTM tiles.
-/// Earth source geometry is retained only inside the current geographic window
-/// and viewport. Published geometry survives while a replacement is composed.
+/// Earth sources use byte-budgeted offscreen LRU retention. Visible terrain and
+/// the published picture survive while a replacement is composed.
 struct GlobeRegionCache {
     residency: globe_residency::Residency,
     zoom_bucket: i32,
@@ -811,7 +811,8 @@ fn finish_globe_read(
     let loaded = loaded.map(|tiles| {
         tiles.into_iter().map(|(key, contours)| {
             let bounds = residency::Bounds::from_contours(&contours);
-            (key, contours, bounds)
+            let cost = globe_residency::Cost::measure(&contours);
+            (key, contours, bounds, cost)
         }).collect::<Vec<_>>()
     });
     let Ok(mut cache) = cache.lock() else {
@@ -825,10 +826,11 @@ fn finish_globe_read(
         let read_failed = loaded.is_none();
         let mut changed = false;
         if let Some(loaded) = loaded {
-            for (key, contours, bounds) in loaded {
+            for (key, contours, bounds, cost) in loaded {
                 let tile_key = (key.lat_bucket, key.lon_bucket);
                 cache.residency.record(tile_key, bounds);
                 if cache.residency.wanted(tile_key) && !cache.tiles.contains_key(&tile_key) {
+                    cache.residency.admit(tile_key, cost);
                     cache.tiles.insert(tile_key, Arc::new(contours));
                     cache.order.push(tile_key);
                     changed = true;
@@ -1477,12 +1479,10 @@ pub fn load_mars_region_for_view(
 /// Load SRTM focus-tile contours for globe-mode rendering.
 ///
 /// Differences from `load_srtm_region_for_view`:
-/// - Loads an 11×11 core grid (radius=5), retaining the former wide-tile
-///   coverage while prefetching neighbors before they scroll into view.
+/// - Selects a 5–7-ring grid and coarser tier when needed for screen coverage.
 /// - Tile inputs change on source-tier/root changes; composed previous-tier
 ///   geometry remains available in gaps until its replacements arrive.
-/// - Retains only viewport-intersecting sources, bounded to five requested
-///   rings plus three rings for legacy halo coverage.
+/// - Retains recently used offscreen sources until the byte budget needs room.
 /// - Partitions legacy overlaps and merges on one coalesced background worker.
 pub fn load_srtm_for_globe(
     selected_root: Option<&Path>,
@@ -1490,16 +1490,15 @@ pub fn load_srtm_for_globe(
     zoom: f32,
     ctx: egui::Context,
 ) -> Option<Arc<Vec<ContourPath>>> {
-    // Map the actual globe view zoom to a coarse tile spec.  Globe mode caps
-    // at bucket 1 (2.2°, 25 m) — finer tiles aren't visible on a globe and
-    // cost far too much geometry. Five rings cover the new disjoint cores.
-    let tile_zoom = globe_zoom_to_tile_zoom(zoom);
-
-    let assets =
-        srtm_focus_cache::ensure_focus_contour_region(selected_root, center, tile_zoom, 5, 5);
-
+    // Choose by viewport coverage as well as zoom. Bucket one is the finest
+    // globe tier; wide screens can use bucket zero and a larger core window.
     let cache: &'static Mutex<GlobeRegionCache> =
         GLOBE_CONTOUR_CACHE.get_or_init(|| Mutex::new(GlobeRegionCache::default()));
+    let view = cache.lock().ok()?.residency.view;
+    let (tile_zoom, radius) = globe_residency::source_spec(view, center, zoom);
+    let assets = srtm_focus_cache::ensure_focus_contour_region(
+        selected_root, center, tile_zoom, radius, radius,
+    );
     let mut guard = cache.lock().ok()?;
 
     let zoom_bucket = srtm_focus_cache::zoom_bucket_for_zoom(tile_zoom);
@@ -1517,9 +1516,9 @@ pub fn load_srtm_for_globe(
 
     let step = srtm_focus_cache::half_extent_for_zoom(tile_zoom) * 0.45;
     let center_cell = ((center.lat / step).round() as i32, (center.lon / step).round() as i32);
-    if guard.residency.configure(zoom_bucket, center_cell) {
-        guard.mark_tiles_changed();
-    }
+    // Camera movement updates LRU use/protection, not geometry identity.
+    // Retained sources need no rebuild until a tile arrives or is evicted.
+    guard.residency.configure(zoom_bucket, center_cell);
     globe_residency::prune(&mut guard);
 
     if assets.is_empty() {

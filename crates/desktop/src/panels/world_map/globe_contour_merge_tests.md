@@ -14,6 +14,9 @@ loss of useful sparse coverage outside a source's own core.
 - Two hundred successive camera stops feed the previous picture into the next
   composition and verify that old Arcs are freed instead of accumulating in
   fallback history. Stale viewport workers cannot restore evicted geometry.
+- Resident sources far outside the current request window still compose.
+  Outgoing offscreen LOD survives below budget; pressure removes it while
+  preserving visible fallback paths.
 - Opt-in `real_moscow_mixed_cache_coverage_is_disjoint` reads three installed
   Hilbert tiles (old LineString and new MultiLineString), checks disjoint region
   ownership, and proves southern legacy coverage survives. Read-only throughout.

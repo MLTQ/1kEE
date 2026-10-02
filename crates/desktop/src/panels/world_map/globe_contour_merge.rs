@@ -22,7 +22,8 @@ pub(super) fn render(
         let (epoch, revision, bucket) = (guard.load_epoch, guard.tiles_revision, guard.zoom_bucket);
         let tiles = guard.tiles.clone();
         let fallback = guard.zoom_fallback.clone();
-        let visible = guard.residency.regions.clone();
+        let view = guard.residency.view;
+        let budget = guard.residency.gpu_budget;
         let view_revision = guard.residency.revision;
         guard.merge_in_flight = Some((epoch, revision));
         let wake = ctx.clone();
@@ -30,9 +31,23 @@ pub(super) fn render(
             .name("globe-contour-ownership".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    compose_visible(bucket, &tiles, fallback, Some(&visible))
+                    compose_resident(bucket, &tiles, fallback, view, budget)
                 }));
+                let bytes = result.as_ref().ok().map(|r| {
+                    (
+                        globe_residency::gpu_bytes(&r.contours),
+                        r.fallback
+                            .as_ref()
+                            .map_or(0, |f| globe_residency::gpu_bytes(f)),
+                    )
+                });
                 if let Ok(mut guard) = cache.lock() {
+                    if guard.load_epoch == epoch
+                        && guard.residency.revision == view_revision
+                        && let Some((bytes, fallback)) = bytes
+                    {
+                        guard.residency.observe_gpu(bytes, fallback);
+                    }
                     finish(&mut guard, epoch, revision, view_revision, result.ok());
                 }
                 wake.request_repaint();
@@ -228,6 +243,50 @@ fn compose_visible(
         contours: Arc::new(merged),
         fallback: kept_fallback,
     }
+}
+
+fn compose_resident(
+    bucket: i32,
+    tiles: &Tiles,
+    fallback: Option<Arc<Vec<ContourPath>>>,
+    view: Option<globe_residency::Viewport>,
+    budget: usize,
+) -> Output {
+    // Compose every retained source, including recently visited offscreen
+    // tiles. Geographic ownership still prevents overlapping opacity.
+    let mut output = compose_visible(bucket, tiles, fallback, None);
+    let bytes = globe_residency::gpu_bytes(&output.contours);
+    if bytes > budget
+        && let Some(fallback) = output.fallback.take()
+    {
+        // Outgoing LOD is the oldest data. Only trim it under pressure and
+        // preserve every visible gap until new terrain covers it.
+        let mut remaining = bytes;
+        let kept: Vec<_> = fallback
+            .iter()
+            .filter(|path| {
+                let visible = residency::Bounds::from_contours(std::slice::from_ref(*path))
+                    .is_some_and(|b| view.is_none_or(|v| v.intersects(footprint(b))));
+                if !visible && remaining > budget {
+                    remaining = remaining
+                        .saturating_sub(globe_residency::gpu_bytes(std::slice::from_ref(*path)));
+                    false
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .collect();
+        // Recompose ownership after dropping old offscreen fallback; selecting
+        // whole paths avoids truncating a line or joining unrelated segments.
+        output = compose_visible(
+            bucket,
+            tiles,
+            (!kept.is_empty()).then(|| Arc::new(kept)),
+            None,
+        );
+    }
+    output
 }
 
 #[cfg(test)]
