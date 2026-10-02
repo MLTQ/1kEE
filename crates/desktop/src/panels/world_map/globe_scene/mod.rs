@@ -100,6 +100,12 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 
     let lod = camera::lod(&model.globe_view);
     let layout = globe_layout(rect, &model.globe_view);
+    contour_asset::globe_residency::set_viewport(
+        (model.show_contours
+            && (model.active_body != crate::model::ActiveBody::Earth || model.globe_view.zoom >= 1.5))
+            .then_some(model.active_body),
+        Some(contour_asset::globe_residency::Viewport::new(&layout, &model.globe_view, rect)),
+    );
     let selected_root = model.selected_root.as_deref();
 
     // ── GPU globe backdrop (terrain shading) ──────────────────────────────

@@ -66,13 +66,82 @@ fn arriving_tiles_preserve_published_arc_and_reset_rejects_stale_merge() {
     assert!(Arc::ptr_eq(cache.merged.as_ref().unwrap(), &old));
     let epoch = cache.load_epoch;
     cache.merge_in_flight = Some((epoch, 0));
-    finish(&mut cache, epoch, 0, Some(old.clone()));
+    finish(
+        &mut cache,
+        epoch,
+        0,
+        0,
+        Some(Output {
+            contours: old.clone(),
+            fallback: None,
+        }),
+    );
     assert!(cache.merged.is_some()); // intermediate revision still publishes
     assert_ne!(cache.merged_revision, Some(cache.tiles_revision));
     cache.merge_in_flight = Some((epoch, 1));
     cache.reset_all();
     assert_eq!(cache.merge_in_flight, Some((epoch, 1))); // one occupied worker
-    finish(&mut cache, epoch, 1, Some(old));
+    finish(
+        &mut cache,
+        epoch,
+        1,
+        0,
+        Some(Output {
+            contours: old,
+            fallback: None,
+        }),
+    );
+    assert!(cache.merged.is_none());
+    assert!(cache.merge_in_flight.is_none());
+}
+
+#[test]
+fn repeated_zoom_and_event_hops_do_not_accumulate_fallback_history() {
+    let mut picture = None;
+    let mut retired = Vec::new();
+    for stop in 0..200 {
+        let lon = -100.0 + stop as f32 * 0.9;
+        let cell = (0, (lon / 0.99).round() as i32);
+        let core = composition::core(ActiveBody::Earth, tile_id(1, cell));
+        let source = lines(
+            50.0,
+            core.min_lon as f32 + 0.01,
+            core.max_lon as f32 - 0.01,
+            0.0,
+        );
+        if let Some(p) = &picture {
+            retired.push(Arc::downgrade(p));
+        }
+        let output = compose_visible(
+            1,
+            &HashMap::from([(cell, source)]),
+            picture.take(),
+            Some(&[core]),
+        );
+        assert!(output.fallback.is_none()); // native tile covers the entire visible cell
+        assert!(output.contours.len() <= 1);
+        picture = Some(output.contours);
+        assert!(retired.iter().all(|w| w.upgrade().is_none()));
+    }
+}
+
+#[test]
+fn stale_view_merge_cannot_reintroduce_evicted_geometry() {
+    let mut cache = GlobeRegionCache {
+        merge_in_flight: Some((0, 0)),
+        ..Default::default()
+    };
+    cache.residency.revision = 1;
+    finish(
+        &mut cache,
+        0,
+        0,
+        0,
+        Some(Output {
+            contours: lines(50.0, -3.0, 3.0, 0.0),
+            fallback: None,
+        }),
+    );
     assert!(cache.merged.is_none());
     assert!(cache.merge_in_flight.is_none());
 }

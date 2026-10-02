@@ -38,7 +38,7 @@ Loads contour geometry from disk into in-memory render caches for both local ter
   stale viewport selection to schedule new SQLite reads.
 
 ### `GlobeRegionCache`
-- **Does**: Accumulates globe-mode tiles across orbit movement, tracks in-flight
+- **Does**: Retains visible globe-mode tiles across orbit movement, tracks in-flight
   background loads, and memoizes the merged contour `Arc` behind a monotonic
   tile-set revision while its tile set is unchanged.
 - **Interacts with**: `load_srtm_for_globe`, `load_lunar_for_globe`.
@@ -47,8 +47,13 @@ Loads contour geometry from disk into in-memory render caches for both local ter
   120-path floor/cap that treated a wide legacy tile like a small modern core.
   Its previous published picture survives revisions; zoom fallback is clipped
   to uncovered regions and never carried across data roots.
-  Full Earth globe sources stay within the five requested rings plus three
-  legacy halo rings (at most 289 cells), rather than accumulating 1600 wide tiles.
+  `globe_residency` also checks Earth sources against the projected viewport,
+  using worker-measured geometry bounds and conservative full legacy bounds
+  until known. Reads and late publication use the same predicate. The geographic
+  ceiling remains five requested rings plus three legacy halo rings (289 cells).
+  Hidden/inactive body caches are reset, including Earth below its draw zoom.
+  Viewport revisions invalidate stale merges; old LOD snapshots are replaced
+  by only their still-visible, uncovered portions on the composition worker.
 
 ### `render_globe_tiles` / `merged_partitioned_local_contours`
 

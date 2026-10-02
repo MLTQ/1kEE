@@ -20,6 +20,8 @@ mod reader;
 mod fallback;
 #[path = "globe_contour_merge.rs"]
 mod globe_merge;
+#[path = "globe_residency.rs"]
+pub(crate) mod globe_residency;
 use reader::spawn_local_read;
 #[path = "contour_residency.rs"]
 pub(crate) mod residency;
@@ -271,10 +273,10 @@ struct LocalMergeWork {
 }
 
 /// Per-zoom-level cache for globe-mode SRTM tiles.
-/// Unlike `LocalRegionCache`, this accumulates tiles across orbit movements
-/// and only clears when the zoom bucket changes.  Eviction is by distance
-/// from the current center, so tiles stay visible while on screen.
+/// Earth source geometry is retained only inside the current geographic window
+/// and viewport. Published geometry survives while a replacement is composed.
 struct GlobeRegionCache {
+    residency: globe_residency::Residency,
     zoom_bucket: i32,
     root: Option<PathBuf>,
     /// (lat_bucket, lon_bucket) → decoded contour paths
@@ -312,6 +314,7 @@ struct GlobeRegionCache {
 impl Default for GlobeRegionCache {
     fn default() -> Self {
         Self {
+            residency: globe_residency::Residency::default(),
             zoom_bucket: -1,
             root: None,
             tiles: HashMap::new(),
@@ -338,6 +341,7 @@ impl GlobeRegionCache {
     /// Drop tiles for a new scene while preserving any old reader's ownership
     /// marker. That worker will discard its result once it notices the epoch.
     fn clear_tiles_for_new_scene(&mut self) {
+        self.residency.reset_sources();
         self.tiles.clear();
         self.in_flight.clear();
         self.order.clear();
@@ -732,19 +736,20 @@ fn begin_globe_read(
         .iter()
         .filter_map(|asset| {
             let tile_key = (asset.lat_bucket, asset.lon_bucket);
-            (!cache.tiles.contains_key(&tile_key) && !cache.in_flight.contains(&tile_key)).then(
-                || {
-                    (
-                        CacheKey {
-                            path: asset.path.clone(),
-                            lat_bucket: asset.lat_bucket,
-                            lon_bucket: asset.lon_bucket,
-                            zoom_bucket: asset.zoom_bucket,
-                        },
-                        asset.clone(),
-                    )
-                },
-            )
+            (cache.residency.wanted(tile_key)
+                && !cache.tiles.contains_key(&tile_key)
+                && !cache.in_flight.contains(&tile_key))
+            .then(|| {
+                (
+                    CacheKey {
+                        path: asset.path.clone(),
+                        lat_bucket: asset.lat_bucket,
+                        lon_bucket: asset.lon_bucket,
+                        zoom_bucket: asset.zoom_bucket,
+                    },
+                    asset.clone(),
+                )
+            })
         })
         .collect();
     if requests.is_empty() {
@@ -802,6 +807,13 @@ fn finish_globe_read(
     requests: &[ContourReadRequest],
     loaded: Option<Vec<(CacheKey, Vec<ContourPath>)>>,
 ) {
+    // Bounds scans belong to this reader, never the paint thread/cache lock.
+    let loaded = loaded.map(|tiles| {
+        tiles.into_iter().map(|(key, contours)| {
+            let bounds = residency::Bounds::from_contours(&contours);
+            (key, contours, bounds)
+        }).collect::<Vec<_>>()
+    });
     let Ok(mut cache) = cache.lock() else {
         return;
     };
@@ -813,9 +825,10 @@ fn finish_globe_read(
         let read_failed = loaded.is_none();
         let mut changed = false;
         if let Some(loaded) = loaded {
-            for (key, contours) in loaded {
+            for (key, contours, bounds) in loaded {
                 let tile_key = (key.lat_bucket, key.lon_bucket);
-                if !cache.tiles.contains_key(&tile_key) {
+                cache.residency.record(tile_key, bounds);
+                if cache.residency.wanted(tile_key) && !cache.tiles.contains_key(&tile_key) {
                     cache.tiles.insert(tile_key, Arc::new(contours));
                     cache.order.push(tile_key);
                     changed = true;
@@ -1468,7 +1481,8 @@ pub fn load_mars_region_for_view(
 ///   coverage while prefetching neighbors before they scroll into view.
 /// - Tile inputs change on source-tier/root changes; composed previous-tier
 ///   geometry remains available in gaps until its replacements arrive.
-/// - Retains five requested rings plus three rings for legacy halo coverage.
+/// - Retains only viewport-intersecting sources, bounded to five requested
+///   rings plus three rings for legacy halo coverage.
 /// - Partitions legacy overlaps and merges on one coalesced background worker.
 pub fn load_srtm_for_globe(
     selected_root: Option<&Path>,
@@ -1501,6 +1515,13 @@ pub fn load_srtm_for_globe(
         guard.clear_tiles_for_new_scene();
     }
 
+    let step = srtm_focus_cache::half_extent_for_zoom(tile_zoom) * 0.45;
+    let center_cell = ((center.lat / step).round() as i32, (center.lon / step).round() as i32);
+    if guard.residency.configure(zoom_bucket, center_cell) {
+        guard.mark_tiles_changed();
+    }
+    globe_residency::prune(&mut guard);
+
     if assets.is_empty() {
         // No SRTM root found; return whatever we already have.
         drop(guard);
@@ -1524,26 +1545,7 @@ pub fn load_srtm_for_globe(
     // Re-acquire lock to render and evict from whatever is currently cached.
     let mut guard = cache.lock().ok()?;
 
-    // Full source geometry needs bounded residency too. Keep the requested
-    // five rings plus the three-core reach of a legacy footprint, not every
-    // place visited during a long event tour (formerly up to 1600 wide tiles).
-    {
-        let half_extent = srtm_focus_cache::half_extent_for_zoom(tile_zoom);
-        let bucket_step = half_extent * 0.45;
-        let clat = (center.lat / bucket_step).round() as i32;
-        let clon = (center.lon / bucket_step).round() as i32;
-
-        let keep: std::collections::HashSet<(i32, i32)> =
-            guard.order.iter().copied().filter(|&(lat, lon)|
-                (lat-clat).abs() <= 8 && (lon-clon).abs() <= 8).collect();
-        let previous_len = guard.tiles.len();
-        guard.tiles.retain(|k, _| keep.contains(k));
-        guard.in_flight.retain(|k| keep.contains(k));
-        guard.order.retain(|k| keep.contains(k));
-        if guard.tiles.len() != previous_len {
-            guard.mark_tiles_changed();
-        }
-    }
+    globe_residency::prune(&mut guard);
 
     drop(guard);
     globe_merge::render(cache, &ctx)

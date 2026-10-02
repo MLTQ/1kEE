@@ -11,6 +11,9 @@ loss of useful sparse coverage outside a source's own core.
 - Missing replacement cells retain outgoing zoom geometry.
 - Arrivals retain the published Arc and cannot starve intermediate publication;
   resets reject late workers without opening a second worker slot.
+- Two hundred successive camera stops feed the previous picture into the next
+  composition and verify that old Arcs are freed instead of accumulating in
+  fallback history. Stale viewport workers cannot restore evicted geometry.
 - Opt-in `real_moscow_mixed_cache_coverage_is_disjoint` reads three installed
   Hilbert tiles (old LineString and new MultiLineString), checks disjoint region
   ownership, and proves southern legacy coverage survives. Read-only throughout.

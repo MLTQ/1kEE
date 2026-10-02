@@ -18,6 +18,9 @@ model and viewport into an egui-painted `GlobeScene` each frame.
   flights, ArcGIS features, and HUD elements in their stable layer order.
 - **Interacts with**: `geography.rs`, `markers.rs`, `projection.rs`, and the
   map model.
+- Publishes the exact globe camera/viewport before terrain loads. Inactive or
+  hidden body caches are released; Earth SRTM also releases below its 1.5 draw
+  threshold. The separate global overview remains available at low zoom.
 
 ### `GlobeLayout` / `ProjectedPoint` / `ProjectedMarker`
 - **Does**: Carry per-frame camera geometry and geographic projection results

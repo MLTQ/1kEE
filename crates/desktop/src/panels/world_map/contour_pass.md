@@ -29,6 +29,16 @@ perspective unit-sphere horizon, existing contour layers retain zero. Size stays
   instance set for display.
 - **Interacts with**: `contour_asset.rs` merged `Arc` identities and Rayon.
 
+### Frame residency
+
+- `contour_lifecycle` clears unrequested CPU instance/source Arcs at frame end
+  and releases GPU layers not prepared that frame. Hidden in-flight builds keep
+  their single worker slot but discard results, avoiding worker fan-out.
+- A completed instance generation pins its source Arc so pointer-based version
+  identity cannot be reused by a later allocation before that generation retires.
+- The canvas must bracket scene drawing with `begin_frame` / `end_frame` and
+  submit `residency_callback` first. Cleanup runs after all layer prepares.
+
 ### `contour_stroke_half_px`
 
 - **Does**: Converts the already-selected physical full width into the GPU

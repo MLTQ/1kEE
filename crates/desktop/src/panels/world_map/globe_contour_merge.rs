@@ -7,6 +7,11 @@ use tile_archive::contour_grid::Bounds as Rect;
 type Cell = (i32, i32);
 type Tiles = HashMap<Cell, Arc<Vec<ContourPath>>>;
 
+struct Output {
+    contours: Arc<Vec<ContourPath>>,
+    fallback: Option<Arc<Vec<ContourPath>>>,
+}
+
 /// Keep the last published picture while one worker rebuilds changed tiles.
 pub(super) fn render(
     cache: &'static Mutex<GlobeRegionCache>,
@@ -17,16 +22,18 @@ pub(super) fn render(
         let (epoch, revision, bucket) = (guard.load_epoch, guard.tiles_revision, guard.zoom_bucket);
         let tiles = guard.tiles.clone();
         let fallback = guard.zoom_fallback.clone();
+        let visible = guard.residency.regions.clone();
+        let view_revision = guard.residency.revision;
         guard.merge_in_flight = Some((epoch, revision));
         let wake = ctx.clone();
         if let Err(error) = std::thread::Builder::new()
             .name("globe-contour-ownership".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    compose(bucket, &tiles, fallback)
+                    compose_visible(bucket, &tiles, fallback, Some(&visible))
                 }));
                 if let Ok(mut guard) = cache.lock() {
-                    finish(&mut guard, epoch, revision, result.ok());
+                    finish(&mut guard, epoch, revision, view_revision, result.ok());
                 }
                 wake.request_repaint();
             })
@@ -43,18 +50,23 @@ fn finish(
     cache: &mut GlobeRegionCache,
     epoch: u64,
     revision: u64,
-    result: Option<Arc<Vec<ContourPath>>>,
+    view_revision: u64,
+    result: Option<Output>,
 ) {
     if cache.merge_in_flight != Some((epoch, revision)) {
         return;
     }
     cache.merge_in_flight = None;
     if cache.load_epoch == epoch
+        && cache.residency.revision == view_revision
         && let Some(result) = result
     {
         // Accept a coherent intermediate snapshot even when more tiles arrived:
         // it makes progress now, and the next repaint coalesces the newer data.
-        cache.merged = Some(result);
+        cache.merged = Some(result.contours);
+        // Release the untrimmed prior generation as soon as the worker has
+        // isolated its still-visible gaps. Never accumulate travel history.
+        cache.zoom_fallback = result.fallback;
         cache.merged_revision = Some(revision);
     }
 }
@@ -138,12 +150,30 @@ fn ownership(bucket: i32, tiles: &Tiles) -> HashMap<Cell, Vec<Rect>> {
     regions
 }
 
+#[cfg(test)]
 fn compose(
     bucket: i32,
     tiles: &Tiles,
     fallback: Option<Arc<Vec<ContourPath>>>,
 ) -> Arc<Vec<ContourPath>> {
-    let regions = ownership(bucket, tiles);
+    compose_visible(bucket, tiles, fallback, None).contours
+}
+
+fn compose_visible(
+    bucket: i32,
+    tiles: &Tiles,
+    fallback: Option<Arc<Vec<ContourPath>>>,
+    visible: Option<&[Rect]>,
+) -> Output {
+    let mut regions = ownership(bucket, tiles);
+    if let Some(visible) = visible {
+        for owned in regions.values_mut() {
+            *owned = owned
+                .iter()
+                .flat_map(|&r| visible.iter().filter_map(move |&v| intersection(r, v)))
+                .collect();
+        }
+    }
     let mut keys: Vec<_> = tiles.keys().copied().collect();
     keys.sort();
     let mut merged = Vec::new();
@@ -161,10 +191,17 @@ fn compose(
         );
     }
     // Keep the outgoing tier only in areas that the incoming data cannot cover.
+    let mut kept_fallback = None;
     if let Some(contours) = fallback
         && let Some(bounds) = residency::Bounds::from_contours(&contours)
     {
-        let mut remaining = vec![footprint(bounds)];
+        let mut remaining = match visible {
+            Some(visible) => visible
+                .iter()
+                .filter_map(|&r| intersection(r, footprint(bounds)))
+                .collect(),
+            None => vec![footprint(bounds)],
+        };
         let mut ordered: Vec<_> = regions.iter().collect();
         ordered.sort_by_key(|(key, _)| **key);
         for (_, owned) in ordered {
@@ -180,14 +217,17 @@ fn compose(
             bounds: Some(bounds),
             contours,
         };
-        merged.extend(
-            composition::clip_contours(&tile, &remaining)
-                .iter()
-                .cloned(),
-        );
+        let clipped = composition::clip_contours(&tile, &remaining);
+        merged.extend(clipped.iter().cloned());
+        if !clipped.is_empty() {
+            kept_fallback = Some(clipped);
+        }
     }
     merged.sort_by(|a, b| a.elevation_m.abs().total_cmp(&b.elevation_m.abs()));
-    Arc::new(merged)
+    Output {
+        contours: Arc::new(merged),
+        fallback: kept_fallback,
+    }
 }
 
 #[cfg(test)]

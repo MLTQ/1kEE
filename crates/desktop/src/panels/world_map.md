@@ -63,6 +63,9 @@ The canvas submits local line residency cleanup on every frame. Its finish-prepa
 callback drops unused contour/road GPU buffers after all live batches are marked.
 Leaving local mode releases local decoded tiles and CPU contour instances;
 subsequent globe-transition loading is independent of the old local viewport.
+The canvas also brackets each scene with globe CPU residency tracking and
+submits globe GPU cleanup first, releasing hidden layers after all prepares.
+Entering local mode releases globe source caches and rejects their late workers.
 
 Webcam/event hover and clicks now use shared `marker_style::pick` geometry,
 including the visible lower spire and scaled ground target. The closest target

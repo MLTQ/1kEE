@@ -293,7 +293,19 @@ struct LayerInstances {
     current: Option<(u64, Arc<Vec<SegmentInstance>>)>,
     /// Version a background build is currently producing, if any.
     building: Option<u64>,
+    active: bool,
+    /// Pin pointer identity for as long as its instance version is cached.
+    source: Option<Arc<Vec<ContourPath>>>,
 }
+
+static INSTANCE_CACHE: OnceLock<Mutex<HashMap<ContourLayer, LayerInstances>>> = OnceLock::new();
+fn instance_cache() -> &'static Mutex<HashMap<ContourLayer, LayerInstances>> {
+    INSTANCE_CACHE.get_or_init(Default::default)
+}
+
+#[path = "contour_lifecycle.rs"]
+mod lifecycle;
+pub(crate) use lifecycle::{begin_frame, end_frame, residency_callback};
 
 /// Complete a single-flight build. A failed build deliberately retains the
 /// previous instance set, but always releases the marker so a later repaint
@@ -307,7 +319,9 @@ fn complete_instance_build(
         return false;
     }
     entry.building = None;
-    if let Some(built) = built {
+    if entry.active
+        && let Some(built) = built
+    {
         entry.current = Some((version, Arc::new(built)));
     }
     true
@@ -331,12 +345,12 @@ pub fn instances_for(
 ) -> Option<(u64, Arc<Vec<SegmentInstance>>)> {
     let version = version_key(contours, palette);
 
-    static CACHE: OnceLock<Mutex<HashMap<ContourLayer, LayerInstances>>> = OnceLock::new();
-    let cache: &'static Mutex<HashMap<ContourLayer, LayerInstances>> =
-        CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    lifecycle::requested(layer);
+    let cache = instance_cache();
 
     let mut guard = cache.lock().unwrap();
     let entry = guard.entry(layer).or_default();
+    entry.active = true;
 
     if let Some((v, instances)) = &entry.current {
         if *v == version {
@@ -379,6 +393,9 @@ pub fn instances_for(
                 let mut guard = cache.lock().unwrap();
                 let entry = guard.entry(layer).or_default();
                 if complete_instance_build(entry, version, built) {
+                    if entry.active && entry.current.as_ref().is_some_and(|(v, _)| *v == version) {
+                        entry.source = Some(contours);
+                    }
                     drop(guard);
                     // Wake the UI so a fresh result, or a recovered failure,
                     // is observed on the next frame.
@@ -402,6 +419,7 @@ pub struct ContourPassResources {
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     layers: HashMap<ContourLayer, LayerGpu>,
+    used: std::collections::HashSet<ContourLayer>,
 }
 
 struct LayerGpu {
@@ -561,6 +579,7 @@ impl ContourPassResources {
             uniform_buf,
             bind_group,
             layers: HashMap::new(),
+            used: Default::default(),
         }
     }
 }
@@ -647,6 +666,8 @@ impl egui_wgpu::CallbackTrait for ContourCallback {
             return Vec::new();
         };
 
+        res.used.insert(self.layer);
+
         queue.write_buffer(
             &res.uniform_buf,
             self.layer.slot() as u64 * UNIFORM_STRIDE,
@@ -731,6 +752,8 @@ mod tests {
         let mut entry = LayerInstances {
             current: Some((3, Arc::new(Vec::new()))),
             building: Some(7),
+            active: true,
+            ..Default::default()
         };
 
         assert!(complete_instance_build(&mut entry, 7, None));
