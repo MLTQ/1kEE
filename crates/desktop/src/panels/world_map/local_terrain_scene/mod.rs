@@ -66,6 +66,10 @@ pub const LOCAL_ZOOM_MAX: f32 = 60.0;
 /// A contour is major every 50 m on Earth. Shared by the CPU stack and the GPU
 /// pass so both classify the same lines the same way.
 const EARTH_MAJOR_REM: i32 = 50;
+/// Major and minor terrain contours share the selected stroke width and differ
+/// only by palette colour, matching the globe. This base resolves to exactly
+/// the selected physical width through `contour_stroke_scale`.
+const TERRAIN_CONTOUR_BASE_WIDTH: f32 = crate::settings_store::LEGACY_CONTOUR_STROKE_WIDTH_POINTS;
 
 #[derive(Clone, Copy)]
 pub(super) struct LocalLayout {
@@ -1937,12 +1941,8 @@ fn gpu_contour_batches(
                     let major =
                         (contour.elevation_m.round() as i32).rem_euclid(EARTH_MAJOR_REM) == 0;
                     let color = if major { major_color } else { minor_color };
-                    // The pass fade is a uniform, so only the fixed major/minor
-                    // weighting is baked here.
-                    (
-                        color.gamma_multiply(if major { 1.0 } else { 0.78 }),
-                        major,
-                    )
+                    // The pass fade is a uniform; palette colours are baked as-is.
+                    (color, major)
                 },
             )
         })
@@ -1976,11 +1976,10 @@ fn draw_gpu_contour_pass(
             batches.to_vec(),
             &params,
             alpha,
-            // Same two widths the CPU stack derives, so the major/minor
-            // hierarchy is preserved exactly — converted to physical pixels,
-            // which is what the pass expects.
-            gpu_contour_stroke_width_px(0.7, alpha, contour_stroke_scale, pixels_per_point),
-            gpu_contour_stroke_width_px(1.35, alpha, contour_stroke_scale, pixels_per_point),
+            // Same single width the CPU stack derives for both major and minor
+            // contours, converted to the physical pixels the pass expects.
+            gpu_contour_stroke_width_px(TERRAIN_CONTOUR_BASE_WIDTH, alpha, contour_stroke_scale, pixels_per_point),
+            gpu_contour_stroke_width_px(TERRAIN_CONTOUR_BASE_WIDTH, alpha, contour_stroke_scale, pixels_per_point),
             painter.ctx().clone(),
         )
         .into_paint_callback(painter.clip_rect()),
@@ -2085,13 +2084,12 @@ fn draw_contour_stack(
                 let major = (contour.elevation_m.round() as i32).rem_euclid(major_rem) == 0;
                 let stroke = egui::Stroke::new(
                     local_contour_stroke_width(
-                        if major { 1.35 } else { 0.7 },
+                        TERRAIN_CONTOUR_BASE_WIDTH,
                         alpha,
                         contour_stroke_scale,
                         pixels_per_point,
                     ),
-                    if major { major_color } else { minor_color }
-                        .gamma_multiply((if major { 1.0 } else { 0.78 }) * alpha),
+                    if major { major_color } else { minor_color }.gamma_multiply(alpha),
                 );
 
                 Some((points, stroke))
@@ -2750,6 +2748,17 @@ mod tests {
         // Below the floor it still clamps, in points for the given density.
         assert_eq!(local_stroke_width_points(0.01, 1.0), floor_px);
         assert_eq!(local_stroke_width_points(0.01, 2.0), floor_px / 2.0);
+    }
+
+    #[test]
+    fn terrain_contours_draw_at_the_selected_physical_width() {
+        for ppp in [1.0, 2.0] {
+            let mut model = AppModel::new();
+            model.set_contour_stroke_width_px(1.0);
+            let scale = model.contour_stroke_scale_for_pixels_per_point(ppp);
+            let px = gpu_contour_stroke_width_px(TERRAIN_CONTOUR_BASE_WIDTH, 1.0, scale, ppp);
+            assert!((px - 1.0).abs() < 1e-5, "ppp {ppp}: {px}");
+        }
     }
 
     #[test]

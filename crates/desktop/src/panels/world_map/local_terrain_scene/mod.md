@@ -35,7 +35,9 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 
 - **Does**: Converts the shared physical primary width to the existing local
   relative scale before threading it through ordinary and transition contour
-  stacks. This retains alpha and major/minor weight relationships.
+  stacks. Major and minor terrain contours use the same width (the selected
+  physical width at full alpha) and differ only by palette colour (`hot_color`
+  vs `contour_color`, undimmed), matching the globe contour pass.
 - **Interacts with**: `AppModel::contour_stroke_scale_for_pixels_per_point`
   and `geography.rs`.
 
