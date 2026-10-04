@@ -104,6 +104,14 @@ and the complete static-data archive plan. See
 archives and review measured loading improvements and current limitations. See
 [`docs/terrain-pipeline.md`](docs/terrain-pipeline.md) for the GDAL preprocessing path.
 
+## Streaming with OBS
+
+Capture the native 1kEE window in OBS to stream the globe, terrain and live pips.
+Use **OBS VIEW** in the map toolbar (or **F10**) for a clean map that keeps any
+open Factal brief and live-camera window. **Escape** restores the controls.
+Leave it off to capture the full dashboard.
+See [OBS setup](docs/obs-streaming.md) for the macOS window-capture steps.
+
 ## Multiplayer over Gruve
 
 The app can put itself on a Gruve mesh (a local-network app-sharing/collaboration

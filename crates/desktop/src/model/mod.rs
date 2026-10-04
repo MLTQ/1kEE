@@ -62,6 +62,8 @@ pub struct AppModel {
     pub event_follow: event_follow::EventFollow,
     pub focused_city_id: Option<String>,
     pub cinematic_mode: bool,
+    /// Session-only clean window capture; content layers and open briefs stay visible.
+    pub obs_view: bool,
     pub show_layer_drawer: bool,
     pub show_event_list: bool,
     pub active_body: ActiveBody,
@@ -268,6 +270,7 @@ impl AppModel {
             event_follow: event_follow::EventFollow::default(),
             focused_city_id: None,
             cinematic_mode: false,
+            obs_view: false,
             show_layer_drawer: false,
             show_event_list: false,
             active_body: ActiveBody::Earth,

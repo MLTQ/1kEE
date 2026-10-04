@@ -129,8 +129,12 @@ struct DeflockLocalMeshKey {
 
 pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: f64) -> GlobeScene {
     puffin::profile_function!();
-    painter.rect_filled(rect, 12.0, theme::canvas_background());
-    if !model.cinematic_mode {
+    painter.rect_filled(
+        rect,
+        if model.obs_view { 0.0 } else { 12.0 },
+        theme::canvas_background(),
+    );
+    if !model.cinematic_mode && !model.obs_view {
         dissolve::draw_frame(painter, rect);
     }
 
@@ -202,7 +206,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 
     // The grid tracks build, decode, and publication; disk presence alone is not completion.
     let still_loading = contour_load.status.ready_assets < contour_load.status.total_assets;
-    if still_loading {
+    if still_loading && !model.obs_view {
         match model.active_body {
             crate::model::ActiveBody::Moon => {
                 let half_extent = srtm_focus_cache::lunar_half_extent_for_zoom(contour_load.source_zoom);
@@ -509,7 +513,9 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             model.show_surveillance,
         );
 
-        draw_loading_boxes(painter, &layout, &model.globe_view, viewport_center);
+        if !model.obs_view {
+            draw_loading_boxes(painter, &layout, &model.globe_view, viewport_center);
+        }
     }
 
     // ── Admin boundaries (Earth only) ─────────────────────────────────────
@@ -576,7 +582,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 
     let event_markers: Vec<MapMarker> = if !should_show_local_event_indicators(
         model.active_body,
-        model.cinematic_mode && !model.event_follow.enabled(),
+        model.cinematic_mode && !model.obs_view && !model.event_follow.enabled(),
         model.show_event_markers,
     ) {
         Vec::new()
@@ -768,36 +774,38 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             None,
         );
     }
-    ui_overlays::draw_legend(
-        painter,
-        rect,
-        match model.active_body {
-            crate::model::ActiveBody::Moon => "LOCAL LUNAR TERRAIN",
-            crate::model::ActiveBody::Mars => "LOCAL MARTIAN TERRAIN",
-            crate::model::ActiveBody::Earth => "LOCAL TERRAIN",
-        },
-        render_zoom,
-        model.active_body,
-    );
-    let (off_ready, off_building, off_total) = match model.active_body {
-        crate::model::ActiveBody::Moon | crate::model::ActiveBody::Mars => (
-            contour_load.status.ready_assets,
-            contour_load.status.pending_assets,
-            contour_load.status.total_assets,
-        ),
-        crate::model::ActiveBody::Earth => (0, 0, 0),
-    };
-    ui_overlays::draw_progress_overlay(
-        painter,
-        rect,
-        cache_status,
-        osm_ingest::osmium_cell_progress(),
-        osm_ingest::active_job_note().as_deref(),
-        off_building,
-        off_ready,
-        off_total,
-        model.active_body,
-    );
+    if !model.obs_view {
+        ui_overlays::draw_legend(
+            painter,
+            rect,
+            match model.active_body {
+                crate::model::ActiveBody::Moon => "LOCAL LUNAR TERRAIN",
+                crate::model::ActiveBody::Mars => "LOCAL MARTIAN TERRAIN",
+                crate::model::ActiveBody::Earth => "LOCAL TERRAIN",
+            },
+            render_zoom,
+            model.active_body,
+        );
+        let (off_ready, off_building, off_total) = match model.active_body {
+            crate::model::ActiveBody::Moon | crate::model::ActiveBody::Mars => (
+                contour_load.status.ready_assets,
+                contour_load.status.pending_assets,
+                contour_load.status.total_assets,
+            ),
+            crate::model::ActiveBody::Earth => (0, 0, 0),
+        };
+        ui_overlays::draw_progress_overlay(
+            painter,
+            rect,
+            cache_status,
+            osm_ingest::osmium_cell_progress(),
+            osm_ingest::active_job_note().as_deref(),
+            off_building,
+            off_ready,
+            off_total,
+            model.active_body,
+        );
+    }
 
     GlobeScene {
         event_markers,

@@ -5,6 +5,13 @@ Implements the main geographic canvas for the demo. The current version wraps an
 
 ## Components
 
+### OBS capture view
+- The OBS VIEW button enters `AppModel::obs_view`; F10 and Escape are handled
+  by the app shell. The canvas fills its panel without the layer bar, footer,
+  rounded inset frame, replay controls, hover cards, or operator detail windows.
+- Live marker rendering, selection, camera movement, polling and terrain
+  preparation continue. Factal and live-camera windows are owned by `app.rs`.
+
 ### `render_world_map`
  - **Does**: Draws the globe panel, renders the top layer bar including the camera-dot toggle/count, applies pointer interaction to the persistent camera state, delegates rendering to `globe_scene.rs`, handles click-based selection, and shows event/camera hover tooltips
 - **Interacts with**: `AppModel` in `model.rs`, `apply_interaction` in `camera.rs`, `paint` in `globe_scene.rs`, theme helpers in `theme.rs`

@@ -21,6 +21,9 @@ UI-thread coordinator for `AppModel`.
   viewer.
 - **Interacts with**: source modules, `AppModel`, `panels`, and
   `camera_feed_viewer.rs`.
+- Handles F10 to toggle OBS view and Escape to leave it. Clean capture skips
+  operator panels while retaining open Factal briefs, camera feeds, all live
+  polling, and cinematic/event-follow motion. Hidden panel flags are preserved.
 
 ### Camera feed viewer ownership
 

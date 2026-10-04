@@ -48,10 +48,14 @@ pub(crate) fn invalidate_water_cache_pub() {
 }
 
 pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
-    let panel_frame = egui::Frame::new()
-        .fill(theme::section_background())
-        .corner_radius(12.0)
-        .inner_margin(egui::Margin::same(14));
+    let panel_frame = if model.obs_view {
+        egui::Frame::new().fill(theme::canvas_background())
+    } else {
+        egui::Frame::new()
+            .fill(theme::section_background())
+            .corner_radius(12.0)
+            .inner_margin(egui::Margin::same(14))
+    };
 
     panel_frame.show(ui, |ui| {
         if model.event_follow.moving() || model.globe_view.auto_spin || (model.cinematic_mode && model.globe_view.meander_mode) {
@@ -116,17 +120,22 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
                 .request_repaint_after(std::time::Duration::from_millis(250));
         }
 
-        draw_layer_bar(ui, model);
+        if !model.obs_view {
+            draw_layer_bar(ui, model);
+            ui.add_space(8.0);
+        }
         let local_terrain_mode = local_terrain_scene::is_active(model);
         layer_import::ensure_visible_road_layers(model, local_terrain_mode);
         layer_import::ensure_visible_water_layers(model, local_terrain_mode);
 
-        ui.add_space(8.0);
-
-        let footer_height = if local_terrain_mode { 72.0 } else { 0.0 };
+        let footer_height = if local_terrain_mode && !model.obs_view {
+            72.0
+        } else {
+            0.0
+        };
         let desired = egui::vec2(
-            ui.available_width().max(480.0),
-            (ui.available_height() - footer_height).max(360.0),
+            ui.available_width().max(if model.obs_view { 1.0 } else { 480.0 }),
+            (ui.available_height() - footer_height).max(if model.obs_view { 1.0 } else { 360.0 }),
         );
         let (response, painter) = ui.allocate_painter(desired, egui::Sense::click_and_drag());
         let rect = response.rect;
@@ -137,7 +146,9 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         if !model.event_follow.enabled() {
             camera::apply_interaction(ui.ctx(), &response, &mut model.globe_view);
         }
-        infrastructure_hover::begin(response.hover_pos().filter(|_| !response.dragged()));
+        infrastructure_hover::begin(
+            response.hover_pos().filter(|_| !response.dragged() && !model.obs_view),
+        );
         contour_pass::begin_frame();
         painter.add(contour_pass::residency_callback(rect));
         painter.add(local_contour_pass::residency_callback(rect, ui.ctx()));
@@ -153,7 +164,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         };
         contour_pass::end_frame();
 
-        if local_terrain_mode {
+        if local_terrain_mode && !model.obs_view {
             ui.add_space(10.0);
             draw_local_footer(ui, model, scene.beam_elevation_m);
         }
@@ -212,6 +223,11 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
             }
         }
 
+        // Markers remain interactive, but transient operator cards do not go
+        // on air. The app shell separately renders the open brief/live camera.
+        if model.obs_view {
+            return;
+        }
         super::render_replay_controls(ui, model);
         if response.hover_pos().is_some_and(|pointer| scene.landing_point_markers.iter().any(|(_, p)| p.distance(pointer) <= 9.0)) {
             infrastructure_hover::prefer_landing();
@@ -330,6 +346,14 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
 
                 // ── Right-aligned controls ────────────────────────────────
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .small_button("OBS VIEW")
+                        .on_hover_text("Clean map with pips, open Factal brief and live camera. F10 toggles; Esc restores controls. In OBS, capture this window.")
+                        .clicked()
+                    {
+                        model.obs_view = true;
+                        ui.ctx().request_repaint();
+                    }
                     // CINEMATIC
                     let (cin_fill, cin_text) = if model.cinematic_mode {
                         (egui::Color32::from_rgb(160, 100, 20), egui::Color32::from_rgb(255, 210, 80))

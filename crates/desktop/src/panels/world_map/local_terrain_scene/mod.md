@@ -5,6 +5,12 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 
 ## Components
 
+### OBS view
+- Skips decorative framing, navigation legends, tile-loading grids and progress
+  cards during clean window capture. Terrain loading and all configured scene
+  layers continue; this flag does not enable cinematic mode or alter selection.
+- Enabled event pips remain visible in OBS view even during cinematic meander.
+
 ### `render_local_terrain_scene`
 - **Does**: Drives the local terrain renderer, assembles terrain/road/water/uploaded-layer overlays, and coordinates the split helper modules in this folder
 - **Interacts with**: `contour_asset.rs`, `terrain_field.rs`, `road_layer.rs`, `water_layer.rs`, `projection.rs`, `ui_overlays.rs`

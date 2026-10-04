@@ -103,6 +103,16 @@ impl eframe::App for DashboardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         puffin::GlobalProfiler::lock().new_frame();
 
+        // Handle escape before hidden panels can consume it. Presentation mode
+        // changes only visibility, so returning restores the operator's layout.
+        ctx.input_mut(|input| {
+            if self.model.obs_view && input.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                self.model.obs_view = false;
+            } else if input.consume_key(egui::Modifiers::NONE, egui::Key::F10) {
+                self.model.obs_view = !self.model.obs_view;
+            }
+        });
+
         // Apply any commands web viewers sent (steer globe / select event) before
         // the panels read the model this frame.
         if let Some(bridge) = &self.gruve {
@@ -150,21 +160,23 @@ impl eframe::App for DashboardApp {
         // must keep ticking even when no API keys are present.
         ctx.request_repaint_after(Duration::from_secs(1));
 
-        if !self.model.cinematic_mode {
+        if !self.model.cinematic_mode && !self.model.obs_view {
             panels::render_header(ctx, &mut self.model);
             panels::render_factal_settings(ctx, &mut self.model);
             panels::render_terrain_library(ctx, &mut self.model);
             panels::render_stellar_observatory(ctx, &mut self.model);
         }
 
-        if !self.model.cinematic_mode || self.model.event_follow.enabled() {
+        if self.model.obs_view || !self.model.cinematic_mode || self.model.event_follow.enabled() {
             panels::render_factal_brief(ctx, &mut self.model);
         }
 
-        // These panels are toggled independently of cinematic mode.
-        panels::render_layer_drawer(ctx, &mut self.model);
-        if self.model.show_event_list {
-            panels::render_event_list(ctx, &mut self.model);
+        // Preserve the panel flags while hiding operator chrome for capture.
+        if !self.model.obs_view {
+            panels::render_layer_drawer(ctx, &mut self.model);
+            if self.model.show_event_list {
+                panels::render_event_list(ctx, &mut self.model);
+            }
         }
 
         egui::CentralPanel::default()

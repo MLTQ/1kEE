@@ -96,7 +96,11 @@ struct DeflockGlobeMeshKey {
 
 pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: f64) -> GlobeScene {
     puffin::profile_function!();
-    painter.rect_filled(rect, 12.0, theme::canvas_background());
+    painter.rect_filled(
+        rect,
+        if model.obs_view { 0.0 } else { 12.0 },
+        theme::canvas_background(),
+    );
 
     let lod = camera::lod(&model.globe_view);
     let layout = globe_layout(rect, &model.globe_view);
@@ -134,13 +138,14 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         .into_paint_callback(rect),
     );
 
-    // Outer panel rect stroke (was part of draw_backdrop)
-    painter.rect_stroke(
-        rect.shrink(6.0),
-        12.0,
-        egui::Stroke::new(0.7, theme::topo_color().gamma_multiply(0.45)),
-        egui::StrokeKind::Outside,
-    );
+    if !model.obs_view {
+        painter.rect_stroke(
+            rect.shrink(6.0),
+            12.0,
+            egui::Stroke::new(0.7, theme::topo_color().gamma_multiply(0.45)),
+            egui::StrokeKind::Outside,
+        );
+    }
 
     if model.show_reticle {
         draw_hud_frame(painter, rect);
@@ -457,10 +462,12 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             .collect();
         markers::draw_camera_links(painter, event_marker.base, &nearby_markers);
     }
-    draw_legend(painter, rect, &layout, &model.globe_view, &lod);
+    if !model.obs_view {
+        draw_legend(painter, rect, &layout, &model.globe_view, &lod);
+    }
 
     // ── Contour build progress (Moon/Mars) ────────────────────────────────────────
-    if model.active_body == crate::model::ActiveBody::Moon {
+    if !model.obs_view && model.active_body == crate::model::ActiveBody::Moon {
         let (ready, building, total) = srtm_focus_cache::lunar_tile_counts(
             selected_root,
             model.globe_view.local_center,
@@ -481,7 +488,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 egui::Color32::from_rgb(155, 200, 248),
             );
         }
-    } else if model.active_body == crate::model::ActiveBody::Mars {
+    } else if !model.obs_view && model.active_body == crate::model::ActiveBody::Mars {
         let (ready, building, total) = srtm_focus_cache::mars_tile_counts(
             selected_root,
             model.globe_view.local_center,

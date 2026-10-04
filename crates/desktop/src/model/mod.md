@@ -9,6 +9,12 @@ source pollers.
 
 ## Components
 
+### OBS view
+- `obs_view` is a session-only presentation toggle, initially off. It hides
+  operator chrome without changing layer visibility, selections, cinematic
+  movement, or open-window flags. The Factal brief and live camera remain
+  available as broadcast content. Escape restores the existing interface.
+
 ### `AppModel::new`
 - **Does**: Initializes settings, asset inventories, empty event/camera
   collections, neutral map state, and honest source status.
