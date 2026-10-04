@@ -9,7 +9,9 @@ half extents remain address/sampling parameters, not new stored footprints.
 - prefetch_radius_for_zoom covers the oblique viewport with disjoint cores and
   one spare hosted ring; source downloads/processing remain separately bounded.
 - region_coverage_half_extent_deg subtracts the worst-case half-core focus offset.
-- per_asset_feature_budget preserves the prior deep-tier detail floor.
+- Earth local readers retain complete cores at every tier. The former per-asset
+  feature budget, unused spec field and accessor are removed; footprint LOD and
+  residency bound the working set. Sampling and contour intervals stay unchanged.
 - Lunar/Mars specs and GeoBounds remain legacy callers' geometry helpers.
 
 ## Contracts

@@ -31,7 +31,7 @@ pub(super) fn spawn_local_read(
     cache: &'static Mutex<LocalRegionCache>,
     epoch: u64,
     requests: Vec<ContourReadRequest>,
-    feature_budget: usize,
+    selection: ReadSelection,
     ctx: egui::Context,
     worker_name: &'static str,
 ) {
@@ -61,7 +61,7 @@ pub(super) fn spawn_local_read(
                                 stream_local_contours(
                                     &work[0].0.path,
                                     &work,
-                                    feature_budget,
+                                    selection,
                                     &mut |key, done, total| {
                                         if let Ok(mut guard) = cache.lock()
                                             && guard.load_epoch == epoch

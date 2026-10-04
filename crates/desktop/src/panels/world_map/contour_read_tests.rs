@@ -397,10 +397,16 @@ fn streaming_reader_can_cancel_between_tiles() {
     drop(connection);
     let requests = [request(&path, (10, 0, 0)), request(&path, (10, 0, 1))];
     let mut tiles = Vec::new();
-    stream_local_contours(&path, &requests, 100, &mut |_, _, _| {}, &mut |key, _| {
-        tiles.push(key);
-        false
-    })
+    stream_local_contours(
+        &path,
+        &requests,
+        ReadSelection::WholeTile(100),
+        &mut |_, _, _| {},
+        &mut |key, _| {
+            tiles.push(key);
+            false
+        },
+    )
     .unwrap();
     assert!(tiles == vec![requests[0].0.clone()]);
     std::fs::remove_file(path).unwrap();

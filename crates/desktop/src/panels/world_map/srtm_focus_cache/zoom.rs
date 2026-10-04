@@ -1,16 +1,6 @@
 use super::{FocusContourSpec, GeoBounds};
 use crate::model::GeoPoint;
 
-pub fn feature_budget_for_zoom(zoom: f32) -> usize {
-    spec_for_zoom(zoom).feature_budget
-}
-
-/// Keep the same per-tile detail while the envelope contains more small cores.
-pub fn per_asset_feature_budget(zoom: f32, assets: usize) -> usize {
-    let spec = spec_for_zoom(zoom);
-    (spec.feature_budget / assets.max(1)).max(if spec.zoom_bucket >= 7 { 10_000 } else { 120 })
-}
-
 pub fn half_extent_for_zoom(zoom: f32) -> f32 {
     spec_for_zoom(zoom).half_extent_deg
 }
@@ -77,7 +67,6 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             raster_size: 384,
             interval_m: 50.0,
             simplify_step: 5,
-            feature_budget: 320,
             zoom_bucket: 0,
         }
     } else if zoom < 2.0 {
@@ -86,7 +75,6 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             raster_size: 512,
             interval_m: 25.0,
             simplify_step: 4,
-            feature_budget: 360,
             zoom_bucket: 1,
         }
     } else if zoom < 3.0 {
@@ -95,7 +83,6 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             raster_size: 576,
             interval_m: 20.0,
             simplify_step: 4,
-            feature_budget: 400,
             zoom_bucket: 2,
         }
     } else if zoom < 4.5 {
@@ -104,7 +91,6 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             raster_size: 640,
             interval_m: 10.0,
             simplify_step: 3,
-            feature_budget: 440,
             zoom_bucket: 3,
         }
     } else if zoom < 6.5 {
@@ -113,7 +99,6 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             raster_size: 704,
             interval_m: 10.0,
             simplify_step: 3,
-            feature_budget: 480,
             zoom_bucket: 4,
         }
     } else if zoom < 9.5 {
@@ -122,7 +107,6 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             raster_size: 768,
             interval_m: 5.0,
             simplify_step: 2,
-            feature_budget: 560,
             zoom_bucket: 5,
         }
     } else if zoom < 13.0 {
@@ -131,20 +115,18 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             raster_size: 896,
             interval_m: 5.0,
             simplify_step: 2,
-            feature_budget: 640,
             zoom_bucket: 6,
         }
     // USGS tiers retain their legacy address step and contour interval.
     // CoreTile derives a smaller, aligned source raster from each spec; stored
-    // geometry covers only the core. The per-asset reader floor preserves the
-    // old detail allowance when the viewport selects more small tiles.
+    // geometry covers only the core. Earth local readers retain every path
+    // in that core; there is no per-tile path-count limit.
     } else if zoom < 21.0 {
         FocusContourSpec {
             half_extent_deg: 0.210,
             raster_size: 2048,
             interval_m: 5.0,
             simplify_step: 2,
-            feature_budget: 250_000,
             zoom_bucket: 7,
         }
     } else if zoom < 31.0 {
@@ -153,7 +135,6 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             raster_size: 2400,
             interval_m: 2.0,
             simplify_step: 2,
-            feature_budget: 250_000,
             zoom_bucket: 8,
         }
     } else if zoom < 44.0 {
@@ -162,7 +143,6 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             raster_size: 2400,
             interval_m: 1.0,
             simplify_step: 2,
-            feature_budget: 250_000,
             zoom_bucket: 9,
         }
     } else {
@@ -171,7 +151,6 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             raster_size: 2400,
             interval_m: 0.5,
             simplify_step: 2,
-            feature_budget: 250_000,
             zoom_bucket: 10,
         }
     }
@@ -192,7 +171,6 @@ pub fn lunar_spec_for_zoom(zoom: f32) -> FocusContourSpec {
             raster_size: 384,
             interval_m: 1000.0,
             simplify_step: 5,
-            feature_budget: 320,
             zoom_bucket: 0,
         }
     } else if zoom < 2.0 {
@@ -201,7 +179,6 @@ pub fn lunar_spec_for_zoom(zoom: f32) -> FocusContourSpec {
             raster_size: 512,
             interval_m: 500.0,
             simplify_step: 4,
-            feature_budget: 360,
             zoom_bucket: 1,
         }
     } else if zoom < 3.0 {
@@ -210,7 +187,6 @@ pub fn lunar_spec_for_zoom(zoom: f32) -> FocusContourSpec {
             raster_size: 576,
             interval_m: 200.0,
             simplify_step: 4,
-            feature_budget: 400,
             zoom_bucket: 2,
         }
     } else if zoom < 4.5 {
@@ -219,7 +195,6 @@ pub fn lunar_spec_for_zoom(zoom: f32) -> FocusContourSpec {
             raster_size: 640,
             interval_m: 100.0,
             simplify_step: 3,
-            feature_budget: 440,
             zoom_bucket: 3,
         }
     } else {
@@ -228,7 +203,6 @@ pub fn lunar_spec_for_zoom(zoom: f32) -> FocusContourSpec {
             raster_size: 704,
             interval_m: 50.0,
             simplify_step: 3,
-            feature_budget: 480,
             zoom_bucket: 4,
         }
     }

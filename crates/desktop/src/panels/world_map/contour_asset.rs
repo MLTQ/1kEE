@@ -16,6 +16,9 @@ use srtm_focus_cache::progress::BuildSnapshot;
 mod loading;
 #[path = "contour_reader.rs"]
 mod reader;
+#[path = "contour_selection.rs"]
+mod selection;
+use selection::ReadSelection;
 #[path = "contour_fallback.rs"]
 mod fallback;
 #[path = "globe_contour_merge.rs"]
@@ -30,6 +33,9 @@ pub(crate) use residency::{leave_local_view, set_local_viewport};
 #[cfg(test)]
 #[path = "contour_read_tests.rs"]
 mod read_tests;
+#[cfg(test)]
+#[path = "contour_seam_tests.rs"]
+mod seam_tests;
 
 // ── Module-level cache statics ────────────────────────────────────────────────
 // Lifted to module scope so blast_tile_caches() can clear them all at once.
@@ -1146,13 +1152,6 @@ fn load_earth_source_region(
         zoom,
         build_radius,
     );
-    let mut per_asset_budget =
-        srtm_focus_cache::zoom::per_asset_feature_budget(zoom, assets.reader_assets().len());
-    // This tier also supplies deep-zoom fallback. Its short contours must not
-    // be discarded using the old coarse-view, CPU-rendering feature budget.
-    if srtm_focus_cache::zoom_bucket_for_zoom(zoom) == fallback::BASE_BUCKET {
-        per_asset_budget = usize::MAX;
-    }
     let scene_key = SceneKey {
         root: selected_root.map(Path::to_path_buf),
         zoom_bucket: srtm_focus_cache::zoom_bucket_for_zoom(zoom),
@@ -1191,7 +1190,7 @@ fn load_earth_source_region(
             cache,
             epoch,
             requests,
-            per_asset_budget,
+            ReadSelection::EarthCore,
             ctx.clone(),
             "earth-local-contour-read",
         );
@@ -1318,7 +1317,7 @@ pub fn load_lunar_region_for_view(
             cache,
             epoch,
             requests,
-            per_asset_budget,
+            ReadSelection::WholeTile(per_asset_budget),
             ctx.clone(),
             "lunar-local-contour-read",
         );
@@ -1440,7 +1439,7 @@ pub fn load_mars_region_for_view(
             cache,
             epoch,
             requests,
-            per_asset_budget,
+            ReadSelection::WholeTile(per_asset_budget),
             ctx.clone(),
             "mars-local-contour-read",
         );
@@ -2126,7 +2125,7 @@ fn query_local_contours_with_progress(
     stream_local_contours(
         path,
         requests,
-        feature_budget,
+        ReadSelection::WholeTile(feature_budget),
         on_progress,
         &mut |key, contours| {
             results.push((key, contours));
@@ -2139,7 +2138,7 @@ fn query_local_contours_with_progress(
 fn stream_local_contours(
     path: &Path,
     requests: &[ContourReadRequest],
-    feature_budget: usize,
+    selection: ReadSelection,
     on_progress: &mut dyn FnMut(&CacheKey, usize, usize),
     on_tile: &mut dyn FnMut(CacheKey, Vec<ContourPath>) -> bool,
 ) -> rusqlite::Result<()> {
@@ -2155,6 +2154,7 @@ fn stream_local_contours(
     let mut completed = 0;
     let mut first_error = None;
     for (key, asset) in requests {
+        let selection = selection.tile(key, asset.simplify_step);
         let tile = srtm_focus_cache::TileKey {
             zoom_bucket: key.zoom_bucket,
             lat_bucket: key.lat_bucket,
@@ -2170,24 +2170,20 @@ fn stream_local_contours(
                     let total = rows.len();
                     let mut contours = Vec::new();
                     for (i, (elevation_m, geometry)) in rows.into_iter().enumerate() {
-                        contours.extend(
+                        selection.append(
+                            &mut contours,
                             tile_archive::contours::decode_lines(geometry, |lon, lat| GeoPoint {
                                 lat,
                                 lon,
                             })
-                            .expect("validated packed geometry")
-                            .into_iter()
-                            .filter(|line| line.len() >= 2)
-                            .map(|line| ContourPath {
-                                elevation_m,
-                                points: simplify_line(line, asset.simplify_step),
-                            }),
+                            .expect("validated packed geometry"),
+                            elevation_m,
                         );
                         if (i + 1) % 128 == 0 {
                             on_progress(key, i + 1, total);
                         }
                     }
-                    select_contour_geometry(&mut contours, feature_budget);
+                    selection.finish(&mut contours);
                     read_timer.finish(total as u64, bytes.len() as u64);
                     on_progress(key, total, total);
                     completed += 1;
@@ -2208,14 +2204,8 @@ fn stream_local_contours(
                 let geometry = row.get_ref(0)?.as_blob()?;
                 geometry_bytes += geometry.len() as u64;
                 let decode_start = read_timer.clock();
-                let decoded = parse_gpkg_lines(geometry)
-                    .into_iter()
-                    .filter(|line| line.len() >= 2)
-                    .map(|line| ContourPath {
-                        elevation_m,
-                        points: simplify_line(line, asset.simplify_step),
-                    })
-                    .collect::<Vec<_>>();
+                let mut decoded = Vec::new();
+                selection.append(&mut decoded, parse_gpkg_lines(geometry), elevation_m);
                 if let Some(start) = decode_start {
                     decode_time += start.elapsed();
                 }
@@ -2287,7 +2277,7 @@ fn stream_local_contours(
         read_timer.finish(decoded_rows as u64, geometry_bytes);
         let select_timer = srtm_focus_cache::timings::StageTimer::new(tile, "geometry_select");
 
-        select_contour_geometry(&mut contours, feature_budget);
+        selection.finish(&mut contours);
 
         // Cache empty ready tiles too. Otherwise the render loop mistakes
         // nodata/flat tiles for misses and schedules the same SQLite/WKB read

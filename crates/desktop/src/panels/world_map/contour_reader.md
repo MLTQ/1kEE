@@ -6,6 +6,9 @@ four available CPUs, otherwise one. Each tile becomes available for merging as
 soon as it decodes, without waiting behind the rest of an eight-tile batch.
 
 ## Components
+- `ReadSelection` is passed through to both readers. Earth uses complete,
+  clipped cores; Moon/Mars retain whole-footprint budget selection. Clipping and
+  simplification finish on workers before geometry is published under the lock.
 - `spawn_local_read`: single coordinator per cache, preserving the existing
   batch limit, retry policy, and epoch. Interleaved center-first requests let
   the two nearest tiles start together; each worker reuses a SQLite connection.

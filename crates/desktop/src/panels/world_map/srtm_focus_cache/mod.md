@@ -72,9 +72,9 @@ on-demand Earth, lunar, and Mars tile builds.
   Local selection derives its radius from actual oblique coverage, including
   worst-case displacement of the focus within its center core. The hosted path
   prefetches one spare ring; existing cache entries stay readable unchanged.
-- `feature_budget` is split across the assets in the envelope, so these tiers
-  need proportionally larger budgets than the SRTM tiers to draw a comparable
-  number of contours from a quarter as many tiles.
+- Source specs describe sampling, contour spacing and grid identity. The
+  obsolete path-count budget and its accessors are removed: Earth local reads
+  retain complete owned cores at every tier, preserving boundary fragments.
 - Changing a tier's `half_extent_deg` changes `bucket_step`, so cached tiles
   keyed on the old geometry now name different ground. Purge rows for the
   affected `zoom_bucket` values when retuning a tier.

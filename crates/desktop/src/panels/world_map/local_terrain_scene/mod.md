@@ -36,6 +36,8 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 - **Interacts with**: `contour_asset::load_srtm_region_for_view`, egui layout helpers
 - **Rationale**: Tests choose an explicit geographic focus rather than depending
   on runtime-seeded event data.
+- `contour_seam_tests.rs` now checks actual complete-core reads and matching
+  boundary endpoints, replacing the old numerical deep-tier budget assertion.
 
 ### Contour width routing
 

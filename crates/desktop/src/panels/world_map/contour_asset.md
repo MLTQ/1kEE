@@ -5,6 +5,14 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 
 ## Components
 
+### Complete Earth local cores
+- Earth local reads use `contour_selection::ReadSelection::EarthCore` at every
+  tier. All contours survive within the owned core, including short fragments
+  at tile edges; the old 120-path SRTM / 10,000-path hosted limits are removed.
+- Legacy outer geometry is clipped row-by-row before simplification and cache
+  publication, keeping retained memory proportional to the disjoint cores.
+  Packed and SQLite paths share the same policy; disk data is unchanged.
+
 ### Earth source fallback
 - `contour_fallback.rs` selects the display tier independently of camera zoom.
   The finest SRTM tier owns a separate retained cache, also used for normal
@@ -160,7 +168,8 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 - Local tile queries stream by indexed fid order and decode directly from
   borrowed SQLite blobs. A stable absolute-elevation sort moves only decoded
   path headers, preserving fid/part ordering for ties without copying/sorting
-  entire geometry blobs in SQLite. Length-budget selection remains unchanged.
+  entire geometry blobs in SQLite. Whole-tile callers retain length-budget
+  selection; Earth local cores retain every clipped path.
 
 - `contour_read_tests.rs` verifies ordering/geometry against the previous
   reader and provides an opt-in read-only benchmark via

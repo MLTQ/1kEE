@@ -28,6 +28,8 @@ ordering as the prior SQLite blob-sort implementation, and measures real data.
 - Streaming regressions verify early tile publication while the batch remains
   in flight, decoded-versus-rendered state, stale epoch rejection after reset,
   old completion not clearing a new batch, and cancellation between tiles.
+- Legacy equivalence/cancellation checks explicitly select `WholeTile`; Earth
+  core completeness and seam retention are covered by `contour_seam_tests.rs`.
 
 - Manifest publication retains the selection-start revision, ensuring a queue
   wakeup during an in-flight selection cannot be consumed by stale results.

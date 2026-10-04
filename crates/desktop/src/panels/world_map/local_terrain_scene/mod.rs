@@ -2610,37 +2610,6 @@ mod tests {
         assert_eq!(checked_buckets.len(), 4);
     }
 
-    /// `feature_budget` is split across the assets in the envelope and decides
-    /// how much of a tile the reader keeps.
-    ///
-    /// Before the GPU pass this was bounded above by what a frame could
-    /// tessellate. It no longer is: `local_contour_pass` uploads a tile once and
-    /// redraws it for free, so these tiers must not decimate at all. A measured
-    /// bucket-10 tile holds ~9 800 contours, so the per-tile share has to clear
-    /// that with room to spare or the deepest tier silently loses geometry
-    /// again.
-    #[test]
-    fn threedep_tiers_do_not_decimate_their_tiles() {
-        let assets_in_envelope =
-            ((srtm_focus_cache::THREEDEP_PREFETCH_RADIUS * 2 + 1) as usize).pow(2);
-        for zoom in [16.0_f32, 22.0, 32.0, 44.0, 60.0] {
-            let spec = srtm_focus_cache::zoom::spec_for_zoom(zoom);
-            if !srtm_focus_cache::zoom::spec_uses_threedep(&spec) {
-                continue;
-            }
-            let per_asset =
-                srtm_focus_cache::zoom::per_asset_feature_budget(zoom, assets_in_envelope);
-            assert!(
-                per_asset >= 10_000,
-                "bucket {} allows {per_asset} contours per tile, under the \
-                 ~9 800 a dense 3DEP tile carries",
-                spec.zoom_bucket
-            );
-        }
-    }
-
-
-
     #[test]
     fn local_bounds_filter_keeps_near_contours_out_of_fill_workers() {
         let focus = GeoPoint { lat: 0.0, lon: 0.0 };

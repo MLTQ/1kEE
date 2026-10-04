@@ -28,7 +28,7 @@ The viewport selects enough cores for the actual oblique view plus a spare
 hosted ring. More small requests can be necessary than before; this is not a
 claim of a 20x end-to-end latency improvement. Network latency, worker limits,
 GPU uploads and old cache contents remain relevant. Loading indicators show
-core footprints. Deep-tier per-tile reader budgets are preserved.
+core footprints. Earth local readers now preserve all paths within each core.
 
 ## Compatibility and existing storage
 
@@ -41,6 +41,36 @@ place could remove the only cached coverage at a region edge. Safe reclamation
 needs a separate migration that preserves those edges, verifies its output and
 then reclaims old storage. No source cache or archive was rewritten here.
 Moon/Mars remain on their prior storage layout.
+
+## Runtime seam preservation
+
+Earth local reads previously kept only the longest 120 SRTM contour paths per
+tile (10,000 at hosted deep tiers). This discarded short edge fragments before
+ownership clipping, revealing a grid in high-relief areas such as the Himalayas.
+The reader now retains every contour in the owned core at every Earth tier.
+Legacy outer geometry is clipped row-by-row before simplification, so removing
+the path cap does not retain the old overlapping footprints in memory. Boundary
+intersections survive simplification. SQLite and packed reads share this policy.
+The bounded readers, source LOD, viewport residency and GPU upload limits remain
+in effect. Existing cached data is reused; no terrain rebuild is required.
+
+A read-only regression on four adjacent Himalayan bucket-one tiles measured
+the following owned-core geometry before and after removing the path cap:
+
+| Tile (y/x) | Core paths, before → after | East-edge endpoints, before → after |
+|---|---:|---:|
+| 28/88 | 630 → 5,088 | 226 → 760 |
+| 28/89 | 560 → 4,576 | 409 → 845 |
+| 29/88 | 195 → 3,418 | 105 → 536 |
+| 29/89 | 151 → 2,765 | 64 → 351 |
+
+The old 120 full-footprint paths can split into more than 120 pieces when
+clipped. Across these four cores, segment geometry grows from 1.79 to 4.51 MiB,
+while retained paths grow from 1,536 to 15,847. These are geometry-reader
+measurements, not a frame-rate claim. The synthetic SQLite/packed regression
+also verifies matching endpoints for all 24 shared-edge test contours.
+Reproduce with the ignored `cached_himalayan_cores_recover_boundary_detail`
+test and `ONEKEE_CONTOUR_BENCH_DB` pointing to the existing cache.
 
 ## Validation
 
