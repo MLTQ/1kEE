@@ -65,12 +65,41 @@ the following owned-core geometry before and after removing the path cap:
 | 29/89 | 151 → 2,765 | 64 → 351 |
 
 The old 120 full-footprint paths can split into more than 120 pieces when
-clipped. Across these four cores, segment geometry grows from 1.79 to 4.51 MiB,
-while retained paths grow from 1,536 to 15,847. These are geometry-reader
+clipped. Before the vertex-fidelity fix below, these four cores' segment geometry
+grew from 1.79 to 4.51 MiB, while retained paths grew from 1,536 to 15,847. These are geometry-reader
 measurements, not a frame-rate claim. The synthetic SQLite/packed regression
 also verifies matching endpoints for all 24 shared-edge test contours.
 Reproduce with the ignored `cached_himalayan_cores_recover_boundary_detail`
 test and `ONEKEE_CONTOUR_BENCH_DB` pointing to the existing cache.
+
+## Contour vertex fidelity
+
+Earth LODs previously discarded every second through fifth vertex after contour
+generation. That produced long chords across bends, collapsed small closed
+contours, and made neighboring elevation lines intersect. Restoring missing
+paths exposed more of this distortion; even a single globe LOD showed it.
+
+Earth specs now use vertex stride one in both globe and local reads. Raster
+spacing and elevation interval still select source detail; ownership, fallback,
+bounded readers and byte-budgeted residency still apply. Persisted data is
+unchanged and does not need rebuilding. Coarse source rasters remain polygonal
+when magnified; this preserves their geometry rather than adding smoothing.
+
+Read-only measurements through the globe reader, clipped to the same core:
+
+| Sample (z/y/x) | Segments before | Segments after |
+|---|---:|---:|
+| Yemen (0/9/27) | 5,431 | 27,472 |
+| Himalayas (1/28/88) | 52,888 | 211,867 |
+
+An independent geometric check of the Yemen sample counted 9,081 proper segment
+crossings between different elevations before the fix and zero afterward.
+Geometry/instance storage grows roughly four to five times for these samples;
+these checks do not measure live frame rate. The regression covers bends, small
+closed loops, reversed paths, all eleven Earth tiers, and SQLite/packed parity.
+Reproduce the source-fidelity checks with the ignored
+`cached_earth_lods_preserve_source_vertices` test and `ONEKEE_CONTOUR_BENCH_DB`.
+Set `ONEKEE_CONTOUR_FIDELITY_OUTPUT` to export both views' comparison geometry.
 
 ## Validation
 

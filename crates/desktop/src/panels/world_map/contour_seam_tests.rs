@@ -16,7 +16,10 @@ fn request(path: &Path, bucket: i32, y: i32, x: i32) -> ContourReadRequest {
             zoom_bucket: bucket,
             lat_bucket: y,
             lon_bucket: x,
-            simplify_step: 4,
+            simplify_step: srtm_focus_cache::zoom::spec_for_zoom(
+                [0.5, 1.5, 2.5, 3.5, 5.0, 8.0, 12.0, 16.0, 25.0, 35.0, 50.0][bucket as usize],
+            )
+            .simplify_step,
         },
     )
 }
@@ -173,6 +176,18 @@ fn adjacent_earth_tiles_keep_short_edge_fragments_in_sqlite_and_packed_reads() {
     let sqlite = read(&requests, ReadSelection::EarthCore);
     for (_, lines) in &sqlite {
         assert_eq!(lines.len(), 184);
+        assert!(
+            lines
+                .iter()
+                .filter(|c| c.elevation_m < 5000.0)
+                .all(|c| c.points.len() == 33)
+        );
+        assert!(
+            lines
+                .iter()
+                .filter(|c| c.elevation_m >= 5000.0)
+                .all(|c| c.points.len() == 3)
+        );
         assert_eq!(boundary_ends(lines, edge as f32).len(), 24);
         assert!(lines.iter().all(|c| c.elevation_m != 9999.0));
     }
@@ -240,6 +255,142 @@ fn every_earth_tier_keeps_more_than_the_old_deep_tile_limit() {
 }
 
 #[test]
+fn earth_lod_reads_preserve_bends_and_small_closed_contours() {
+    for bucket in 0..=10 {
+        let (key, asset) = request(Path::new("unused"), bucket, 0, 0);
+        let scale = core(&key).max_lon as f32;
+        let bend: Vec<_> = [
+            (-0.8, 0.0),
+            (-0.6, 0.5),
+            (-0.4, 0.5),
+            (-0.2, 0.0),
+            (0.2, -0.5),
+            (0.4, -0.5),
+            (0.8, 0.0),
+        ]
+        .into_iter()
+        .map(|(lon, lat)| GeoPoint {
+            lon: lon * scale,
+            lat: lat * scale,
+        })
+        .collect();
+        let ring: Vec<_> = [
+            (-0.5, -0.5),
+            (0.5, -0.5),
+            (0.5, 0.5),
+            (-0.5, 0.5),
+            (-0.5, -0.5),
+        ]
+        .into_iter()
+        .map(|(lon, lat)| GeoPoint {
+            lon: lon * scale,
+            lat: lat * scale,
+        })
+        .collect();
+        // Local and globe reads must both respect the geometry already sampled
+        // for this LOD. Changing vertex order must not change its shape.
+        for policy in [
+            ReadSelection::EarthCore,
+            ReadSelection::WholeTile(usize::MAX),
+        ] {
+            let selection = policy.tile(&key, asset.simplify_step);
+            for original in [&bend, &ring] {
+                for reverse in [false, true] {
+                    let mut expected = original.clone();
+                    if reverse {
+                        expected.reverse();
+                    }
+                    let mut actual = Vec::new();
+                    selection.append(&mut actual, [expected.clone()], 100.0);
+                    selection.finish(&mut actual);
+                    assert_eq!(actual.len(), 1);
+                    assert_eq!(
+                        actual[0].points, expected,
+                        "bucket {bucket}, reverse={reverse}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "read-only contour fidelity check; ONEKEE_CONTOUR_BENCH_DB required"]
+fn cached_earth_lods_preserve_source_vertices() {
+    let path = PathBuf::from(std::env::var_os("ONEKEE_CONTOUR_BENCH_DB").unwrap());
+    let mut export = Vec::new();
+    for (name, bucket, y, x, old_step) in [("Yemen", 0, 9, 27, 5), ("Himalayas", 1, 28, 88, 4)] {
+        for (view, policy) in [
+            ("local", ReadSelection::EarthCore),
+            ("globe", ReadSelection::WholeTile(usize::MAX)),
+        ] {
+            let req = request(&path, bucket, y, x);
+            let actual = read(std::slice::from_ref(&req), policy).remove(0).1;
+            let mut raw_request = req.clone();
+            raw_request.1.simplify_step = 1;
+            let raw = read(&[raw_request], policy).remove(0).1;
+            assert!(!raw.is_empty());
+            assert_eq!(actual.len(), raw.len());
+            for (actual, raw) in actual.iter().zip(&raw) {
+                assert_eq!(actual.elevation_m, raw.elevation_m);
+                assert_eq!(actual.points, raw.points);
+            }
+            let mut old_request = req.clone();
+            old_request.1.simplify_step = old_step;
+            let old = read(&[old_request], policy).remove(0).1;
+            // The globe simplifies the full footprint before composition,
+            // whereas local reads clip first. Reproduce both orders, then show
+            // the same owned core for an equal-area comparison at one LOD.
+            let bounds = core(&req.0);
+            let clip = |lines: Vec<ContourPath>| {
+                let tile = LocalTileGeometry {
+                    id: LocalTileId {
+                        zoom_bucket: bucket,
+                        lat_bucket: y,
+                        lon_bucket: x,
+                    },
+                    bounds: residency::Bounds::from_contours(&lines),
+                    contours: Arc::new(lines),
+                };
+                composition::clip_contours(&tile, &[bounds])
+            };
+            let old = clip(old);
+            let raw = clip(raw);
+            let segments = |lines: &[ContourPath]| {
+                lines
+                    .iter()
+                    .map(|line| line.points.len().saturating_sub(1))
+                    .sum::<usize>()
+            };
+            let encode = |lines: &[ContourPath]| {
+                lines
+                    .iter()
+                    .map(|line| {
+                        serde_json::json!({"elevation": line.elevation_m,
+                    "points": line.points.iter().map(|p| [p.lon, p.lat]).collect::<Vec<_>>()})
+                    })
+                    .collect::<Vec<_>>()
+            };
+            eprintln!(
+                "{name} {view} {bucket}/{y}/{x}: {} -> {} core paths; {} -> {} segments",
+                old.len(),
+                raw.len(),
+                segments(&old),
+                segments(&raw)
+            );
+            export.push(
+                serde_json::json!({"name": name, "view": view, "bucket": bucket,
+                "bounds": [bounds.min_lon, bounds.min_lat, bounds.max_lon, bounds.max_lat],
+                "before": encode(&old), "after": encode(&raw)}),
+            );
+        }
+    }
+    if let Some(output) = std::env::var_os("ONEKEE_CONTOUR_FIDELITY_OUTPUT") {
+        std::fs::write(output, serde_json::to_vec(&export).unwrap()).unwrap();
+    }
+}
+
+#[test]
 #[ignore = "read-only Himalayan cache check; ONEKEE_CONTOUR_BENCH_DB required"]
 fn cached_himalayan_cores_recover_boundary_detail() {
     let path = PathBuf::from(std::env::var_os("ONEKEE_CONTOUR_BENCH_DB").unwrap());
@@ -247,7 +398,11 @@ fn cached_himalayan_cores_recover_boundary_detail() {
         .into_iter()
         .map(|(y, x)| request(&path, 1, y, x))
         .collect();
-    let before = read(&requests, ReadSelection::WholeTile(120));
+    let mut legacy_requests = requests.clone();
+    for (_, asset) in &mut legacy_requests {
+        asset.simplify_step = 4;
+    }
+    let before = read(&legacy_requests, ReadSelection::WholeTile(120));
     let after = read(&requests, ReadSelection::EarthCore);
     let mut export = Vec::new();
     for ((key, old), (_, new)) in before.iter().zip(&after) {

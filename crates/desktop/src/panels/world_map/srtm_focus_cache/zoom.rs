@@ -61,12 +61,15 @@ pub fn bucket_radius_for_target_radius_miles(zoom: f32, radius_miles: f32) -> i3
 }
 
 pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
+    // Raster spacing and contour interval already define this LOD. Stride
+    // decimation after contouring cuts across bends and collapses small rings;
+    // keep source vertices in both globe and local readers.
     if zoom < 1.0 {
         FocusContourSpec {
             half_extent_deg: 3.6,
             raster_size: 384,
             interval_m: 50.0,
-            simplify_step: 5,
+            simplify_step: 1,
             zoom_bucket: 0,
         }
     } else if zoom < 2.0 {
@@ -74,7 +77,7 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             half_extent_deg: 2.2,
             raster_size: 512,
             interval_m: 25.0,
-            simplify_step: 4,
+            simplify_step: 1,
             zoom_bucket: 1,
         }
     } else if zoom < 3.0 {
@@ -82,7 +85,7 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             half_extent_deg: 1.4,
             raster_size: 576,
             interval_m: 20.0,
-            simplify_step: 4,
+            simplify_step: 1,
             zoom_bucket: 2,
         }
     } else if zoom < 4.5 {
@@ -90,7 +93,7 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             half_extent_deg: 0.9,
             raster_size: 640,
             interval_m: 10.0,
-            simplify_step: 3,
+            simplify_step: 1,
             zoom_bucket: 3,
         }
     } else if zoom < 6.5 {
@@ -98,7 +101,7 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             half_extent_deg: 0.55,
             raster_size: 704,
             interval_m: 10.0,
-            simplify_step: 3,
+            simplify_step: 1,
             zoom_bucket: 4,
         }
     } else if zoom < 9.5 {
@@ -106,7 +109,7 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             half_extent_deg: 0.3,
             raster_size: 768,
             interval_m: 5.0,
-            simplify_step: 2,
+            simplify_step: 1,
             zoom_bucket: 5,
         }
     } else if zoom < 13.0 {
@@ -114,7 +117,7 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             half_extent_deg: 0.16,
             raster_size: 896,
             interval_m: 5.0,
-            simplify_step: 2,
+            simplify_step: 1,
             zoom_bucket: 6,
         }
     // USGS tiers retain their legacy address step and contour interval.
@@ -126,7 +129,7 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             half_extent_deg: 0.210,
             raster_size: 2048,
             interval_m: 5.0,
-            simplify_step: 2,
+            simplify_step: 1,
             zoom_bucket: 7,
         }
     } else if zoom < 31.0 {
@@ -134,7 +137,7 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             half_extent_deg: 0.067,
             raster_size: 2400,
             interval_m: 2.0,
-            simplify_step: 2,
+            simplify_step: 1,
             zoom_bucket: 8,
         }
     } else if zoom < 44.0 {
@@ -142,7 +145,7 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             half_extent_deg: 0.0305,
             raster_size: 2400,
             interval_m: 1.0,
-            simplify_step: 2,
+            simplify_step: 1,
             zoom_bucket: 9,
         }
     } else {
@@ -150,7 +153,7 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
             half_extent_deg: 0.0148,
             raster_size: 2400,
             interval_m: 0.5,
-            simplify_step: 2,
+            simplify_step: 1,
             zoom_bucket: 10,
         }
     }

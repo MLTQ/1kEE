@@ -2,14 +2,23 @@
 
 ## Purpose
 Regress terrain grids caused by dropping short contour fragments at tile edges.
+Also regress angular distortions caused by dropping vertices within each LOD.
 
 ## Coverage
 - Adjacent synthetic Himalayan-address tiles each have 160 long interior paths,
   24 short shared-edge crossings and a legacy halo-only path. The old 120-path
   policy loses every crossing. Earth-core reads retain all 24 with bit-identical
   neighboring endpoints and discard only the unowned halo.
-- SQLite and packed reads produce identical clipped geometry and ordering.
+- SQLite and packed reads produce identical clipped geometry and ordering,
+  including every interior bend and inserted boundary intersection.
 - All eleven Earth tiers retain more than the former 10,000-path deep-tier cap.
+- Every Earth tier's actual read settings retain bends and small closed loops,
+  in both directions, through local-core and globe whole-tile selections.
+- Opt-in `cached_earth_lods_preserve_source_vertices` checks Yemen and Himalayan
+  local/globe reads against their undecimated source geometry, reporting core
+  path and segment counts. `ONEKEE_CONTOUR_FIDELITY_OUTPUT` optionally exports
+  the old stride-decimated and complete geometry at one fixed LOD. Globe reads
+  reproduce decimation before clipping; local reads reproduce clipping first.
 - Opt-in `cached_himalayan_cores_recover_boundary_detail` reads four adjacent
   installed 25 m contour tiles, measures retained core paths/edge endpoints and
   bounds, and optionally exports geometry for a visual comparison.

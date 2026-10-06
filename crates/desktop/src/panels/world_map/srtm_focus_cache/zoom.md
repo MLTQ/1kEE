@@ -6,6 +6,10 @@ half extents remain address/sampling parameters, not new stored footprints.
 
 ## Components
 - spec_for_zoom retains historical keys, contour intervals and sampling scales.
+- Earth tiers use vertex stride one. The source raster already defines their
+  detail; dropping every second through fifth contour vertex afterward distorted
+  bends and collapsed small closed rings. This applies to both globe and local
+  reads without rebuilding caches. Moon/Mars keep their existing settings.
 - prefetch_radius_for_zoom covers the oblique viewport with disjoint cores and
   one spare hosted ring; source downloads/processing remain separately bounded.
 - region_coverage_half_extent_deg subtracts the worst-case half-core focus offset.

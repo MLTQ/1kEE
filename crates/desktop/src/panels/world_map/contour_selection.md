@@ -11,6 +11,8 @@ creating a visible grid in mountainous terrain.
 - `TileSelection::append` clips before vertex simplification, retaining boundary
   intersections, splitting exits and discarding legacy overlapping outer data.
   Only one decoded row's temporary geometry is handled at a time.
+- Earth read specs use stride one, preserving all sampled bends and closed
+  loops. LOD changes the source raster/interval rather than decimating paths.
 - `WholeTile` preserves the existing globe and Moon/Mars budget semantics.
 - `finish` preserves the reader's stable absolute-elevation ordering.
 
