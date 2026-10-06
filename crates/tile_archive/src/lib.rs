@@ -6,6 +6,7 @@ pub mod contour_clip;
 pub mod contour_grid;
 pub mod contours;
 pub mod gpkg;
+pub mod native_contours;
 pub mod pipelines;
 pub mod platforms;
 pub mod vector;

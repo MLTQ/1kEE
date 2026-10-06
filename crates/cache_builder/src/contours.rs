@@ -1,7 +1,7 @@
 /// Offline contour pre-builder — Phase A (GDAL pipeline, SQLite output).
 ///
 /// Iterates every tile in `zoom_buckets` that covers the requested bounding
-/// box, skips tiles already present in `srtm_focus_cache.sqlite`, and runs
+/// box, skips tiles already present in `srtm_native_v1.sqlite`, and runs
 /// the same gdalwarp + gdal_contour pipeline the desktop uses on-demand.
 /// The desktop will find the pre-built tiles and skip its own generation.
 use rayon::prelude::*;
@@ -46,43 +46,43 @@ pub fn all_specs() -> [FocusContourSpec; 7] {
     [
         FocusContourSpec {
             half_extent_deg: 3.6,
-            raster_size: 384,
-            interval_m: 50,
+            raster_size: 25920,
+            interval_m: 200,
             zoom_bucket: 0,
         },
         FocusContourSpec {
             half_extent_deg: 2.2,
-            raster_size: 512,
-            interval_m: 25,
+            raster_size: 15840,
+            interval_m: 100,
             zoom_bucket: 1,
         },
         FocusContourSpec {
             half_extent_deg: 1.4,
-            raster_size: 576,
-            interval_m: 20,
+            raster_size: 10080,
+            interval_m: 50,
             zoom_bucket: 2,
         },
         FocusContourSpec {
             half_extent_deg: 0.9,
-            raster_size: 640,
-            interval_m: 10,
+            raster_size: 6480,
+            interval_m: 25,
             zoom_bucket: 3,
         },
         FocusContourSpec {
             half_extent_deg: 0.55,
-            raster_size: 704,
+            raster_size: 3960,
             interval_m: 10,
             zoom_bucket: 4,
         },
         FocusContourSpec {
             half_extent_deg: 0.3,
-            raster_size: 768,
+            raster_size: 2160,
             interval_m: 5,
             zoom_bucket: 5,
         },
         FocusContourSpec {
             half_extent_deg: 0.16,
-            raster_size: 896,
+            raster_size: 1152,
             interval_m: 5,
             zoom_bucket: 6,
         },
@@ -91,7 +91,7 @@ pub fn all_specs() -> [FocusContourSpec; 7] {
 
 // ── SQLite helpers (mirrors desktop db.rs) ────────────────────────────────────
 
-const CACHE_DB_NAME: &str = "srtm_focus_cache.sqlite";
+const CACHE_DB_NAME: &str = tile_archive::contour_grid::SRTM_NATIVE_DB_NAME;
 const TEMP_DIR_NAME: &str = "srtm_focus_tmp";
 
 pub fn default_cache_db_path(derived_terrain_dir: &Path) -> PathBuf {
@@ -497,7 +497,7 @@ pub fn resolve_gdal_tool(gdal_bin_dir: &Path, tool: &str) -> PathBuf {
 
 /// Pre-build contour tiles for every zoom bucket in `zoom_buckets` that covers
 /// the given bounding box, writing into `cache_db_path` (which the desktop
-/// reads as `Derived/terrain/srtm_focus_cache.sqlite`).
+/// reads as `Derived/terrain/srtm_native_v1.sqlite`).
 ///
 /// `gdal_bin_dir` is the directory containing `gdalwarp` / `gdal_contour`.
 /// Pass `Path::new("")` to search Homebrew locations then `$PATH`.
@@ -568,7 +568,9 @@ pub fn build_contour_tiles(
     }
 
     fs::create_dir_all(tmp_dir).map_err(|e| e.to_string())?;
-    open_cache_db(cache_db_path).map_err(|e| e.to_string())?;
+    let native_db = open_cache_db(cache_db_path).map_err(|e| e.to_string())?;
+    tile_archive::native_contours::initialize(&native_db).map_err(|e| e.to_string())?;
+    drop(native_db);
 
     let specs = all_specs();
     let selected: Vec<FocusContourSpec> = specs
@@ -607,12 +609,7 @@ pub fn build_contour_tiles(
                     skipped += 1;
                     continue;
                 }
-                let source = CoreTile::new(
-                    spec.half_extent_deg,
-                    spec.raster_size,
-                    lat_bucket,
-                    lon_bucket,
-                )
+                let source = CoreTile::srtm(spec.half_extent_deg, lat_bucket, lon_bucket)
                 .source;
                 let tile_bounds = GeoBounds {
                     min_lat: source.min_lat as f32,
@@ -695,12 +692,7 @@ pub fn build_contour_tiles(
                 let tmp_coast_gpkg = tmp_dir.join(format!("{stem}.coast.tmp.gpkg"));
                 cleanup(&[&tmp_tif, &tmp_gpkg, &tmp_coast_gpkg]);
 
-                let core = CoreTile::new(
-                    spec.half_extent_deg,
-                    spec.raster_size,
-                    tile.lat_bucket,
-                    tile.lon_bucket,
-                );
+                let core = CoreTile::srtm(spec.half_extent_deg, tile.lat_bucket, tile.lon_bucket);
                 let outcome = (|| {
                     run_gdalwarp(
                         &gdalwarp,
@@ -924,7 +916,9 @@ pub fn build_contour_tiles_native(
         format!("Cache DB: {}", cache_db_path.display()),
     ));
 
-    open_cache_db(cache_db_path).map_err(|e| e.to_string())?;
+    let native_db = open_cache_db(cache_db_path).map_err(|e| e.to_string())?;
+    tile_archive::native_contours::initialize(&native_db).map_err(|e| e.to_string())?;
+    drop(native_db);
 
     let specs = all_specs();
     let selected: Vec<FocusContourSpec> = specs
@@ -957,12 +951,7 @@ pub fn build_contour_tiles_native(
                     skipped += 1;
                     continue;
                 }
-                let source = CoreTile::new(
-                    spec.half_extent_deg,
-                    spec.raster_size,
-                    lat_bucket,
-                    lon_bucket,
-                )
+                let source = CoreTile::srtm(spec.half_extent_deg, lat_bucket, lon_bucket)
                 .source;
                 let tile_bounds = GeoBounds {
                     min_lat: source.min_lat as f32,
@@ -1062,12 +1051,7 @@ pub fn build_contour_tiles_native(
             work.into_par_iter()
                 .for_each_with(compute_tx, |tx, (tile, _tile_bounds, spec)| {
                     let mut sampler = NativeSrtmSampler::new(srtm_root_owned.clone());
-                    let core = CoreTile::new(
-                        spec.half_extent_deg,
-                        spec.raster_size,
-                        tile.lat_bucket,
-                        tile.lon_bucket,
-                    );
+                    let core = CoreTile::srtm(spec.half_extent_deg, tile.lat_bucket, tile.lon_bucket);
                     let (contours, coastlines) = build_tile_contours_on_grid(
                         FocusContourSpec {
                             raster_size: core.raster_size,
@@ -1168,12 +1152,7 @@ fn earth_core_bounds(tile: TileKey) -> Option<CoreBounds> {
         .into_iter()
         .find(|s| s.zoom_bucket == tile.zoom_bucket)
         .map(|s| {
-            CoreTile::new(
-                s.half_extent_deg,
-                s.raster_size,
-                tile.lat_bucket,
-                tile.lon_bucket,
-            )
+            CoreTile::srtm(s.half_extent_deg, tile.lat_bucket, tile.lon_bucket)
             .core
         })
 }

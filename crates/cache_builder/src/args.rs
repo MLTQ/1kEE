@@ -52,7 +52,7 @@ pub enum ContourEngine {
 #[derive(Debug, Clone)]
 pub struct ContoursBboxCommand {
     pub srtm_root: PathBuf,
-    pub cache_db_path: PathBuf,   // path to srtm_focus_cache.sqlite
+    pub cache_db_path: PathBuf,   // path to srtm_native_v1.sqlite
     pub tmp_dir: Option<PathBuf>, // default: cache_db parent / srtm_focus_tmp
     pub min_lat: f32,
     pub max_lat: f32,
@@ -446,7 +446,7 @@ fn usage() -> String {
                        power,rail,pipeline,aeroway,military,
                        comm,industrial,port,government,surveillance]
   one-thousand-electric-eye-cache-builder contours-bbox \\
-      --srtm-root <dir> --cache-db <Derived/terrain/srtm_focus_cache.sqlite> \\
+      --srtm-root <dir> --cache-db <Derived/terrain/srtm_native_v1.sqlite> \\
       --min-lat <f32> --max-lat <f32> --min-lon <f32> --max-lon <f32> \\
       [--zoom-buckets 0,1,2,3,4,5,6] [--gdal-bin <dir>] [--tmp-dir <dir>]
   one-thousand-electric-eye-cache-builder planet-all \\

@@ -32,6 +32,9 @@ on-demand Earth, lunar, and Mars tile builds.
 - **Does**: Resolve Earth, lunar, and Mars SQLite cache paths beneath the
   selected derived-data root.
 - **Interacts with**: `terrain_assets.rs` and `db.rs`.
+- Earth region selection/readiness/status all route by source zoom: native
+  SRTM has a separate cache; existing hosted detail stays in its current cache.
+  Missing native tiles are generated from GL1 instead of using coarse fallback.
 
 ## Contracts
 

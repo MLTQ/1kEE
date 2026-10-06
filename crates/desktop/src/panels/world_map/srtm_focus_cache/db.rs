@@ -16,7 +16,14 @@ pub fn open_cache_db(path: &Path) -> rusqlite::Result<Connection> {
     connection.pragma_update(None, "synchronous", "NORMAL")?;
     connection.pragma_update(None, "temp_store", "MEMORY")?;
     ensure_cache_schema_with_connection(&connection)?;
+    if is_native_path(path) {
+        tile_archive::native_contours::initialize(&connection)?;
+    }
     Ok(connection)
+}
+
+fn is_native_path(path: &Path) -> bool {
+    path.file_name().and_then(|p| p.to_str()) == Some(tile_archive::contour_grid::SRTM_NATIVE_DB_NAME)
 }
 
 /// Open an existing cache strictly for rendering/status queries. Unlike
@@ -32,7 +39,7 @@ pub fn open_cache_db_read_only(path: &Path) -> rusqlite::Result<Connection> {
     let normal = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .and_then(configure_read_connection)
         .and_then(verify_read_connection);
-    match normal {
+    let connection = match normal {
         Ok(connection) => Ok(connection),
         Err(normal_error) => {
             let uri = immutable_read_uri(path);
@@ -44,7 +51,11 @@ pub fn open_cache_db_read_only(path: &Path) -> rusqlite::Result<Connection> {
             .and_then(verify_read_connection)
             .map_err(|_| normal_error)
         }
+    }?;
+    if is_native_path(path) && !tile_archive::native_contours::is_native(&connection)? {
+        return Err(rusqlite::Error::InvalidQuery);
     }
+    Ok(connection)
 }
 
 fn configure_read_connection(connection: Connection) -> rusqlite::Result<Connection> {
@@ -401,7 +412,17 @@ pub fn focus_cache_root(selected_root: Option<&Path>) -> Option<PathBuf> {
 }
 
 pub fn focus_cache_db_path(selected_root: Option<&Path>) -> Option<PathBuf> {
-    Some(focus_cache_root(selected_root)?.join(CACHE_DB_NAME))
+    Some(focus_cache_root(selected_root)?.join(tile_archive::contour_grid::SRTM_NATIVE_DB_NAME))
+}
+
+/// Keep existing hosted detail available; coarse SRTM caches are never used as
+/// a fallback for the native-resolution source.
+pub fn focus_cache_db_path_for_zoom(selected_root: Option<&Path>, zoom: f32) -> Option<PathBuf> {
+    if super::zoom::spec_uses_threedep(&super::zoom::spec_for_zoom(zoom)) {
+        Some(focus_cache_root(selected_root)?.join(CACHE_DB_NAME))
+    } else {
+        focus_cache_db_path(selected_root)
+    }
 }
 
 pub fn journal_path_for(path: &Path) -> PathBuf {

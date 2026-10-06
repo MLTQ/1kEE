@@ -4,6 +4,10 @@ use super::db::{
 };
 use super::timings::StageTimer;
 use super::{BUILD_TIMEOUT, FocusContourSpec, GeoBounds, TEMP_DIR_NAME, TileKey};
+
+#[cfg(test)]
+#[path = "native_build_tests.rs"]
+mod native_build_tests;
 use crate::settings_store;
 use std::collections::HashSet;
 use std::fs;
@@ -833,11 +837,8 @@ pub fn build_focus_contours(
         return None;
     }
 
-    let core = tile_archive::contour_grid::CoreTile::new(
-        spec.half_extent_deg,
-        spec.raster_size,
-        tile.lat_bucket,
-        tile.lon_bucket,
+    let core = tile_archive::contour_grid::CoreTile::srtm(
+        spec.half_extent_deg, tile.lat_bucket, tile.lon_bucket,
     );
     let spec = FocusContourSpec {
         raster_size: core.raster_size,

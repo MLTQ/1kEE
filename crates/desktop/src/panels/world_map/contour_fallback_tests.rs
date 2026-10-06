@@ -155,13 +155,13 @@ fn cold_deep_zoom_reads_base_then_upgrades_to_cached_fine_tiles() {
     ));
     let derived = root.join("Derived");
     std::fs::create_dir_all(derived.join("terrain")).unwrap();
-    let db = derived.join("terrain/srtm_focus_cache.sqlite");
-    let connection = srtm_focus_cache::db::open_cache_db(&db).unwrap();
     let center = GeoPoint {
         lat: -33.86,
         lon: 151.21,
     }; // Sydney: outside every hosted provider, so this remains offline
     let insert = |zoom: f32, radius: i32| {
+        let path = srtm_focus_cache::db::focus_cache_db_path_for_zoom(Some(&root), zoom).unwrap();
+        let connection = srtm_focus_cache::db::open_cache_db(&path).unwrap();
         let spec = srtm_focus_cache::zoom::spec_for_zoom(zoom);
         let step = spec.half_extent_deg * 0.45;
         let y = (center.lat / step).round() as i32;
@@ -219,7 +219,6 @@ fn cold_deep_zoom_reads_base_then_upgrades_to_cached_fine_tiles() {
     // All decodes/merges completed; stop outstanding manifest refreshes before
     // fixture removal. Reset epochs also reject any late worker publications.
     blast_tile_caches();
-    drop(connection);
     std::thread::sleep(Duration::from_millis(100));
     std::fs::remove_dir_all(root).unwrap();
 }

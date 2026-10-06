@@ -67,39 +67,39 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
     if zoom < 1.0 {
         FocusContourSpec {
             half_extent_deg: 3.6,
-            raster_size: 384,
-            interval_m: 50.0,
+            raster_size: 25920,
+            interval_m: 200.0,
             simplify_step: 1,
             zoom_bucket: 0,
         }
     } else if zoom < 2.0 {
         FocusContourSpec {
             half_extent_deg: 2.2,
-            raster_size: 512,
-            interval_m: 25.0,
+            raster_size: 15840,
+            interval_m: 100.0,
             simplify_step: 1,
             zoom_bucket: 1,
         }
     } else if zoom < 3.0 {
         FocusContourSpec {
             half_extent_deg: 1.4,
-            raster_size: 576,
-            interval_m: 20.0,
+            raster_size: 10080,
+            interval_m: 50.0,
             simplify_step: 1,
             zoom_bucket: 2,
         }
     } else if zoom < 4.5 {
         FocusContourSpec {
             half_extent_deg: 0.9,
-            raster_size: 640,
-            interval_m: 10.0,
+            raster_size: 6480,
+            interval_m: 25.0,
             simplify_step: 1,
             zoom_bucket: 3,
         }
     } else if zoom < 6.5 {
         FocusContourSpec {
             half_extent_deg: 0.55,
-            raster_size: 704,
+            raster_size: 3960,
             interval_m: 10.0,
             simplify_step: 1,
             zoom_bucket: 4,
@@ -107,7 +107,7 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
     } else if zoom < 9.5 {
         FocusContourSpec {
             half_extent_deg: 0.3,
-            raster_size: 768,
+            raster_size: 2160,
             interval_m: 5.0,
             simplify_step: 1,
             zoom_bucket: 5,
@@ -115,7 +115,7 @@ pub fn spec_for_zoom(zoom: f32) -> FocusContourSpec {
     } else if zoom < 13.0 {
         FocusContourSpec {
             half_extent_deg: 0.16,
-            raster_size: 896,
+            raster_size: 1152,
             interval_m: 5.0,
             simplify_step: 1,
             zoom_bucket: 6,

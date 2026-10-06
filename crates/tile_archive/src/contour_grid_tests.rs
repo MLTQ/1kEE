@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn srtm_tiers_share_native_posts_and_preserve_owned_edges() {
+    for h in [3.6f32, 2.2, 1.4, 0.9, 0.55, 0.3, 0.16] {
+        for (lat, lon) in [(14.2, 43.3), (28.0, 87.0), (-29.0, -70.0)] {
+            let step = h * 0.45;
+            let y = (lat / step).round() as i32;
+            let x = (lon / step).round() as i32;
+            let grid = CoreTile::srtm(h, y, x);
+            assert_eq!(grid.core, CoreTile::new(h, 384, y, x).core);
+            assert_eq!(grid.core.max_lon, CoreTile::srtm(h, y, x + 1).core.min_lon);
+            let pixel = (grid.source.max_lon - grid.source.min_lon) / f64::from(grid.raster_size);
+            assert!((pixel - 1.0 / 3600.0).abs() < 1e-14);
+            assert!(grid.source.min_lon <= grid.core.min_lon - pixel);
+            assert!(grid.source.min_lat <= grid.core.min_lat - pixel);
+            assert!(grid.source.max_lon >= grid.core.max_lon + pixel);
+            assert!(grid.source.max_lat >= grid.core.max_lat + pixel);
+            for origin in [grid.source.min_lon, grid.source.min_lat] {
+                for i in [0, 1, grid.raster_size - 1] {
+                    let post = (origin + (f64::from(i) + 0.5) * pixel) * 3600.0;
+                    assert!((post - post.round()).abs() < 1e-7);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn neighboring_cores_have_identical_edges_and_aligned_halo_samples() {
     for (h, n) in [(3.6, 384), (0.16, 896), (0.0148, 2400)] {
         for y in [-8000, 0, 6360] {

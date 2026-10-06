@@ -40,6 +40,8 @@ change camera movement or enable additional layers.
 
 Allow OBS screen-recording access if macOS requests it. If the window is absent
 from the picker, enable **Show fullscreen and hidden windows / applications**.
+The entry may be prefixed **[one-thousand-electric-eye-desktop]**. Select that
+map window rather than the **[Terminal]** window that launched the executable.
 Keep 1kEE running and avoid minimizing it during capture; capture of an
 occluded/minimized window should be checked on your particular OS/OBS version.
 

@@ -1,4 +1,6 @@
 //! Nonoverlapping ownership on the existing Earth contour address grid.
+/// Separate native-sampled geometry from the earlier coarse raster caches.
+pub const SRTM_NATIVE_DB_NAME: &str = "srtm_native_v1.sqlite";
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Bounds {
     pub min_lon: f64,
@@ -13,6 +15,29 @@ pub struct CoreTile {
     pub raster_size: u32,
 }
 impl CoreTile {
+    /// Native SRTM GL1 posts are one arc-second apart, centered on integer
+    /// arc-seconds. Every tile/zoom samples this same world grid; only the
+    /// owned footprint and requested elevation levels may change.
+    pub fn srtm(half_extent: f32, y: i32, x: i32) -> Self {
+        let core = Self::new(half_extent, 2, y, x).core;
+        const POSTS_PER_DEGREE: f64 = 3600.0;
+        let first = |v: f64| (v * POSTS_PER_DEGREE + 0.5).floor() - 2.0;
+        let last = |v: f64| (v * POSTS_PER_DEGREE + 0.5).ceil() + 2.0;
+        let west = first(core.min_lon);
+        let south = first(core.min_lat);
+        let raster_size = ((last(core.max_lon) - west).max(last(core.max_lat) - south)) as u32;
+        Self {
+            core,
+            source: Bounds {
+                min_lon: (west - 0.5) / POSTS_PER_DEGREE,
+                min_lat: (south - 0.5) / POSTS_PER_DEGREE,
+                max_lon: (west + f64::from(raster_size) - 0.5) / POSTS_PER_DEGREE,
+                max_lat: (south + f64::from(raster_size) - 0.5) / POSTS_PER_DEGREE,
+            },
+            raster_size,
+        }
+    }
+
     /// Keep old addresses and sample spacing, but discard the overlapping footprint.
     pub fn new(half_extent: f32, old_raster_size: u32, y: i32, x: i32) -> Self {
         let step = f64::from(half_extent * 0.45);

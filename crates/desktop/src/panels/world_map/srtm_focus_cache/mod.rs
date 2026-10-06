@@ -380,7 +380,7 @@ pub fn ensure_focus_contour_region(
     let Some(cache_root) = db::focus_cache_root(selected_root) else {
         return Vec::new();
     };
-    let Some(cache_db_path) = db::focus_cache_db_path(selected_root) else {
+    let Some(cache_db_path) = db::focus_cache_db_path_for_zoom(selected_root, zoom) else {
         return Vec::new();
     };
     // Open one read-only connection for all tile checks. A missing cache is
@@ -447,7 +447,7 @@ pub fn ready_tile_buckets(
     radius: i32,
 ) -> HashSet<(i32, i32)> {
     let mut set = HashSet::new();
-    let Some(cache_db_path) = db::focus_cache_db_path(selected_root) else {
+    let Some(cache_db_path) = db::focus_cache_db_path_for_zoom(selected_root, zoom) else {
         return set;
     };
     let Ok(connection) = db::open_cache_db_read_only(&cache_db_path) else {
@@ -479,7 +479,7 @@ pub fn focus_contour_region_status(
     radius: i32,
 ) -> Option<FocusContourRegionStatus> {
     // Don't require SRTM root — status should reflect cache hits too.
-    let cache_db_path = db::focus_cache_db_path(selected_root)?;
+    let cache_db_path = db::focus_cache_db_path_for_zoom(selected_root, zoom)?;
     let connection = db::open_cache_db_read_only(&cache_db_path).ok()?;
     let spec = zoom::spec_for_zoom(zoom);
     let bucket_step = spec.half_extent_deg * 0.45;

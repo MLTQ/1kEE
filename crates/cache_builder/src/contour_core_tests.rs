@@ -52,12 +52,7 @@ fn native_core_tiles_keep_matching_seams_and_discard_halo() {
         ..left
     };
     for tile in [left, right] {
-        let grid = CoreTile::new(
-            spec.half_extent_deg,
-            spec.raster_size,
-            tile.lat_bucket,
-            tile.lon_bucket,
-        );
+        let grid = CoreTile::srtm(spec.half_extent_deg, tile.lat_bucket, tile.lon_bucket);
         let (lines, coast) = build_tile_contours_on_grid(
             FocusContourSpec {
                 raster_size: grid.raster_size,
@@ -86,7 +81,7 @@ fn native_core_tiles_keep_matching_seams_and_discard_halo() {
             }
         }
     }
-    let edge = CoreTile::new(spec.half_extent_deg, spec.raster_size, 0, 0)
+    let edge = CoreTile::srtm(spec.half_extent_deg, 0, 0)
         .core
         .max_lon as f32;
     let a = crossings(&db, left, edge);
@@ -131,7 +126,7 @@ fn gdal_core_tiles_keep_matching_seams() {
         ..left
     };
     for tile in [left, right] {
-        let core = CoreTile::new(spec.half_extent_deg, spec.raster_size, 0, tile.lon_bucket);
+        let core = CoreTile::srtm(spec.half_extent_deg, 0, tile.lon_bucket);
         let tif = root.join(format!("{}.tif", tile.lon_bucket));
         let gpkg = root.join(format!("{}.gpkg", tile.lon_bucket));
         run_gdalwarp(
@@ -149,7 +144,7 @@ fn gdal_core_tiles_keep_matching_seams() {
         import_tile_clipped(&out, tile, &gpkg, Some(core.core)).unwrap();
     }
     let db = open_cache_db(&out).unwrap();
-    let edge = CoreTile::new(spec.half_extent_deg, spec.raster_size, 0, 0)
+    let edge = CoreTile::srtm(spec.half_extent_deg, 0, 0)
         .core
         .max_lon as f32;
     let a = crossings(&db, left, edge);

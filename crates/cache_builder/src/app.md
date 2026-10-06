@@ -54,3 +54,5 @@ Provides the minimal egui desktop shell for the offline cache-builder. It is the
   directory when present; the worker reports the actual included source path.
 
 - GUI vector packs likewise detect sibling `platforms.1ka` and preserve its inventory metadata in the new world archive.
+- Earth builds default to `srtm_native_v1.sqlite`; folder selections use the
+  same shared filename as the desktop's native-resolution SRTM reader.

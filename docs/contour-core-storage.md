@@ -4,6 +4,36 @@ As of September 2026, new Earth contour builds persist one disjoint core per
 existing cache address. The change covers the desktop's SRTM and hosted 3DEP
 paths plus the offline builder's GDAL and native SRTM engines.
 
+The current SRTM quality policy uses native-resolution samples at every view
+scale, as described below. The initial core-storage conversion preserved the
+older coarse sampling; the native policy supersedes that sampling choice.
+
+## Native SRTM shapes at every scale
+
+Earth SRTM generation now uses the original GL1 one-arc-second posts (roughly
+30 m), globally aligned across all source tiers. Zoom changes tile/request
+footprints and selected elevation planes, never the underlying raster detail.
+Wider views generate 200/100/50/25 m planes, followed by 10/5/5 m closer in.
+All retained contours keep their complete vertices; no curve smoothing invents
+terrain between measurements. Existing hosted-detail sampling is unchanged.
+
+Desktop and offline builds share `CoreTile::srtm`. Native geometry lives in
+`Derived/terrain/srtm_native_v1.sqlite`, with a source-quality tag. Untagged
+nonempty caches cannot be relabelled as native. Old `srtm_focus_cache.sqlite`
+data stays on disk; only its hosted tiers are still used. A fresh native cache
+populates on demand, so previously visited SRTM regions must be generated once
+again. Existing packed coarse snapshots do not override this new database.
+
+The native Yemen test built widest-tier core 0/9/27 using a 5,837-pixel source
+raster and 200 m elevation planes. It produced 10,013 paths / 1,642,134 segments
+in about eight seconds on the validation machine, with a median segment axis
+span of 0.0002327 degrees. This verifies native sampling, not live frame rate.
+Native geometry costs more memory/storage than the earlier coarse cache.
+Reproduce with `native_yemen_build_keeps_source_resolution_at_globe_scale`,
+`ONEKEE_SRTM_ROOT`, and optional `ONEKEE_NATIVE_OUTPUT`. Outputs are temporary;
+the installed source/caches are untouched. Synthetic native/GDAL seam tests
+also check matching neighbor endpoints.
+
 ## Why the old cache grew
 
 Legacy tiles had width 2h, but their centers were only 0.45h apart. A fully
@@ -11,14 +41,14 @@ populated grid therefore stored approximately (2/0.45)^2 = 19.75 copies of the
 same ground at each detail level. Packing those existing tiles alone does not
 remove that overlap.
 
-## New builds
+## Initial core-storage conversion
 
 Each address owns the square between the midpoints to its neighbors, width
 0.45h. A two-pixel halo supplies shared interpolation/contouring samples. Only
 geometry clipped to the owned square is committed; crossing edges retain their
 shared endpoints. Lines along north/east boundaries belong to their neighbor.
 
-The elevation interval is unchanged. Source resolution is rounded to a whole
+In the initial conversion, the elevation interval was unchanged. Source resolution was rounded to a whole
 number of pixels per core, keeping approximately the prior sample spacing.
 A former 2400-square source becomes 540 core pixels plus four halo pixels, or
 544-square: 94.86% fewer source pixels per address. TIFF/GeoPackage staging is

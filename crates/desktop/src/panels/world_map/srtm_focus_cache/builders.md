@@ -97,3 +97,5 @@ is retried once its probe lands.
 - Earth source-presence checks now use the small padded core bounds. Discovery
   no longer scans every source in the old overlapping footprint. Tile keys and
   immediate legacy-cache hits remain unchanged.
+- SRTM presence checks use `CoreTile::srtm`, the same native-post source bounds
+  as generation. Hosted checks retain their provider-specific raster footprint.

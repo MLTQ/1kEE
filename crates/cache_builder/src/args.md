@@ -40,3 +40,4 @@ Parses the cache-builder CLI without pulling in a heavier argument framework yet
 - `pipelines` builds a standalone archive from normalized JSONL and provenance.
 
 - `platforms` builds a static offshore inventory archive from normalized source data.
+- Contour examples use `srtm_native_v1.sqlite`, the desktop's native SRTM cache.

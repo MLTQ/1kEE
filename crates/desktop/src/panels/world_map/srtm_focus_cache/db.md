@@ -26,6 +26,14 @@ contracts shared by on-demand terrain builders and render-time tile lookups.
 - **Does**: Read and update contour/coastline tile manifest rows.
 - **Interacts with**: tile builders and focus-region asset selection.
 
+### Earth cache paths
+- `focus_cache_db_path` selects `srtm_native_v1.sqlite` for native SRTM geometry.
+- `focus_cache_db_path_for_zoom` uses that file for SRTM tiers and the existing
+  `srtm_focus_cache.sqlite` for hosted detail. Old coarse SRTM tiles are preserved
+  on disk, but cannot satisfy a native-resolution request or its status query.
+- Native files carry a shared source-quality tag. Reads reject untagged files;
+  schema initialization tags empty caches but refuses to relabel legacy data.
+
 ### `contour_manifest_window`
 
 - **Does**: Reads one indexed rectangular manifest snapshot for a zoom bucket.

@@ -20,6 +20,10 @@ Owns the desktop-side GDAL pipelines for terrain assets: SRTM focus contours, GE
 ### `build_focus_contours`
 - **Does**: Builds one SRTM focus tile from one or more source GeoTIFF tiles and imports it into SQLite.
 - **Interacts with**: `db.rs` import helpers.
+- Uses `CoreTile::srtm` at all SRTM scales: native one-arc-second posts on an
+  absolute world grid. Zoom changes footprint/elevation interval, not DEM detail.
+- `native_build_tests.rs` validates a real widest-tier Yemen build using
+  read-only source data and an isolated temporary output cache.
 
 ### `bounds_have_srtm_source`
 - **Does**: Reports whether any SRTM source file overlaps a bucket's bounds,

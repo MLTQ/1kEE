@@ -12,6 +12,8 @@ temporary Derived directory at a Sydney focus, starts directly at maximum zoom,
 checks all 150 short paths per tile survive, then adds cached fine tiles and
 waits for the asynchronous upgrade. No network access is required. Missing
 real source data must not silently skip the test.
+SRTM fixtures use the tagged native cache; hosted fixtures use the existing
+separate cache path, exercising the same source routing as production.
 
 Run the integration test with `cargo test -p one-thousand-electric-eye-desktop
 cold_deep_zoom_reads_base_then_upgrades_to_cached_fine_tiles -- --ignored

@@ -5,7 +5,10 @@ Defines terrain detail tiers and the Earth core selection envelope. Original
 half extents remain address/sampling parameters, not new stored footprints.
 
 ## Components
-- spec_for_zoom retains historical keys, contour intervals and sampling scales.
+- spec_for_zoom retains historical tile addresses. SRTM uses the same native
+  one-arc-second grid at every view scale; raster sizes describe that spacing.
+  Wider tiers select 200/100/50/25 m elevation planes, followed by 10/5/5 m.
+  This reduces line density without distorting any retained contour's shape.
 - Earth tiers use vertex stride one. The source raster already defines their
   detail; dropping every second through fifth contour vertex afterward distorted
   bends and collapsed small closed rings. This applies to both globe and local
@@ -15,7 +18,7 @@ half extents remain address/sampling parameters, not new stored footprints.
 - region_coverage_half_extent_deg subtracts the worst-case half-core focus offset.
 - Earth local readers retain complete cores at every tier. The former per-asset
   feature budget, unused spec field and accessor are removed; footprint LOD and
-  residency bound the working set. Sampling and contour intervals stay unchanged.
+  residency bound the working set. Hosted detail keeps its prior source policy.
 - Lunar/Mars specs and GeoBounds remain legacy callers' geometry helpers.
 
 ## Contracts

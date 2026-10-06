@@ -22,6 +22,8 @@ read-only connections, never a shared connection mutex.
 - `Writer`: writes tile batches transactionally and seals the database.
 - `vector`: partitions full vector features into smaller read units.
 - `contours`: converts contour rows to renderer-coordinate arrays in one tile payload.
+- `native_contours`: shared native-source quality metadata; prevents legacy
+  contour caches from being silently reused or relabelled by native builders.
 - `pipelines`: public fuel routes in independent FUEL/grid-3 tiles, with a baked
   overview and source/status metadata. Can coexist with OSM PIPE in world.1ka.
 

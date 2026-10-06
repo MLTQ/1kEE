@@ -321,13 +321,13 @@ pub fn ensure_bucket_asset(
         lat: (lat_bucket as f32 * bucket_step).clamp(-89.999, 89.999),
         lon: lon_bucket as f32 * bucket_step,
     };
-    let source = tile_archive::contour_grid::CoreTile::new(
-        spec.half_extent_deg,
-        spec.raster_size,
-        lat_bucket,
-        lon_bucket,
-    )
-    .source;
+    let source = if spec_uses_threedep(&spec) {
+        tile_archive::contour_grid::CoreTile::new(
+            spec.half_extent_deg, spec.raster_size, lat_bucket, lon_bucket,
+        )
+    } else {
+        tile_archive::contour_grid::CoreTile::srtm(spec.half_extent_deg, lat_bucket, lon_bucket)
+    }.source;
     let bounds = GeoBounds {
         min_lat: source.min_lat as f32,
         max_lat: source.max_lat as f32,
