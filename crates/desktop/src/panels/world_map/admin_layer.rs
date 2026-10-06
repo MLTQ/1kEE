@@ -21,33 +21,18 @@ pub struct LoadedAdminBoundary {
 
 // ── Session cache ──────────────────────────────────────────────────────────────
 
-struct AdminCache {
-    loaded_root: Option<PathBuf>,
-    boundaries: Arc<Vec<LoadedAdminBoundary>>,
-}
-
+type AdminCache = super::layer_snapshot::Snapshot<(PathBuf, Vec<u8>), Vec<LoadedAdminBoundary>>;
 static ADMIN_CACHE: OnceLock<Mutex<AdminCache>> = OnceLock::new();
 
-/// Return all admin boundaries for `levels`, loading from disk only when the
-/// cache root changes (or on first call).  Returns a shared `Arc` so the
-/// per-frame render call is a cheap refcount bump rather than a deep clone of
-/// every whole-world boundary and its point list.
-pub fn get_or_load_admin_boundaries(
-    cache_root: &Path,
-    levels: &[u8],
-) -> Arc<Vec<LoadedAdminBoundary>> {
-    let cache = ADMIN_CACHE.get_or_init(|| {
-        Mutex::new(AdminCache {
-            loaded_root: None,
-            boundaries: Arc::new(Vec::new()),
-        })
-    });
-    let mut guard = cache.lock().unwrap();
-    if guard.loaded_root.as_deref() != Some(cache_root) {
-        guard.boundaries = Arc::new(load_admin_boundaries(cache_root, levels));
-        guard.loaded_root = Some(cache_root.to_owned());
-    }
-    Arc::clone(&guard.boundaries)
+/// Return the completed snapshot immediately; discovery and parsing run on a worker.
+pub fn get_or_load_admin_boundaries(cache_root: &Path, levels: &[u8]) -> Arc<Vec<LoadedAdminBoundary>> {
+    let mut levels = levels.to_vec();
+    levels.sort_unstable();
+    levels.dedup();
+    ADMIN_CACHE.get_or_init(Default::default).lock().unwrap().get(
+        (cache_root.to_owned(), levels), "admin-boundaries", |a,b| a == b,
+        |(root, levels)| Some(load_admin_boundaries(&root, &levels)),
+    ).unwrap_or_default()
 }
 
 // ── Loading ────────────────────────────────────────────────────────────────────

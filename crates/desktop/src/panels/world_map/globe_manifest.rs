@@ -47,12 +47,38 @@ pub(super) fn assets(
     radius: i32,
     ctx: &egui::Context,
 ) -> Vec<srtm_focus_cache::FocusContourAsset> {
-    let step = srtm_focus_cache::half_extent_for_zoom(zoom) * 0.45;
+    assets_for(
+        cache,
+        root,
+        center,
+        zoom,
+        radius,
+        crate::model::ActiveBody::Earth,
+        ctx,
+    )
+}
+
+pub(super) fn assets_for(
+    cache: &'static Mutex<GlobeRegionCache>,
+    root: Option<&Path>,
+    center: GeoPoint,
+    zoom: f32,
+    radius: i32,
+    body: crate::model::ActiveBody,
+    ctx: &egui::Context,
+) -> Vec<srtm_focus_cache::FocusContourAsset> {
+    use crate::model::ActiveBody;
+    let spec = match body {
+        ActiveBody::Earth => srtm_focus_cache::zoom::spec_for_zoom(zoom),
+        ActiveBody::Moon => srtm_focus_cache::zoom::lunar_spec_for_zoom(zoom),
+        ActiveBody::Mars => srtm_focus_cache::zoom::mars_spec_for_zoom(zoom),
+    };
+    let step = spec.half_extent_deg * 0.45;
     let key = LocalManifestKey {
         root: root.map(Path::to_path_buf),
         center_lat_bucket: (center.lat / step).round() as i32,
         center_lon_bucket: (center.lon / step).round() as i32,
-        zoom_bucket: srtm_focus_cache::zoom_bucket_for_zoom(zoom),
+        zoom_bucket: spec.zoom_bucket,
         prefetch_radius: radius,
         build_radius: radius,
     };
@@ -69,16 +95,15 @@ pub(super) fn assets(
         let epoch = state.epoch;
         let wake = ctx.clone();
         if let Err(error) = std::thread::Builder::new()
-            .name("earth-globe-manifest".into())
+            .name("globe-manifest".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    srtm_focus_cache::ensure_focus_contour_region(
-                        key.root.as_deref(),
-                        center,
-                        zoom,
-                        radius,
-                        radius,
-                    )
+                    let load = match body {
+                        ActiveBody::Earth => srtm_focus_cache::ensure_focus_contour_region,
+                        ActiveBody::Moon => srtm_focus_cache::ensure_lunar_contour_region,
+                        ActiveBody::Mars => srtm_focus_cache::ensure_mars_contour_region,
+                    };
+                    load(key.root.as_deref(), center, zoom, radius, radius)
                 }))
                 .ok();
                 cache

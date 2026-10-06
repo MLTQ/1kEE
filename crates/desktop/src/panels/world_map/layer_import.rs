@@ -8,7 +8,7 @@ use std::time::Instant;
 mod roads;
 
 pub(super) fn ensure_visible_road_layers(model: &mut AppModel, local_terrain_mode: bool) {
-    roads::poll(model);
+    roads::poll(model, roads::Kind::Roads);
     if !local_terrain_mode || (!model.show_major_roads && !model.show_minor_roads) {
         return;
     }
@@ -49,10 +49,11 @@ pub(super) fn ensure_visible_road_layers(model: &mut AppModel, local_terrain_mod
     {
         requests.push((center, radius_miles, "map viewport"));
     }
-    roads::queue(model, requests);
+    roads::queue(model, roads::Kind::Roads, requests);
 }
 
 pub(super) fn ensure_visible_water_layers(model: &mut AppModel, local_terrain_mode: bool) {
+    roads::poll(model, roads::Kind::Water);
     if !local_terrain_mode || !model.show_water {
         return;
     }
@@ -76,8 +77,9 @@ pub(super) fn ensure_visible_water_layers(model: &mut AppModel, local_terrain_mo
     let half_deg = local_terrain_scene::visual_half_extent_for_zoom(model.globe_view.local_zoom);
     let radius_miles = (half_deg * 69.0 * 1.25).clamp(10.0, 150.0);
 
+    let mut requests = Vec::new();
     if let Some(focus) = model.terrain_focus_location() {
-        queue_water_focus_import(model, focus, radius_miles, "terrain focus");
+        requests.push((focus, radius_miles, "terrain focus"));
     }
 
     let center = model.globe_view.local_center;
@@ -86,26 +88,7 @@ pub(super) fn ensure_visible_water_layers(model: &mut AppModel, local_terrain_mo
         .map(|focus| (focus.lat - center.lat).abs() > 0.15 || (focus.lon - center.lon).abs() > 0.15)
         .unwrap_or(true)
     {
-        queue_water_focus_import(model, center, radius_miles, "map viewport");
+        requests.push((center, radius_miles, "map viewport"));
     }
-}
-
-pub(super) fn queue_water_focus_import(
-    model: &mut AppModel,
-    point: crate::model::GeoPoint,
-    radius_miles: f32,
-    label: &str,
-) {
-    match osm_ingest::queue_focus_water_import(model.selected_root.as_deref(), point, radius_miles)
-    {
-        Ok(true) => {
-            model.push_log(format!("Queued focused water import for the {label}."));
-            model.osm_inventory =
-                osm_ingest::OsmInventory::detect_from(model.selected_root.as_deref());
-        }
-        Ok(false) => {}
-        Err(error) => {
-            model.push_log(format!("Focused water import failed: {error}"));
-        }
-    }
+    roads::queue(model, roads::Kind::Water, requests);
 }

@@ -19,3 +19,7 @@ No coordinate simplification or joins across gaps. Camera movement alone does
 not rebuild geometry. Empty decoded tiles own their cores. Root changes discard
 fallback; normal zoom changes retain uncovered coverage. The GPU tile renderer
 uses stable contour Arcs to reuse uploads and culls retained offscreen pieces.
+
+Worker publication moves retired/rejected geometry out of the cache lock before
+freeing it. Reclaiming a large obsolete snapshot cannot make drawing frames
+wait on its destruction while new tiles arrive.

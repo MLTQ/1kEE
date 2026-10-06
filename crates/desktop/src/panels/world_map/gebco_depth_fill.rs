@@ -19,121 +19,62 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use crate::terrain_assets;
-
 // ── grid constants ────────────────────────────────────────────────────────────
 const GRID_W: usize = 1440;
 const GRID_H: usize = 720;
 const NODATA: i16 = -32767;
 
-// ── statics ───────────────────────────────────────────────────────────────────
-static DEPTH_GRID: OnceLock<Mutex<Option<Vec<i16>>>> = OnceLock::new();
-static TEXTURE_HANDLE: OnceLock<Mutex<Option<egui::TextureHandle>>> = OnceLock::new();
+type TextureCache =
+    super::layer_snapshot::Snapshot<Option<std::path::PathBuf>, egui::TextureHandle>;
+static TEXTURE: OnceLock<Mutex<TextureCache>> = OnceLock::new();
 
-// ── public API ────────────────────────────────────────────────────────────────
-
-/// Ensure the texture is uploaded and return its id, or `None` if the .bil
-/// file is not present yet.
+/// Request a background read/conversion and return the last completed texture.
 pub fn ensure_texture(
     ctx: &egui::Context,
     selected_root: Option<&Path>,
 ) -> Option<egui::TextureId> {
-    let handle_cell = TEXTURE_HANDLE.get_or_init(|| Mutex::new(None));
-    {
-        let guard = handle_cell.lock().ok()?;
-        if let Some(h) = guard.as_ref() {
-            return Some(h.id());
-        }
-    }
-    // Not uploaded yet — try to load the grid and build the texture.
-    ensure_grid_loaded(selected_root)?;
-    let image = build_color_image()?;
-    let handle = ctx.load_texture(
-        "gebco_depth_fill",
-        image,
-        egui::TextureOptions {
-            magnification: egui::TextureFilter::Linear,
-            minification: egui::TextureFilter::Linear,
-            wrap_mode: egui::TextureWrapMode::ClampToEdge,
-            mipmap_mode: None,
+    let wake = ctx.clone();
+    let result = TEXTURE.get_or_init(Default::default).lock().ok()?.get(
+        selected_root.map(Path::to_path_buf),
+        "gebco-depth-image",
+        |a, b| a == b,
+        move |root| {
+            let (path, _) = super::srtm_focus_cache::ensure_gebco_derived(root.as_deref());
+            let bytes = std::fs::read(path?).ok()?;
+            let image = color_image(&bytes)?;
+            Some(wake.load_texture("gebco_depth_fill", image, egui::TextureOptions::LINEAR))
         },
     );
-    let id = handle.id();
-    let mut guard = handle_cell.lock().ok()?;
-    *guard = Some(handle);
-    Some(id)
+    if result.is_none() {
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+    }
+    result.map(|h| h.id())
 }
 
-/// Clear all caches (Cache Blast button).
 pub fn clear() {
-    if let Some(c) = DEPTH_GRID.get() {
-        if let Ok(mut g) = c.lock() {
-            *g = None;
-        }
-    }
-    if let Some(c) = TEXTURE_HANDLE.get() {
-        if let Ok(mut g) = c.lock() {
-            *g = None;
-        }
+    if let Some(cache) = TEXTURE.get() {
+        cache.lock().unwrap().clear();
     }
 }
 
-// ── private ───────────────────────────────────────────────────────────────────
-
-fn bil_path(selected_root: Option<&Path>) -> Option<std::path::PathBuf> {
-    // Trigger background generation of the depth BIL (and companion contours)
-    // when missing.  Returns the ready path or None while building.
-    let (depth_bil, _contours) =
-        crate::panels::world_map::srtm_focus_cache::ensure_gebco_derived(selected_root);
-    depth_bil
-}
-
-fn ensure_grid_loaded(selected_root: Option<&Path>) -> Option<()> {
-    let cache = DEPTH_GRID.get_or_init(|| Mutex::new(None));
-    {
-        let guard = cache.lock().ok()?;
-        if guard.is_some() {
-            return Some(());
-        }
-    }
-    let path = bil_path(selected_root)?;
-    let bytes = std::fs::read(&path).ok()?;
+fn color_image(bytes: &[u8]) -> Option<egui::ColorImage> {
     if bytes.len() != GRID_W * GRID_H * 2 {
-        eprintln!(
-            "gebco_depth_fill: expected {} bytes, got {}",
-            GRID_W * GRID_H * 2,
-            bytes.len()
-        );
         return None;
     }
-    // .hdr says BYTEORDER I (Intel / little-endian).
-    let pixels: Vec<i16> = bytes
+    let pixels = bytes
         .chunks_exact(2)
-        .map(|c| i16::from_le_bytes([c[0], c[1]]))
-        .collect();
-    let mut guard = cache.lock().ok()?;
-    *guard = Some(pixels);
-    Some(())
-}
-
-fn build_color_image() -> Option<egui::ColorImage> {
-    let cache = DEPTH_GRID.get()?.lock().ok()?;
-    let pixels = cache.as_ref()?;
-
-    let colors: Vec<egui::Color32> = pixels
-        .iter()
-        .map(|&v| {
+        .map(|c| {
+            let v = i16::from_le_bytes([c[0], c[1]]);
             if v == NODATA || v >= 0 {
-                egui::Color32::TRANSPARENT // land → globe background shows through
+                egui::Color32::TRANSPARENT
             } else {
                 depth_color(v)
             }
         })
         .collect();
-
     Some(egui::ColorImage {
         size: [GRID_W, GRID_H],
-        pixels: colors,
+        pixels,
     })
 }
 

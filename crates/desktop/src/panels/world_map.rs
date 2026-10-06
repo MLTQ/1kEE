@@ -32,6 +32,8 @@ mod srtm_stream;
 mod stellar_layer;
 mod terrain_field;
 mod terrain_raster;
+mod layer_snapshot;
+mod line_upload;
 mod tree_layer;
 mod water_layer;
 mod waterway_layer;

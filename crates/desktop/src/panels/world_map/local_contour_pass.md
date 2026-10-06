@@ -84,7 +84,10 @@ uniform slot and a typed cache namespace so roads never overwrite contour tiles.
   change invalidates the baked colours.
 - Uploads are capped per frame so a jump into a fully-cached area spreads its
   envelope over consecutive frames instead of stalling on one.
-- The upload cap is three batches per callback; roads use at most 2 MiB batches.
+- The count cap is three batches per callback, with a shared 4 MiB / 2 ms
+  frame budget across all local passes. Even one enormous native tile uploads
+  in 512 KiB pieces over multiple frames. Only fully uploaded tiles enter the
+  published ready set. Pending uploads are dropped when no longer requested.
   Deferred uploads request repaint; stale versions are never painted in place
   of requested geometry. The map submits a residency callback even with no
   line passes. After all prepares it drops GPU buffers unused by this frame,

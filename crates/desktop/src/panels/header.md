@@ -26,3 +26,6 @@ Renders the top operational banner for the desktop app. It gives the analyst imm
 | `app.rs` | Header rendering can mutate the model for root-selection changes while remaining the top-bar entrypoint | Changing the entrypoint signature materially |
 | Camera registry | Enabling live cameras persists the opt-in and invalidates the registry immediately | Turning the button into an implicit startup fetch |
 | Camera registry progress | The indicator is visible only while `camera_registry_scanning` is true and reads the worker's latest non-blocking update | Performing network work from the header render path |
+
+Imported GeoJSON/KML/KMZ reads and parsing use `layer_file_import`. The button
+shows a loading state while its worker runs; the file picker remains explicit.

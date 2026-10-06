@@ -77,3 +77,6 @@ Entering local mode releases globe source caches and rejects their late workers.
 Webcam/event hover and clicks now use shared `marker_style::pick` geometry,
 including the visible lower spire and scaled ground target. The closest target
 wins within each layer; existing cross-layer click priority remains intact.
+
+`layer_snapshot` centralizes generation-safe asynchronous layer loads.
+`line_upload` bounds local/globe GPU publication by bytes and submission time.

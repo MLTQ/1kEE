@@ -44,3 +44,24 @@ Upload byte limits do not guarantee a wall-time ceiling; allocator/driver
 pressure can still cause occasional stalls. These timings are not application
 FPS promises. The complete desktop suite passed (260 tests); three separate
 GPU regressions passed, including pixel equivalence and hidden-layer cleanup.
+
+The benchmark now additionally measures 45 continuously moving frames with
+retained full detail, including preview, bounded refinement and reprojection.
+Its optional image is the moving frame, making density dropout visible.
+The historical timings above predate the shared 4 MiB / 2 ms upload budget.
+
+## Retained-detail and upload follow-up, 2026-10-06
+Same 46-tile, 39,491,374-segment M1 Pro / Metal fixture at 1920×1080:
+- Prior synchronous bulk upload: 590.28 ms.
+- Shared 4 MiB / 2 ms scheduling budget: 297 upload frames, worst observed
+  CPU submission 3.90 ms. This bounds individual frame work, not total load time.
+- Full image refinement: 20 frames, worst step 18.25 ms.
+- Completed stationary image: median 1.13 ms.
+- Continuous panning with full-detail reprojection and rolling refinement:
+  median 11.92 ms, worst 18.27 ms over 45 changing camera frames.
+- Geometry preparation: 325.75 ms off-thread; reuse of 45 tiles: 0.173 ms.
+
+The upload time limit stops new submissions, but cannot preempt an individual
+GPU-driver call. These measurements exclude the app UI, video and OBS. The
+moving-frame readback retained detailed Yemen/Red Sea contours; its rectangular
+outer edges are the boundary of the benchmark's finite input tile set.

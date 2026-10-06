@@ -553,6 +553,7 @@ fn benchmark_native_globe_tiles() {
         let mut encoder = device.create_command_encoder(&Default::default());
         let pending = cached.prepare(
             &device,
+            &queue,
             &mut encoder,
             new.format,
             &new.pipeline,
@@ -571,7 +572,7 @@ fn benchmark_native_globe_tiles() {
         }
         assert!(refinement.len() < 100);
     }
-    let render_cached = || {
+    let render_cached = |cached: &texture::Cache| {
         let target_view = texture.create_view(&Default::default());
         let mut encoder = device.create_command_encoder(&Default::default());
         {
@@ -597,7 +598,7 @@ fn benchmark_native_globe_tiles() {
     let mut stable = Vec::new();
     for _ in 0..20 {
         let start = Instant::now();
-        render_cached();
+        render_cached(&cached);
         stable.push(start.elapsed().as_secs_f64() * 1000.);
     }
     stable.sort_by(f64::total_cmp);
@@ -607,6 +608,20 @@ fn benchmark_native_globe_tiles() {
         stable[10],
         refinement.iter().copied().fold(0f64, f64::max)
     );
+    let mut moving = Vec::new();
+    for i in 0..45 {
+        let start = Instant::now();
+        let yaw = view.yaw + 0.00015 * (i + 1) as f32;
+        uniforms.yaw_sin = yaw.sin(); uniforms.yaw_cos = yaw.cos();
+        queue.write_buffer(&new.uniform_buf, ContourLayer::SrtmGlobe.slot() as u64 * UNIFORM_STRIDE, bytemuck::bytes_of(&uniforms));
+        let mut encoder = device.create_command_encoder(&Default::default());
+        cached.prepare(&device, &queue, &mut encoder, new.format, &new.pipeline, &new.bind_group, &prepared, &gpu.tiles, &uniforms, viewport, interval);
+        queue.submit([encoder.finish()]);
+        render_cached(&cached);
+        moving.push(start.elapsed().as_secs_f64() * 1000.);
+    }
+    moving.sort_by(f64::total_cmp);
+    eprintln!("RETAINED FULL DETAIL PAN: median {:.2}ms; worst {:.2}ms (preview + refinement + reprojection + GPU wait)", moving[22], moving[44]);
     if let Some(path) = std::env::var_os("ONEKEE_NATIVE_BENCH_IMAGE") {
         image::save_buffer(
             path,

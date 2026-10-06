@@ -50,9 +50,10 @@ static GLOBE_CONTOUR_CACHE: OnceLock<Mutex<GlobeRegionCache>> = OnceLock::new();
 static LUNAR_GLOBE_CONTOUR_CACHE: OnceLock<Mutex<GlobeRegionCache>> = OnceLock::new();
 static MARS_LOCAL_CONTOUR_CACHE: OnceLock<Mutex<LocalRegionCache>> = OnceLock::new();
 static MARS_GLOBE_CONTOUR_CACHE: OnceLock<Mutex<GlobeRegionCache>> = OnceLock::new();
-static GLOBAL_COASTLINE_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();
-static GLOBAL_TOPO_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();
-static GLOBAL_BATHYMETRY_CACHE: OnceLock<Mutex<Option<CachedGlobalContours>>> = OnceLock::new();
+type GlobalSnapshot = super::layer_snapshot::Snapshot<(Option<PathBuf>, i32), Vec<ContourPath>>;
+static GLOBAL_COASTLINE_CACHE: OnceLock<Mutex<GlobalSnapshot>> = OnceLock::new();
+static GLOBAL_TOPO_CACHE: OnceLock<Mutex<GlobalSnapshot>> = OnceLock::new();
+static GLOBAL_BATHYMETRY_CACHE: OnceLock<Mutex<GlobalSnapshot>> = OnceLock::new();
 
 const CONTOUR_READ_RETRY_DELAY: Duration = Duration::from_millis(250);
 /// Keep local-view reads responsive even when the prefetch envelope includes
@@ -109,17 +110,17 @@ pub fn blast_tile_caches() {
     }
     if let Some(c) = GLOBAL_COASTLINE_CACHE.get() {
         if let Ok(mut g) = c.lock() {
-            *g = None;
+            g.clear();
         }
     }
     if let Some(c) = GLOBAL_TOPO_CACHE.get() {
         if let Ok(mut g) = c.lock() {
-            *g = None;
+            g.clear();
         }
     }
     if let Some(c) = GLOBAL_BATHYMETRY_CACHE.get() {
         if let Ok(mut g) = c.lock() {
-            *g = None;
+            g.clear();
         }
     }
     gebco_depth_fill::clear();
@@ -204,12 +205,6 @@ struct CacheKey {
     lat_bucket: i32,
     lon_bucket: i32,
     zoom_bucket: i32,
-}
-
-struct CachedGlobalContours {
-    lod_bucket: i32,
-    path: PathBuf,
-    contours: Arc<Vec<ContourPath>>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1562,6 +1557,58 @@ fn globe_zoom_to_tile_zoom(globe_zoom: f32) -> f32 {
     if globe_zoom < 2.5 { 0.5 } else { 1.5 }
 }
 
+/// Moon/Mars keep their prior interface, but cloning/sorting runs off-thread.
+fn render_globe_tiles_async(
+    cache: &'static Mutex<GlobeRegionCache>,
+    ctx: &egui::Context,
+) -> Option<Arc<Vec<ContourPath>>> {
+    let mut guard = cache.lock().ok()?;
+    let current = guard
+        .merged
+        .clone()
+        .filter(|c| !c.is_empty())
+        .or_else(|| guard.zoom_fallback.clone());
+    if guard.tiles.is_empty()
+        || guard.merged_revision == Some(guard.tiles_revision)
+        || guard.merge_in_flight.is_some()
+    {
+        return current;
+    }
+    guard.merge_in_flight = Some((guard.load_epoch, guard.tiles_revision));
+    let epoch = guard.load_epoch;
+    let revision = guard.tiles_revision;
+    let mut snapshot = GlobeRegionCache {
+        tiles: guard.tiles.clone(),
+        zoom_fallback: guard.zoom_fallback.clone(),
+        tiles_revision: revision,
+        ..Default::default()
+    };
+    let wake = ctx.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("planet-globe-merge".into())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                render_globe_tiles(&mut snapshot)
+            }));
+            let mut guard = cache.lock().unwrap();
+            guard.merge_in_flight = None;
+            if guard.load_epoch == epoch
+                && guard.tiles_revision == revision
+                && let Ok(result) = result
+            {
+                guard.merged = result;
+                guard.merged_revision = Some(revision);
+            }
+            drop(guard);
+            wake.request_repaint();
+        })
+    {
+        guard.merge_in_flight = None;
+        eprintln!("[1kEE] globe merge: {error}");
+    }
+    current
+}
+
 fn render_globe_tiles(guard: &mut GlobeRegionCache) -> Option<Arc<Vec<ContourPath>>> {
     if guard.tiles.is_empty() {
         // No new-resolution tiles yet — return the previous zoom level's
@@ -1624,34 +1671,26 @@ pub fn load_lunar_for_globe(
     const MAX_TILES: usize = 800;
     let tile_zoom = globe_zoom_to_tile_zoom(zoom);
 
-    let assets =
-        srtm_focus_cache::ensure_lunar_contour_region(selected_root, center, tile_zoom, 2, 2);
-
     let cache: &'static Mutex<GlobeRegionCache> =
         LUNAR_GLOBE_CONTOUR_CACHE.get_or_init(|| Mutex::new(GlobeRegionCache::default()));
+    let assets = globe_manifest::assets_for(cache, selected_root, center, tile_zoom, 2, crate::model::ActiveBody::Moon, &ctx);
     let mut guard = cache.lock().ok()?;
 
-    let zoom_bucket = srtm_focus_cache::zoom_bucket_for_zoom(tile_zoom);
+    let zoom_bucket = srtm_focus_cache::zoom::lunar_spec_for_zoom(tile_zoom).zoom_bucket;
     let root = selected_root.map(Path::to_path_buf);
 
     if guard.zoom_bucket != zoom_bucket || guard.root != root {
-        let old: Vec<ContourPath> = guard
-            .tiles
-            .values()
-            .flat_map(|v| v.iter().cloned())
-            .collect();
-        guard.zoom_fallback = if old.is_empty() {
-            None
-        } else {
-            Some(Arc::new(old))
-        };
+        guard.zoom_fallback = if guard.root == root {
+            guard.merged.clone().or_else(|| guard.zoom_fallback.clone())
+        } else { None };
         guard.zoom_bucket = zoom_bucket;
         guard.root = root;
         guard.clear_tiles_for_new_scene();
     }
 
     if assets.is_empty() {
-        return render_globe_tiles(&mut guard);
+        drop(guard);
+        return render_globe_tiles_async(cache, &ctx);
     }
 
     let per_asset_budget = (360 / assets.len().max(1)).max(120);
@@ -1673,7 +1712,7 @@ pub fn load_lunar_for_globe(
     let mut guard = cache.lock().ok()?;
 
     if guard.tiles.len() > MAX_TILES {
-        let half_extent = srtm_focus_cache::half_extent_for_zoom(tile_zoom);
+        let half_extent = srtm_focus_cache::lunar_half_extent_for_zoom(tile_zoom);
         let bucket_step = half_extent * 0.45;
         let clat = (center.lat / bucket_step).round() as i32;
         let clon = (center.lon / bucket_step).round() as i32;
@@ -1690,7 +1729,8 @@ pub fn load_lunar_for_globe(
         }
     }
 
-    render_globe_tiles(&mut guard)
+    drop(guard);
+    render_globe_tiles_async(cache, &ctx)
 }
 
 /// Mars equivalent of `load_lunar_for_globe`. Triggers on-demand tile builds
@@ -1705,34 +1745,26 @@ pub fn load_mars_for_globe(
     const MAX_TILES: usize = 800;
     let tile_zoom = globe_zoom_to_tile_zoom(zoom);
 
-    let assets =
-        srtm_focus_cache::ensure_mars_contour_region(selected_root, center, tile_zoom, 2, 2);
-
     let cache: &'static Mutex<GlobeRegionCache> =
         MARS_GLOBE_CONTOUR_CACHE.get_or_init(|| Mutex::new(GlobeRegionCache::default()));
+    let assets = globe_manifest::assets_for(cache, selected_root, center, tile_zoom, 2, crate::model::ActiveBody::Mars, &ctx);
     let mut guard = cache.lock().ok()?;
 
-    let zoom_bucket = srtm_focus_cache::zoom_bucket_for_zoom(tile_zoom);
+    let zoom_bucket = srtm_focus_cache::zoom::mars_spec_for_zoom(tile_zoom).zoom_bucket;
     let root = selected_root.map(Path::to_path_buf);
 
     if guard.zoom_bucket != zoom_bucket || guard.root != root {
-        let old: Vec<ContourPath> = guard
-            .tiles
-            .values()
-            .flat_map(|v| v.iter().cloned())
-            .collect();
-        guard.zoom_fallback = if old.is_empty() {
-            None
-        } else {
-            Some(Arc::new(old))
-        };
+        guard.zoom_fallback = if guard.root == root {
+            guard.merged.clone().or_else(|| guard.zoom_fallback.clone())
+        } else { None };
         guard.zoom_bucket = zoom_bucket;
         guard.root = root;
         guard.clear_tiles_for_new_scene();
     }
 
     if assets.is_empty() {
-        return render_globe_tiles(&mut guard);
+        drop(guard);
+        return render_globe_tiles_async(cache, &ctx);
     }
 
     let per_asset_budget = (360 / assets.len().max(1)).max(120);
@@ -1754,7 +1786,7 @@ pub fn load_mars_for_globe(
     let mut guard = cache.lock().ok()?;
 
     if guard.tiles.len() > MAX_TILES {
-        let half_extent = srtm_focus_cache::half_extent_for_zoom(tile_zoom);
+        let half_extent = srtm_focus_cache::mars_half_extent_for_zoom(tile_zoom);
         let bucket_step = half_extent * 0.45;
         let clat = (center.lat / bucket_step).round() as i32;
         let clon = (center.lon / bucket_step).round() as i32;
@@ -1771,7 +1803,8 @@ pub fn load_mars_for_globe(
         }
     }
 
-    render_globe_tiles(&mut guard)
+    drop(guard);
+    render_globe_tiles_async(cache, &ctx)
 }
 
 pub fn load_global_coastlines(
@@ -1779,48 +1812,27 @@ pub fn load_global_coastlines(
     zoom: f32,
     ctx: egui::Context,
 ) -> Option<Arc<Vec<ContourPath>>> {
-    let path = srtm_focus_cache::ensure_global_coastline_cache(selected_root).or_else(|| {
-        let path = terrain_assets::find_derived_root(selected_root)?
-            .join("terrain/gebco_2025_coastline_0m.gpkg");
-        path.exists().then_some(path)
-    })?;
-    let (lod_bucket, simplify_step, feature_budget) = global_coastline_lod(zoom);
-
-    let cache: &'static Mutex<Option<CachedGlobalContours>> =
-        GLOBAL_COASTLINE_CACHE.get_or_init(|| Mutex::new(None));
-    let guard = cache.lock().ok()?;
-
-    let needs_reload = guard
-        .as_ref()
-        .map(|cached| cached.path.as_path() != path.as_path() || cached.lod_bucket != lod_bucket)
-        .unwrap_or(true);
-
-    if needs_reload {
-        let old_result = guard.as_ref().map(|c| Arc::clone(&c.contours));
-        drop(guard);
-        static LOADING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if !LOADING.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            let path_bg = path.clone();
-            std::thread::spawn(move || {
-                if let Ok(contours) =
-                    query_global_coastlines(&path_bg, simplify_step, feature_budget)
-                {
-                    if let Ok(mut g) = cache.lock() {
-                        *g = Some(CachedGlobalContours {
-                            lod_bucket,
-                            path: path_bg,
-                            contours: Arc::new(contours),
-                        });
-                    }
-                }
-                LOADING.store(false, std::sync::atomic::Ordering::SeqCst);
-                ctx.request_repaint();
-            });
-        }
-        return old_result;
-    }
-
-    guard.as_ref().map(|cached| Arc::clone(&cached.contours))
+    let (lod, step, budget) = global_coastline_lod(zoom);
+    let result = GLOBAL_COASTLINE_CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .ok()?
+        .get(
+            (selected_root.map(Path::to_path_buf), lod),
+            "load_global_coastlines",
+            |a, b| a.0 == b.0,
+            move |(root, _)| {
+                let path = srtm_focus_cache::ensure_global_coastline_cache(root.as_deref())
+                    .or_else(|| {
+                        let path = terrain_assets::find_derived_root(root.as_deref())?
+                            .join("terrain/gebco_2025_coastline_0m.gpkg");
+                        path.exists().then_some(path)
+                    })?;
+                query_global_coastlines(&path, step, budget).ok()
+            },
+        );
+    ctx.request_repaint_after(Duration::from_secs(1));
+    result
 }
 
 pub fn global_coastlines_pending(_selected_root: Option<&Path>) -> bool {
@@ -1832,44 +1844,22 @@ pub fn load_global_topo(
     zoom: f32,
     ctx: egui::Context,
 ) -> Option<Arc<Vec<ContourPath>>> {
-    // Triggers a one-time background GDAL build from available SRTM tiles if
-    // the file doesn't yet exist.  Returns None while the build is in progress.
-    let path = srtm_focus_cache::ensure_global_land_overview(selected_root)?;
-    let (lod_bucket, simplify_step, feature_budget) = global_topo_lod(zoom);
-
-    let cache: &'static Mutex<Option<CachedGlobalContours>> =
-        GLOBAL_TOPO_CACHE.get_or_init(|| Mutex::new(None));
-    let guard = cache.lock().ok()?;
-
-    let needs_reload = guard
-        .as_ref()
-        .map(|cached| cached.path.as_path() != path.as_path() || cached.lod_bucket != lod_bucket)
-        .unwrap_or(true);
-
-    if needs_reload {
-        let old_result = guard.as_ref().map(|c| Arc::clone(&c.contours));
-        drop(guard);
-        static LOADING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if !LOADING.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            let path_bg = path.clone();
-            std::thread::spawn(move || {
-                if let Ok(contours) = query_global_topo(&path_bg, simplify_step, feature_budget) {
-                    if let Ok(mut g) = cache.lock() {
-                        *g = Some(CachedGlobalContours {
-                            lod_bucket,
-                            path: path_bg,
-                            contours: Arc::new(contours),
-                        });
-                    }
-                }
-                LOADING.store(false, std::sync::atomic::Ordering::SeqCst);
-                ctx.request_repaint();
-            });
-        }
-        return old_result;
-    }
-
-    guard.as_ref().map(|cached| Arc::clone(&cached.contours))
+    let (lod, step, budget) = global_topo_lod(zoom);
+    let result = GLOBAL_TOPO_CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .ok()?
+        .get(
+            (selected_root.map(Path::to_path_buf), lod),
+            "load_global_topo",
+            |a, b| a.0 == b.0,
+            move |(root, _)| {
+                let path = srtm_focus_cache::ensure_global_land_overview(root.as_deref())?;
+                query_global_topo(&path, step, budget).ok()
+            },
+        );
+    ctx.request_repaint_after(Duration::from_secs(1));
+    result
 }
 
 pub fn load_global_bathymetry(
@@ -1877,51 +1867,23 @@ pub fn load_global_bathymetry(
     zoom: f32,
     ctx: egui::Context,
 ) -> Option<Arc<Vec<ContourPath>>> {
-    // Trigger background generation of derived GEBCO assets when missing.
-    // This is a no-op once both files exist and is cheap to call every frame.
-    srtm_focus_cache::ensure_gebco_derived(selected_root);
-    let path = contour_path(selected_root, zoom)?;
-    // Single LOD — no zoom-based switching so the cache never reloads on zoom
-    // changes (which was causing contours to appear/disappear while panning).
-    let lod_bucket: i32 = 0;
-    let simplify_step: usize = 4;
-    let feature_budget: usize = 4_000;
-
-    let cache: &'static Mutex<Option<CachedGlobalContours>> =
-        GLOBAL_BATHYMETRY_CACHE.get_or_init(|| Mutex::new(None));
-    let guard = cache.lock().ok()?;
-
-    let needs_reload = guard
-        .as_ref()
-        .map(|cached| cached.path.as_path() != path.as_path() || cached.lod_bucket != lod_bucket)
-        .unwrap_or(true);
-
-    if needs_reload {
-        let old_result = guard.as_ref().map(|c| Arc::clone(&c.contours));
-        drop(guard);
-        static LOADING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if !LOADING.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            let path_bg = path.clone();
-            std::thread::spawn(move || {
-                if let Ok(contours) =
-                    query_global_bathymetry(&path_bg, simplify_step, feature_budget)
-                {
-                    if let Ok(mut g) = cache.lock() {
-                        *g = Some(CachedGlobalContours {
-                            lod_bucket,
-                            path: path_bg,
-                            contours: Arc::new(contours),
-                        });
-                    }
-                }
-                LOADING.store(false, std::sync::atomic::Ordering::SeqCst);
-                ctx.request_repaint();
-            });
-        }
-        return old_result;
-    }
-
-    guard.as_ref().map(|cached| Arc::clone(&cached.contours))
+    let (lod, step, budget) = (0, 4, 4_000);
+    let result = GLOBAL_BATHYMETRY_CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .ok()?
+        .get(
+            (selected_root.map(Path::to_path_buf), lod),
+            "load_global_bathymetry",
+            |a, b| a.0 == b.0,
+            move |(root, _)| {
+                srtm_focus_cache::ensure_gebco_derived(root.as_deref());
+                let path = contour_path(root.as_deref(), zoom)?;
+                query_global_bathymetry(&path, step, budget).ok()
+            },
+        );
+    ctx.request_repaint_after(Duration::from_secs(1));
+    result
 }
 
 fn query_global_bathymetry(

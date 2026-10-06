@@ -236,3 +236,12 @@ perform no Earth globe SQLite queries. Moon/Mars keep the prior layer interface.
 
 `globe_reader` publishes Earth tiles individually on the single reader. The
 first completed center tile can compose and stage while neighbors still decode.
+
+### Non-blocking layer loads
+Global coastline/topography/bathymetry source discovery and build checks now run
+inside `layer_snapshot` workers, including directory scans that formerly ran
+before the asynchronous query. Root/LOD keys and reset epochs reject stale
+results; same-root contours remain available while another LOD loads.
+Moon/Mars globe manifest selection and merged-vector cloning/sorting also run
+on coalesced workers. Zoom fallback reuses a published Arc, and is not carried
+across data roots. No scene switch clones every contour synchronously.

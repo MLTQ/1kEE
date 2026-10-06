@@ -67,7 +67,7 @@ pub(super) fn render(
                     compose_resident(bucket, &tiles, fallback, pieces, view, budget)
                 }))
                 .ok();
-                if let Ok(mut guard) = cache.lock() {
+                let retired = if let Ok(mut guard) = cache.lock() {
                     if guard.load_epoch == epoch
                         && guard.residency.revision == view_revision
                         && let Some(result) = &result
@@ -77,8 +77,12 @@ pub(super) fn render(
                             result.fallback.as_ref().map_or(0, |f| f.bytes),
                         );
                     }
-                    finish(&mut guard, epoch, revision, view_revision, result);
-                }
+                    finish(&mut guard, epoch, revision, view_revision, result)
+                } else {
+                    (None, result)
+                };
+                // Free replaced/rejected geometry after releasing the UI lock.
+                drop(retired);
                 wake.request_repaint();
             })
         {
@@ -100,20 +104,27 @@ fn finish(
     revision: u64,
     view_revision: u64,
     result: Option<Output>,
-) {
+) -> (Option<State>, Option<Output>) {
     if cache.merge_in_flight != Some((epoch, revision)) {
-        return;
+        return (None, result);
     }
     cache.merge_in_flight = None;
-    if cache.load_epoch == epoch
-        && cache.residency.revision == view_revision
-        && let Some(result) = result
-    {
-        cache.earth.frame = Some(result.frame);
-        cache.earth.fallback = result.fallback;
-        cache.earth.pieces = result.pieces;
-        cache.merged_revision = Some(revision);
+    if cache.load_epoch == epoch && cache.residency.revision == view_revision {
+        if let Some(result) = result {
+            let retired = std::mem::replace(
+                &mut cache.earth,
+                State {
+                    frame: Some(result.frame),
+                    fallback: result.fallback,
+                    pieces: result.pieces,
+                },
+            );
+            cache.merged_revision = Some(revision);
+            return (Some(retired), None);
+        }
+        return (None, None);
     }
+    (None, result)
 }
 
 fn tile_id(bucket: i32, (lat, lon): Cell) -> LocalTileId {

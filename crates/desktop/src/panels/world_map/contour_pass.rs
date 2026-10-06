@@ -423,6 +423,7 @@ pub struct ContourPassResources {
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     layers: HashMap<ContourLayer, LayerGpu>,
+    uploads: super::line_upload::Budget,
     used: std::collections::HashSet<ContourLayer>,
     terrain: tiles::Gpu,
     format: wgpu::TextureFormat,
@@ -431,6 +432,10 @@ pub struct ContourPassResources {
 struct LayerGpu {
     version: u64,
     chunks: Vec<InstanceChunk>,
+    pending: Option<(u64, super::line_upload::Upload<SegmentInstance>)>,
+}
+impl Default for LayerGpu {
+    fn default() -> Self { Self { version: u64::MAX, chunks: vec![], pending: None } }
 }
 
 /// One vertex buffer's worth of instances.
@@ -589,6 +594,7 @@ impl ContourPassResources {
             uniform_buf,
             bind_group,
             layers: HashMap::new(),
+            uploads: Default::default(),
             used: Default::default(),
             terrain: Default::default(),
             format: target_format,
@@ -686,20 +692,17 @@ impl egui_wgpu::CallbackTrait for ContourCallback {
             bytemuck::bytes_of(&self.uniforms),
         );
 
-        let stale = res
-            .layers
-            .get(&self.layer)
-            .map(|gpu| gpu.version != self.version)
-            .unwrap_or(true);
-        if stale {
-            puffin::profile_scope!("contour_instances_upload");
-            res.layers.insert(
-                self.layer,
-                LayerGpu {
-                    version: self.version,
-                    chunks: split_instance_buffers(device, "contour_instances", &self.instances),
-                },
-            );
+        let gpu = res.layers.entry(self.layer).or_default();
+        if gpu.version != self.version || gpu.pending.is_some() {
+            let (version, upload) = gpu.pending.get_or_insert_with(||
+                (self.version, super::line_upload::Upload::new(self.instances.clone())));
+            if upload.advance(device, &mut res.uploads) {
+                gpu.version = *version;
+                gpu.chunks = gpu.pending.take().unwrap().1.chunks;
+            }
+            // Finish this snapshot before accepting a newer arrival. Keep the
+            // previous complete buffers drawable throughout the upload.
+            crate::app::request_repaint();
         }
         Vec::new()
     }

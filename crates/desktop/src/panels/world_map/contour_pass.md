@@ -115,3 +115,11 @@ third without changing the covered quad or antialiasing.
 
 The terrain renderer retains the window target format for its transparent image
 cache; stationary contour frames are composited without repeating native draws.
+
+### Staged whole-layer uploads
+Coastlines, global topo, bathymetry, Moon/Mars and pipeline layers now use
+`line_upload::Upload`. Replacement buffers stage in 512 KiB pieces under the
+shared globe frame budget (4 MiB, stop submitting after 2 ms). Previous complete
+buffers remain drawable until all replacement pieces are uploaded. In-flight
+snapshots finish before accepting later arrivals. Hidden layers release both
+pending and displayed buffers. Driver calls cannot be preempted mid-allocation.

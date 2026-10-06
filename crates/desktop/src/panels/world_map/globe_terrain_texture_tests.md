@@ -1,13 +1,13 @@
 # globe_terrain_texture_tests.rs
 
 ## Purpose
-Exercise the stationary native terrain image cache on the actual GPU.
+Exercise retained native detail and rolling refinement on the actual GPU.
 
 ## Coverage
-A 2.2 million segment fixture starts with an intentionally omitted preview
-plane. Refinement spans multiple frames, restores that plane only when complete,
-then reuses identical pixels with no cursor changes. Camera changes invalidate
-the image and restart refinement. All targets are private offscreen textures.
-
-The restored image must match the RGB pixels from a one-pass draw of every
-original segment. Its reference fixture is independently checked nonempty.
+A 2.2-million-segment fixture uses an intentionally absent 200m preview plane.
+It requires multiple refinement frames, then matches every RGB pixel from a
+single full-resolution reference draw. During continuous camera movement,
+readback must remain nonempty and its centroid must follow the newly projected
+reference within 1.5 pixels. Frozen jobs must finish even while movement
+continues. After settling, composited pixels again match the reference exactly.
+All targets are private offscreen textures, with no app/settings changes.

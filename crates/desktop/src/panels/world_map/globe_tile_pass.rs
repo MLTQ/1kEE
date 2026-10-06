@@ -11,7 +11,7 @@ mod density;
 mod texture;
 
 const CHUNK_SEGMENTS: usize = 32_768; // < 1 MiB; small individual allocations
-const UPLOAD_BYTES_PER_FRAME: usize = 8 * 1024 * 1024;
+const UPLOAD_BYTES_PER_FRAME: usize = 4 * 1024 * 1024;
 
 pub(super) struct Chunk {
     bounds: Bounds,
@@ -199,13 +199,16 @@ fn instances(
                 .ok();
                 let mut state = cache().lock().unwrap();
                 state.busy = false;
-                if state.active
+                let retired = if state.active
                     && state.epoch == epoch
                     && let Some(result) = result
                 {
-                    state.current = Some(Arc::new(result));
-                }
+                    state.current.replace(Arc::new(result))
+                } else {
+                    None
+                };
                 drop(state);
+                drop(retired);
                 wake.request_repaint();
             })
         {
@@ -243,7 +246,36 @@ impl Gpu {
         });
     }
 
+    fn prune(&mut self) {
+        let keep: std::collections::HashSet<_> = self
+            .pending
+            .iter()
+            .chain(self.displayed.iter())
+            .flat_map(|p| p.tiles.iter().map(|t| t.version))
+            .chain(
+                self.texture
+                    .iter()
+                    .flat_map(|image| image.retained_versions()),
+            )
+            .collect();
+        self.tiles.retain(|version, _| keep.contains(version));
+    }
+    #[cfg(test)]
     fn stage(&mut self, device: &wgpu::Device, candidate: &Arc<Prepared>, view: Viewport) -> bool {
+        self.stage_budgeted(
+            device,
+            candidate,
+            view,
+            &mut super::super::line_upload::Budget::default(),
+        )
+    }
+    fn stage_budgeted(
+        &mut self,
+        device: &wgpu::Device,
+        candidate: &Arc<Prepared>,
+        view: Viewport,
+        budget: &mut super::super::line_upload::Budget,
+    ) -> bool {
         if self.pending.is_none()
             && self
                 .displayed
@@ -268,7 +300,7 @@ impl Gpu {
             let uploaded = self.tiles.entry(tile.version).or_default();
             for chunk in &tile.chunks[uploaded.len()..] {
                 let bytes = chunk.instances.len() * std::mem::size_of::<SegmentInstance>();
-                if bytes > remaining {
+                if bytes > remaining || !budget.claim(bytes) {
                     break;
                 }
                 uploaded.extend(split_instance_buffers(
@@ -291,6 +323,11 @@ impl Gpu {
             .iter()
             .chain(self.displayed.iter().flat_map(|p| &p.tiles))
             .map(|t| t.version)
+            .chain(
+                self.texture
+                    .iter()
+                    .flat_map(|image| image.retained_versions()),
+            )
             .collect();
         self.tiles.retain(|version, _| keep.contains(version));
         ready
@@ -369,7 +406,10 @@ impl egui_wgpu::CallbackTrait for Callback {
             ContourLayer::SrtmGlobe.slot() as u64 * UNIFORM_STRIDE,
             bytemuck::bytes_of(&self.uniforms),
         );
-        if !res.terrain.stage(device, &self.candidate, self.viewport) {
+        if !res
+            .terrain
+            .stage_budgeted(device, &self.candidate, self.viewport, &mut res.uploads)
+        {
             self.ctx.request_repaint();
         }
         res.terrain.update_density(self.viewport);
@@ -381,6 +421,7 @@ impl egui_wgpu::CallbackTrait for Callback {
                 .unwrap_or_else(|| texture::Cache::new(device, res.format));
             if image.prepare(
                 device,
+                queue,
                 encoder,
                 res.format,
                 &res.pipeline,
@@ -394,6 +435,7 @@ impl egui_wgpu::CallbackTrait for Callback {
                 self.ctx.request_repaint();
             }
             res.terrain.texture = Some(image);
+            res.terrain.prune();
         }
 
         vec![]

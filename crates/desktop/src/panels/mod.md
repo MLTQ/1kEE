@@ -14,3 +14,5 @@ Exports the panel renderers used by the desktop shell. This module is the compos
 | Dependent | Expects | Breaking changes |
 |-----------|---------|------------------|
 | `app.rs` | Renderer functions stay re-exported from here | Removing or renaming exports |
+
+`layer_file_import` owns asynchronous user-uploaded map-layer parsing.

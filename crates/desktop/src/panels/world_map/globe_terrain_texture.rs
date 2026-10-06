@@ -1,55 +1,93 @@
-//! Cache stationary terrain; progressively restore all native elevation planes.
+//! Reproject retained detail while bounded full-resolution snapshots refresh.
 use super::*;
-
 const REFINE_SEGMENTS_PER_FRAME: usize = 2_000_000;
-
 struct Target {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+}
+struct Refinement {
+    source: Arc<Prepared>,
+    uniforms: ContourUniforms,
+    viewport: Viewport,
     bind: wgpu::BindGroup,
+    target: Target,
+    next: usize,
+}
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct Warp {
+    current: ContourUniforms,
+    saved: ContourUniforms,
+    flags: [f32; 4],
 }
 
 pub(super) struct Cache {
     blit: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    warp: wgpu::Buffer,
+    paint_bind: Option<wgpu::BindGroup>,
     size: [u32; 2],
     preview: Option<Target>,
     full: Option<Target>,
+    spare: Option<Target>,
     source: Option<Arc<Prepared>>,
-    uniforms: Vec<u8>,
-    interval: i32,
+    uniforms: Option<ContourUniforms>,
+    full_source: Option<Arc<Prepared>>,
+    full_uniforms: Option<ContourUniforms>,
+    working: Option<Refinement>,
     next_chunk: usize,
     complete: bool,
 }
-
 impl Cache {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        let texture = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("globe terrain image layout"),
+            label: Some("terrain reprojection"),
             entries: &[
+                texture(0),
+                texture(1),
                 wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
+                    binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let warp = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("terrain image cameras"),
+            size: std::mem::size_of::<Warp>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("globe terrain image"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            label: Some("globe terrain reprojection"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("globe_terrain_reproject.wgsl").into()),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
@@ -88,17 +126,21 @@ impl Cache {
             blit,
             layout,
             sampler,
+            warp,
+            paint_bind: None,
             size: [0, 0],
             preview: None,
             full: None,
+            spare: None,
             source: None,
-            uniforms: vec![],
-            interval: 1,
+            uniforms: None,
+            full_source: None,
+            full_uniforms: None,
+            working: None,
             next_chunk: 0,
             complete: false,
         }
     }
-
     fn target(&self, device: &wgpu::Device, format: wgpu::TextureFormat) -> Target {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("cached globe terrain"),
@@ -117,31 +159,17 @@ impl Cache {
             view_formats: &[],
         });
         let view = texture.create_view(&Default::default());
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
-        });
-        Target {
-            texture,
-            view,
-            bind,
-        }
+        Target { texture, view }
     }
-
-    /// Returns whether another frame is needed to finish the all-plane image.
+    pub fn retained_versions(&self) -> impl Iterator<Item = u64> + '_ {
+        self.working
+            .iter()
+            .flat_map(|w| w.source.tiles.iter().map(|t| t.version))
+    }
     pub fn prepare(
         &mut self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         format: wgpu::TextureFormat,
         pipeline: &wgpu::RenderPipeline,
@@ -153,22 +181,37 @@ impl Cache {
         interval: i32,
     ) -> bool {
         let size = uniforms.viewport_size.map(|v| v.round().max(1.) as u32);
-        let resized = size != self.size;
-        if resized {
+        let resized = self.size != size;
+        let incompatible = self.uniforms.is_some_and(|u| !same_style(&u, uniforms))
+            || self.source.as_ref().is_some_and(|old| {
+                old.palette != frame.palette
+                    || (!Arc::ptr_eq(old, frame)
+                        && !old
+                            .tiles
+                            .iter()
+                            .any(|a| frame.tiles.iter().any(|b| Arc::ptr_eq(a, b))))
+            });
+        if resized || incompatible {
             self.size = size;
+            self.full = None;
+            self.full_source = None;
+            self.full_uniforms = None;
+            self.working = None;
+            self.spare = None;
+            self.uniforms = None;
             self.preview = Some(self.target(device, format));
-            self.full = Some(self.target(device, format));
         }
-        let changed = resized
-            || self.source.as_ref().is_none_or(|s| !Arc::ptr_eq(s, frame))
-            || self.uniforms != bytemuck::bytes_of(uniforms)
-            || self.interval != interval;
+        let changed = self.source.as_ref().is_none_or(|s| !Arc::ptr_eq(s, frame))
+            || self
+                .uniforms
+                .as_ref()
+                .is_none_or(|u| !same_camera(u, uniforms));
+        if !changed && self.complete {
+            return false;
+        }
         if changed {
             self.source = Some(frame.clone());
-            self.uniforms = bytemuck::bytes_of(uniforms).to_vec();
-            self.interval = interval;
-            self.next_chunk = 0;
-            self.complete = false;
+            self.uniforms = Some(*uniforms);
             render(
                 encoder,
                 pipeline,
@@ -182,44 +225,137 @@ impl Cache {
                 usize::MAX,
                 true,
             );
-            // Small views already include every plane; their preview is final.
-            self.complete = interval == 1;
-            return !self.complete;
         }
-        if self.complete {
-            return false;
+        self.complete = self
+            .full_source
+            .as_ref()
+            .is_some_and(|s| Arc::ptr_eq(s, frame))
+            && self
+                .full_uniforms
+                .as_ref()
+                .is_some_and(|u| same_camera(u, uniforms));
+        if !self.complete && self.working.is_none() {
+            // Freeze a complete camera/source snapshot. Movement must not
+            // restart it, or a continuously moving globe can never refine.
+            let mut bytes =
+                vec![0; UNIFORM_STRIDE as usize * (ContourLayer::SrtmGlobe.slot() as usize + 1)];
+            let offset = ContourLayer::SrtmGlobe.slot() as usize * UNIFORM_STRIDE as usize;
+            bytes[offset..offset + std::mem::size_of::<ContourUniforms>()]
+                .copy_from_slice(bytemuck::bytes_of(uniforms));
+            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("frozen terrain camera"),
+                contents: &bytes,
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let frozen_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &buffer,
+                        offset: 0,
+                        size: wgpu::BufferSize::new(std::mem::size_of::<ContourUniforms>() as u64),
+                    }),
+                }],
+            });
+            let target = self
+                .spare
+                .take()
+                .unwrap_or_else(|| self.target(device, format));
+            self.working = Some(Refinement {
+                source: frame.clone(),
+                uniforms: *uniforms,
+                viewport,
+                bind: frozen_bind,
+                target,
+                next: 0,
+            });
         }
-        let (next, done) = render(
-            encoder,
-            pipeline,
-            bind,
-            &self.full.as_ref().unwrap().view,
-            frame,
-            tiles,
-            viewport,
-            1,
-            self.next_chunk,
-            REFINE_SEGMENTS_PER_FRAME,
-            self.next_chunk == 0,
-        );
-        self.next_chunk = next;
-        self.complete = done;
-        !done
-    }
-
-    pub fn paint(&self, pass: &mut wgpu::RenderPass<'static>) {
-        let target = if self.complete && self.interval != 1 {
-            &self.full
-        } else {
-            &self.preview
+        if let Some(job) = self.working.as_mut() {
+            let (next, done) = render(
+                encoder,
+                pipeline,
+                &job.bind,
+                &job.target.view,
+                &job.source,
+                tiles,
+                job.viewport,
+                1,
+                job.next,
+                REFINE_SEGMENTS_PER_FRAME,
+                job.next == 0,
+            );
+            job.next = next;
+            self.next_chunk = next;
+            if done {
+                let job = self.working.take().unwrap();
+                self.spare = self.full.replace(job.target);
+                self.complete =
+                    Arc::ptr_eq(&job.source, frame) && same_camera(&job.uniforms, uniforms);
+                self.full_source = Some(job.source);
+                self.full_uniforms = Some(job.uniforms);
+            }
+        }
+        let saved = self.full_uniforms.unwrap_or(*uniforms);
+        let warp = Warp {
+            current: *uniforms,
+            saved,
+            flags: [
+                if self.full.is_some() { 1. } else { 0. },
+                if same_camera(&saved, uniforms) {
+                    1.
+                } else {
+                    0.
+                },
+                0.,
+                0.,
+            ],
         };
-        if let Some(target) = target {
-            debug_assert_eq!(target.texture.width(), self.size[0]);
+        queue.write_buffer(&self.warp, 0, bytemuck::bytes_of(&warp));
+        let preview = self.preview.as_ref().unwrap();
+        let full = self.full.as_ref().unwrap_or(preview);
+        self.paint_bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&preview.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&full.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.warp.as_entire_binding(),
+                },
+            ],
+        }));
+        !self.complete
+    }
+    pub fn paint(&self, pass: &mut wgpu::RenderPass<'static>) {
+        if let Some(bind) = &self.paint_bind {
             pass.set_pipeline(&self.blit);
-            pass.set_bind_group(0, &target.bind, &[]);
+            pass.set_bind_group(0, bind, &[]);
             pass.draw(0..4, 0..1);
         }
     }
+}
+fn same_camera(a: &ContourUniforms, b: &ContourUniforms) -> bool {
+    bytemuck::bytes_of(a) == bytemuck::bytes_of(b)
+}
+fn same_style(a: &ContourUniforms, b: &ContourUniforms) -> bool {
+    a.alpha == b.alpha
+        && a.stroke_half_px == b.stroke_half_px
+        && a.feather_px == b.feather_px
+        && a.radius_offset == b.radius_offset
+        && a.horizon_z == b.horizon_z
 }
 
 fn render(
@@ -282,17 +418,6 @@ fn render(
     }
     (next, true)
 }
-
-const SHADER: &str = r#"
-@group(0) @binding(0) var terrain:texture_2d<f32>;
-@group(0) @binding(1) var nearest:sampler;
-struct Out { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f32> }
-@vertex fn vs(@builtin(vertex_index) i:u32)->Out {
-    let uv=vec2<f32>(f32(i&1u),f32(i>>1u));
-    var out:Out;out.position=vec4<f32>(uv.x*2.-1.,1.-uv.y*2.,0.,1.);out.uv=uv;return out;
-}
-@fragment fn fs(in:Out)->@location(0) vec4<f32> {return textureSample(terrain,nearest,in.uv);}
-"#;
 
 #[cfg(test)]
 #[path = "globe_terrain_texture_tests.rs"]

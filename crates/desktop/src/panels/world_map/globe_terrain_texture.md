@@ -1,21 +1,23 @@
 # globe_terrain_texture.rs
 
 ## Purpose
-Reuse the terrain image while the globe is stationary. Pips, UI and OBS frames
-no longer require another draw of every native contour segment.
+Keep full-resolution terrain visible during continuous globe movement, without
+redrawing tens of millions of segments in one frame.
 
 ## Components
-- A changing camera/frame/style draws a responsive whole-plane preview.
-- Stable frames refine all native elevation planes into a second transparent
-  texture, at most two million segments per frame. A completed image replaces
-  the preview atomically; partial images and different LODs never overlap.
-- Subsequent unchanged frames composite one textured quad. The full-detail image
-  remains until source, camera, viewport, palette, width or fade changes.
-- Texture dimensions follow the physical viewport. Blending remains premultiplied
-  and the render target matches the window format, including sRGB conversion.
+A complete terrain image stays on its sphere via `globe_terrain_reproject.wgsl`.
+Newly exposed coverage uses a bounded whole-plane preview. A second image is
+refined at most two million segments per frame, using a frozen camera and source
+snapshot. Movement does not restart this job: completed snapshots replace the
+retained image, then another job follows the latest camera. At rest the final
+image contains every native contour plane and subsequent frames draw one quad.
 
 ## Contracts
-All original segments and planes return after settling, without a large single
-GPU draw. Refinement uses unchanged geometry and deterministic draw order.
-Textures and their pinned source frame are owned by the native GPU layer and
-released on hiding/reset. Offscreen batches are culled before refinement work.
+The refinement owns its uniform bind group; live camera uniform writes cannot
+change an in-progress image. GPU tile versions needed by the job remain pinned.
+Images from different generations never overlap within retained coverage.
+Resizing, incompatible source/palette or stroke changes retire old images.
+Same-camera compositing preserves exact pixels; moving reprojection interpolates
+pixels without changing contour coordinates. Newly exposed areas refine over
+several frames. Three viewport-sized textures are the maximum retained set.
+Hiding the layer releases images, jobs, pinned sources and uploaded tiles.

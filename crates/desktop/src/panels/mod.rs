@@ -3,6 +3,7 @@ mod event_list;
 mod factal_brief;
 mod factal_settings;
 mod header;
+pub(crate) mod layer_file_import;
 mod layer_drawer;
 mod replay_controls;
 mod status_log;

@@ -1,5 +1,5 @@
 use crate::camera_registry;
-use crate::model::{ActiveBody, AppModel, GeoJsonLayer};
+use crate::model::{ActiveBody, AppModel};
 use crate::osm_ingest;
 use crate::panels::world_map::contour_asset;
 use crate::terrain_assets;
@@ -95,7 +95,8 @@ pub fn render_header(ctx: &egui::Context, model: &mut AppModel) {
                     crate::theme::set_theme(ui.ctx(), new_theme);
                 }
 
-                if ui.button("Import Layer").clicked() {
+                let importing = super::layer_file_import::busy();
+                if ui.add_enabled(!importing, egui::Button::new(if importing { "Loading layer…" } else { "Import Layer" })).clicked() {
                     import_layer(model);
                 }
 
@@ -188,33 +189,7 @@ fn import_layer(model: &mut AppModel) {
         return;
     };
 
-    let name = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "Imported layer".into());
-    let format_label = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_ascii_uppercase())
-        .unwrap_or_else(|| "LAYER".into());
-
-    match std::fs::read(&path) {
-        Err(e) => model.push_log(format!("Layer read error: {e}")),
-        Ok(bytes) => match GeoJsonLayer::parse_upload(
-            name.clone(),
-            path.extension().and_then(|ext| ext.to_str()),
-            &bytes,
-        ) {
-            Err(e) => model.push_log(format!("{format_label} parse error in \"{name}\": {e}")),
-            Ok(layer) => {
-                model.push_log(format!(
-                    "{format_label} layer \"{name}\" loaded — {} feature(s).",
-                    layer.features.len()
-                ));
-                model.geojson_layers.push(layer);
-            }
-        },
-    }
+    super::layer_file_import::queue(path, model);
 }
 
 fn metric_chip(ui: &mut egui::Ui, label: &str, value: &str) {

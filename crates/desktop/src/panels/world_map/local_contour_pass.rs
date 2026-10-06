@@ -310,6 +310,9 @@ pub struct LocalContourPassResources {
     bind_group: wgpu::BindGroup,
     tiles: HashMap<(LocalBatchId, u64), TileGpu>,
     resident_bytes: u64,
+    pending: HashMap<(LocalBatchId, u64), (super::line_upload::Upload<LocalSegmentInstance>, u64)>,
+    upload_frame: Option<u64>,
+    uploads: super::line_upload::Budget,
 }
 
 /// Uploading a whole envelope in one frame would stall visibly, so a cold start
@@ -447,6 +450,9 @@ impl LocalContourPassResources {
             bind_group,
             tiles: HashMap::new(),
             resident_bytes: 0,
+            pending: HashMap::new(),
+            upload_frame: None,
+            uploads: Default::default(),
         }
     }
 
@@ -600,12 +606,17 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
         // The clock also advances when contours are hidden and only roads draw.
         let frame = self.frame;
 
+        if res.upload_frame != Some(frame) {
+            res.upload_frame = Some(frame);
+            res.uploads = Default::default();
+        }
         let mut uploads = 0usize;
         for batch in &self.batches {
             if batch.instances.is_empty() {
                 continue;
             }
             let key = (batch.id, batch.version);
+            if let Some((_, used)) = res.pending.get_mut(&key) { *used = frame; }
             let stale = !res.tiles.contains_key(&key);
 
             if stale {
@@ -615,12 +626,16 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
                 }
                 uploads += 1;
                 puffin::profile_scope!("local_contour_tile_upload");
-                let bytes = std::mem::size_of_val(&batch.instances[..]) as u64;
-                let chunks = super::contour_pass::split_instance_buffers(
-                    device,
-                    "local_contour_tile_instances",
-                    &batch.instances,
-                );
+                let (upload, used) = res.pending.entry(key).or_insert_with(||
+                    (super::line_upload::Upload::new(batch.instances.clone()), frame));
+                *used = frame;
+                if !upload.advance(device, &mut res.uploads) {
+                    self.ctx.request_repaint();
+                    continue;
+                }
+                let upload = res.pending.remove(&key).unwrap().0;
+                let bytes = upload.bytes();
+                let chunks = upload.chunks;
                 if let Some(previous) = res.tiles.insert(
                     key,
                     TileGpu {
@@ -699,6 +714,7 @@ impl egui_wgpu::CallbackTrait for ResidencyCallback {
     ) -> Vec<wgpu::CommandBuffer> {
         if let Some(res) = resources.get_mut::<LocalContourPassResources>() {
             res.tiles.retain(|_, tile| tile.last_used == self.frame);
+            res.pending.retain(|_, (_, used)| *used == self.frame);
             res.resident_bytes = res.tiles.values().map(|tile| tile.bytes).sum();
             res.publish_resident_bytes();
             if let Ok(mut ready) = GPU_READY.get_or_init(Default::default).lock() {

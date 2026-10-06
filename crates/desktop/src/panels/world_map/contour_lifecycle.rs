@@ -59,6 +59,7 @@ impl egui_wgpu::CallbackTrait for Cleanup {
     ) -> Vec<wgpu::CommandBuffer> {
         if let Some(res) = resources.get_mut::<ContourPassResources>() {
             res.used.clear();
+            res.uploads = Default::default();
             res.terrain.used = false;
         }
         Vec::new()
