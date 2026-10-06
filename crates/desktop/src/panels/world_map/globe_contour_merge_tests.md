@@ -20,3 +20,7 @@ loss of useful sparse coverage outside a source's own core.
 - Opt-in `real_moscow_mixed_cache_coverage_is_disjoint` reads three installed
   Hilbert tiles (old LineString and new MultiLineString), checks disjoint region
   ownership, and proves southern legacy coverage survives. Read-only throughout.
+
+The same regressions now inspect tile frames rather than flattened runtime
+vectors. Added explicit Arc reuse after neighboring arrivals and root-transition
+fallback release. Budget trimming acts on offscreen fallback pieces, not points.

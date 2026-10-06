@@ -310,6 +310,9 @@ fn discovery_reuse_recheck_removal_and_manual_rediscovery_use_only_expected_requ
                     std::thread::sleep(Duration::from_millis(2));
                     continue;
                 };
+                // macOS inherits the listener's nonblocking mode. Read the
+                // complete request with the timeout, not a scheduler race.
+                socket.set_nonblocking(false).unwrap();
                 socket
                     .set_read_timeout(Some(Duration::from_secs(1)))
                     .unwrap();

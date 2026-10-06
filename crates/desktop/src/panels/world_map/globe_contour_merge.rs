@@ -1,4 +1,4 @@
-//! Disjoint ownership for mixed legacy/full-footprint and modern globe tiles.
+//! Disjoint, persistent tile batches for Earth globe contours.
 use super::*;
 use crate::model::ActiveBody;
 use crate::panels::world_map::{local_contour_pass::LocalTileId, local_terrain_scene::composition};
@@ -7,21 +7,54 @@ use tile_archive::contour_grid::Bounds as Rect;
 type Cell = (i32, i32);
 type Tiles = HashMap<Cell, Arc<Vec<ContourPath>>>;
 
-struct Output {
-    contours: Arc<Vec<ContourPath>>,
-    fallback: Option<Arc<Vec<ContourPath>>>,
+#[derive(Default)]
+pub struct Frame {
+    pub tiles: Vec<LocalTileGeometry>,
+    pub bytes: usize,
 }
 
-/// Keep the last published picture while one worker rebuilds changed tiles.
+#[derive(Clone)]
+struct Piece {
+    source: Arc<Vec<ContourPath>>,
+    raw_bounds: Option<residency::Bounds>,
+    regions: Vec<Rect>,
+    tile: LocalTileGeometry,
+}
+
+#[derive(Default)]
+pub(super) struct State {
+    pub frame: Option<Arc<Frame>>,
+    pub fallback: Option<Arc<Frame>>,
+    pieces: HashMap<Cell, Piece>,
+}
+
+impl State {
+    pub fn transition(&mut self, same_root: bool) {
+        self.fallback = same_root
+            .then(|| self.frame.take().or_else(|| self.fallback.take()))
+            .flatten();
+        self.frame = None;
+        self.pieces.clear();
+    }
+}
+
+struct Output {
+    frame: Arc<Frame>,
+    fallback: Option<Arc<Frame>>,
+    pieces: HashMap<Cell, Piece>,
+}
+
+/// Keep the last published picture while one worker composes changed tiles.
 pub(super) fn render(
     cache: &'static Mutex<GlobeRegionCache>,
     ctx: &egui::Context,
-) -> Option<Arc<Vec<ContourPath>>> {
+) -> Option<Arc<Frame>> {
     let mut guard = cache.lock().ok()?;
     if guard.merge_in_flight.is_none() && guard.merged_revision != Some(guard.tiles_revision) {
         let (epoch, revision, bucket) = (guard.load_epoch, guard.tiles_revision, guard.zoom_bucket);
         let tiles = guard.tiles.clone();
-        let fallback = guard.zoom_fallback.clone();
+        let fallback = guard.earth.fallback.clone();
+        let pieces = guard.earth.pieces.clone();
         let view = guard.residency.view;
         let budget = guard.residency.gpu_budget;
         let view_revision = guard.residency.revision;
@@ -31,24 +64,20 @@ pub(super) fn render(
             .name("globe-contour-ownership".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    compose_resident(bucket, &tiles, fallback, view, budget)
-                }));
-                let bytes = result.as_ref().ok().map(|r| {
-                    (
-                        globe_residency::gpu_bytes(&r.contours),
-                        r.fallback
-                            .as_ref()
-                            .map_or(0, |f| globe_residency::gpu_bytes(f)),
-                    )
-                });
+                    compose_resident(bucket, &tiles, fallback, pieces, view, budget)
+                }))
+                .ok();
                 if let Ok(mut guard) = cache.lock() {
                     if guard.load_epoch == epoch
                         && guard.residency.revision == view_revision
-                        && let Some((bytes, fallback)) = bytes
+                        && let Some(result) = &result
                     {
-                        guard.residency.observe_gpu(bytes, fallback);
+                        guard.residency.observe_gpu(
+                            result.frame.bytes,
+                            result.fallback.as_ref().map_or(0, |f| f.bytes),
+                        );
                     }
-                    finish(&mut guard, epoch, revision, view_revision, result.ok());
+                    finish(&mut guard, epoch, revision, view_revision, result);
                 }
                 wake.request_repaint();
             })
@@ -58,7 +87,11 @@ pub(super) fn render(
             ctx.request_repaint_after(CONTOUR_READ_RETRY_DELAY);
         }
     }
-    guard.merged.clone().or_else(|| guard.zoom_fallback.clone())
+    guard
+        .earth
+        .frame
+        .clone()
+        .or_else(|| guard.earth.fallback.clone())
 }
 
 fn finish(
@@ -76,12 +109,9 @@ fn finish(
         && cache.residency.revision == view_revision
         && let Some(result) = result
     {
-        // Accept a coherent intermediate snapshot even when more tiles arrived:
-        // it makes progress now, and the next repaint coalesces the newer data.
-        cache.merged = Some(result.contours);
-        // Release the untrimmed prior generation as soon as the worker has
-        // isolated its still-visible gaps. Never accumulate travel history.
-        cache.zoom_fallback = result.fallback;
+        cache.earth.frame = Some(result.frame);
+        cache.earth.fallback = result.fallback;
+        cache.earth.pieces = result.pieces;
         cache.merged_revision = Some(revision);
     }
 }
@@ -117,13 +147,17 @@ fn footprint(bounds: residency::Bounds) -> Rect {
 
 /// Native cores win. Missing cores can still use a legacy tile's outer geometry;
 /// overlapping outer pieces choose the nearest available source deterministically.
-fn ownership(bucket: i32, tiles: &Tiles) -> HashMap<Cell, Vec<Rect>> {
+fn ownership(
+    bucket: i32,
+    tiles: &Tiles,
+    bounds: &HashMap<Cell, Option<residency::Bounds>>,
+) -> HashMap<Cell, Vec<Rect>> {
     let mut regions: HashMap<Cell, Vec<Rect>> = HashMap::new();
     let mut halos: HashMap<Cell, Vec<(Cell, Rect)>> = HashMap::new();
-    for (&cell, contours) in tiles {
+    for &cell in tiles.keys() {
         let own = composition::core(ActiveBody::Earth, tile_id(bucket, cell));
         regions.entry(cell).or_default().push(own); // decoded empty cores count too
-        let Some(bounds) = residency::Bounds::from_contours(contours) else {
+        let Some(bounds) = bounds[&cell] else {
             continue;
         };
         let bounds = footprint(bounds);
@@ -165,128 +199,139 @@ fn ownership(bucket: i32, tiles: &Tiles) -> HashMap<Cell, Vec<Rect>> {
     regions
 }
 
-#[cfg(test)]
-fn compose(
-    bucket: i32,
-    tiles: &Tiles,
-    fallback: Option<Arc<Vec<ContourPath>>>,
-) -> Arc<Vec<ContourPath>> {
-    compose_visible(bucket, tiles, fallback, None).contours
-}
-
-fn compose_visible(
-    bucket: i32,
-    tiles: &Tiles,
-    fallback: Option<Arc<Vec<ContourPath>>>,
-    visible: Option<&[Rect]>,
-) -> Output {
-    let mut regions = ownership(bucket, tiles);
-    if let Some(visible) = visible {
-        for owned in regions.values_mut() {
-            *owned = owned
-                .iter()
-                .flat_map(|&r| visible.iter().filter_map(move |&v| intersection(r, v)))
-                .collect();
-        }
-    }
-    let mut keys: Vec<_> = tiles.keys().copied().collect();
-    keys.sort();
-    let mut merged = Vec::new();
-    for cell in keys {
-        let contours = tiles[&cell].clone();
-        let tile = LocalTileGeometry {
-            id: tile_id(bucket, cell),
-            bounds: residency::Bounds::from_contours(&contours),
-            contours,
-        };
-        merged.extend(
-            composition::clip_contours(&tile, &regions[&cell])
-                .iter()
-                .cloned(),
-        );
-    }
-    // Keep the outgoing tier only in areas that the incoming data cannot cover.
-    let mut kept_fallback = None;
-    if let Some(contours) = fallback
-        && let Some(bounds) = residency::Bounds::from_contours(&contours)
-    {
-        let mut remaining = match visible {
-            Some(visible) => visible
-                .iter()
-                .filter_map(|&r| intersection(r, footprint(bounds)))
-                .collect(),
-            None => vec![footprint(bounds)],
-        };
-        let mut ordered: Vec<_> = regions.iter().collect();
-        ordered.sort_by_key(|(key, _)| **key);
-        for (_, owned) in ordered {
-            for &r in owned {
-                remaining = remaining
-                    .into_iter()
-                    .flat_map(|space| composition::subtract(space, r))
-                    .collect();
-            }
-        }
-        let tile = LocalTileGeometry {
-            id: tile_id(bucket, (0, 0)),
-            bounds: Some(bounds),
-            contours,
-        };
-        let clipped = composition::clip_contours(&tile, &remaining);
-        merged.extend(clipped.iter().cloned());
-        if !clipped.is_empty() {
-            kept_fallback = Some(clipped);
-        }
-    }
-    merged.sort_by(|a, b| a.elevation_m.abs().total_cmp(&b.elevation_m.abs()));
-    Output {
-        contours: Arc::new(merged),
-        fallback: kept_fallback,
-    }
+fn frame(tiles: Vec<LocalTileGeometry>) -> Arc<Frame> {
+    let bytes = tiles
+        .iter()
+        .map(|t| globe_residency::gpu_bytes(&t.contours))
+        .sum();
+    Arc::new(Frame { tiles, bytes })
 }
 
 fn compose_resident(
     bucket: i32,
-    tiles: &Tiles,
-    fallback: Option<Arc<Vec<ContourPath>>>,
+    sources: &Tiles,
+    fallback: Option<Arc<Frame>>,
+    previous: HashMap<Cell, Piece>,
     view: Option<globe_residency::Viewport>,
     budget: usize,
 ) -> Output {
-    // Compose every retained source, including recently visited offscreen
-    // tiles. Geographic ownership still prevents overlapping opacity.
-    let mut output = compose_visible(bucket, tiles, fallback, None);
-    let bytes = globe_residency::gpu_bytes(&output.contours);
-    if bytes > budget
-        && let Some(fallback) = output.fallback.take()
-    {
-        // Outgoing LOD is the oldest data. Only trim it under pressure and
-        // preserve every visible gap until new terrain covers it.
-        let mut remaining = bytes;
-        let kept: Vec<_> = fallback
-            .iter()
-            .filter(|path| {
-                let visible = residency::Bounds::from_contours(std::slice::from_ref(*path))
-                    .is_some_and(|b| view.is_none_or(|v| v.intersects(footprint(b))));
-                if !visible && remaining > budget {
-                    remaining = remaining
-                        .saturating_sub(globe_residency::gpu_bytes(std::slice::from_ref(*path)));
-                    false
-                } else {
-                    true
-                }
-            })
-            .cloned()
-            .collect();
-        // Recompose ownership after dropping old offscreen fallback; selecting
-        // whole paths avoids truncating a line or joining unrelated segments.
-        output = compose_visible(
-            bucket,
-            tiles,
-            (!kept.is_empty()).then(|| Arc::new(kept)),
-            None,
+    let bounds: HashMap<_, _> = sources
+        .iter()
+        .map(|(&cell, contours)| {
+            let bounds = previous
+                .get(&cell)
+                .filter(|p| Arc::ptr_eq(&p.source, contours))
+                .map_or_else(
+                    || residency::Bounds::from_contours(contours),
+                    |p| p.raw_bounds,
+                );
+            (cell, bounds)
+        })
+        .collect();
+    let regions = ownership(bucket, sources, &bounds);
+    let mut keys: Vec<_> = sources.keys().copied().collect();
+    keys.sort();
+    let mut tiles = Vec::new();
+    let mut pieces = HashMap::new();
+    for cell in keys {
+        let source = sources[&cell].clone();
+        let owned = &regions[&cell];
+        let tile = if let Some(old) = previous.get(&cell)
+            && Arc::ptr_eq(&old.source, &source)
+            && old.regions == *owned
+        {
+            old.tile.clone()
+        } else {
+            let raw = LocalTileGeometry {
+                id: tile_id(bucket, cell),
+                contours: source.clone(),
+                bounds: bounds[&cell],
+            };
+            let contours = composition::clip_contours(&raw, owned);
+            let bounds = if Arc::ptr_eq(&contours, &source) {
+                raw.bounds
+            } else {
+                residency::Bounds::from_contours(&contours)
+            };
+            LocalTileGeometry {
+                contours,
+                bounds,
+                ..raw
+            }
+        };
+        pieces.insert(
+            cell,
+            Piece {
+                source,
+                raw_bounds: bounds[&cell],
+                regions: owned.clone(),
+                tile: tile.clone(),
+            },
         );
+        tiles.push(tile);
     }
-    output
+    // Previous generations remain disjoint tiles too. A new tile only clips
+    // fallback tiles it actually overlaps; unchanged neighbors keep their Arc.
+    let mut retained = Vec::new();
+    if let Some(fallback) = fallback {
+        let mut ordered: Vec<_> = regions.iter().collect();
+        ordered.sort_by_key(|(cell, _)| **cell);
+        for tile in &fallback.tiles {
+            let Some(bounds) = tile.bounds else {
+                continue;
+            };
+            let mut remaining = vec![footprint(bounds)];
+            for (_, owned) in &ordered {
+                for &r in *owned {
+                    remaining = remaining
+                        .into_iter()
+                        .flat_map(|space| composition::subtract(space, r))
+                        .collect();
+                }
+                if remaining.is_empty() {
+                    break;
+                }
+            }
+            let contours = composition::clip_contours(tile, &remaining);
+            if !contours.is_empty() {
+                let bounds = if Arc::ptr_eq(&contours, &tile.contours) {
+                    tile.bounds
+                } else {
+                    residency::Bounds::from_contours(&contours)
+                };
+                retained.push(LocalTileGeometry {
+                    contours,
+                    bounds,
+                    ..tile.clone()
+                });
+            }
+        }
+    }
+    let mut bytes: usize = tiles
+        .iter()
+        .chain(&retained)
+        .map(|t| globe_residency::gpu_bytes(&t.contours))
+        .sum();
+    retained.retain(|t| {
+        let visible = t
+            .bounds
+            .is_some_and(|b| view.is_none_or(|v| v.intersects(footprint(b))));
+        if !visible && bytes > budget {
+            bytes = bytes.saturating_sub(globe_residency::gpu_bytes(&t.contours));
+            false
+        } else {
+            true
+        }
+    });
+    let fallback = (!retained.is_empty()).then(|| frame(retained));
+    if let Some(fallback) = &fallback {
+        tiles.extend(fallback.tiles.iter().cloned());
+    }
+    Output {
+        frame: frame(tiles),
+        fallback,
+        pieces,
+    }
 }
 
 #[cfg(test)]

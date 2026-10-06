@@ -5,6 +5,7 @@ use std::collections::HashSet;
 static REQUESTED: OnceLock<Mutex<HashSet<ContourLayer>>> = OnceLock::new();
 
 pub(crate) fn begin_frame() {
+    tiles::begin_frame();
     REQUESTED
         .get_or_init(Default::default)
         .lock()
@@ -21,6 +22,7 @@ pub(super) fn requested(layer: ContourLayer) {
 }
 
 pub(crate) fn end_frame() {
+    tiles::end_frame();
     let keep = REQUESTED
         .get_or_init(Default::default)
         .lock()
@@ -57,6 +59,7 @@ impl egui_wgpu::CallbackTrait for Cleanup {
     ) -> Vec<wgpu::CommandBuffer> {
         if let Some(res) = resources.get_mut::<ContourPassResources>() {
             res.used.clear();
+            res.terrain.used = false;
         }
         Vec::new()
     }
@@ -70,6 +73,7 @@ impl egui_wgpu::CallbackTrait for Cleanup {
     ) -> Vec<wgpu::CommandBuffer> {
         if let Some(res) = resources.get_mut::<ContourPassResources>() {
             res.layers.retain(|layer, _| res.used.contains(layer));
+            if !res.terrain.used { res.terrain = Default::default(); }
         }
         Vec::new()
     }

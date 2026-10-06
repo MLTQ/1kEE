@@ -107,3 +107,11 @@ perspective unit-sphere horizon, existing contour layers retain zero. Size stays
   safe — the split has to hold on any device.
 
 `SegmentInstance::endpoints` exposes the immutable uploaded unit-sphere endpoints for exact, camera-independent pipeline hit indexing. Buffer layout is unchanged.
+
+Earth globe terrain uses `globe_tile_pass` persistent spatial tile batches and
+bounded uploads. Other globe layers keep their existing interface. All globe
+line quads use four-vertex triangle strips, reducing vertex shader work by a
+third without changing the covered quad or antialiasing.
+
+The terrain renderer retains the window target format for its transparent image
+cache; stationary contour frames are composited without repeating native draws.

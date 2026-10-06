@@ -19,7 +19,9 @@
 /// *  [`ContourCallback`] – constructed each frame per visible layer; its
 ///    `prepare` writes that layer's uniform slot and (re)uploads the instance
 ///    buffer if the cached version differs; its `paint` issues one
-///    `draw(0..6, 0..segment_count)`.
+///    `draw(0..4, 0..segment_count)`.
+/// * Native Earth terrain uses `tiles` for persistent spatial batches, bounded
+///   uploads, and a cached stationary image with all-plane refinement.
 use eframe::egui_wgpu;
 use eframe::wgpu;
 use eframe::wgpu::util::DeviceExt;
@@ -306,6 +308,8 @@ fn instance_cache() -> &'static Mutex<HashMap<ContourLayer, LayerInstances>> {
 #[path = "contour_lifecycle.rs"]
 mod lifecycle;
 pub(crate) use lifecycle::{begin_frame, end_frame, residency_callback};
+#[path = "globe_tile_pass.rs"]
+pub(crate) mod tiles;
 
 /// Complete a single-flight build. A failed build deliberately retains the
 /// previous instance set, but always releases the marker so a later repaint
@@ -420,6 +424,8 @@ pub struct ContourPassResources {
     bind_group: wgpu::BindGroup,
     layers: HashMap<ContourLayer, LayerGpu>,
     used: std::collections::HashSet<ContourLayer>,
+    terrain: tiles::Gpu,
+    format: wgpu::TextureFormat,
 }
 
 struct LayerGpu {
@@ -478,9 +484,13 @@ impl ContourPassResources {
     /// Create the render pipeline and the slotted uniform buffer.
     /// Call once from `DashboardApp::new`, next to `GlobePassResources::new`.
     pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+        Self::with_shader(device, target_format, CONTOUR_WGSL, wgpu::PrimitiveTopology::TriangleStrip)
+    }
+
+    fn with_shader(device: &wgpu::Device, target_format: wgpu::TextureFormat, source: &str, topology: wgpu::PrimitiveTopology) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("contour_pass_shader"),
-            source: wgpu::ShaderSource::Wgsl(CONTOUR_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
         });
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -565,7 +575,7 @@ impl ContourPassResources {
                 })],
             }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
+                topology,
                 ..Default::default()
             },
             depth_stencil: None,
@@ -580,6 +590,8 @@ impl ContourPassResources {
             bind_group,
             layers: HashMap::new(),
             used: Default::default(),
+            terrain: Default::default(),
+            format: target_format,
         }
     }
 }
@@ -718,7 +730,7 @@ impl egui_wgpu::CallbackTrait for ContourCallback {
                 continue;
             }
             render_pass.set_vertex_buffer(0, chunk.buffer.slice(..));
-            render_pass.draw(0..6, 0..chunk.count);
+            render_pass.draw(0..4, 0..chunk.count);
         }
     }
 }

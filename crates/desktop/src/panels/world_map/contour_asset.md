@@ -1,7 +1,7 @@
 # contour_asset.rs
 
 ## Purpose
-Loads contour geometry from disk into in-memory render caches for both local terrain and globe views. It merges per-tile SQLite assets into draw-ready polyline sets while avoiding UI-thread stalls.
+Loads contour geometry from disk into in-memory render caches for both local terrain and globe views. It prepares per-tile SQLite assets for drawing while avoiding UI-thread stalls. Earth globe output retains tile batches; other callers can use merged polylines.
 
 ## Components
 
@@ -47,7 +47,7 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 
 ### `GlobeRegionCache`
 - **Does**: Retains visible globe-mode tiles across orbit movement, tracks in-flight
-  background loads, and memoizes the merged contour `Arc` behind a monotonic
+  background loads, and memoizes the composed tile frame behind a monotonic
   tile-set revision while its tile set is unchanged.
 - **Interacts with**: `load_srtm_for_globe`, `load_lunar_for_globe`.
 - Earth uses `globe_contour_merge` to partition overlapping legacy footprints
@@ -66,7 +66,7 @@ Loads contour geometry from disk into in-memory render caches for both local ter
   coverage, trimming old offscreen paths only under pressure. Camera movement
   refreshes last use without forcing full composition or GPU instance rebuilds.
 
-### `render_globe_tiles` / `merged_partitioned_local_contours`
+### `render_globe_tiles` / `merged_partitioned_local_contours` (Moon/Mars)
 
 - **Does**: Return stable merged `Arc`s until the underlying tile set changes;
   the latter also preserves the exclusive-region filter needed for overlapping
@@ -226,3 +226,13 @@ prepare a new grid without erasing what is drawn. Manual reset clears both.
 
 The merge-publication regression pins tile metadata to the CPU generation that
 actually contains it, including empty cells and arrivals between snapshots.
+
+### Native globe performance
+Earth now returns `globe_merge::Frame` with persistent disjoint tile handles,
+not a deep flattened contour copy. Its separate Earth state retains partitioned
+fallback across zoom changes. `globe_manifest` runs root/database/build selection
+on one coalesced worker, with epoch/key checked 350 ms snapshots. Drawing frames
+perform no Earth globe SQLite queries. Moon/Mars keep the prior layer interface.
+
+`globe_reader` publishes Earth tiles individually on the single reader. The
+first completed center tile can compose and stage while neighbors still decode.

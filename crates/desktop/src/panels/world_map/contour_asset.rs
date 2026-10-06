@@ -22,7 +22,11 @@ use selection::ReadSelection;
 #[path = "contour_fallback.rs"]
 mod fallback;
 #[path = "globe_contour_merge.rs"]
-mod globe_merge;
+pub(crate) mod globe_merge;
+#[path = "globe_manifest.rs"]
+mod globe_manifest;
+#[path = "globe_reader.rs"]
+mod globe_reader;
 #[path = "globe_residency.rs"]
 pub(crate) mod globe_residency;
 use reader::spawn_local_read;
@@ -282,6 +286,8 @@ struct LocalMergeWork {
 /// Earth sources use byte-budgeted offscreen LRU retention. Visible terrain and
 /// the published picture survive while a replacement is composed.
 struct GlobeRegionCache {
+    earth: globe_merge::State,
+    manifest: globe_manifest::State,
     residency: globe_residency::Residency,
     zoom_bucket: i32,
     root: Option<PathBuf>,
@@ -320,6 +326,8 @@ struct GlobeRegionCache {
 impl Default for GlobeRegionCache {
     fn default() -> Self {
         Self {
+            earth: Default::default(),
+            manifest: Default::default(),
             residency: globe_residency::Residency::default(),
             zoom_bucket: -1,
             root: None,
@@ -358,6 +366,8 @@ impl GlobeRegionCache {
     }
 
     fn reset_all(&mut self) {
+        self.earth = Default::default();
+        self.manifest.invalidate();
         self.zoom_bucket = -1;
         self.root = None;
         self.zoom_fallback = None;
@@ -1488,16 +1498,14 @@ pub fn load_srtm_for_globe(
     center: GeoPoint,
     zoom: f32,
     ctx: egui::Context,
-) -> Option<Arc<Vec<ContourPath>>> {
+) -> Option<Arc<globe_merge::Frame>> {
     // Choose by viewport coverage as well as zoom. Bucket one is the finest
     // globe tier; wide screens can use bucket zero and a larger core window.
     let cache: &'static Mutex<GlobeRegionCache> =
         GLOBE_CONTOUR_CACHE.get_or_init(|| Mutex::new(GlobeRegionCache::default()));
     let view = cache.lock().ok()?.residency.view;
     let (tile_zoom, radius) = globe_residency::source_spec(view, center, zoom);
-    let assets = srtm_focus_cache::ensure_focus_contour_region(
-        selected_root, center, tile_zoom, radius, radius,
-    );
+    let assets = globe_manifest::assets(cache, selected_root, center, tile_zoom, radius, &ctx);
     let mut guard = cache.lock().ok()?;
 
     let zoom_bucket = srtm_focus_cache::zoom_bucket_for_zoom(tile_zoom);
@@ -1506,8 +1514,8 @@ pub fn load_srtm_for_globe(
     // Retain the already composed picture across zoom changes, never across
     // data roots. Snapshotting raw wide tiles here would restore overlap.
     if guard.zoom_bucket != zoom_bucket || guard.root != root {
-        guard.zoom_fallback = (guard.root == root)
-            .then(|| guard.merged.clone().or_else(|| guard.zoom_fallback.clone())).flatten();
+        let same_root = guard.root == root;
+        guard.earth.transition(same_root);
         guard.zoom_bucket = zoom_bucket;
         guard.root = root;
         guard.clear_tiles_for_new_scene();
@@ -1530,14 +1538,7 @@ pub fn load_srtm_for_globe(
     drop(guard);
 
     if let Some((epoch, requests)) = read {
-        spawn_globe_read(
-            cache,
-            epoch,
-            requests,
-            usize::MAX, // partition full legacy footprints before any display selection
-            ctx.clone(),
-            "earth-globe-contour-read",
-        );
+        globe_reader::spawn(cache, epoch, requests, ctx.clone());
     }
 
     // Re-acquire lock to render and evict from whatever is currently cached.

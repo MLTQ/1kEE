@@ -18,3 +18,7 @@ temporary SQLite files, never the operator's cache or camera services.
 A loopback HTTP proxy fixture drives actual discovery, cached reuse, endpoint-only
 rechecking, failed removal and explicit rediscovery. Exact request counts prove
 that ordinary polls and empty caches make no requests. No external host is contacted.
+
+Accepted fixture sockets explicitly use blocking reads with a timeout. macOS
+inherits the nonblocking listener mode; leaving it enabled made a valid request
+race the first read and fail with `WouldBlock` in optimized test builds.

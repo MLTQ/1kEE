@@ -78,17 +78,15 @@ fn vs_main(in: VsIn) -> VsOut {
         return out;
     }
 
-    // Quad corner from vertex index: two triangles (0,1,2) (3,4,5).
+    // Four-corner strip: two triangles share their endpoints.
     // t = position along the segment, side = perpendicular sign.
     var t: f32;
     var side: f32;
     switch in.vidx {
         case 0u: { t = 0.0; side = -1.0; }
         case 1u: { t = 1.0; side = -1.0; }
-        case 2u: { t = 1.0; side = 1.0; }
-        case 3u: { t = 0.0; side = -1.0; }
-        case 4u: { t = 1.0; side = 1.0; }
-        default: { t = 0.0; side = 1.0; }
+        case 2u: { t = 0.0; side = 1.0; }
+        default: { t = 1.0; side = 1.0; }
     }
 
     var dir = pb.xy - pa.xy;

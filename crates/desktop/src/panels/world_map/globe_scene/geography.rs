@@ -467,26 +467,8 @@ pub(super) fn draw_srtm_on_globe(
 
     // Same altitude offset as coastlines so SRTM contours sit on the sphere
     // surface and don't parallax against the coastline layer.
-    let batch = contour_pass::instances_for(
-        ContourLayer::SrtmGlobe,
-        &contours,
-        contour_pass::palette_key(major_color, minor_color),
-        painter.ctx(),
-        move |contour| {
-            let major = (contour.elevation_m.round() as i32).rem_euclid(50) == 0;
-            if major { major_color } else { minor_color }
-        },
-    );
-    paint_contour_layer(
-        painter,
-        layout,
-        view,
-        ContourLayer::SrtmGlobe,
-        batch,
-        0.020,
-        alpha * 0.92,
-        contour_stroke_width_px,
-    );
+    contour_pass::tiles::paint(painter, layout, view, &contours, major_color, minor_color,
+        alpha * 0.92, contour_stroke_width_px);
 }
 
 /// Draw lunar contour lines and feature labels on the globe when Moon Mode is active.
