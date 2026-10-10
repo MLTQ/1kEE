@@ -349,8 +349,12 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
                 // ── Right-aligned controls ────────────────────────────────
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
-                        .small_button("OBS VIEW")
-                        .on_hover_text("Clean map with pips, open Factal brief and live camera. F10 toggles; Esc restores controls. In OBS, capture this window.")
+                        .add(
+                            egui::Button::new(egui::RichText::new("Focus").color(inactive_text).small())
+                                .fill(egui::Color32::TRANSPARENT)
+                                .corner_radius(4.0),
+                        )
+                        .on_hover_text("Hide controls to focus on the map, keeping markers, open briefs and live camera visible. F10 toggles; Esc restores controls.")
                         .clicked()
                     {
                         model.obs_view = true;

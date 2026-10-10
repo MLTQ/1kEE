@@ -5,8 +5,9 @@ Implements the main geographic canvas for the demo. The current version wraps an
 
 ## Components
 
-### OBS capture view
-- The OBS VIEW button enters `AppModel::obs_view`; F10 and Escape are handled
+### Focus view
+- The Focus button uses the toolbar's small muted text, transparent fill and
+  4-point corners. It enters `AppModel::obs_view`; F10 and Escape are handled
   by the app shell. The canvas fills its panel without the layer bar, footer,
   rounded inset frame, replay controls, hover cards, or operator detail windows.
 - Live marker rendering, selection, camera movement, polling and terrain
