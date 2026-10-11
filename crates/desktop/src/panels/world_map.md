@@ -72,6 +72,8 @@ on-screen event anchors after the camera reaches its arrival zoom, in both Globe
 and Local, including Focus capture. Cards fade out on departure and stay hidden
 during wide travel; opacity comes from the actual flight timing. Cards
 show severity, headline and location, with nearby placement and leader lines.
+Card slots stay fixed during dwell while their leader lines track orbiting
+markers. New cards fit around established ones; hidden travel resets the layout.
 They do not capture input or depend on hovering; normal event hover cards resume
 when follow stops. Event-marker visibility controls apply to these cards too.
 

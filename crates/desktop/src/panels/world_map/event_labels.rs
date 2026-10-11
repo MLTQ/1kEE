@@ -2,12 +2,14 @@
 use super::marker_style::MapMarker;
 use crate::model::EventRecord;
 use crate::theme;
-use egui::{Pos2, Rect, Vec2};
+use egui::{Rect, Vec2};
 use std::collections::HashMap;
 
 const PADDING: f32 = 8.0;
 const FIELD_GAP: f32 = 4.0;
-const CARD_GAP: f32 = 6.0;
+
+#[path = "event_label_layout.rs"]
+mod layout;
 
 pub(super) fn draw<'a>(
     painter: &egui::Painter,
@@ -16,7 +18,13 @@ pub(super) fn draw<'a>(
     markers: &[MapMarker],
     opacity: f32,
 ) {
+    let layout_id = egui::Id::new("follow_event_card_layout");
+    let mut layout = painter.ctx().data_mut(|data| {
+        data.remove_temp::<layout::Layout>(layout_id)
+            .unwrap_or_default()
+    });
     // Skip text lookup/layout and collision placement during wide transitions.
+    // Dropping the old layout here lets the next stop choose fresh slots.
     if opacity <= 0.0 {
         return;
     }
@@ -24,9 +32,11 @@ pub(super) fn draw<'a>(
     if bounds.width() <= PADDING * 2.0 || bounds.height() <= PADDING * 2.0 {
         return;
     }
+    let now = painter.ctx().input(|input| input.time);
+    layout.begin_frame(bounds, now);
     let markers: HashMap<_, _> = markers
         .iter()
-        .filter(|marker| viewport.contains(marker.base))
+        .filter(|marker| layout.accepts_anchor(&marker.id, marker.base, viewport))
         .map(|marker| (marker.id.as_str(), marker))
         .collect();
     let mut visible: Vec<_> = events
@@ -44,7 +54,7 @@ pub(super) fn draw<'a>(
     painter.multiply_opacity(opacity);
     let style = painter.ctx().style();
     let width = 220.0_f32.min(bounds.width() - PADDING * 2.0);
-    let mut occupied = Vec::with_capacity(visible.len());
+    let mut requests = Vec::with_capacity(visible.len());
     let mut cards = Vec::with_capacity(visible.len());
     for (event, marker) in visible {
         let fields = [
@@ -77,20 +87,27 @@ pub(super) fn draw<'a>(
                 + PADDING * 2.0,
             text.iter().map(|line| line.size().y).sum::<f32>() + FIELD_GAP * 2.0 + PADDING * 2.0,
         );
-        let rect = place_card(marker.base, size, bounds, &occupied);
-        occupied.push(rect);
-        cards.push((rect, marker.base, event.severity.color(), text));
+        requests.push(layout::Request {
+            id: &event.id,
+            anchor: marker.base,
+            size,
+        });
+        cards.push((marker.base, event.severity.color(), text));
     }
+    let positions = layout.place(&requests, now);
+    painter
+        .ctx()
+        .data_mut(|data| data.insert_temp(layout_id, layout));
 
     // Leaders sit beneath every card, and all shapes stay on the map's layer:
     // they cannot intercept navigation or cover the floating brief/feed windows.
-    for (rect, anchor, color, _) in &cards {
+    for (rect, (anchor, color, _)) in positions.iter().zip(&cards) {
         painter.line_segment(
             [*anchor, rect.clamp(*anchor)],
             egui::Stroke::new(1.0, color.gamma_multiply(0.65)),
         );
     }
-    for (rect, _, _, text) in cards {
+    for (rect, (_, _, text)) in positions.into_iter().zip(cards) {
         painter.rect(
             rect,
             8.0,
@@ -105,55 +122,6 @@ pub(super) fn draw<'a>(
             pos.y += height + FIELD_GAP;
         }
     }
-}
-
-/// Prefer nearby space without collisions. A fixed candidate count bounds work
-/// during camera motion; crowded views still draw every card, without a cap.
-fn place_card(anchor: Pos2, size: Vec2, bounds: Rect, occupied: &[Rect]) -> Rect {
-    let fit = |pos: Pos2| {
-        Rect::from_min_size(
-            egui::pos2(
-                pos.x
-                    .clamp(bounds.left(), (bounds.right() - size.x).max(bounds.left())),
-                pos.y
-                    .clamp(bounds.top(), (bounds.bottom() - size.y).max(bounds.top())),
-            ),
-            size,
-        )
-    };
-    let mut best = fit(anchor + egui::vec2(14.0, -8.0));
-    let mut best_score = (f32::INFINITY, f32::INFINITY);
-    for column in 0..3 {
-        for row in [0, -1, 1, -2, 2, -3, 3] {
-            for right in [true, false] {
-                let offset = 14.0 + column as f32 * (size.x + CARD_GAP);
-                let x = if right {
-                    anchor.x + offset
-                } else {
-                    anchor.x - offset - size.x
-                };
-                let y = anchor.y - 8.0 + row as f32 * (size.y + CARD_GAP);
-                let candidate = fit(egui::pos2(x, y));
-                let overlap: f32 = occupied
-                    .iter()
-                    .map(|rect| {
-                        let intersection = rect.expand(CARD_GAP).intersect(candidate);
-                        if intersection.is_positive() {
-                            intersection.area()
-                        } else {
-                            0.0
-                        }
-                    })
-                    .sum();
-                let score = (overlap, candidate.center().distance_sq(anchor));
-                if score < best_score {
-                    best = candidate;
-                    best_score = score;
-                }
-            }
-        }
-    }
-    best
 }
 
 #[cfg(test)]
