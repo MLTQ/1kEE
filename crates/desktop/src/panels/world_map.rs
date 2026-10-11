@@ -24,6 +24,7 @@ mod layer_import;
 mod local_terrain_scene;
 mod map_detail_panels;
 mod map_tooltips;
+mod event_labels;
 mod marker_style;
 mod road_layer;
 #[path = "world_map/srtm_focus_cache/mod.rs"]
@@ -225,8 +226,12 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
             }
         }
 
-        // Markers remain interactive, but transient operator cards do not go
-        // on air. The app shell separately renders the open brief/live camera.
+        if model.event_follow.enabled() {
+            event_labels::draw(&painter, rect, model.map_events(), &scene.event_markers);
+        }
+
+        // Persistent tour cards remain in Focus; transient hover/detail panels
+        // stay hidden. The app shell renders the open brief/live camera.
         if model.obs_view {
             return;
         }
@@ -235,7 +240,9 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
             infrastructure_hover::prefer_landing();
         }
         if !infrastructure_hover::show(ui.ctx()) {
-            map_tooltips::draw_event_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
+            if !model.event_follow.enabled() {
+                map_tooltips::draw_event_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
+            }
             map_tooltips::draw_camera_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
             map_tooltips::draw_ship_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
             map_tooltips::draw_flight_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());

@@ -9,7 +9,7 @@ Implements the main geographic canvas for the demo. The current version wraps an
 - The Focus button uses the toolbar's small muted text, transparent fill and
   4-point corners. It enters `AppModel::obs_view`; F10 and Escape are handled
   by the app shell. The canvas fills its panel without the layer bar, footer,
-  rounded inset frame, replay controls, hover cards, or operator detail windows.
+  rounded inset frame, replay controls, transient hover cards, or operator detail windows.
 - Live marker rendering, selection, camera movement, polling and terrain
   preparation continue. Factal and live-camera windows are owned by `app.rs`.
 
@@ -66,6 +66,12 @@ FOLLOW EVENTS sits beside MEANDER in cinematic mode on Earth. It retains the cho
 
 The FOLLOW EVENTS tooltip describes the six-stop severity tour, travel capped at
 ten seconds with faster nearby hops, and ten-second orbit dwell.
+
+While FOLLOW EVENTS is enabled, `event_labels` paints persistent cards for all
+on-screen event anchors in both Globe and Local, including Focus capture. Cards
+show severity, headline and location, with nearby placement and leader lines.
+They do not capture input or depend on hovering; normal event hover cards resume
+when follow stops. Event-marker visibility controls apply to these cards too.
 
 The canvas submits local line residency cleanup on every frame. Its finish-prepare
 callback drops unused contour/road GPU buffers after all live batches are marked.
