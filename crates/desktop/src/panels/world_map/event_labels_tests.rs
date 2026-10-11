@@ -2,6 +2,30 @@ use super::*;
 use crate::model::{EventSeverity, GeoPoint};
 
 #[test]
+fn hidden_cards_skip_event_lookup_and_emit_no_shapes() {
+    let ctx = egui::Context::default();
+    let viewport = Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0));
+    let output = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(viewport),
+            ..Default::default()
+        },
+        |ctx| {
+            draw(
+                &ctx.layer_painter(egui::LayerId::background()),
+                viewport,
+                std::iter::once_with(|| -> &EventRecord {
+                    panic!("hidden cards must not inspect events")
+                }),
+                &[],
+                0.0,
+            );
+        },
+    );
+    assert!(output.shapes.is_empty());
+}
+
+#[test]
 fn clustered_events_get_separate_cards_without_leaving_the_map() {
     let bounds = Rect::from_min_size(Pos2::ZERO, egui::vec2(900.0, 650.0));
     let mut occupied = Vec::new();
@@ -72,6 +96,7 @@ fn all_visible_event_cards_render_without_a_pointer_or_tour_rank_limit() {
                 viewport,
                 events.iter(),
                 &markers,
+                1.0,
             );
         },
     );

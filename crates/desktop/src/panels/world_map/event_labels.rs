@@ -14,7 +14,12 @@ pub(super) fn draw<'a>(
     viewport: Rect,
     events: impl Iterator<Item = &'a EventRecord>,
     markers: &[MapMarker],
+    opacity: f32,
 ) {
+    // Skip text lookup/layout and collision placement during wide transitions.
+    if opacity <= 0.0 {
+        return;
+    }
     let bounds = viewport.shrink(PADDING);
     if bounds.width() <= PADDING * 2.0 || bounds.height() <= PADDING * 2.0 {
         return;
@@ -35,7 +40,8 @@ pub(super) fn draw<'a>(
     // trading places merely because the event payload was refreshed.
     visible.sort_unstable_by(|(a, _), (b, _)| a.id.cmp(&b.id));
 
-    let painter = painter.with_clip_rect(viewport);
+    let mut painter = painter.with_clip_rect(viewport);
+    painter.multiply_opacity(opacity);
     let style = painter.ctx().style();
     let width = 220.0_f32.min(bounds.width() - PADDING * 2.0);
     let mut occupied = Vec::with_capacity(visible.len());

@@ -67,8 +67,10 @@ FOLLOW EVENTS sits beside MEANDER in cinematic mode on Earth. It retains the cho
 The FOLLOW EVENTS tooltip describes the six-stop severity tour, travel capped at
 ten seconds with faster nearby hops, and ten-second orbit dwell.
 
-While FOLLOW EVENTS is enabled, `event_labels` paints persistent cards for all
-on-screen event anchors in both Globe and Local, including Focus capture. Cards
+While FOLLOW EVENTS is enabled, `event_labels` fades in persistent cards for all
+on-screen event anchors after the camera reaches its arrival zoom, in both Globe
+and Local, including Focus capture. Cards fade out on departure and stay hidden
+during wide travel; opacity comes from the actual flight timing. Cards
 show severity, headline and location, with nearby placement and leader lines.
 They do not capture input or depend on hovering; normal event hover cards resume
 when follow stops. Event-marker visibility controls apply to these cards too.

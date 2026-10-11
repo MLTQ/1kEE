@@ -227,7 +227,8 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         }
 
         if model.event_follow.enabled() {
-            event_labels::draw(&painter, rect, model.map_events(), &scene.event_markers);
+            let opacity = model.event_follow.event_label_opacity(ui.ctx().input(|input| input.time));
+            event_labels::draw(&painter, rect, model.map_events(), &scene.event_markers, opacity);
         }
 
         // Persistent tour cards remain in Focus; transient hover/detail panels

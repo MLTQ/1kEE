@@ -8,6 +8,8 @@ const MAX_FLIGHT_SECONDS: f64 = 10.0;
 const MIN_FLIGHT_SECONDS: f64 = 0.65;
 const ORBIT_SECONDS: f64 = 10.0;
 const ORBIT_RATE: f64 = 0.035;
+const LABEL_FADE_IN_SECONDS: f64 = 0.45;
+const LABEL_FADE_OUT_SECONDS: f64 = 0.25;
 // Latitude, unwrapped longitude, log zoom, local yaw, local pitch.
 type Pose = [f64; 5];
 
@@ -31,6 +33,7 @@ struct Flight {
     wide_zoom: f64,
     zoom_out: bool,
     orbit_center: GeoPoint,
+    departure_label_opacity: f32,
 }
 
 impl EventFollow {
@@ -42,6 +45,37 @@ impl EventFollow {
     }
     pub fn moving(&self) -> bool {
         self.enabled && self.flight.is_some()
+    }
+
+    /// Regional cards appear only after arrival at the flight's destination
+    /// zoom. Capture their current alpha on departure to fade out continuously,
+    /// including when a new event interrupts an unfinished fade.
+    pub fn event_label_opacity(&self, now: f64) -> f32 {
+        let Some(flight) = self.flight.as_ref().filter(|_| self.enabled) else {
+            return 0.0;
+        };
+        let elapsed = (now - flight.started).max(0.0);
+        if elapsed >= flight.duration {
+            curve(
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                elapsed - flight.duration,
+                LABEL_FADE_IN_SECONDS,
+            )
+            .0 as f32
+        } else {
+            curve(
+                flight.departure_label_opacity as f64,
+                0.0,
+                0.0,
+                0.0,
+                elapsed,
+                LABEL_FADE_OUT_SECONDS,
+            )
+            .0 as f32
+        }
     }
 
     pub fn tour_position(&self) -> Option<(usize, usize)> {
@@ -103,7 +137,9 @@ impl EventFollow {
             if self.flight.is_none() {
                 self.velocity = view_velocity(view);
             }
-            self.flight = Some(Flight::new(view, self.velocity, event.location, now));
+            let mut flight = Flight::new(view, self.velocity, event.location, now);
+            flight.departure_label_opacity = self.event_label_opacity(now);
+            self.flight = Some(flight);
             let id = event.id.clone();
             self.target = Some(event);
             id
@@ -227,6 +263,7 @@ impl Flight {
             wide_zoom,
             zoom_out: excursion > 0.05,
             orbit_center: center,
+            departure_label_opacity: 0.0,
         }
     }
 

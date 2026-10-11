@@ -12,3 +12,7 @@ retarget and orbit-entry continuity (including zoom phases of short flights) in 
 retention and manual/replay cancellation. A headless egui regression paints the
 cinematic brief after its record leaves the live page and checks placement to the
 right of map center.
+
+Card-opacity regressions cover hidden initial/wide travel, arrival at the actual
+Globe/Local landing zoom, eased fade-in and departure fade-out, cancellation,
+unchanged payload refresh, and continuity when a retarget interrupts a fade.

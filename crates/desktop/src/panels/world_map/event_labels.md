@@ -16,11 +16,14 @@ tour ranking and of pointer position.
   and then proximity. Cards stay inside the viewport where their size permits.
   If the viewport is too crowded, cards still render rather than being capped.
 - Leader lines connect displaced cards to their original marker positions.
+- The supplied controller opacity fades text, backgrounds, borders and leader
+  lines together. Zero opacity skips event lookup, layout and placement entirely.
 
 ## Contracts
 
 - `world_map.rs` calls this only while Follow Events is enabled, before the Focus
-  early return, and suppresses the duplicate event hover card in that mode.
+  early return, supplies its arrival/departure opacity, and suppresses the
+  duplicate event hover card in that mode. Cards are hidden during wide travel.
 - Uses scene visibility and marker filtering; never reprojects geographic data
   or resurrects hidden layers, far-side globe events or offscreen anchors.
 - Painter-only output does not capture clicks or hover, create egui windows,

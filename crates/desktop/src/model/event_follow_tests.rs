@@ -26,6 +26,66 @@ fn event(id: &str, lat: f32, lon: f32, minute: u8) -> EventRecord {
 }
 
 #[test]
+fn regional_cards_fade_only_after_arrival_and_disappear_during_wide_travel() {
+    for local in [false, true] {
+        let mut view = GlobeViewState::from_focus(GeoPoint { lat: 0.0, lon: 0.0 });
+        view.local_mode = local;
+        let mut follow = EventFollow::default();
+        assert_eq!(follow.event_label_opacity(0.0), 0.0);
+        follow.enable(&[event("a", 30.0, 60.0, 2), event("b", -30.0, -60.0, 1)]);
+        assert_eq!(follow.event_label_opacity(0.0), 0.0);
+        assert_eq!(follow.tick(&mut view, 0.0).as_deref(), Some("factal-a"));
+        let arrival = follow.flight.as_ref().unwrap().duration;
+        for step in 0..=10 {
+            assert_eq!(
+                follow.event_label_opacity(arrival * step as f64 / 10.0),
+                0.0
+            );
+        }
+        follow.tick(&mut view, arrival);
+        let zoom = if local { view.local_zoom } else { view.zoom };
+        assert!((zoom - if local { 9.5 } else { 35.0 }).abs() < 0.001);
+        assert!((follow.event_label_opacity(arrival + 0.225) - 0.5).abs() < 0.001);
+        assert_eq!(follow.event_label_opacity(arrival + 1.0), 1.0);
+
+        let departure = arrival + ORBIT_SECONDS;
+        assert_eq!(
+            follow.tick(&mut view, departure).as_deref(),
+            Some("factal-b")
+        );
+        assert_eq!(follow.event_label_opacity(departure), 1.0);
+        assert!((follow.event_label_opacity(departure + 0.125) - 0.5).abs() < 0.001);
+        assert_eq!(follow.event_label_opacity(departure + 0.25), 0.0);
+        let next_arrival = departure + follow.flight.as_ref().unwrap().duration;
+        assert_eq!(follow.event_label_opacity(next_arrival - 0.01), 0.0);
+        assert_eq!(follow.event_label_opacity(next_arrival), 0.0);
+        assert_eq!(follow.event_label_opacity(next_arrival + 1.0), 1.0);
+        follow.stop();
+        assert_eq!(follow.event_label_opacity(next_arrival + 1.0), 0.0);
+    }
+}
+
+#[test]
+fn event_refresh_does_not_restart_fades_and_retarget_preserves_current_opacity() {
+    let mut view = GlobeViewState::from_focus(GeoPoint { lat: 0.0, lon: 0.0 });
+    let mut follow = EventFollow::default();
+    let a = event("a", 30.0, 60.0, 1);
+    follow.enable(std::slice::from_ref(&a));
+    follow.tick(&mut view, 0.0);
+    let now = follow.flight.as_ref().unwrap().duration + 0.225;
+    let opacity = follow.event_label_opacity(now);
+    assert!((opacity - 0.5).abs() < 0.001);
+    follow.observe(std::slice::from_ref(&a));
+    assert_eq!(follow.tick(&mut view, now), None);
+    assert_eq!(follow.event_label_opacity(now), opacity);
+    follow.observe(&[a, event("b", -30.0, -60.0, 2)]);
+    assert_eq!(follow.tick(&mut view, now).as_deref(), Some("factal-b"));
+    assert_eq!(follow.event_label_opacity(now), opacity);
+    assert!(follow.event_label_opacity(now + 0.125) < opacity);
+    assert_eq!(follow.event_label_opacity(now + 0.25), 0.0);
+}
+
+#[test]
 fn unchanged_refresh_preserves_the_current_stop_and_newest_breaks_severity_ties() {
     let a = event("a", 10.0, 20.0, 1);
     let b = event("b", 30.0, 40.0, 2);

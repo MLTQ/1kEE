@@ -7,6 +7,7 @@ Checks persistent event-card behavior without loading settings, terrain or feeds
 ## Coverage
 
 - Eight colocated events receive separate, in-bounds cards when space permits.
+- Fully hidden cards do not read the event iterator or emit any paint shapes.
 - Anchors at each viewport corner keep readable cards inside the map.
 - A real headless egui frame with no pointer paints all eight visible headlines
   and severity labels, exceeding the six-stop tour size. Offscreen and absent
