@@ -16,7 +16,8 @@ pub fn render_factal_brief(ctx: &egui::Context, model: &mut AppModel) {
     };
 
     let tour_position = model.event_follow.tour_position();
-    let mut window = egui::Window::new("Factal Brief")
+    let mut window = egui::Window::new("Brief")
+        .id(egui::Id::new("Factal Brief"))
         .open(&mut model.factal_brief_open)
         .default_width(520.0)
         .default_height(560.0)
@@ -37,7 +38,6 @@ pub fn render_factal_brief(ctx: &egui::Context, model: &mut AppModel) {
             ui.colored_label(event.severity.color(), event.severity.label());
             ui.label(event.location_name.as_str());
             ui.small(format!("Occurred: {}", event.occurred_at));
-            ui.small(format!("Source: {}", event.source));
 
             ui.add_space(10.0);
             ui.colored_label(theme::text_muted(), "Summary");
@@ -48,7 +48,7 @@ pub fn render_factal_brief(ctx: &egui::Context, model: &mut AppModel) {
                 .num_columns(2)
                 .spacing([10.0, 6.0])
                 .show(ui, |ui| {
-                    ui.colored_label(theme::text_muted(), "Factal id");
+                    ui.colored_label(theme::text_muted(), "Event id");
                     ui.label(brief.factal_id.as_str());
                     ui.end_row();
 
@@ -85,7 +85,7 @@ pub fn render_factal_brief(ctx: &egui::Context, model: &mut AppModel) {
 
             if let Some(content) = &brief.content {
                 ui.add_space(10.0);
-                ui.colored_label(theme::text_muted(), "Factal content");
+                ui.colored_label(theme::text_muted(), "Content");
                 ui.label(content.as_str());
             }
 
@@ -100,7 +100,7 @@ pub fn render_factal_brief(ctx: &egui::Context, model: &mut AppModel) {
             }
 
             ui.add_space(10.0);
-            ui.collapsing("Raw Factal payload", |ui| {
+            ui.collapsing("Raw payload", |ui| {
                 egui::ScrollArea::vertical()
                     .max_height(260.0)
                     .show(ui, |ui| {

@@ -81,7 +81,12 @@ impl CameraFeedViewer {
             .show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.colored_label(camera.status.color(), camera.status.label());
-                    ui.strong(&camera.provider);
+                    ui.strong(
+                        camera
+                            .provider
+                            .strip_prefix("Project Eyes On · ")
+                            .unwrap_or(&camera.provider),
+                    );
                     ui.label(&camera.kind);
                     ui.label(format!(
                         "{:.4}°, {:.4}°",

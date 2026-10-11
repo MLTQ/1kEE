@@ -1,7 +1,7 @@
 # factal_brief.rs
 
 ## Purpose
-Renders the operator-facing Factal detail window for the currently selected live event. This keeps the raw/private-source payload display separate from the main map shell and event list.
+Renders the operator-facing Brief window for the currently selected live event. This keeps the raw/private-source payload display separate from the main map shell and event list.
 
 ## Components
 
@@ -20,6 +20,9 @@ Renders the operator-facing Factal detail window for the currently selected live
 ## Notes
 - Non-Factal demo events close the window automatically because they do not carry a raw Factal payload.
 - The raw JSON is shown read-only so the window is an inspection surface, not an editor.
+- Visible window and field labels use neutral wording and omit the source-brand
+  row. Source metadata and raw payload contents remain intact. The original
+  window ID preserves ordinary brief placement across the title change.
 
 Event-follow mode uses a separate, narrower right-anchored window placement with vertical scrolling to keep the map center clear. Ordinary brief placement is preserved separately. The window can be closed during an orbit; the next new target reopens it.
 

@@ -49,3 +49,6 @@ uploads the most recent decoded frame to an egui texture.
   request already blocked in the HTTP client may take up to its timeout to exit.
 - Video containers such as HLS/MP4 are reported as unsupported until a video
   decoder is added.
+- The feed window omits the `Project Eyes On · ` provider prefix, showing only
+  the underlying source name (for example, Insecam). Registry metadata is kept
+  intact and other provider names display as supplied.
