@@ -2,22 +2,22 @@
 
 ## Purpose
 
-Drapes a server-rendered 3DEP multidirectional hillshade over the local terrain
-surface. This is distinct from the elevation fill, which shades a 60×60
-interpolated mesh: the image service renders from its own 1 m source, so the
-relief detail is finer than the fill mesh can express.
+Projects a server-rendered 3DEP multidirectional hillshade onto the local
+sea-level plane. The image service supplies relief shading from its own source
+elevation data; this independent overlay creates no elevation surface and does
+not occlude contours.
 
 ## Components
 
 ### `draw_hillshade`
 
 - **Does**: Builds a 48×48 drape mesh over the cached texture's bounds,
-  projecting each vertex through `project_local` at its surface elevation, and
+  projecting each vertex through `project_local` at sea level, and
   paints it as a single textured mesh.
-- **Interacts with**: `projection::project_local`, `ElevationSurface`,
+- **Interacts with**: `projection::project_local`,
   `local_terrain_scene::render_local_terrain_scene`.
-- **Rationale**: Draping on the projected surface keeps the shade registered
-  with the contours and markers instead of floating as a flat overlay.
+- **Rationale**: Retains the projection previously used with terrain fill off.
+  The image conveys relief but is not draped over contour elevations.
   Unprojectable vertices drop only the cells that touch them.
 
 ### `ensure_requested` / `upload_pending`
@@ -33,7 +33,7 @@ relief detail is finer than the fill mesh can express.
 - **Does**: Converts the greyscale PNG into a premultiplied image whose alpha
   carries the shading — lit ground is transparent, shadow is dark.
 - **Rationale**: Painting darkness as alpha rather than opaque grey keeps the
-  contour and fill colours below visible through lit slopes.
+  underlying map visible through lit slopes.
 
 ## Contracts
 

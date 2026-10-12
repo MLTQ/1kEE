@@ -84,3 +84,6 @@ together; unrelated point layers retain their own styles.
 Webcams has an independent Nearby camera links toggle, initially off and
 disabled while webcams are hidden. Its tooltip explains the 250 km proximity
 rule and distinguishes it from viewing direction or incident footage.
+
+Terrain controls no longer expose the removed Terrain fill layer. Hillshade
+(3DEP) remains an independent optional local Earth image overlay.

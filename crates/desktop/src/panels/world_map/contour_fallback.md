@@ -46,3 +46,6 @@ followed by an offline fine-cache upgrade.
 The scene supplies source zoom separately from camera zoom. Fine/base coverage
 and the base envelope use the actual camera footprint; a coarser selected source
 never changes screen scale or expands fallback requests to its nominal camera.
+
+The selected source tier supplies CPU contour geometry and GPU batches; it
+no longer feeds an interpolated elevation-fill mesh.

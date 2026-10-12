@@ -3,25 +3,24 @@
 ## Purpose
 
 Draws local-terrain event and camera markers at terrain-relative elevations.
-It anchors them to the displayed fill mesh when available, while keeping paint
-responsive when an Earth-only raw SRTM fallback is needed.
+It samples the Earth elevation cache without blocking paint, then adds the
+existing small clearance for the ground glyph.
 
 ## Components
 
 ### `marker_surface_elevation_m`
 
-- **Does**: Prefers a supplied elevation sampled from the currently displayed
-  fill mesh, applies the named glyph clearance, and uses nonblocking SRTM only
-  as an Earth fallback.
+- **Does**: Samples cached Earth elevations and applies glyph clearance. A cache
+  miss schedules background preload and temporarily uses sea level.
 - **Interacts with**: `local_terrain_scene/mod.rs` and `srtm_stream.rs`.
-- **Rationale**: The fill mesh is an interpolated contour/GEBCO surface, so it
-  is the only source that can guarantee the glyph lies on the pixels drawn.
+- **Rationale**: Marker rendering must not decode rasters or fetch source data
+  on the UI thread. No interpolated fill surface is accepted or retained.
 
 ## Contracts
 
 | Dependent | Expects | Breaking changes |
 |---|---|---|
-| Local scene | Markers use its displayed fill-surface elevation when supplied | Sampling an unrelated terrain source while a fill mesh is visible |
+| Local scene | Anchors use nonblocking Earth elevation samples plus clearance | Introducing blocking I/O or changing clearance |
 | SRTM stream | Marker cache misses request only nonblocking preload work | Replacing background layer exact-sample behavior |
 
 ## Notes

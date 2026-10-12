@@ -10,8 +10,7 @@ use super::ProjectedLocalPoint;
 pub(super) const EVENT_BEAM_HEIGHT: f32 = 110.0;
 pub(super) const CAMERA_BEAM_HEIGHT: f32 = 76.0;
 
-/// Small visual clearance that prevents glyph strokes from z-fighting with the
-/// terrain mesh while keeping their perceived ground contact on the surface.
+/// Small visual clearance above the sampled terrain for marker ground strokes.
 pub(super) const MARKER_SURFACE_CLEARANCE_M: f32 = 18.0;
 
 pub(super) fn draw_camera_links(
@@ -67,20 +66,18 @@ pub(super) fn draw_event_marker(
     painter.circle_filled(ground.pos, 2.2 * scale, col);
 }
 
-/// Returns a marker anchor height above the terrain that is visibly rendered
-/// this frame. The local scene supplies `displayed_surface_elevation_m` from
-/// its fill mesh; raw SRTM remains an Earth-only nonblocking fallback for
-/// contour-only frames.
+/// Returns a marker anchor height from the nonblocking Earth elevation cache.
+/// Other bodies never request Earth data; uncached heights use sea level until
+/// a background preload completes.
 pub(super) fn marker_surface_elevation_m(
     active_body: ActiveBody,
     selected_root: Option<&Path>,
     point: GeoPoint,
-    displayed_surface_elevation_m: Option<f32>,
 ) -> f32 {
     // Marker paint must never be the first caller that decodes a full SRTM
     // raster or runs gdal_translate. Keep the existing fallback for the short
     // preload window, then repaint at the exact elevation once it is cached.
-    let terrain_elevation_m = displayed_surface_elevation_m.unwrap_or_else(|| match active_body {
+    let terrain_elevation_m = match active_body {
         ActiveBody::Earth => {
             srtm_stream::peek_elevation_m(selected_root, point).unwrap_or_else(|| {
                 srtm_stream::request_elevation_preload(selected_root, point);
@@ -88,6 +85,6 @@ pub(super) fn marker_surface_elevation_m(
             })
         }
         ActiveBody::Moon | ActiveBody::Mars => 0.0,
-    });
+    };
     terrain_elevation_m + MARKER_SURFACE_CLEARANCE_M
 }

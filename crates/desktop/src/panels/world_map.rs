@@ -535,29 +535,6 @@ fn draw_local_footer(ui: &mut egui::Ui, model: &mut AppModel, beam_elevation_m: 
                     ui.label(format!("Terrain zoom {:.1}x", model.globe_view.local_zoom));
                 }
 
-                if model.fill_elevation && local_terrain_scene::is_active(model) {
-                    let half_deg = local_terrain_scene::visual_half_extent_for_zoom(
-                        model.globe_view.local_zoom,
-                    );
-                    let side_ns_km = half_deg * 2.0 * 111.32_f32;
-                    let cos_lat = model
-                        .globe_view
-                        .local_center
-                        .lat
-                        .to_radians()
-                        .cos()
-                        .abs()
-                        .max(0.2);
-                    let side_ew_km = half_deg * 2.0 * 111.32_f32 * cos_lat;
-                    let side_ns_mi = side_ns_km * 0.621_371;
-                    let side_ew_mi = side_ew_km * 0.621_371;
-                    ui.separator();
-                    ui.colored_label(theme::contour_color(), "TERRAIN GRID");
-                    ui.label(format!(
-                        "N–S {:.0} km / {:.0} mi  ·  E–W {:.0} km / {:.0} mi",
-                        side_ns_km, side_ns_mi, side_ew_km, side_ew_mi,
-                    ));
-                }
             });
         });
 }

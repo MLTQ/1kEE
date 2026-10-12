@@ -55,7 +55,6 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                 ui.checkbox(&mut model.show_bathymetry, "Bathymetry");
                 ui.checkbox(&mut model.show_graticule, "Graticule");
                 ui.checkbox(&mut model.show_reticle, "Reticle");
-                ui.checkbox(&mut model.fill_elevation, "Terrain fill");
                 {
                     // 3DEP publishes only for the United States, and the drape
                     // is a local-scene layer.

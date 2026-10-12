@@ -44,26 +44,23 @@ const LOCAL_CONTOUR_WGSL: &str = include_str!("local_contour_lines.wgsl");
 /// wgpu requires dynamic uniform offsets to be 256-aligned on most hardware.
 const UNIFORM_STRIDE: u64 = 256;
 
-/// Contours draw beneath and above the elevation fill; roads draw afterwards.
+/// Contours draw once, followed by roads.
 /// Each pass has independent uniforms for fade and stroke width.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum LocalContourPass {
-    /// Drawn before the elevation fill, which then occludes it.
-    Background,
-    /// Drawn after the fill so lines stay visible on top.
+    /// The visible terrain contours.
     Surface,
     /// Road overlays use their own uniforms after the terrain passes.
     Roads,
 }
 
-const PASS_COUNT: usize = 3;
+const PASS_COUNT: usize = 2;
 
 impl LocalContourPass {
     fn slot(self) -> u32 {
         match self {
-            LocalContourPass::Background => 0,
-            LocalContourPass::Surface => 1,
-            LocalContourPass::Roads => 2,
+            LocalContourPass::Surface => 0,
+            LocalContourPass::Roads => 1,
         }
     }
 }

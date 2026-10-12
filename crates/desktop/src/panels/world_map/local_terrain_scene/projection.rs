@@ -138,7 +138,7 @@ impl LocalProjector {
 
     #[inline]
     fn project(&self, point: GeoPoint, elevation_m: f32) -> Option<ProjectedLocalPoint> {
-        let (pos_x, pos_y, z_pitch) = self.params.project_logical(point, elevation_m);
+        let (pos_x, pos_y, _) = self.params.project_logical(point, elevation_m);
         let pos = egui::pos2(pos_x, pos_y);
 
         // Let egui's painter clip rect cull off-screen geometry; only reject points
@@ -149,10 +149,7 @@ impl LocalProjector {
             && pos.x <= self.max_x
             && pos.y >= self.min_y
             && pos.y <= self.max_y)
-            .then_some(ProjectedLocalPoint {
-                pos,
-                depth: (1.0 + z_pitch).clamp(0.0, 1.0),
-            })
+            .then_some(ProjectedLocalPoint { pos })
     }
 }
 
@@ -341,4 +338,3 @@ mod tests {
         assert!((projected.pos.y - y).abs() < 1e-4);
     }
 }
-

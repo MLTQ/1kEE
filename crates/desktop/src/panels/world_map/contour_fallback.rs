@@ -122,7 +122,7 @@ fn choose(primary: LocalContourLoad, base: LocalContourLoad) -> LocalContourLoad
     // Display an available base instead of a fine patch surrounded by holes.
     // If there is no base data, continue showing fine arrivals progressively.
     // Returning the entire load keeps progress, grid coordinates, GPU IDs and
-    // CPU/elevation-fill geometry on one consistent source tier.
+    // CPU contour geometry on one consistent source tier.
     if has_geometry(&base) || !has_geometry(&primary) {
         base
     } else {

@@ -73,24 +73,14 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
   midpoint ownership; existing bounds culling limits projection to the scene.
 - **Interacts with**: `contour_asset.rs` and `srtm_focus_cache` region APIs.
 
-### Elevation-fill worker scheduling
+### Terrain composition and indicator heights
 
-- **Does**: Retains one mesh build and its sampled 61×61 elevation surface
-  while the camera moves, then builds the newest key after that worker
-  completes instead of cloning contours and spawning a replacement worker
-  every frame. Disconnected/panicked workers clear their marker so the next
-  frame retries.
-- **Interacts with**: `draw_elevation_fill`, `build_elev_fill_mesh`, and the
-  local repaint loop. The retained surface supplies beam and marker anchors.
-
-### Surface-aligned indicators
-
-- **Does**: Samples the exact triangles used by the displayed elevation-fill
-  mesh before projecting event/camera markers and the targeting beam. Marker
-  glyphs keep a small clearance above that ground contact.
-- **Interacts with**: `markers.rs`, `draw_local_beam`, and `ElevationSurface`.
-- **Rationale**: Raw SRTM samples and the interpolated visible mesh can differ;
-  using the latter prevents indicators from appearing above or below topology.
+- Contours draw once. The legacy interpolated fill, its background worker,
+  surface cache, color ramps and duplicate background contour pass are removed.
+- Event and webcam anchors use the nonblocking Earth elevation cache with the
+  existing clearance. The targeting beam retains its nearby-contour estimate.
+- The independent 3DEP hillshade image uses its existing sea-level projection;
+  it does not provide a terrain surface or occlude contours.
 
 ### Viewport camera dots
 
@@ -98,7 +88,7 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
   local viewport, while drawing event link lines only to the 250 km nearby
   subset.
 - **Interacts with**: `AppModel::cameras`, `show_camera_markers`, and the local
-  projection/elevation surface.
+  projection and nonblocking elevation samples.
 
 ## Contracts
 
@@ -108,8 +98,7 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 | Overlay renderers | Imported user layers, roads, water, and contours share the same local projection space | Changing coordinate transforms without updating overlay helpers |
 | Scene tests | The local contour loader stays reachable through `contour_asset::load_srtm_region_for_view` for end-to-end validation | Renaming/removing that loader without updating the tests |
 | Globe scene | A shared physical primary width produces matching derived local widths, with every local stroke clamped to at least 1 px | Applying a different conversion or bypassing the floor in transition rendering |
-| Cinematic movement | At most one elevation-fill mesh worker is active while camera-derived keys change | Replacing the receiver and spawning a worker per frame |
-| Local markers and beam | Ground contacts match the exact elevation surface of the mesh painted this frame | Sampling a separate terrain source or pairing a stale mesh with a newer grid |
+| Local indicators | Marker sampling never blocks paint; the targeting beam uses loaded contours | Adding synchronous elevation I/O during rendering |
 
 ## Notes
 - The scene-level tests are intentionally tolerant of missing local cache data: they return early when the shared focus cache is unavailable instead of making the suite depend on large fixture assets.
@@ -118,22 +107,11 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 - The local geography helpers receive the same scale for coastline and
   bathymetry linework, while unrelated roads, boundaries, and marker strokes
   deliberately retain their independent visual contracts.
-- Elevation-fill workers are named to make any future background failure
-  diagnosable from the native crash report.
-- If a mesh worker exits without sending a result, the stale mesh stays visible
-  and the single-flight gate is released rather than leaving elevation fill
-  permanently blocked.
-- Elevation-fill cache keys include the active body. This prevents a retained
-  Moon/Mars surface from being reused after a body change, and Earth-only event
-  and camera data is not projected into planetary local scenes.
 - The local source and build radii intentionally match at 13×13: an uncached
   Moon/Mars tile outside a smaller central window can uniquely own a contour
   that crosses the visible edge. The loader returns its ready/progress snapshot
   to the pulse grid and overlay, avoiding extra cache queries during local
   paint.
-- The elevation-fill worker takes only the local viewport's padded contour
-  subset; the wider source envelope remains available to line rendering but
-  cannot inflate fill-worker cloning or bias local elevation interpolation.
 - Local contour line projection is chunked in source/elevation order. Rayon
   still handles point projection, while egui submission stays serial and
   stops before work the existing point budget would never draw.
@@ -228,8 +206,8 @@ Moon/Mars preserve their ownership envelope for tiles that can cross the view.
 GPU instance residency follows the displayed Earth tiles, and hidden contours
 release their instance copies. Disk cache contents are unchanged.
 
-Webcam/event spires share saved marker sizing. Bases still sample the displayed
-terrain; tips extend along the projector’s screen-up vertical axis at a stable
+Webcam/event spires share saved marker sizing. Bases use nonblocking Earth
+elevation samples; tips extend along the projector’s screen-up vertical axis at a stable
 logical-point height. `MapMarker` returns the exact drawn base/tip/scale for hover
 and click picking, independent of terrain availability. Links use ground bases.
 

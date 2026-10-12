@@ -141,3 +141,6 @@ brief-opening path; source replacement still cannot snap the active camera.
 ### Marker size
 `marker_scale()` and `set_marker_scale()` own the normalized 25–200% webcam/event
 size. Startup, settings reload and save retain it independently of layer toggles.
+
+The legacy terrain-fill field and initialization are removed. Independent
+contour, bathymetry and 3DEP hillshade visibility remain separate controls.

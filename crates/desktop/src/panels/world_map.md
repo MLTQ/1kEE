@@ -91,3 +91,6 @@ wins within each layer; existing cross-layer click priority remains intact.
 
 `layer_snapshot` centralizes generation-safe asynchronous layer loads.
 `line_upload` bounds local/globe GPU publication by bytes and submission time.
+
+The footer no longer displays the grid-size readout belonging to the removed
+terrain-fill mesh. Local zoom and contour/road legends remain available.

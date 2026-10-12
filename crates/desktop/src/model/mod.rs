@@ -80,7 +80,6 @@ pub struct AppModel {
     pub show_minor_roads: bool,
     pub show_water: bool,
     pub show_beam: bool,
-    pub fill_elevation: bool,
     pub show_bathymetry: bool,
     /// Server-rendered USGS 3DEP hillshade draped over the local terrain.
     pub show_hillshade: bool,
@@ -287,7 +286,6 @@ impl AppModel {
             show_water: false,
             show_hillshade: false,
             show_beam: false,
-            fill_elevation: false,
             show_bathymetry: true,
             show_contours: true,
             legacy_contour_stroke_scale: app_settings.contour_stroke_scale,

@@ -121,3 +121,7 @@ callbacks prepare, residency publishes the uploaded keys for the next UI pass.
 upload finishes. The last upload also requests repaint to complete the handoff.
 Old and candidate buffers remain live together during staging; the old set is
 released on the next frame after adoption.
+
+The removed fill no longer needs a background contour pass. The two remaining
+uniform slots are Surface (0) and Roads (1); each visible contour batch draws
+once. Existing hardware tests verify the separate road and contour uniforms.

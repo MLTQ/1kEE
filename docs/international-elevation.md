@@ -29,8 +29,8 @@ also holds these international chunks for compatibility.
 Where finer tiles are absent, the SRTM fallback remains available. A timeout,
 server error, or decoder failure is retried with backoff rather than written as
 permanent empty terrain. Completed offline contour tiles are checked first.
-The optional server-rendered hillshade drape remains USGS-only; the ordinary
-contour-based elevation fill works with the international terrain.
+The optional server-rendered hillshade image remains USGS-only; international
+terrain is displayed through the contour layers.
 
 The installed GDAL tools perform small-area reprojection. New Zealand's LERC
 files use **LIBERTIFF, available in GDAL 3.11+**; the tested machine has 3.12.2.

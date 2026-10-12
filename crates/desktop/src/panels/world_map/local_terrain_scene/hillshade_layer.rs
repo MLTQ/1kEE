@@ -1,24 +1,20 @@
-//! Server-rendered 3DEP hillshade draped over the local terrain surface.
+//! Server-rendered 3DEP hillshade projected onto the local sea-level plane.
 //!
-//! The existing elevation fill already shades a 60x60 interpolated mesh. This
-//! layer is a different thing: the image service renders a multidirectional
-//! hillshade from its own 1 m source and returns it as an 8-bit image, so the
-//! relief detail is far finer than the fill mesh can express. The texture is
-//! draped on the same projected surface, which keeps it registered with the
-//! contours and markers rather than floating as a flat overlay.
+//! The image service supplies relief shading from its own elevation data.
+//! This optional texture overlay does not generate terrain geometry or occlude
+//! contour lines; its geographic projection matches the local map.
 
 use crate::model::GeoPoint;
 use crate::model::GlobeViewState;
 use std::sync::{Mutex, OnceLock};
 
 use super::projection::project_local;
-use super::{ElevationSurface, LocalLayout, visual_half_extent_for_zoom};
+use super::{LocalLayout, visual_half_extent_for_zoom};
 
 /// Requested texture edge. 1024 is a ~700 KB PNG and resolves better than one
 /// screen pixel per texel across the deep zoom range.
 const TEXTURE_PX: u32 = 1024;
-/// Drape grid resolution. The surface is smooth, so this only needs to be fine
-/// enough that the projection's curvature does not show as faceting.
+/// Grid resolution for projecting and clipping the texture onto the map.
 const DRAPE_CELLS: usize = 48;
 /// Panning within this fraction of the view keeps the current texture instead
 /// of refetching, so a slow drag does not stream a new image every frame.
@@ -83,15 +79,12 @@ pub(crate) fn clear() {
 /// Draw the hillshade for the current view, fetching it in the background when
 /// the view has moved beyond the cached image.
 ///
-/// `surface` is the elevation field the fill mesh was built from; using it
-/// keeps the drape on exactly the triangles already on screen. Without it the
-/// texture is draped flat, which still reads correctly from the oblique camera.
+/// The image is projected at sea level, independently of contour elevations.
 pub(super) fn draw_hillshade(
     painter: &egui::Painter,
     layout: &LocalLayout,
     view: &GlobeViewState,
     focus: GeoPoint,
-    surface: Option<&ElevationSurface>,
     extent_x_km: f32,
     extent_y_km: f32,
 ) {
@@ -127,16 +120,7 @@ pub(super) fn draw_hillshade(
             let u = col as f32 / DRAPE_CELLS as f32;
             let lon = bounds.min_lon + (bounds.max_lon - bounds.min_lon) * u;
             let point = GeoPoint { lat, lon };
-            let elevation_m = surface.and_then(|s| s.elevation_at(point)).unwrap_or(0.0);
-            match project_local(
-                layout,
-                view,
-                focus,
-                point,
-                elevation_m,
-                extent_x_km,
-                extent_y_km,
-            ) {
+            match project_local(layout, view, focus, point, 0.0, extent_x_km, extent_y_km) {
                 Some(projected) => {
                     indices.push(Some(mesh.vertices.len() as u32));
                     mesh.vertices.push(egui::epaint::Vertex {
@@ -245,7 +229,7 @@ fn ensure_requested(ctx: &egui::Context, wanted: ShadeBounds) {
 
 /// Decode the service's greyscale PNG into a premultiplied image whose alpha
 /// carries the shading. Painting darkness as alpha rather than as opaque grey
-/// lets the contour and fill colours below stay visible through the lit slopes.
+/// keeps the underlying map visible through lit slopes.
 fn decode_shade(bytes: &[u8]) -> Option<egui::ColorImage> {
     let decoded = image::load_from_memory(bytes).ok()?.to_luma8();
     let (width, height) = decoded.dimensions();
