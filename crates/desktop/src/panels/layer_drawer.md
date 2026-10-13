@@ -86,7 +86,10 @@ disabled while webcams are hidden. Its tooltip explains the 250 km proximity
 rule and distinguishes it from viewing direction or incident footage.
 
 Terrain controls no longer expose the removed Terrain fill layer. Hillshade
-(3DEP) remains an independent optional local Earth image overlay.
+remains an independent optional local Earth image overlay, with a source picker
+for USGS 3DEP, Washington LiDAR bare earth, and Washington LiDAR top surface.
+DNR selections show coverage, attribution and the original portal link. Source
+selection is session-only; it does not enable the layer or change contour data.
 
 Contours includes Hide distant contours, enabled only in Local Earth view
 while contours are visible. It controls the new invisible visibility pass and

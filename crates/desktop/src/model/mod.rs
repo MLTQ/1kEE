@@ -81,8 +81,9 @@ pub struct AppModel {
     pub show_water: bool,
     pub show_beam: bool,
     pub show_bathymetry: bool,
-    /// Server-rendered USGS 3DEP hillshade draped over the local terrain.
+    /// Optional server-rendered hillshade projected into the local map.
     pub show_hillshade: bool,
+    pub hillshade_source: crate::hillshade_source::Source,
     pub show_contours: bool,
     pub contour_occlusion: bool,
     /// Saved multiplier used only when an older settings file has no physical
@@ -286,6 +287,7 @@ impl AppModel {
             show_minor_roads: false,
             show_water: false,
             show_hillshade: false,
+            hillshade_source: crate::hillshade_source::Source::default(),
             show_beam: false,
             show_bathymetry: true,
             show_contours: true,

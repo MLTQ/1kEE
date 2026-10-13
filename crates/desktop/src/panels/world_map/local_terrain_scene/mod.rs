@@ -259,8 +259,11 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let contour_stroke_scale =
         model.contour_stroke_scale_for_pixels_per_point(painter.ctx().pixels_per_point());
 
-    // The optional 3DEP image is projected at sea level beneath the contours.
-    if model.show_hillshade && model.active_body == crate::model::ActiveBody::Earth {
+    // Optional source imagery is projected at sea level beneath the contours.
+    if model.show_hillshade
+        && model.settings_threedep_enabled
+        && model.active_body == crate::model::ActiveBody::Earth
+    {
         let half_extent_deg = visual_half_extent_for_zoom(model.globe_view.local_zoom);
         let km_per_deg_lat = 111.32f32;
         let km_per_deg_lon =
@@ -269,6 +272,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             painter,
             &layout,
             &model.globe_view,
+            model.hillshade_source,
             viewport_center,
             (half_extent_deg * km_per_deg_lon).max(1.0),
             (half_extent_deg * km_per_deg_lat).max(1.0),

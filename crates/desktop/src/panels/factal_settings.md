@@ -39,7 +39,8 @@ Renders the app settings window for the desktop app. This file is the user-facin
 - The existing streaming toggle now covers USGS plus six international
   providers. Expandable source credits link to official data/licence pages.
   Contour rasters are temporary; only sampled elevation chunks use the displayed
-  cache budget. The help text keeps USGS-only hillshade scope explicit.
+  cache budget. The help text points to the Layers drawer for USGS and
+  Washington DNR LiDAR hillshade choices; both obey the same streaming toggle.
 
 - **Does**: Toggles on-demand 3DEP 1 m streaming and sets the chunk cache
   ceiling, with a live readout of how much of that budget is in use.

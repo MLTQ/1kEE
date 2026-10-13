@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Projects a server-rendered 3DEP multidirectional hillshade onto the local
+Projects selected USGS or Washington DNR hillshade onto the local
 sea-level plane. The image service supplies relief shading from its own source
 elevation data; this independent overlay creates no elevation surface and does
 not occlude contours.
@@ -24,16 +24,23 @@ not occlude contours.
 
 - **Does**: Schedules one background fetch when the view leaves the cached
   bounds, then uploads the decoded image to a texture on the UI thread.
-- **Interacts with**: `threedep::fetch_hillshade_png`.
+- **Interacts with**: `hillshade_source::Source::fetch`.
 - **Rationale**: Texture upload needs the egui context, so the fetch thread can
   only hand back a decoded `ColorImage`.
+- Source identity travels with requests, pending images and textures; changing
+  products cannot display the previous product. One worker owns the slot even
+  across cache clears; a generation check discards results from before reset.
+- Failed fetch/decode attempts back off for 30 seconds per last failed source,
+  across pans. Successful empty/transparent images are reusable coverage gaps.
 
 ### `decode_shade`
 
-- **Does**: Converts the greyscale PNG into a premultiplied image whose alpha
-  carries the shading — lit ground is transparent, shadow is dark.
-- **Rationale**: Painting darkness as alpha rather than opaque grey keeps the
-  underlying map visible through lit slopes.
+- **Does**: Preserves DNR grayscale relief and its alpha. USGS retains the
+  existing style where lit ground is transparent and shadow is dark.
+- **Rationale**: DNR's actual grayscale detail must be visible on the default
+  black map canvas; painting only black shadows there would hide the product.
+- Preserves input alpha so missing DNR coverage never becomes black shadow.
+  PNG dimensions are checked before allocation, with a 2048-pixel edge cap.
 
 ## Contracts
 
@@ -44,11 +51,16 @@ not occlude contours.
 
 ## Notes
 
+- Offline tests cover source changes, transparent nodata, image size rejection,
+  post-clear worker completion, grayscale visibility and failure backoff in
+  addition to bounds reuse.
+
 - The texture is fetched for the view's bounds, and a pan is tolerated up to
   `REUSE_FRACTION` of the view before the stale image is dropped. That keeps a
   slow drag from streaming a new image every frame while avoiding a texture
   from a completely different area.
 - Row 0 of the service's image is the northern edge, which is why the drape maps
   `v = 0` to `max_lat`.
-- The layer is Earth- and local-mode only, and does nothing when 3DEP is
-  disabled in settings.
+- The local scene checks Earth mode and its in-memory streaming toggle before
+  drawing; workers check the saved toggle before fetching. Geography screens
+  reject remote views without network work.

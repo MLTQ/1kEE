@@ -34,6 +34,9 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
   `panels/world_map/fire_layer.rs`, cached locally). Both default to off.
 - **Terrain & bodies** — GEBCO / SRTM / Natural Earth elevation, the Yale Bright
   Star Catalogue and planetary ephemeris, and a replay timeline.
+- **Washington LiDAR** — optional DNR bare-earth and top-surface hillshade in
+  Local Earth view, with portal access for survey metadata and downloads
+  ([usage](docs/washington-lidar.md)).
 - **Multiplayer** — a companion web view that mirrors the analyst's live view onto a
   local mesh (see below).
 

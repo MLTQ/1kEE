@@ -610,8 +610,8 @@ fn tab_paths(ui: &mut egui::Ui, model: &mut AppModel) {
     )
     .on_hover_text(
         "Fetch elevation for contours, markers and map layers as you explore. \
-         Downloaded contour rasters are removed after processing. The hillshade \
-         drape currently uses the USGS service in the US.",
+         Downloaded contour rasters are removed after processing. Choose USGS or \
+         Washington DNR LiDAR hillshade in the Layers drawer.",
     );
 
     ui.collapsing("Elevation sources and credits", |ui| {

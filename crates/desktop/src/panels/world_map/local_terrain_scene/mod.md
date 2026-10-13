@@ -79,8 +79,9 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
   surface cache, color ramps and duplicate background contour pass are removed.
 - Event and webcam anchors use the nonblocking Earth elevation cache with the
   existing clearance. The targeting beam retains its nearby-contour estimate.
-- The independent 3DEP hillshade image uses its existing sea-level projection;
+- The selected USGS or Washington DNR hillshade uses its existing sea-level projection;
   it does not provide a terrain surface or occlude contours.
+  Drawing and requesting both stop while detailed terrain streaming is disabled.
 
 ### Viewport camera dots
 

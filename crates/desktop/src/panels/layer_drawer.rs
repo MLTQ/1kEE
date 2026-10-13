@@ -56,18 +56,36 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                 ui.checkbox(&mut model.show_graticule, "Graticule");
                 ui.checkbox(&mut model.show_reticle, "Reticle");
                 {
-                    // 3DEP publishes only for the United States, and the drape
-                    // is a local-scene layer.
+                    // Public hillshade imagery is a local Earth scene layer.
                     let hillshade_available = model.globe_view.local_mode
                         && model.active_body == crate::model::ActiveBody::Earth
                         && model.settings_threedep_enabled;
                     ui.add_enabled(
                         hillshade_available,
-                        egui::Checkbox::new(&mut model.show_hillshade, "Hillshade (3DEP)"),
+                        egui::Checkbox::new(&mut model.show_hillshade, "Hillshade"),
                     )
                     .on_disabled_hover_text(
-                        "Local Earth view with 3DEP enabled in Settings",
+                        "Local Earth view with Stream detailed terrain enabled in Settings → Paths",
                     );
+                    ui.indent("hillshade_source", |ui| {
+                        egui::ComboBox::from_id_salt("hillshade_source")
+                            .width(185.0)
+                            .selected_text(model.hillshade_source.label())
+                            .show_ui(ui, |ui| {
+                                for source in crate::hillshade_source::Source::ALL {
+                                    ui.selectable_value(&mut model.hillshade_source, source, source.label())
+                                        .on_hover_text(source.description());
+                                }
+                            });
+                        if model.hillshade_source != crate::hillshade_source::Source::Usgs {
+                            ui.small("Washington coverage only");
+                            ui.hyperlink_to("Washington Geological Survey (DNR)",
+                                "https://dnr.wa.gov/washington-geological-survey/publications-and-data/lidar");
+                            ui.hyperlink_to("Open Washington LiDAR Portal",
+                                "https://lidarportal.dnr.wa.gov/")
+                                .on_hover_text("Explore surveys and download DEMs, surface models and point clouds.");
+                        }
+                    });
                 }
                 {
                     let ships_enabled = !model.aisstream_api_key.is_empty();

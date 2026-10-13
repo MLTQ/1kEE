@@ -8,6 +8,7 @@ application with the map-oriented window configuration.
 ## Components
 
 ### Module declarations
+- `hillshade_source` supplies USGS and Washington DNR public relief images.
 - `flock_source` loads the downloaded Flock TSV as a separate public position layer.
 - `elevation_sources` supplies bounded international terrain acquisition to the
   existing Earth contour and point-sampling pipelines.
