@@ -283,6 +283,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             &model.globe_view,
             viewport_center,
             local_contour_pass::LocalContourPass::Surface,
+            model.contour_occlusion,
             &gpu_contour_batches,
             1.0,
             contour_stroke_scale,
@@ -1372,6 +1373,7 @@ fn draw_gpu_contour_pass(
     view: &GlobeViewState,
     focus: GeoPoint,
     pass: local_contour_pass::LocalContourPass,
+    occlusion: bool,
     batches: &[local_contour_pass::LocalTileBatch],
     alpha: f32,
     contour_stroke_scale: f32,
@@ -1399,6 +1401,7 @@ fn draw_gpu_contour_pass(
             gpu_contour_stroke_width_px(1.35, alpha, contour_stroke_scale, pixels_per_point),
             painter.ctx().clone(),
         )
+        .with_occlusion(occlusion)
         .into_paint_callback(painter.clip_rect()),
     );
 }

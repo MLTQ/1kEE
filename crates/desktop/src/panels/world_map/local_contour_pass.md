@@ -125,3 +125,11 @@ released on the next frame after adoption.
 The removed fill no longer needs a background contour pass. The two remaining
 uniform slots are Surface (0) and Roads (1); each visible contour batch draws
 once. Existing hardware tests verify the separate road and contour uniforms.
+
+Each tile now carries bounded `local_occlusion_geometry` alongside full line
+instances, prepared by the same worker. Both buffers share the upload budget
+and publish atomically; residency and byte accounting include both.
+`local_occlusion` renders a separate cached depth target during prepare. Surface
+fragments sample it when enabled; roads/staging keep occlusion off. Uniforms
+are now 128 bytes, matched by the WGSL layout regression. No UI depth attachment
+is introduced. The hidden frame residency callback also releases depth images.

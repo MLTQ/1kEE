@@ -230,3 +230,7 @@ See `composition` and `handoff` for ownership, coalescing, and publication.
 
 Camera proximity links draw only with the separate Nearby camera links toggle
 enabled, matching globe mode. Webcam spires remain independently visible.
+
+The local Earth GPU contour pass applies `AppModel::contour_occlusion`.
+Occluders use the exact displayed tile versions through the existing staged
+handoff. CPU cold-start fallback and Moon/Mars still draw ordinary contours.

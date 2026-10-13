@@ -87,3 +87,7 @@ rule and distinguishes it from viewing direction or incident footage.
 
 Terrain controls no longer expose the removed Terrain fill layer. Hillshade
 (3DEP) remains an independent optional local Earth image overlay.
+
+Contours includes Hide distant contours, enabled only in Local Earth view
+while contours are visible. It controls the new invisible visibility pass and
+provides a direct comparison with transparent line rendering.

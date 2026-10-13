@@ -55,6 +55,7 @@ fn roads_and_contours_render_together_and_deferred_uploads_complete() {
     };
     let road_batches: Vec<_> = (0..4)
         .map(|chunk| LocalTileBatch {
+            occlusion: Default::default(),
             id: LocalBatchId::Road { major: true, chunk },
             version: 17,
             instances: Arc::new(vec![LocalSegmentInstance::line(
@@ -66,6 +67,7 @@ fn roads_and_contours_render_together_and_deferred_uploads_complete() {
         })
         .collect();
     let contour = LocalTileBatch {
+        occlusion: Default::default(),
         id: LocalBatchId::Contour(LocalTileId {
             zoom_bucket: 0,
             lat_bucket: 0,
@@ -275,6 +277,7 @@ fn roads_and_contours_render_together_and_deferred_uploads_complete() {
     // Reuse its tile ID with a different version: staging must not overwrite
     // either the visible buffer or the visible pass's uniforms.
     let replacements: Vec<_> = (0..4).map(|n| LocalTileBatch {
+            occlusion: Default::default(),
         id: if n == 0 { contour.id } else { LocalBatchId::Contour(LocalTileId {
             zoom_bucket: 5, lat_bucket: n, lon_bucket: 0,
         }) },
@@ -350,6 +353,7 @@ fn roads_and_contours_render_together_and_deferred_uploads_complete() {
     let mixed = composition::compose(crate::model::ActiveBody::Earth,
         vec![source(5, 1, 0.0), source(6, 2, 0.015)], HashMap::new());
     let mixed_batches: Vec<_> = mixed.frame.tiles.iter().map(|tile| LocalTileBatch {
+            occlusion: Default::default(),
         id: LocalBatchId::Contour(tile.id), version: 91,
         instances: Arc::new(tile.contours.iter().flat_map(|line| line.points.windows(2).map(|pair|
             LocalSegmentInstance::line([pair[0].lon, pair[0].lat, 0.0], [pair[1].lon, pair[1].lat, 0.0], egui::Color32::WHITE, true)

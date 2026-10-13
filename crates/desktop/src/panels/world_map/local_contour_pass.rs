@@ -39,6 +39,11 @@ use super::globe_pass::color_to_linear;
 use super::local_terrain_scene::projection::LocalProjectionParams;
 use crate::settings_store;
 
+#[path = "local_occlusion.rs"]
+mod occlusion;
+#[path = "local_occlusion_geometry.rs"]
+mod occlusion_geometry;
+
 const LOCAL_CONTOUR_WGSL: &str = include_str!("local_contour_lines.wgsl");
 
 /// wgpu requires dynamic uniform offsets to be 256-aligned on most hardware.
@@ -143,11 +148,15 @@ struct LocalContourUniforms {
     feather_px_major: f32,
     pixels_per_point: f32,
     alpha: f32,
+    occlusion_enabled: f32,
+    depth_scale: f32,
+    depth_center: f32,
+    depth_bias: f32,
+    screen_guard: f32,
     _pad0: f32,
-    _pad1: f32,
 }
 
-const _: () = assert!(std::mem::size_of::<LocalContourUniforms>() == 112);
+const _: () = assert!(std::mem::size_of::<LocalContourUniforms>() == 128);
 
 #[inline]
 fn linear_u8(c: egui::Color32) -> [u8; 4] {
@@ -164,11 +173,16 @@ pub struct LocalTileBatch {
     pub id: LocalBatchId,
     pub version: u64,
     pub instances: Arc<Vec<LocalSegmentInstance>>,
+    pub(super) occlusion: occlusion_geometry::Geometry,
 }
 
 #[derive(Default)]
 struct TileInstances {
-    current: Option<(u64, Arc<Vec<LocalSegmentInstance>>)>,
+    current: Option<(
+        u64,
+        Arc<Vec<LocalSegmentInstance>>,
+        occlusion_geometry::Geometry,
+    )>,
     building: Option<(u64, u64)>, // geometry version and unique worker ticket
 }
 
@@ -179,14 +193,14 @@ fn finish_instance_build(
     id: LocalTileId,
     version: u64,
     ticket: u64,
-    instances: Option<Vec<LocalSegmentInstance>>,
+    instances: Option<(Vec<LocalSegmentInstance>, occlusion_geometry::Geometry)>,
 ) {
     if let Some(entry) = cache.get_mut(&id)
         && entry.building == Some((version, ticket))
     {
         entry.building = None;
-        if let Some(instances) = instances {
-            entry.current = Some((version, Arc::new(instances)));
+        if let Some((instances, occlusion)) = instances {
+            entry.current = Some((version, Arc::new(instances), occlusion));
         }
     }
 }
@@ -220,13 +234,14 @@ pub fn instances_for_tile(
     {
         let mut guard = instance_cache().lock().ok()?;
         let entry = guard.entry(id).or_default();
-        if let Some((v, instances)) = &entry.current
+        if let Some((v, instances, occlusion)) = &entry.current
             && *v == version
         {
             return Some(LocalTileBatch {
                 id: LocalBatchId::Contour(id),
                 version,
                 instances: instances.clone(),
+                occlusion: occlusion.clone(),
             });
         }
         if entry.building.is_some_and(|(v, _)| v == version) {
@@ -243,7 +258,7 @@ pub fn instances_for_tile(
         .spawn(move || {
             let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 puffin::profile_scope!("local_contour_instances_build");
-                contours
+                let instances = contours
                     .par_iter()
                     .flat_map_iter(|contour| {
                         let (color, is_major) = style_fn(contour);
@@ -256,7 +271,8 @@ pub fn instances_for_tile(
                             major,
                         })
                     })
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                (instances, occlusion_geometry::build(&contours))
             }));
 
             if let Ok(mut guard) = instance_cache().lock() {
@@ -293,6 +309,7 @@ pub fn retain_instances(visible: &HashSet<LocalTileId>) {
 // ── GPU resources ────────────────────────────────────────────────────────────
 
 struct TileGpu {
+    occlusion: Vec<super::contour_pass::InstanceChunk>,
     /// One tile can exceed the device's `max_buffer_size` on its own — a dense
     /// bucket-10 tile is ~4.3 M segments — so its geometry is split across as
     /// many vertex buffers as the limit requires.
@@ -301,13 +318,20 @@ struct TileGpu {
     last_used: u64,
 }
 
+struct PendingTile {
+    lines: super::line_upload::Upload<LocalSegmentInstance>,
+    occlusion: super::line_upload::Upload<LocalSegmentInstance>,
+    used: u64,
+}
+
 pub struct LocalContourPassResources {
+    occlusion: occlusion::Resources,
     pipeline: wgpu::RenderPipeline,
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     tiles: HashMap<(LocalBatchId, u64), TileGpu>,
     resident_bytes: u64,
-    pending: HashMap<(LocalBatchId, u64), (super::line_upload::Upload<LocalSegmentInstance>, u64)>,
+    pending: HashMap<(LocalBatchId, u64), PendingTile>,
     upload_frame: Option<u64>,
     uploads: super::line_upload::Budget,
 }
@@ -383,7 +407,7 @@ impl LocalContourPassResources {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("local_contour_pl"),
-            bind_group_layouts: &[&bgl],
+            bind_group_layouts: &[&bgl, &occlusion::texture_layout(device)],
             push_constant_ranges: &[],
         });
 
@@ -442,6 +466,7 @@ impl LocalContourPassResources {
         });
 
         Self {
+            occlusion: occlusion::Resources::new(device, &bgl, &shader),
             pipeline,
             uniform_buf,
             bind_group,
@@ -554,10 +579,24 @@ impl LocalContourCallback {
                 // Same gamma-space→linear-space correction the CPU path applied
                 // through `gamma_multiply`.
                 alpha: alpha.powf(2.2),
+                occlusion_enabled: 0.0,
+                depth_scale: 0.01,
+                depth_center: 0.0,
+                depth_bias: 0.0,
+                screen_guard: 1.0,
                 _pad0: 0.0,
-                _pad1: 0.0,
             },
         }
+    }
+
+    /// Only the local Earth surface opts in. Roads and staging never occlude.
+    pub fn with_occlusion(mut self, enabled: bool) -> Self {
+        self.uniforms.occlusion_enabled = if enabled && self.pass == LocalContourPass::Surface {
+            1.0
+        } else {
+            0.0
+        };
+        self
     }
 
     /// Stage buffers while the previous terrain is still being drawn. Do not
@@ -585,18 +624,20 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         _screen_descriptor: &egui_wgpu::ScreenDescriptor,
-        _encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         let Some(res) = resources.get_mut::<LocalContourPassResources>() else {
             return Vec::new();
         };
 
+        let mut uniforms = self.uniforms;
+        occlusion::configure(&mut uniforms, &self.batches);
         if !self.upload_only {
             queue.write_buffer(
                 &res.uniform_buf,
                 self.pass.slot() as u64 * UNIFORM_STRIDE,
-                bytemuck::bytes_of(&self.uniforms),
+                bytemuck::bytes_of(&uniforms),
             );
         }
 
@@ -613,7 +654,9 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
                 continue;
             }
             let key = (batch.id, batch.version);
-            if let Some((_, used)) = res.pending.get_mut(&key) { *used = frame; }
+            if let Some(pending) = res.pending.get_mut(&key) {
+                pending.used = frame;
+            }
             let stale = !res.tiles.contains_key(&key);
 
             if stale {
@@ -623,19 +666,25 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
                 }
                 uploads += 1;
                 puffin::profile_scope!("local_contour_tile_upload");
-                let (upload, used) = res.pending.entry(key).or_insert_with(||
-                    (super::line_upload::Upload::new(batch.instances.clone()), frame));
-                *used = frame;
-                if !upload.advance(device, &mut res.uploads) {
+                let pending = res.pending.entry(key).or_insert_with(|| PendingTile {
+                    lines: super::line_upload::Upload::new(batch.instances.clone()),
+                    occlusion: super::line_upload::Upload::new(batch.occlusion.segments.clone()),
+                    used: frame,
+                });
+                pending.used = frame;
+                if !pending.lines.advance(device, &mut res.uploads)
+                    || !pending.occlusion.advance(device, &mut res.uploads)
+                {
                     self.ctx.request_repaint();
                     continue;
                 }
-                let upload = res.pending.remove(&key).unwrap().0;
-                let bytes = upload.bytes();
-                let chunks = upload.chunks;
+                let upload = res.pending.remove(&key).unwrap();
+                let bytes = upload.lines.bytes() + upload.occlusion.bytes();
+                let chunks = upload.lines.chunks;
                 if let Some(previous) = res.tiles.insert(
                     key,
                     TileGpu {
+                        occlusion: upload.occlusion.chunks,
                         chunks,
                         bytes,
                         last_used: frame,
@@ -655,6 +704,17 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
         let budget = settings_store::local_contour_vram_budget_bytes();
         res.enforce_budget(budget, frame);
         res.publish_resident_bytes();
+        if !self.upload_only && self.pass == LocalContourPass::Surface {
+            res.occlusion.prepare(
+                device,
+                encoder,
+                &res.bind_group,
+                &uniforms,
+                &self.batches,
+                &res.tiles,
+                frame,
+            );
+        }
         Vec::new()
     }
 
@@ -671,6 +731,7 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
             return;
         };
         render_pass.set_pipeline(&res.pipeline);
+        render_pass.set_bind_group(1, res.occlusion.bind_group(), &[]);
         render_pass.set_bind_group(
             0,
             &res.bind_group,
@@ -711,7 +772,8 @@ impl egui_wgpu::CallbackTrait for ResidencyCallback {
     ) -> Vec<wgpu::CommandBuffer> {
         if let Some(res) = resources.get_mut::<LocalContourPassResources>() {
             res.tiles.retain(|_, tile| tile.last_used == self.frame);
-            res.pending.retain(|_, (_, used)| *used == self.frame);
+            res.pending.retain(|_, pending| pending.used == self.frame);
+            res.occlusion.release_if_unused(self.frame);
             res.resident_bytes = res.tiles.values().map(|tile| tile.bytes).sum();
             res.publish_resident_bytes();
             if let Ok(mut ready) = GPU_READY.get_or_init(Default::default).lock() {
@@ -725,6 +787,10 @@ impl egui_wgpu::CallbackTrait for ResidencyCallback {
 }
 
 #[cfg(test)]
+#[path = "local_occlusion_gpu_tests.rs"]
+mod occlusion_gpu_tests;
+
+#[cfg(test)]
 #[path = "local_line_gpu_tests.rs"]
 mod gpu_tests;
 
@@ -736,21 +802,21 @@ mod tests {
     fn evicted_instance_workers_cannot_resurrect_or_overwrite_returned_tiles() {
         let id = LocalTileId { zoom_bucket: 6, lat_bucket: 0, lon_bucket: 0 };
         let mut cache = HashMap::new();
-        finish_instance_build(&mut cache, id, 1, 10, Some(vec![]));
+        finish_instance_build(&mut cache, id, 1, 10, Some((vec![], Default::default())));
         assert!(cache.is_empty());
         cache.insert(id, TileInstances { current: None, building: Some((1, 11)) });
-        finish_instance_build(&mut cache, id, 1, 10, Some(vec![]));
+        finish_instance_build(&mut cache, id, 1, 10, Some((vec![], Default::default())));
         assert!(cache[&id].current.is_none());
         assert_eq!(cache[&id].building, Some((1, 11)));
-        finish_instance_build(&mut cache, id, 1, 11, Some(vec![]));
+        finish_instance_build(&mut cache, id, 1, 11, Some((vec![], Default::default())));
         assert!(cache[&id].current.is_some());
         assert!(cache[&id].building.is_none());
     }
 
     #[test]
     fn the_uniform_block_matches_the_shader_layout() {
-        // 28 f32s, and a multiple of 16 so it satisfies uniform alignment.
-        assert_eq!(std::mem::size_of::<LocalContourUniforms>(), 28 * 4);
+        // 32 f32s, and a multiple of 16 so it satisfies uniform alignment.
+        assert_eq!(std::mem::size_of::<LocalContourUniforms>(), 32 * 4);
         assert_eq!(std::mem::size_of::<LocalContourUniforms>() % 16, 0);
         assert!(std::mem::size_of::<LocalContourUniforms>() as u64 <= UNIFORM_STRIDE);
     }
@@ -798,8 +864,12 @@ mod tests {
             "feather_px_major",
             "pixels_per_point",
             "alpha",
+            "occlusion_enabled",
+            "depth_scale",
+            "depth_center",
+            "depth_bias",
+            "screen_guard",
             "_pad0",
-            "_pad1",
         ];
         assert_eq!(shader_fields, rust_fields);
     }

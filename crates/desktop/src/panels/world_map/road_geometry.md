@@ -15,3 +15,6 @@ Builds road GPU instances on a background worker. Replaces the length-prioritize
   or reprojects the CPU data. Colours are converted once per layer.
 - `RoadGeometry` owns immutable Arc-backed batches for cheap frame snapshots.
 - Regression/optional read-only regional benchmark lives in `road_geometry_tests`.
+
+Road batches explicitly carry empty terrain occluders. Their independent
+uniform slot always disables terrain masking.

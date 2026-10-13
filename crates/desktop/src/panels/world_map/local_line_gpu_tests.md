@@ -27,3 +27,7 @@ A geographic composition fixture leaves neighboring fine cells permanently
 missing. GPU readback requires the ready fine curve in the middle, retained
 coarse terrain at the sides, and no coarse bridge/overlap in the replaced cell.
 The UI callback clones batch handles so egui can safely repeat a layout pass.
+
+Legacy line-only fixtures carry empty occluder geometry. They continue to
+verify unchanged road/contour rendering and staging with occlusion disabled;
+`local_occlusion_gpu_tests` covers enabled visibility and cache invalidation.

@@ -9,7 +9,7 @@
 // scalar half of it.
 //
 // The Rust `LocalContourUniforms` struct in local_contour_pass.rs must stay
-// byte-for-byte in sync with `Uniforms` below (112 bytes).
+// byte-for-byte in sync with `Uniforms` below (128 bytes).
 
 struct Uniforms {
     focus_lon: f32,
@@ -43,11 +43,16 @@ struct Uniforms {
     feather_px_major: f32,
     pixels_per_point: f32,
     alpha: f32,                 // pass fade multiplier
+    occlusion_enabled: f32,
+    depth_scale: f32,
+    depth_center: f32,
+    depth_bias: f32,
+    screen_guard: f32,
     _pad0: f32,
-    _pad1: f32,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
+@group(1) @binding(0) var terrain_depth: texture_depth_2d;
 
 struct VsIn {
     @builtin(vertex_index) vidx: u32,
@@ -65,6 +70,7 @@ struct VsOut {
     // which width this instance was expanded with.
     @location(2) @interpolate(flat) stroke_half_px: f32,
     @location(3) @interpolate(flat) feather_px: f32,
+    @location(4) ground_depth: f32,
 }
 
 // Project (lon, lat, elevation_m) to physical-pixel screen space.
@@ -117,6 +123,7 @@ fn vs_main(in: VsIn) -> VsOut {
         out.dist_px = 0.0;
         out.stroke_half_px = 0.0;
         out.feather_px = 1.0;
+        out.ground_depth = 0.0;
         return out;
     }
 
@@ -160,6 +167,7 @@ fn vs_main(in: VsIn) -> VsOut {
         / vec2<f32>(u.viewport_size_x, u.viewport_size_y);
     let ndc = vec2<f32>(rel.x * 2.0 - 1.0, 1.0 - rel.y * 2.0);
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
+    out.ground_depth = mix(depth(in.a), depth(in.b), t);
     out.color = in.color;
     out.dist_px = side * half_extent;
     out.stroke_half_px = stroke_half_px;
@@ -169,6 +177,15 @@ fn vs_main(in: VsIn) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let tolerance = max(abs(dpdx(in.ground_depth)), abs(dpdy(in.ground_depth))) * 2.0 + u.depth_bias;
+    if (u.occlusion_enabled > 0.5) {
+        let size = textureDimensions(terrain_depth);
+        let uv = (in.clip.xy - vec2<f32>(u.viewport_min_x, u.viewport_min_y))
+            / vec2<f32>(u.viewport_size_x, u.viewport_size_y);
+        let pixel = clamp(vec2<i32>(uv * vec2<f32>(size)), vec2<i32>(0), vec2<i32>(size)-vec2<i32>(1));
+        let terrain = textureLoad(terrain_depth, pixel, 0);
+        if (terrain < 1.0 && in.ground_depth > terrain + tolerance) { discard; }
+    }
     let d = abs(in.dist_px);
     let edge = clamp(
         (in.stroke_half_px + in.feather_px - d) / max(in.feather_px, 0.001),
@@ -181,4 +198,25 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let sub_pixel = clamp(2.0 * in.stroke_half_px, 0.0, 1.0);
     // Colour is premultiplied — scale the whole vector by coverage x pass fade.
     return in.color * (edge * u.alpha * sub_pixel);
+}
+
+// Ground distance remains constant down a vertical contour curtain. For the
+// affine local view this is a valid depth ordering without inventing a DEM.
+fn depth(geo: vec3<f32>) -> f32 {
+    let ground = (geo.x-u.focus_lon)*u.x_factor*u.yaw_sin
+        + (geo.y-u.focus_lat)*u.y_factor*u.yaw_cos;
+    return 0.5 + (ground-u.depth_center)*u.depth_scale;
+}
+@vertex
+fn vs_curtain(in: VsIn) -> @builtin(position) vec4<f32> {
+    if (project(in.a).z < 0.0 || project(in.b).z < 0.0) {
+        return vec4<f32>(0.0,0.0,2.0,1.0);
+    }
+    let geo = select(in.a, in.b, (in.vidx & 1u) != 0u);
+    let p = project(geo);
+    if (p.z < 0.0) { return vec4<f32>(0.0,0.0,2.0,1.0); }
+    let rel = (p.xy-vec2<f32>(u.viewport_min_x,u.viewport_min_y))
+        / vec2<f32>(u.viewport_size_x,u.viewport_size_y);
+    let top = 1.0-2.0*(rel.y+u.screen_guard/u.viewport_size_y);
+    return vec4<f32>(rel.x*2.0-1.0, select(max(-1.0,top),-1.0,in.vidx>=2u), depth(geo), 1.0);
 }

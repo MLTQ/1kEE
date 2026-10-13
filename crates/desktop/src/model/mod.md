@@ -144,3 +144,6 @@ size. Startup, settings reload and save retain it independently of layer toggles
 
 The legacy terrain-fill field and initialization are removed. Independent
 contour, bathymetry and 3DEP hillshade visibility remain separate controls.
+
+`contour_occlusion` is a session toggle, enabled at startup, for hiding distant
+contours in GPU-rendered local Earth views. It does not enable terrain fill.

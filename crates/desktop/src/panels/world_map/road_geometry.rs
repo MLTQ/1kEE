@@ -84,6 +84,7 @@ impl BatchBuilder {
             return;
         }
         self.batches.push(LocalTileBatch {
+            occlusion: Default::default(),
             id: LocalBatchId::Road {
                 major: self.major,
                 chunk: self.batches.len(),

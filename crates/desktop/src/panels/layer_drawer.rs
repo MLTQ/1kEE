@@ -124,6 +124,11 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                 }
                 ui.checkbox(&mut model.show_contours, "Contours");
                 ui.indent("contour_thickness", |ui| {
+                    ui.add_enabled(
+                        model.show_contours && model.globe_view.local_mode
+                            && model.active_body == crate::model::ActiveBody::Earth,
+                        egui::Checkbox::new(&mut model.contour_occlusion, "Hide distant contours"),
+                    ).on_hover_text("Hide contour lines behind nearer ridges in Local Earth view. Turn off to compare the transparent view.");
                     let pixels_per_point = ui.ctx().pixels_per_point();
                     let mut stroke_width_px = model.contour_stroke_width_px(pixels_per_point);
                     // Keep any unusually wide legacy setting visible without

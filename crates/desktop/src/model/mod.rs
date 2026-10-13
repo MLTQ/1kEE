@@ -84,6 +84,7 @@ pub struct AppModel {
     /// Server-rendered USGS 3DEP hillshade draped over the local terrain.
     pub show_hillshade: bool,
     pub show_contours: bool,
+    pub contour_occlusion: bool,
     /// Saved multiplier used only when an older settings file has no physical
     /// pixel-width value. Keeping it preserves pre-slider visual output.
     legacy_contour_stroke_scale: f32,
@@ -288,6 +289,7 @@ impl AppModel {
             show_beam: false,
             show_bathymetry: true,
             show_contours: true,
+            contour_occlusion: true,
             legacy_contour_stroke_scale: app_settings.contour_stroke_scale,
             contour_stroke_width_px: app_settings.contour_stroke_width_px,
             show_trees: false,
