@@ -94,3 +94,10 @@ wins within each layer; existing cross-layer click priority remains intact.
 
 The footer no longer displays the grid-size readout belonging to the removed
 terrain-fill mesh. Local zoom and contour/road legends remain available.
+
+Globe repaint scheduling belongs to the existing asynchronous manifest loader:
+it requests a 350 ms refresh, and manifest/read/merge workers wake the UI when
+results arrive. The canvas must not open SQLite to decide whether to repaint.
+The removed globe status poll ran before input handling at zoom >= 2 and could
+block the whole app on cold-cache WAL/filesystem operations. Its radius-zero,
+local-center query also did not describe the actual globe source window.

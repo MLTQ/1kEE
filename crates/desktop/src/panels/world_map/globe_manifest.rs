@@ -136,6 +136,71 @@ mod tests {
         }
     }
     #[test]
+    fn in_flight_globe_selection_keeps_repainting_without_a_database_poll() {
+        // Simulate a worker stuck in filesystem/SQLite I/O. The UI can still
+        // draw and schedule retries using only the coordinator's memory.
+        let cache: &'static Mutex<GlobeRegionCache> =
+            Box::leak(Box::new(Mutex::new(GlobeRegionCache::default())));
+        cache.lock().unwrap().manifest.busy = true;
+        let ctx = egui::Context::default();
+        for _ in 0..4 {
+            let output = ctx.run(egui::RawInput::default(), |ctx| {
+                assert!(
+                    assets(
+                        cache,
+                        Some(Path::new("/unavailable-terrain-source")),
+                        GeoPoint {
+                            lat: 40.0,
+                            lon: -120.0
+                        },
+                        1.5,
+                        5,
+                        ctx,
+                    )
+                    .is_empty()
+                );
+            });
+            assert!(
+                output.viewport_output[&egui::ViewportId::ROOT].repaint_delay
+                    <= LOCAL_MANIFEST_SNAPSHOT_TTL
+            );
+            assert!(cache.lock().unwrap().manifest.busy);
+        }
+        // Even a completed empty snapshot keeps the external-builder refresh
+        // alive; stopping the old panel poll must not strand a stationary view.
+        let mut guard = cache.lock().unwrap();
+        let state = &mut guard.manifest;
+        state.finish(
+            state.epoch,
+            state.requested.clone().unwrap(),
+            srtm_focus_cache::contour_manifest_revision(),
+            Some(vec![]),
+        );
+        drop(guard);
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            assert!(
+                assets(
+                    cache,
+                    Some(Path::new("/unavailable-terrain-source")),
+                    GeoPoint {
+                        lat: 40.0,
+                        lon: -120.0
+                    },
+                    1.5,
+                    5,
+                    ctx,
+                )
+                .is_empty()
+            );
+        });
+        assert!(
+            output.viewport_output[&egui::ViewportId::ROOT].repaint_delay
+                <= LOCAL_MANIFEST_SNAPSHOT_TTL
+        );
+        assert!(!cache.lock().unwrap().manifest.busy);
+    }
+
+    #[test]
     fn late_manifest_cannot_restore_a_reset_or_panned_scene() {
         let mut state = State {
             requested: Some(key(0)),

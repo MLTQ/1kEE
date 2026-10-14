@@ -42,7 +42,7 @@ on-demand Earth, lunar, and Mars tile builds.
 |---|---|---|
 | `contour_asset.rs` | Existing cached tiles are discoverable without requiring write access | Using writable cache setup for renderer lookups |
 | `builders.rs` | Missing tiles can use the writable schema-initializing connection | Removing builder-side write access |
-| Map UI | Region queries are cheap enough for repeated frames | Synchronous GDAL work on the UI thread |
+| Map UI | Region/status queries run on loader or precompute workers; drawing uses in-memory snapshots | Calling SQLite status helpers during paint |
 
 ## Notes
 

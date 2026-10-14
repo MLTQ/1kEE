@@ -67,8 +67,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
             // Faster repaint while tile pulse animation is running (~30 fps)
             ui.ctx()
                 .request_repaint_after(std::time::Duration::from_millis(33));
-        } else if globe_srtm_pending(model)
-            || (model.show_coastlines
+        } else if (model.show_coastlines
                 && contour_asset::global_coastlines_pending(model.selected_root.as_deref()))
             || ((model.show_major_roads || model.show_minor_roads || model.show_water)
                 && osm_ingest::has_active_jobs(model.selected_root.as_deref()))
@@ -458,23 +457,6 @@ fn draw_layer_bar(ui: &mut egui::Ui, model: &mut AppModel) {
         });
 }
 
-
-/// True while SRTM focus tiles for the globe viewport are still being built.
-/// Drives repaint so the sphere updates as soon as the background build finishes.
-fn globe_srtm_pending(model: &AppModel) -> bool {
-    let zoom = model.globe_view.zoom;
-    if zoom < 2.0 || model.globe_view.local_mode {
-        return false;
-    }
-    srtm_focus_cache::focus_contour_region_status(
-        model.selected_root.as_deref(),
-        model.globe_view.local_center,
-        zoom,
-        0,
-    )
-    .map(|s| s.pending_assets > 0 || s.ready_assets < s.total_assets)
-    .unwrap_or(false)
-}
 
 fn draw_local_footer(ui: &mut egui::Ui, model: &mut AppModel, beam_elevation_m: Option<f32>) {
     egui::Frame::new()
