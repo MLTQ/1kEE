@@ -62,6 +62,7 @@ fn frame(zoom: f32, radius: i32) -> LocalContourLoad {
             total_assets: tiles.len(),
         },
         tiles,
+        detail: None,
     }
 }
 
@@ -80,6 +81,94 @@ fn complete(state: &mut Handoff) {
         state.revision,
         Some(result),
     );
+}
+
+fn fallback(detail: LocalContourLoad) -> LocalContourLoad {
+    let mut base = frame(12.0, 0);
+    base.detail = Some(crate::panels::world_map::contour_asset::LocalContourDetail {
+        source_zoom: detail.source_zoom,
+        tiles: detail.tiles,
+    });
+    base
+}
+
+#[test]
+fn small_pan_with_a_missing_fine_edge_keeps_visible_detail_and_its_priority() {
+    let mut state = Handoff::default();
+    let fine = frame(60.0, 0);
+    let fine_id = fine.tiles[0].id;
+    let fine_lines = fine.tiles[0].contours.clone();
+    state.observe(None, view(0.02), &fine);
+    complete(&mut state);
+    state.publish(state.candidate(), vec![], false, true);
+    let generation = state.generation;
+
+    let mut panned = view(0.02);
+    panned.projection.focus_lon = 0.001;
+    // A refreshed manifest can briefly omit even the already displayed tile.
+    let mut missing = frame(60.0, 0);
+    missing.tiles.clear();
+    state.observe(None, panned, &fallback(missing));
+    complete(&mut state);
+    state.publish(state.candidate(), vec![], false, true);
+    assert_eq!(state.generation, generation);
+    let retained = state.display.tiles.iter().find(|t| t.id == fine_id).unwrap();
+    assert!(Arc::ptr_eq(&retained.contours, &fine_lines));
+    assert_eq!(state.display.tiles.len(), 2); // base only outside the fine core
+
+    // An intentional zoom-out must still replace fine terrain when ready.
+    state.observe(None, view(0.1), &frame(12.0, 0));
+    complete(&mut state);
+    state.publish(state.candidate(), vec![], false, true);
+    assert_eq!(state.display.tiles.len(), 1);
+    assert_eq!(state.display.tiles[0].id.zoom_bucket, 6);
+}
+
+#[test]
+fn partial_detail_is_admitted_over_base_without_waiting_for_whole_view() {
+    let mut state = Handoff::default();
+    let mut missing = frame(60.0, 0);
+    missing.tiles.clear();
+    state.observe(None, view(0.02), &fallback(missing));
+    complete(&mut state);
+    state.publish(state.candidate(), vec![], false, true);
+    assert_eq!(state.display.tiles[0].id.zoom_bucket, 6);
+    let generation = state.generation;
+
+    let load = fallback(frame(60.0, 0));
+    state.observe(None, view(0.02), &load);
+    complete(&mut state);
+    assert_eq!(state.candidate().tiles.len(), 2);
+    assert_eq!(state.generation, generation);
+    let fine_id = load.detail.as_ref().unwrap().tiles[0].id;
+    let fine_core = composition::core(ActiveBody::Earth, fine_id);
+    assert_eq!(state.pieces[&fine_id].regions, vec![fine_core]);
+    let base_id = load.tiles[0].id;
+    assert_eq!(state.pieces[&base_id].regions.len(), 4);
+}
+
+#[test]
+fn fully_covered_base_arrivals_do_not_schedule_composition_every_frame() {
+    let mut state = Handoff::default();
+    // Hosted bucket seven has a larger core than the SRTM base; one ready
+    // hosted tile can completely replace this base tile while edges load.
+    let load = fallback(frame(16.0, 0));
+    state.observe(None, view(0.1), &load);
+    complete(&mut state);
+    state.publish(state.candidate(), vec![], false, true);
+    assert_eq!(state.display.tiles.len(), 1);
+    assert_eq!(state.display.tiles[0].id.zoom_bucket, 7);
+    let revision = state.revision;
+    for _ in 0..3 {
+        state.observe(None, view(0.1), &load);
+        assert_eq!(state.revision, revision);
+        assert_eq!(state.revision, state.built_revision);
+    }
+    let mut away = view(0.1);
+    away.projection.focus_lon = 1.0;
+    state.observe(None, away, &load);
+    assert!(state.sources.is_empty());
+    assert!(state.display.tiles.is_empty());
 }
 
 #[test]

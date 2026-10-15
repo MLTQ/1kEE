@@ -16,10 +16,11 @@ road detail, and the Moon/Mars pipelines remain independent of this choice.
   The spare prefetch ring is excluded.
 - `base_radius` translates the camera footprint onto the SRTM address grid;
   maximum zoom needs only nine base tiles.
-- `choose` displays one complete source tier and its matching loading snapshot.
-  Available SRTM stays visible until fine coverage is ready across the view;
-  if no base geometry exists, partial fine arrivals remain visible. This avoids
-  doubled contours from simultaneously drawing SRTM and USGS heights.
+- `choose` keeps the base's loading snapshot when fallback is needed, and
+  attaches the requested source tier and its ready tiles as `detail`. The
+  handoff compositor clips base contours to areas without ready detail; a
+  missing edge cell cannot demote still-visible fine terrain. Empty decoded
+  detail owns its region too; unavailable cells do not.
 - `pending` records work for the current request, so an inactive fallback cache
   with an old incomplete status cannot keep the repaint loop running forever.
 
@@ -34,9 +35,10 @@ road detail, and the Moon/Mars pipelines remain independent of this choice.
   SRTM samples), with no per-tile path-count thinning. Zoom does not invent
   higher-resolution measurements. Areas without SRTM or cached terrain still
   need another source. Cache formats and persisted data are unchanged.
-- A view crossing the fine-coverage boundary stays on SRTM as a whole. Mixing
-  tiers spatially would require clipping ownership boundaries to avoid double
-  contours. This policy favors continuous terrain across that view.
+- Fallback availability never changes requested LOD priority. A real zoom-out
+  still supersedes finer tiles as the requested coarse cores become ready.
+- Supplemental detail carries stable tile Arcs only; merging and ownership
+  clipping remain on the existing background composition worker.
 
 ## Validation
 Companion tests cover missing versus empty tiles, publication, panning, all
@@ -47,5 +49,5 @@ The scene supplies source zoom separately from camera zoom. Fine/base coverage
 and the base envelope use the actual camera footprint; a coarser selected source
 never changes screen scale or expands fallback requests to its nominal camera.
 
-The selected source tier supplies CPU contour geometry and GPU batches; it
-no longer feeds an interpolated elevation-fill mesh.
+The local scene uses the same composed picture for CPU contours and GPU batches.
+Legacy transition callers can still use the selected tier's merged `contours`.

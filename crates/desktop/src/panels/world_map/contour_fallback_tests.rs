@@ -47,6 +47,7 @@ fn frame(zoom: f32, radius: i32, with_lines: bool) -> LocalContourLoad {
             total_assets: tiles.len(),
         },
         tiles,
+        detail: None,
     }
 }
 
@@ -65,6 +66,27 @@ fn missing_fine_coverage_keeps_base_geometry_and_its_progress_grid() {
     assert_eq!(chosen.loading_progress[&(0, 0)], 0.87);
     assert!(Arc::ptr_eq(chosen.contours.as_ref().unwrap(), &expected));
     assert!(chosen.tiles.iter().all(|t| t.id.zoom_bucket == BASE_BUCKET));
+    let detail = chosen.detail.unwrap();
+    assert_eq!(detail.source_zoom, 60.0);
+    assert!(detail.tiles.is_empty());
+}
+
+#[test]
+fn base_fallback_preserves_partial_published_detail_and_empty_cells() {
+    let mut fine = frame(60.0, 1, true);
+    let expected = fine.tiles[0].contours.clone();
+    fine.ready_buckets.remove(&(1, 1)); // awaiting publication
+    fine.tiles[4].contours = Arc::new(vec![]); // valid empty terrain
+    assert!(!covers_view(&fine, GeoPoint { lat: 0.0, lon: 0.0 }, 60.0));
+    let chosen = choose(fine, frame(BASE_ZOOM, 1, true));
+    assert_eq!(chosen.source_zoom, BASE_ZOOM);
+    let detail = chosen.detail.unwrap();
+    assert_eq!(detail.source_zoom, 60.0);
+    assert_eq!(detail.tiles.len(), 8);
+    assert!(detail.tiles.iter().all(|t| t.id.zoom_bucket == 10));
+    assert!(Arc::ptr_eq(&detail.tiles[0].contours, &expected));
+    assert!(detail.tiles.iter().any(|t| t.contours.is_empty()));
+    assert!(!detail.tiles.iter().any(|t| (t.id.lat_bucket, t.id.lon_bucket) == (1, 1)));
 }
 
 #[test]
@@ -180,26 +202,27 @@ fn cold_deep_zoom_reads_base_then_upgrades_to_cached_fine_tiles() {
                 for fid in 0..150 {
                     connection
                         .execute(
-                            "INSERT INTO contour_tiles VALUES (?1,?2,?3,?4,?5,?6)",
+                            "INSERT OR IGNORE INTO contour_tiles VALUES (?1,?2,?3,?4,?5,?6)",
                             params![spec.zoom_bucket, lat, lon, fid, fid as f64 * 5.0, &blob],
                         )
                         .unwrap();
                 }
-                connection.execute("INSERT INTO contour_tile_manifest(zoom_bucket,lat_bucket,lon_bucket,contour_count) VALUES(?1,?2,?3,150)",
+                connection.execute("INSERT OR IGNORE INTO contour_tile_manifest(zoom_bucket,lat_bucket,lon_bucket,contour_count) VALUES(?1,?2,?3,150)",
                     params![spec.zoom_bucket, lat, lon]).unwrap();
             }
         }
     };
     insert(BASE_ZOOM, 1);
     let ctx = egui::Context::default();
-    let wait_for = |source_zoom: f32| {
+    let wait_for = |at: GeoPoint, source_zoom: f32, partial_detail: bool| {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             let result =
-                load_srtm_region_for_view(Some(&root), center, center, 60.0, 3, 3, ctx.clone());
+                load_srtm_region_for_view(Some(&root), center, at, 60.0, 3, 3, ctx.clone());
             if result.source_zoom == source_zoom
                 && has_geometry(&result)
                 && result.status.ready_assets == result.status.total_assets
+                && result.detail.as_ref().is_some_and(|d| !d.tiles.is_empty()) == partial_detail
             {
                 return result;
             }
@@ -210,12 +233,27 @@ fn cold_deep_zoom_reads_base_then_upgrades_to_cached_fine_tiles() {
             std::thread::sleep(Duration::from_millis(20));
         }
     };
-    let base = wait_for(BASE_ZOOM);
+    let base = wait_for(center, BASE_ZOOM, false);
     assert_eq!(base.tiles.len(), 9);
     assert!(base.tiles.iter().all(|t| t.contours.len() == 150));
+    insert(60.0, 0);
+    let partial = wait_for(center, BASE_ZOOM, true);
+    let detail = partial.detail.unwrap();
+    assert_eq!(detail.source_zoom, 60.0);
+    assert_eq!(detail.tiles.len(), 1);
+    assert_eq!(detail.tiles[0].contours.len(), 150);
+    let retained_id = detail.tiles[0].id;
     insert(60.0, 3);
-    let fine = wait_for(60.0);
+    let fine = wait_for(center, 60.0, false);
     assert!(covers_view(&fine, center, 60.0));
+    let panned = GeoPoint {
+        lon: center.lon + 2.0 * srtm_focus_cache::half_extent_for_zoom(60.0) * 0.45,
+        ..center
+    };
+    let fallback = wait_for(panned, BASE_ZOOM, true);
+    let detail = fallback.detail.unwrap();
+    assert_eq!(detail.source_zoom, 60.0);
+    assert!(detail.tiles.iter().any(|t| t.id == retained_id));
     // All decodes/merges completed; stop outstanding manifest refreshes before
     // fixture removal. Reset epochs also reject any late worker publications.
     blast_tile_caches();

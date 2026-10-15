@@ -118,12 +118,23 @@ fn has_geometry(load: &LocalContourLoad) -> bool {
             .is_some_and(|lines| !lines.is_empty())
 }
 
-fn choose(primary: LocalContourLoad, base: LocalContourLoad) -> LocalContourLoad {
-    // Display an available base instead of a fine patch surrounded by holes.
-    // If there is no base data, continue showing fine arrivals progressively.
-    // Returning the entire load keeps progress, grid coordinates, GPU IDs and
-    // CPU contour geometry on one consistent source tier.
+fn choose(primary: LocalContourLoad, mut base: LocalContourLoad) -> LocalContourLoad {
+    // Keep the base's loading grid, but pass ready detail to the geographic
+    // compositor too. A missing fine edge cell must not replace the entire
+    // view with SRTM or change the requested LOD's ownership priority.
     if has_geometry(&base) || !has_geometry(&primary) {
+        base.detail = Some(LocalContourDetail {
+            source_zoom: primary.source_zoom,
+            tiles: primary
+                .tiles
+                .into_iter()
+                .filter(|tile| {
+                    primary
+                        .ready_buckets
+                        .contains(&(tile.id.lat_bucket, tile.id.lon_bucket))
+                })
+                .collect(),
+        });
         base
     } else {
         primary

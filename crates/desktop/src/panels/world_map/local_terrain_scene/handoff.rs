@@ -171,12 +171,16 @@ impl Handoff {
             self.revision = self.revision.wrapping_add(1);
         }
         self.pieces.retain(|id, _| self.sources.contains_key(id));
+        let requested_zoom = load
+            .detail
+            .as_ref()
+            .map_or(load.source_zoom, |d| d.source_zoom);
         let tier = match view.body {
             ActiveBody::Earth => {
-                super::super::srtm_focus_cache::zoom_bucket_for_zoom(load.source_zoom)
+                super::super::srtm_focus_cache::zoom_bucket_for_zoom(requested_zoom)
             }
             _ => {
-                super::super::srtm_focus_cache::zoom::lunar_spec_for_zoom(load.source_zoom)
+                super::super::srtm_focus_cache::zoom::lunar_spec_for_zoom(requested_zoom)
                     .zoom_bucket
             }
         };
@@ -194,16 +198,29 @@ impl Handoff {
             }
             self.revision = self.revision.wrapping_add(1);
         }
-        for tile in &load.tiles {
-            if !load
-                .ready_buckets
-                .contains(&(tile.id.lat_bucket, tile.id.lon_bucket))
-                || !view.intersects(composition::visible_bounds(view.body, tile))
-            {
+        // SRTM fallback fills holes beneath every requested generation. Its
+        // arrival or disappearance during a pan is not an intentional zoom-out.
+        let base_priority = if load.detail.is_some() { 0 } else { self.generation };
+        let tiles = load
+            .tiles
+            .iter()
+            .filter(|tile| {
+                load.ready_buckets
+                    .contains(&(tile.id.lat_bucket, tile.id.lon_bucket))
+            })
+            .map(|tile| (tile, base_priority))
+            .chain(
+                load.detail
+                    .iter()
+                    .flat_map(|detail| &detail.tiles)
+                    .map(|tile| (tile, self.generation)),
+            );
+        for (tile, priority) in tiles {
+            if !view.intersects(composition::visible_bounds(view.body, tile)) {
                 continue;
             }
             if self.sources.get(&tile.id).is_some_and(|s| {
-                Arc::ptr_eq(&s.tile.contours, &tile.contours) && s.priority == self.generation
+                Arc::ptr_eq(&s.tile.contours, &tile.contours) && s.priority == priority
             }) {
                 continue;
             }
@@ -211,7 +228,7 @@ impl Handoff {
                 tile.id,
                 Source {
                     tile: tile.clone(),
-                    priority: self.generation,
+                    priority,
                 },
             );
             self.revision = self.revision.wrapping_add(1);
@@ -237,7 +254,12 @@ impl Handoff {
         if let Some(mut result) = result {
             result.frame.id = ticket;
             if self.revision == revision {
-                self.sources.retain(|id, _| result.pieces.contains_key(id));
+                // The bounded base loader can keep returning a fully covered
+                // tile. Retain its shared source handle (no display piece) to
+                // avoid recomposing it every paint. Offscreen pruning still
+                // releases it, as does replacement on a real zoom-out.
+                self.sources
+                    .retain(|id, s| s.priority == 0 || result.pieces.contains_key(id));
             }
             self.pieces = result.pieces;
             self.prepared = Some(result.frame);

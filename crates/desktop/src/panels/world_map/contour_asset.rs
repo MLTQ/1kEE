@@ -189,6 +189,16 @@ pub struct LocalContourLoad {
     /// Also populated for Moon/Mars coverage checks. Those bodies retain the
     /// CPU renderer because their merges apply exclusive midpoint ownership.
     pub tiles: Vec<LocalTileGeometry>,
+    /// Requested fine terrain when this load's progress grid is the SRTM base.
+    /// Kept separate so fallback availability cannot masquerade as a zoom-out.
+    pub detail: Option<LocalContourDetail>,
+}
+
+#[derive(Clone)]
+pub struct LocalContourDetail {
+    pub source_zoom: f32,
+    /// Only decoded/published tiles, including decoded empty terrain.
+    pub tiles: Vec<LocalTileGeometry>,
 }
 
 /// One source tile's contours, identified for the GPU pass's buffer cache.
@@ -1232,6 +1242,7 @@ fn load_earth_source_region(
         culled_buckets: loading.culled_buckets,
         status: loading.status,
         tiles,
+        detail: None,
     }
 }
 
@@ -1355,6 +1366,7 @@ pub fn load_lunar_region_for_view(
         culled_buckets: loading.culled_buckets,
         status: loading.status,
         tiles,
+        detail: None,
     }
 }
 
@@ -1477,6 +1489,7 @@ pub fn load_mars_region_for_view(
         culled_buckets: loading.culled_buckets,
         status: loading.status,
         tiles,
+        detail: None,
     }
 }
 
