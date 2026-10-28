@@ -30,7 +30,7 @@ impl Drop for Scratch {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
-fn build(root: &Path, mode: &str) {
+fn build(root: &Path, mode: &str) -> String {
     let output = Command::new(env!(
         "CARGO_BIN_EXE_one-thousand-electric-eye-cache-builder"
     ))
@@ -48,14 +48,32 @@ fn build(root: &Path, mode: &str) {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("unsupported"));
+    let progress = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(!progress.contains("unsupported"));
+    progress
 }
 #[test]
 fn admin_pbf_flat_and_compact_build_all_levels_with_complete_holes() {
     let scratch = Scratch::new();
     let root = &scratch.0;
+    let checkpoint = root.join("indexed-pbf/tmp/indexed-pbf-v1/ways_checkpoint.txt");
+    fs::create_dir_all(checkpoint.parent().unwrap()).unwrap();
+    let saved = format!(
+        "pass2_offset={}\n",
+        fs::metadata(root.join("source.pbf")).unwrap().len()
+    );
+    fs::write(&checkpoint, &saved).unwrap();
     for mode in ["flat", "indexed-pbf"] {
-        build(root, mode);
+        let progress = build(root, mode);
+        assert!(progress.contains("Skipping general way pass"), "{progress}");
+        assert!(progress.contains("Assembling Admin Boundaries"));
+        if mode == "indexed-pbf" {
+            assert_eq!(
+                fs::read_to_string(&checkpoint).unwrap(),
+                saved,
+                "admin-only must not reset general-way progress"
+            );
+        }
         let dir = root.join(mode).join("out/admin_cells");
         for level in 2..=11 {
             let bytes = fs::read(dir.join(format!("admin_level_{level}.1kc"))).unwrap();

@@ -22,3 +22,6 @@ keeping all state under `tmp_dir/indexed-pbf-v1` instead of using legacy scratch
 Admin boundaries reuse the compact lookup after way extraction. Completed older
 way builds can backfill admin output without changing the existing build binding
 or resetting legacy data. Admin errors prevent new completion publication.
+
+Admin-only jobs reuse the existing completed node index and skip general way
+extraction without changing build binding or saved way checkpoints.

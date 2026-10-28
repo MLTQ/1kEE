@@ -34,8 +34,8 @@ parallel Pass 2 and incrementally merge feature cells.
 - Uses the `planet_lookup` adapter for grouped coordinate queries: flat sessions
   cache up to 4 MiB and compact sessions up to 16 MiB of decoded node arrays.
   Reference order and coordinate values are identical across backends.
-- Compact sessions prepare each way blob's dependencies together before feature
-  classification to avoid repeatedly decompressing evicted node blocks.
+- Compact sessions prepare each way blob's selected dependencies together after
+  feature classification to avoid repeatedly decompressing evicted node blocks.
 - **Rationale**: Resolving every reference in one grouped lookup amortizes
   positional I/O without changing vertex order, omissions, or `f32` values.
 
@@ -77,3 +77,13 @@ parallel Pass 2 and incrementally merge feature cells.
 When requested, admin boundaries now run after Pass 2 using the existing node
 lookup and dedicated resumable relation/member-way scans. The summary includes
 administrative ring counts; admin geometry is no longer skipped.
+
+Admin-only builds bypass general Pass 2 entirely without touching its checkpoint.
+`planet_way_selection` classifies once before compact prefetch; unmatched ways
+perform no coordinate I/O. Scanned-way counts include rejected ways. Progress
+reports source bytes before/after each batch regardless of feature count; a
+256 MiB byte cadence flushes pending output before saving sparse-run checkpoints.
+The CLI reports the same progress stages as the GUI.
+
+`planet_pass2_tests` checks zero coordinate reads for unmatched ways, genuine
+scan counts/progress and normal selected-road output against real PBF fixtures.

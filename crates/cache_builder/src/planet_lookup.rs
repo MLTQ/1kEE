@@ -23,20 +23,9 @@ impl Lookup {
     }
 }
 impl Session<'_> {
-    pub fn prepare_blob(&mut self, block: &osmpbf::PrimitiveBlock) -> Result<(), String> {
+    pub fn prepare_refs(&mut self, refs: impl Iterator<Item = i64>) -> Result<(), String> {
         if let Self::Compact(nodes) = self {
-            nodes.prefetch(
-                block
-                    .elements()
-                    .filter_map(|e| {
-                        if let osmpbf::Element::Way(way) = e {
-                            Some(way)
-                        } else {
-                            None
-                        }
-                    })
-                    .flat_map(|way| way.refs()),
-            )?;
+            nodes.prefetch(refs)?;
         }
         Ok(())
     }

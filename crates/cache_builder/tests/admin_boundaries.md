@@ -7,3 +7,7 @@ missing ways and admin backfill after an already-completed compact way build.
 All output and scratch state belong to disposable temporary directories.
 
 A focused import over existing global output must preserve complete country rings and holes.
+
+Admin-only flat and compact builds must explicitly skip general-way extraction.
+A pre-existing compact way checkpoint stays byte-for-byte intact; CLI progress
+reaches real relation assembly and all levels retain identical geometry.

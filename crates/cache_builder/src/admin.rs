@@ -77,12 +77,24 @@ fn collect_admin_relations(
     }
 
     let start = resume_offset.unwrap_or(0);
+    let total_bytes = std::fs::metadata(planet_path)
+        .map_err(|e| e.to_string())?
+        .len();
     let (reader, pos) = open_planet_at(planet_path, start)?;
 
     // Batch: (relation_id, name, admin_level, way_ids)
     let mut batch: Vec<(i64, Option<String>, u8, Vec<i64>)> = Vec::new();
     let mut total_relations = 0usize;
     let mut checkpoint = start;
+    progress(RoadBuildProgress {
+        stage: "Scanning Relations".into(),
+        fraction: 0.82,
+        message: format!(
+            "Scanning from {:.2} / {:.2} GB",
+            start as f64 / 1e9,
+            total_bytes as f64 / 1e9
+        ),
+    });
 
     for blob_result in reader {
         let blob = blob_result.map_err(|e| e.to_string())?;
@@ -91,11 +103,7 @@ fn collect_admin_relations(
             continue;
         };
 
-        for element in block.elements() {
-            let osmpbf::Element::Relation(rel) = element else {
-                continue;
-            };
-
+        for rel in block.groups().flat_map(|group| group.relations()) {
             // OSM levels vary by country; retain intermediate and local divisions too.
             let mut is_boundary = false;
             let mut admin_level: Option<u8> = None;
@@ -155,10 +163,11 @@ fn collect_admin_relations(
             checkpoint = offset;
             progress(RoadBuildProgress {
                 stage: "Scanning Relations".into(),
-                fraction: 0.89,
+                fraction: 0.82 + 0.06 * offset as f32 / total_bytes.max(1) as f32,
                 message: format!(
-                    "{total_relations} records; {:.1} GB scanned",
-                    offset as f64 / 1e9
+                    "{total_relations} admin relations found; {:.2} / {:.2} GB scanned",
+                    offset as f64 / 1e9,
+                    total_bytes as f64 / 1e9
                 ),
             });
         }
@@ -204,11 +213,23 @@ fn collect_admin_way_nodes(
     }
 
     let start = resume_offset.unwrap_or(0);
+    let total_bytes = std::fs::metadata(planet_path)
+        .map_err(|e| e.to_string())?
+        .len();
     let (reader, pos) = open_planet_at(planet_path, start)?;
 
     let mut batch: Vec<(i64, Vec<i64>)> = Vec::new();
     let mut ways_found = 0usize;
     let mut checkpoint = start;
+    progress(RoadBuildProgress {
+        stage: "Scanning Admin Ways".into(),
+        fraction: 0.88,
+        message: format!(
+            "Scanning from {:.2} / {:.2} GB",
+            start as f64 / 1e9,
+            total_bytes as f64 / 1e9
+        ),
+    });
 
     for blob_result in reader {
         let blob = blob_result.map_err(|e| e.to_string())?;
@@ -217,10 +238,7 @@ fn collect_admin_way_nodes(
             continue;
         };
 
-        for element in block.elements() {
-            let osmpbf::Element::Way(way) = element else {
-                continue;
-            };
+        for way in block.groups().flat_map(|group| group.ways()) {
             if !admin_way_ids.contains(&way.id()) {
                 continue;
             }
@@ -237,10 +255,11 @@ fn collect_admin_way_nodes(
             checkpoint = offset;
             progress(RoadBuildProgress {
                 stage: "Scanning Admin Ways".into(),
-                fraction: 0.89,
+                fraction: 0.88 + 0.06 * offset as f32 / total_bytes.max(1) as f32,
                 message: format!(
-                    "{ways_found} records; {:.1} GB scanned",
-                    offset as f64 / 1e9
+                    "{ways_found} boundary member ways found; {:.2} / {:.2} GB scanned",
+                    offset as f64 / 1e9,
+                    total_bytes as f64 / 1e9
                 ),
             });
         }
@@ -309,7 +328,26 @@ fn stitch_and_write(
     progress: &mut dyn FnMut(RoadBuildProgress),
 ) -> Result<usize, String> {
     let mut by_level: HashMap<u8, Vec<AdminRegion>> = HashMap::new();
-    for (relation_id, name, level, way_ids) in node_store.get_admin_relation_ways()? {
+    progress(RoadBuildProgress {
+        stage: "Assembling Admin Boundaries".into(),
+        fraction: 0.94,
+        message: "Loading boundary relations and resolving their member coordinates…".into(),
+    });
+    let relations = node_store.get_admin_relation_ways()?;
+    let count = relations.len();
+    let mut last_report = std::time::Instant::now();
+    for (index, (relation_id, name, level, way_ids)) in relations.into_iter().enumerate() {
+        if index == 0 || last_report.elapsed().as_secs_f32() >= 1.0 {
+            progress(RoadBuildProgress {
+                stage: "Assembling Admin Boundaries".into(),
+                fraction: 0.94 + 0.04 * index as f32 / count.max(1) as f32,
+                message: format!(
+                    "{index} / {count} relations assembled; resolving {} (relation {relation_id}, level {level})",
+                    name.as_deref().unwrap_or("unnamed boundary")
+                ),
+            });
+            last_report = std::time::Instant::now();
+        }
         let ways = node_store.admin_way_refs(&way_ids)?;
         let mut region = geometry::assemble(relation_id, name, &ways, resolve)?;
         region.complete &= ways.len() == way_ids.len();
@@ -319,6 +357,11 @@ fn stitch_and_write(
     }
     let mut total = 0;
     for level in 2..=11 {
+        progress(RoadBuildProgress {
+            stage: "Writing Admin Boundaries".into(),
+            fraction: 0.98,
+            message: format!("Writing level {level}; {total} rings already written"),
+        });
         total += write_admin_level_file(
             cache_dir,
             level,

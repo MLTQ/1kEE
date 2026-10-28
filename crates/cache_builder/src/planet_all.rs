@@ -25,14 +25,7 @@ use crate::geojson::{ensure_cache_dir, merge_write_cells, merge_write_feature_ce
 use crate::planet_lookup::{Lookup, Session as LookupSession};
 use crate::roads::{RoadBuildProgress, open_planet_at};
 use crate::srtm::SrtmSampler;
-use crate::util::{
-    GeoPoint, RoadPolyline, WayFeature, canonical_aeroway_class, canonical_building_class,
-    canonical_comm_class, canonical_govt_class, canonical_industrial_class,
-    canonical_military_class, canonical_pipeline_class, canonical_port_class,
-    canonical_power_class, canonical_railway_class, canonical_road_class, canonical_surv_class,
-    canonical_tree_class, canonical_waterway_class, focus_cells_for_bounds, parse_voltage_kv,
-    polyline_bounds,
-};
+use crate::util::{GeoPoint, RoadPolyline, WayFeature, focus_cells_for_bounds, polyline_bounds};
 use osmpbf::BlobDecode;
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -55,6 +48,8 @@ const BATCH_BLOBS: usize = 64;
 mod compact;
 #[path = "planet_scan.rs"]
 mod scan;
+#[path = "planet_way_selection.rs"]
+mod selection;
 
 // ── Checkpoint ────────────────────────────────────────────────────────────────
 
@@ -103,7 +98,10 @@ impl Checkpoint {
 // ── Public entry point ────────────────────────────────────────────────────────
 
 pub fn build_planet_cache(cmd: PlanetAllCommand) -> Result<(), String> {
-    build_planet_cache_with_progress(cmd, &mut |_| {}).map(|_| ())
+    build_planet_cache_with_progress(cmd, &mut |p| {
+        println!("[{:.1}%] {}: {}", p.fraction * 100.0, p.stage, p.message);
+    })
+    .map(|_| ())
 }
 
 pub fn build_planet_cache_with_progress(
@@ -300,6 +298,7 @@ fn run_pass1(
 
 // ── Pass 2 ────────────────────────────────────────────────────────────────────
 
+#[derive(Default)]
 struct BuildStats {
     feature_count: usize,
     cell_count: usize,
@@ -366,147 +365,44 @@ fn process_blob(
     let BlobDecode::OsmData(block) = decoded else {
         return Ok(out);
     };
-    node_lookup.prepare_blob(&block)?;
-    for element in block.elements() {
-        let osmpbf::Element::Way(way) = element else {
-            continue;
-        };
-        process_way(&way, node_lookup, cmd, &mut out)?;
+    let mut selected = Vec::new();
+    for way in block.groups().flat_map(|group| group.ways()) {
+        out.scanned_ways += 1;
+        if let Some(selection) = selection::classify(&way, cmd) {
+            selected.push((way, selection));
+        }
+    }
+    node_lookup.prepare_refs(selected.iter().flat_map(|(way, _)| way.refs()))?;
+    for (way, selection) in selected {
+        process_way(&way, selection, node_lookup, cmd, &mut out)?;
     }
     Ok(out)
 }
 
 fn process_way(
     way: &osmpbf::Way<'_>,
+    selected: selection::WaySelection,
     node_lookup: &mut LookupSession<'_>,
     cmd: &PlanetAllCommand,
     out: &mut BatchOutput,
 ) -> Result<(), String> {
-    let mut road_class: Option<&'static str> = None;
-    let mut waterway_class: Option<&'static str> = None;
-    let mut building_class: Option<&'static str> = None;
-    let mut tree_class: Option<&'static str> = None;
-    let mut military_class: Option<&'static str> = None;
-    let mut industrial_class: Option<&'static str> = None;
-    let mut port_class: Option<&'static str> = None;
-    let mut govt_class: Option<&'static str> = None;
-    let mut surv_class: Option<&'static str> = None;
-    let mut name: Option<String> = None;
-
-    let mut raw_power: Option<String> = None;
-    let mut raw_voltage: Option<String> = None;
-    let mut raw_railway: Option<&'static str> = None;
-    let mut raw_pipeline = false;
-    let mut raw_substance: Option<String> = None;
-    let mut raw_aeroway: Option<String> = None;
-    let mut raw_aerodrome_intl = false;
-    let mut raw_man_made: Option<String> = None;
-    let mut raw_tower_type: Option<String> = None;
-
-    for (key, value) in way.tags() {
-        match key {
-            "highway" => road_class = canonical_road_class(value),
-            "waterway" => waterway_class = canonical_waterway_class(value),
-            "building" => building_class = canonical_building_class(value),
-            "natural" | "landuse" => {
-                if tree_class.is_none() {
-                    tree_class = canonical_tree_class(key, value);
-                }
-                if industrial_class.is_none() {
-                    industrial_class = canonical_industrial_class(key, value);
-                }
-            }
-            "military" => military_class = canonical_military_class(key, value),
-            "power" => raw_power = Some(value.to_owned()),
-            "voltage" => raw_voltage = Some(value.to_owned()),
-            "railway" => raw_railway = canonical_railway_class(value),
-            "man_made" => {
-                if value == "pipeline" {
-                    raw_pipeline = true;
-                } else {
-                    if industrial_class.is_none() {
-                        industrial_class = canonical_industrial_class(key, value);
-                    }
-                    raw_man_made = Some(value.to_owned());
-                    if port_class.is_none() {
-                        port_class = canonical_port_class(key, value);
-                    }
-                    if surv_class.is_none() {
-                        surv_class = canonical_surv_class(key, value);
-                    }
-                }
-            }
-            "substance" => raw_substance = Some(value.to_owned()),
-            "aeroway" => raw_aeroway = Some(value.to_owned()),
-            "aerodrome:type" => {
-                if value == "international" {
-                    raw_aerodrome_intl = true;
-                }
-            }
-            "tower:type" => raw_tower_type = Some(value.to_owned()),
-            "amenity" => {
-                if govt_class.is_none() {
-                    govt_class = canonical_govt_class(key, value);
-                }
-                if port_class.is_none() {
-                    port_class = canonical_port_class(key, value);
-                }
-            }
-            "office" | "government" => {
-                if govt_class.is_none() {
-                    govt_class = canonical_govt_class(key, value);
-                }
-            }
-            "harbour" | "leisure" => {
-                if port_class.is_none() {
-                    port_class = canonical_port_class(key, value);
-                }
-            }
-            "surveillance" => {
-                if surv_class.is_none() {
-                    surv_class = canonical_surv_class(key, value);
-                }
-            }
-            "name" if name.is_none() => name = Some(value.to_owned()),
-            _ => {}
-        }
-    }
-
-    let voltage_kv = raw_voltage.as_deref().and_then(parse_voltage_kv);
-    let power_class = raw_power
-        .as_deref()
-        .and_then(|pt| canonical_power_class(pt, voltage_kv));
-    let pipeline_class: Option<&'static str> = if raw_pipeline {
-        Some(canonical_pipeline_class(
-            raw_substance.as_deref().unwrap_or(""),
-        ))
-    } else {
-        None
-    };
-    let aeroway_class = raw_aeroway
-        .as_deref()
-        .and_then(|a| canonical_aeroway_class(a, raw_aerodrome_intl));
-    let comm_class = raw_man_made
-        .as_deref()
-        .and_then(|m| canonical_comm_class(m, raw_tower_type.as_deref()));
-
-    let any_match = (cmd.build_roads && road_class.is_some())
-        || (cmd.build_waterways && waterway_class.is_some())
-        || (cmd.build_buildings && building_class.is_some())
-        || (cmd.build_trees && tree_class.is_some())
-        || (cmd.build_power && power_class.is_some())
-        || (cmd.build_rail && raw_railway.is_some())
-        || (cmd.build_pipeline && pipeline_class.is_some())
-        || (cmd.build_aeroway && aeroway_class.is_some())
-        || (cmd.build_military && military_class.is_some())
-        || (cmd.build_comm && comm_class.is_some())
-        || (cmd.build_industrial && industrial_class.is_some())
-        || (cmd.build_port && port_class.is_some())
-        || (cmd.build_government && govt_class.is_some())
-        || (cmd.build_surveillance && surv_class.is_some());
-    if !any_match {
-        return Ok(());
-    }
+    let selection::WaySelection {
+        road_class,
+        waterway_class,
+        building_class,
+        tree_class,
+        military_class,
+        industrial_class,
+        port_class,
+        govt_class,
+        surv_class,
+        power_class,
+        raw_railway,
+        pipeline_class,
+        aeroway_class,
+        comm_class,
+        name,
+    } = selected;
 
     let refs: Vec<i64> = way.refs().collect();
     let points: Vec<GeoPoint> = node_lookup
@@ -521,8 +417,6 @@ fn process_way(
     }
 
     let way_bounds = polyline_bounds(&points);
-    out.scanned_ways += 1;
-
     macro_rules! emit_feature {
         ($enabled:expr, $cls:expr, $map:expr, $is_poly:expr) => {
             if $enabled {
@@ -596,12 +490,29 @@ fn run_pass2(
     checkpoint_path: &Path,
     progress: &mut dyn FnMut(RoadBuildProgress),
 ) -> Result<BuildStats, String> {
+    if !selection::has_way_layers(cmd) {
+        progress(RoadBuildProgress {
+            stage: "Skipping general way pass".into(),
+            fraction: 0.42,
+            message: "No way layers selected; proceeding directly to administrative relations."
+                .into(),
+        });
+        // Admin owns separate checkpoints. Do not reset a saved general-way offset.
+        return Ok(BuildStats::default());
+    }
+    let total_bytes = fs::metadata(&cmd.planet_path)
+        .map_err(|e| e.to_string())?
+        .len();
     let resume = cp.pass2_offset;
     if resume > 0 {
         progress(RoadBuildProgress {
-            stage: "Resuming Pass 2".to_owned(),
+            stage: "Scanning Ways".to_owned(),
             fraction: 0.42,
-            message: format!("Resuming Pass 2 from offset {resume}"),
+            message: format!(
+                "Starting way scan at {:.2} / {:.2} GB",
+                resume as f64 / 1e9,
+                total_bytes as f64 / 1e9
+            ),
         });
     }
 
@@ -651,6 +562,15 @@ fn run_pass2(
         // by the reader — safe to resume from here.
         let batch_end_pos = pos.load(Ordering::Relaxed);
 
+        progress(RoadBuildProgress {
+            stage: "Resolving selected ways".into(),
+            fraction: 0.42 + 0.4 * batch_end_pos as f32 / total_bytes.max(1) as f32,
+            message: format!(
+                "Read {:.2} / {:.2} GB; resolving this batch's selected features",
+                batch_end_pos as f64 / 1e9,
+                total_bytes as f64 / 1e9
+            ),
+        });
         // Process blobs in parallel; each returns a BatchOutput.
         let partials: Vec<BatchOutput> = blob_batch
             .par_iter()
@@ -684,7 +604,9 @@ fn run_pass2(
             buffered += p.feature_count;
         }
 
-        if buffered >= FLUSH_THRESHOLD {
+        if buffered >= FLUSH_THRESHOLD
+            || batch_end_pos.saturating_sub(cp.pass2_offset) >= 256 * 1024 * 1024
+        {
             // Update cell_set from accumulated maps (used only for the final count).
             for k in roads_by_cell.keys() {
                 cell_set.insert(*k);
@@ -752,16 +674,16 @@ fn run_pass2(
             cp.pass2_offset = batch_end_pos;
             node_lookup.validate_source()?;
             cp.save(checkpoint_path)?;
-
-            progress(RoadBuildProgress {
-                stage: "Scanning Ways".to_owned(),
-                fraction: 0.75,
-                message: format!(
-                    "Pass 2: {scanned_ways} ways scanned; {feature_count} features; \
-                     {written_cells} cache files written",
-                ),
-            });
         }
+        progress(RoadBuildProgress {
+            stage: "Scanning Ways".into(),
+            fraction: 0.42 + 0.4 * batch_end_pos as f32 / total_bytes.max(1) as f32,
+            message: format!(
+                "{scanned_ways} ways scanned; {feature_count} selected features; {written_cells} cache files; {:.2} / {:.2} GB",
+                batch_end_pos as f64 / 1e9,
+                total_bytes as f64 / 1e9
+            ),
+        });
     }
 
     node_lookup.validate_source()?;
@@ -981,3 +903,7 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "planet_pass2_tests.rs"]
+mod pass2_tests;

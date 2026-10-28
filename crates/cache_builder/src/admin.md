@@ -31,3 +31,8 @@ Compact admin scratch lives under indexed-pbf-v1 with the rest of compact state.
 Whole-planet builds replace each level including empty levels. Focused exports
 merge by relation: retain existing complete topology over incoming fragments,
 keep unrelated regions, and replace fragments once a full relation is available.
+
+Scans iterate only relation/way groups, avoiding expansion of billions of dense
+node elements that cannot match. Fresh and resumed scans report bytes/total and
+matched records at durable checkpoints. Assembly reports relation/name/count
+progress at most once per second, followed by per-level write progress.
