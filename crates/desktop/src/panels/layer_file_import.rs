@@ -67,3 +67,31 @@ fn read(path: PathBuf) -> ResultMessage {
         .map_err(|e| format!("{format} parse error in \"{name}\": {e}"))?;
     Ok((layer, format))
 }
+
+/// Explicit file-picker action, displayed in the Layers sidebar.
+pub(super) fn button(ui: &mut egui::Ui, model: &mut AppModel) {
+    let importing = busy();
+    if ui
+        .add_enabled(
+            !importing,
+            egui::Button::new(if importing {
+                "Loading layer…"
+            } else {
+                "Import Layer…"
+            }),
+        )
+        .on_hover_text("Add a GeoJSON, KML or KMZ overlay")
+        .clicked()
+    {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Map layers", &["geojson", "json", "kml", "kmz"])
+            .add_filter("GeoJSON", &["geojson", "json"])
+            .add_filter("KML / KMZ", &["kml", "kmz"])
+            .set_title("Import map layer")
+            .pick_file()
+        else {
+            return;
+        };
+        queue(path, model);
+    }
+}

@@ -41,7 +41,7 @@ Defines the shared domain and UI state for the 1kEE desktop application. This fi
 
 ### `AppModel::has_factal_api_key`
 - **Does**: Reports whether a non-empty Factal token is currently configured
-- **Interacts with**: `app.rs`, `factal_settings.rs`
+- **Interacts with**: `app.rs`, `settings.rs`
 
 ### `AppModel::replace_factal_events`
 - **Does**: Swaps in a fresh live event list while retaining the current selection when possible
@@ -64,12 +64,12 @@ Defines the shared domain and UI state for the 1kEE desktop application. This fi
 | `app.rs` | `AppModel::new` returns a ready state with empty event and camera collections | Constructor removal, signature change, or seeded runtime records |
 | `camera_list.rs` | `nearby_cameras` returns distance-sorted items | Changing sort order or field names |
 | `world_map.rs` | `selected_event`, `nearby_cameras`, and `cameras` remain available | Renaming state accessors or moving map data out |
-| `header.rs` | `terrain_inventory` is available for top-level dataset status | Removing or relocating terrain status state |
-| `header.rs` | `osm_inventory` is available for top-level OSM source/runtime status | Removing or relocating OSM status state |
+| `settings_overview.rs` | `terrain_inventory` is available for dataset status in Settings | Removing or relocating terrain status state |
+| `settings_overview.rs` | `osm_inventory` is available for OSM source/runtime status in Settings | Removing or relocating OSM status state |
 | `world_map/camera.rs` | `globe_view` is available for persistent camera interaction | Removing or relocating globe state without replacing the contract |
-| `header.rs` | `selected_root` can be updated from the UI to re-resolve terrain assets | Removing or relocating root-selection state without replacing the contract |
+| `settings_paths.rs` | `selected_root` can be updated from the UI to re-resolve terrain assets | Removing or relocating root-selection state without replacing the contract |
 | `terrain_library.rs` | City focus, search text, and selected city ids live here and can be mutated from UI actions | Removing or relocating terrain-library state without replacing the contract |
-| `factal_settings.rs` | Factal key text, path override text, and window-open state live here and can be mutated from UI actions | Removing or relocating settings state without replacing the contract |
+| `settings.rs` | Factal key text, path override text, and window-open state live here and can be mutated from UI actions | Removing or relocating settings state without replacing the contract |
 | `factal_stream.rs` | `replace_factal_events` swaps in fresh event lists without destroying other app state | Removing the method or changing its selection-retention semantics |
 
 ## Notes
@@ -78,7 +78,7 @@ Defines the shared domain and UI state for the 1kEE desktop application. This fi
 - With no source records, the globe starts at a neutral zero-degree focus. The
   first authentic event becomes the map focus unless a city is already selected.
 - Manual city focus coexists with live events: selecting a city re-centers terrain without destroying the event list, and selecting an event clears the manual city focus again.
-- Manual city focus labels now use region-qualified city names when the GeoNames catalog can resolve an admin1/state entry, so repeated place names are less ambiguous in the header, logs, and terrain library.
+- Manual city focus labels now use region-qualified city names when the GeoNames catalog can resolve an admin1/state entry, so repeated place names are less ambiguous in Settings Overview, logs, and Terrain Library.
 - Factal API key persistence is intentionally lightweight for now: the key is loaded into the model at startup and the live poller swaps in fresh events once authenticated.
 - Factal-backed events now preserve an optional raw-detail payload so the operator can inspect the original API item from a brief window without bloating the normalized event list UI.
 - Live camera-source keys persist in the model/settings path, and the camera registry status distinguishes `inactive`, `configured`, and `live` without fallback records.

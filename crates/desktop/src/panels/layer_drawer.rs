@@ -27,6 +27,33 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
             ui.separator();
 
             egui::ScrollArea::vertical().show(ui, |ui| {
+                section_label(ui, "IMPORTED LAYERS");
+                super::layer_file_import::button(ui, model);
+                if model.geojson_layers.is_empty() { ui.small("GeoJSON, KML or KMZ"); }
+                if !model.geojson_layers.is_empty() {
+                    let mut remove_idx: Option<usize> = None;
+                    for (idx, layer) in model.geojson_layers.iter_mut().enumerate() {
+                        let [r, g, b, _] = layer.color;
+                        let dot_color = egui::Color32::from_rgb(r, g, b);
+                        ui.horizontal(|ui| {
+                            let (rect, _) =
+                                ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                            ui.painter().circle_filled(rect.center(), 4.0, dot_color);
+                            ui.checkbox(&mut layer.visible, &layer.name);
+                            if ui.small_button("×").on_hover_text("Remove").clicked() {
+                                remove_idx = Some(idx);
+                            }
+                        });
+                    }
+                    if let Some(idx) = remove_idx {
+                        model.geojson_layers.remove(idx);
+                    }
+                    ui.add_space(6.0);
+                }
+
+                ui.separator();
+                ui.add_space(6.0);
+
                 // ── BASE ─────────────────────────────────────────────────────
                 section_label(ui, "BASE");
                 ui.checkbox(&mut model.show_event_markers, "Events");
@@ -65,7 +92,7 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                         egui::Checkbox::new(&mut model.show_hillshade, "Hillshade"),
                     )
                     .on_disabled_hover_text(
-                        "Local Earth view with Stream detailed terrain enabled in Settings → Paths",
+                        "Local Earth view with Stream detailed terrain enabled in Settings → Files & Cache",
                     );
                     ui.indent("hillshade_source", |ui| {
                         egui::ComboBox::from_id_salt("hillshade_source")
@@ -320,29 +347,6 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                     );
                 });
                 ui.add_space(6.0);
-
-                // ── IMPORTED LAYERS ──────────────────────────────────────────
-                if !model.geojson_layers.is_empty() {
-                    section_label(ui, "IMPORTED LAYERS");
-                    let mut remove_idx: Option<usize> = None;
-                    for (idx, layer) in model.geojson_layers.iter_mut().enumerate() {
-                        let [r, g, b, _] = layer.color;
-                        let dot_color = egui::Color32::from_rgb(r, g, b);
-                        ui.horizontal(|ui| {
-                            let (rect, _) =
-                                ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                            ui.painter().circle_filled(rect.center(), 4.0, dot_color);
-                            ui.checkbox(&mut layer.visible, &layer.name);
-                            if ui.small_button("×").on_hover_text("Remove").clicked() {
-                                remove_idx = Some(idx);
-                            }
-                        });
-                    }
-                    if let Some(idx) = remove_idx {
-                        model.geojson_layers.remove(idx);
-                    }
-                    ui.add_space(6.0);
-                }
 
                 // ── ARCGIS SOURCES ───────────────────────────────────────────
                 section_label(ui, "ARCGIS SOURCES");

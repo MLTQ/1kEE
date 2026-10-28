@@ -179,7 +179,7 @@ pub struct AppModel {
     camera_registry_revision: u64,
     nearby_camera_cache: RefCell<Option<NearbyCameraCache>>,
     pub selected_root: Option<PathBuf>,
-    pub factal_settings_open: bool,
+    pub settings_open: bool,
     pub factal_brief_open: bool,
     pub factal_api_key: String,
     pub windy_webcams_api_key: String,
@@ -199,11 +199,9 @@ pub struct AppModel {
     pub settings_threedep_enabled: bool,
     pub settings_threedep_cache_budget_gb: f32,
     pub settings_local_contour_vram_budget_gb: f32,
-    pub terrain_library_open: bool,
     pub city_filter: String,
     pub selected_city_ids: BTreeSet<String>,
     pub activity_log: Vec<String>,
-    pub log_collapsed: bool,
     pub factal_stream_status: String,
     pub usgs_stream_status: String,
     pub camera_registry_status: String,
@@ -352,7 +350,7 @@ impl AppModel {
             camera_registry_revision: 0,
             nearby_camera_cache: RefCell::new(None),
             selected_root,
-            factal_settings_open: false,
+            settings_open: false,
             factal_brief_open: false,
             factal_api_key: factal_api_key.clone(),
             windy_webcams_api_key: windy_webcams_api_key.clone(),
@@ -374,7 +372,6 @@ impl AppModel {
             settings_threedep_enabled: app_settings.threedep_enabled,
             settings_threedep_cache_budget_gb: app_settings.threedep_cache_budget_gb,
             settings_local_contour_vram_budget_gb: app_settings.local_contour_vram_budget_gb,
-            terrain_library_open: false,
             city_filter: String::new(),
             selected_city_ids: BTreeSet::new(),
             activity_log: {
@@ -415,7 +412,6 @@ impl AppModel {
             replay_duration_secs: 120,
             replay_state: None,
             replay_history_status: String::new(),
-            log_collapsed: false,
             factal_stream_status: if factal_api_key.is_empty() {
                 "inactive".into()
             } else {

@@ -17,7 +17,7 @@ Runs the live camera registry polling loop for the desktop app. This module owns
 - **Does**: Cancels an active registry worker and schedules a new provider poll.
   Saved directory endpoints remain cached unless Settings explicitly requests
   discovery or rechecking through the endpoint store.
-- **Interacts with**: `factal_settings.rs`
+- **Interacts with**: `settings_actions.rs`
 
 ### `fetch_511ny_cameras`
 - **Does**: Calls the official 511NY cameras endpoint and maps statewide camera metadata into normalized `CameraFeed` records
@@ -34,7 +34,7 @@ Runs the live camera registry polling loop for the desktop app. This module owns
 - **Does**: Invokes the paced Insecam discovery, detail-page geolocation, feed
   classification, and deduplication pipeline when explicitly enabled. Directory
   page, cache-reuse, candidate, geolocation, and reachability counts are
-  translated into top-bar progress updates while the worker runs.
+  translated into Settings Overview progress updates while the worker runs.
 - **Interacts with**: `camera_directory_pipeline.rs` and persisted camera settings.
 - **Rationale**: Keeps the Project Eyes On integration inside the same
   non-blocking registry worker and source-normalization boundary as keyed feeds.
@@ -45,8 +45,8 @@ Runs the live camera registry polling loop for the desktop app. This module owns
 |-----------|---------|------------------|
 | `app.rs` | `tick` is cheap enough to call every frame and only mutates the model when a finished poll result exists | Making `tick` blocking or removing it |
 | `model.rs` | Successful polls arrive as normalized `CameraFeed` values and can replace the current camera registry atomically | Returning provider-specific camera types without normalization |
-| `factal_settings.rs` | `invalidate` triggers a fresh camera sync after camera-source settings change | Removing the invalidation hook |
-| `header.rs` | Progress arrives through a channel and never blocks the egui render loop | Updating the model directly from the registry worker |
+| `settings_actions.rs` | `invalidate` triggers a fresh camera sync after camera-source settings change | Removing the invalidation hook |
+| `settings_overview.rs` | Progress arrives through a channel and never blocks the egui render loop | Updating the model directly from the registry worker |
 | Directory pipeline | Active work receives a cancellation flag so an end-of-directory crawl cannot delay a settings change or shutdown indefinitely | Dropping the cancellation token |
 
 ## Notes

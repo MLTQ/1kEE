@@ -7,7 +7,7 @@ Detects the locally available terrain datasets for the app, including repository
 
 ### `TerrainInventory`
 - **Does**: Summarizes which GEBCO, Natural Earth, SRTM, and derived runtime terrain assets are present and which source should drive runtime terrain work first
-- **Interacts with**: `AppModel` in `model.rs`, `header.rs`
+- **Interacts with**: `AppModel` in `model.rs`, `settings_overview.rs`
 
 ### `TerrainInventory::detect_from`
 - **Does**: Scans the selected root, its parents, and the local workspace for known raw and derived terrain asset locations
@@ -28,14 +28,14 @@ Detects the locally available terrain datasets for the app, including repository
 
 ### Status helpers
 - **Does**: Produce compact status labels and user-facing summary lines
-- **Interacts with**: operator log and header metrics
+- **Interacts with**: operator log and Settings Overview
 
 ## Contracts
 
 | Dependent | Expects | Breaking changes |
 |-----------|---------|------------------|
 | `model.rs` | `detect_from` is cheap and safe to call during startup and after user root changes | Making detection expensive or fallible in a way that crashes startup |
-| `header.rs` | `status_label` and `status_summary` return concise human-readable strings | Renaming/removing status helpers |
+| `settings_overview.rs` | `status_label` and `status_summary` return concise human-readable strings | Renaming/removing status helpers |
 
 ## Notes
 - This module intentionally stops at inventory. Real terrain ingestion should consume preprocessed outputs rather than opening the raw source rasters directly from the UI thread.

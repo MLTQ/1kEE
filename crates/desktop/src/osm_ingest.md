@@ -7,7 +7,7 @@ Tracks the planet-scale OSM source, owns the shared runtime schema, and runs bac
 
 ### `OsmInventory`
 - **Does**: Summarizes whether the planet PBF is present, whether the shared runtime SQLite store is initialized, and how many queued jobs / derived tile manifests exist
-- **Interacts with**: `model.rs`, `header.rs`
+- **Interacts with**: `model.rs`, `settings_overview.rs`
 
 ### `ensure_runtime_store`
 - **Does**: Creates `Derived/osm/osm_runtime.sqlite`, enables WAL mode, creates the shared schema, and records the detected planet source metadata
@@ -47,7 +47,7 @@ Tracks the planet-scale OSM source, owns the shared runtime schema, and runs bac
 
 ### `snapshots` / `has_active_jobs`
 - **Does**: Exposes the current OSM ingest queue for UI status rendering
-- **Interacts with**: `terrain_library.rs`, `header.rs`
+- **Interacts with**: `terrain_library.rs`, `settings_overview.rs`
 
 ### `find_planet_pbf`
 - **Does**: Resolves `planet-latest.osm.pbf` from explicit app settings first and otherwise searches under the selected asset root / executable directory
@@ -78,7 +78,7 @@ Tracks the planet-scale OSM source, owns the shared runtime schema, and runs bac
 | Dependent | Expects | Breaking changes |
 |-----------|---------|------------------|
 | `model.rs` | `detect_from` is cheap enough to run at startup and after root changes | Making inventory expensive or blocking on planet scans |
-| `header.rs` | `status_label`, `status_summary`, and `primary_runtime_source` remain concise | Removing or renaming those accessors |
+| `settings_overview.rs` | `status_label`, `status_summary`, and `primary_runtime_source` remain concise | Removing or renaming those accessors |
 | Future OSM importer | `ensure_runtime_store` creates stable tables for queued jobs plus road/building tiles | Renaming schema without migrating readers/writers |
 | `terrain_library.rs` | `tick`, `queue_planet_roads_import`, and `snapshots` remain cheap enough to call every frame / button press | Making them block on heavy import work |
 

@@ -7,7 +7,7 @@ Centralizes the visual language for the 1kEE desktop demo. It installs the activ
 
 ### `MapTheme`
 - **Does**: Enumerates the available palette presets, including the optional sodium-lamp amber theme
-- **Interacts with**: `factal_settings.rs`, `app.rs`, `model.rs`
+- **Interacts with**: `settings_appearance.rs`, `app.rs`, `model.rs`
 
 ### `install`
 - **Does**: Applies spacing, backgrounds, and interactive widget colors to the `egui` context

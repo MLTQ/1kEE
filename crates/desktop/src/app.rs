@@ -120,6 +120,7 @@ impl eframe::App for DashboardApp {
         }
 
         panels::layer_file_import::poll(&mut self.model);
+        panels::terrain_library::tick(ctx, &mut self.model);
         factal_stream::tick(&mut self.model);
         factal_stream::history_tick(&mut self.model);
         usgs_stream::tick(&mut self.model);
@@ -161,13 +162,6 @@ impl eframe::App for DashboardApp {
         // must keep ticking even when no API keys are present.
         ctx.request_repaint_after(Duration::from_secs(1));
 
-        if !self.model.cinematic_mode && !self.model.obs_view {
-            panels::render_header(ctx, &mut self.model);
-            panels::render_factal_settings(ctx, &mut self.model);
-            panels::render_terrain_library(ctx, &mut self.model);
-            panels::render_stellar_observatory(ctx, &mut self.model);
-        }
-
         if self.model.obs_view || !self.model.cinematic_mode || self.model.event_follow.enabled() {
             panels::render_factal_brief(ctx, &mut self.model);
         }
@@ -186,6 +180,10 @@ impl eframe::App for DashboardApp {
                 panels::render_world_map(ui, &mut self.model);
             });
 
+        if !self.model.obs_view {
+            panels::render_settings(ctx, &mut self.model);
+            panels::render_stellar_observatory(ctx, &mut self.model);
+        }
         self.camera_feed_viewer.render(ctx, &mut self.model);
 
         // Refresh the snapshot the companion web view polls, now that this frame's

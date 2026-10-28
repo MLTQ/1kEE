@@ -1,7 +1,7 @@
 # camera_endpoint_settings.rs
 
 ## Purpose
-Render saved camera-directory controls inside Settings → APIs → Project Eyes On.
+Render saved camera-directory controls inside Settings → Data Sources → Project Eyes On.
 Keep filesystem and network work off the egui thread.
 
 ## Components

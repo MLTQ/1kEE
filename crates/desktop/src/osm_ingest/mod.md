@@ -19,7 +19,7 @@ Defines the OSM ingest subsystem’s public surface: source discovery, job queue
 | Dependent | Expects | Breaking changes |
 |-----------|---------|------------------|
 | `road_layer.rs` | `load_roads_for_bounds` returns normalized `RoadPolyline` data regardless of the backing cache format | Changing the return type or removing the vector-cache preference |
-| `header.rs` / status UI | Queue/inventory re-exports remain stable | Renaming re-exported functions |
+| `settings_overview.rs` / status UI | Queue/inventory re-exports remain stable | Renaming re-exported functions |
 | `roads_osmium.rs` | Feature-kind constants and focus-note prefixes stay stable | Renaming the constants without updating focused importers |
 
 ## Notes

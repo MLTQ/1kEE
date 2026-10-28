@@ -1,22 +1,20 @@
 mod camera_list;
 mod event_list;
 mod factal_brief;
-mod factal_settings;
-mod header;
-pub(crate) mod layer_file_import;
 mod layer_drawer;
+pub(crate) mod layer_file_import;
+mod map_rail;
 mod replay_controls;
+mod settings;
 mod status_log;
 mod stellar_observatory;
-mod terrain_library;
+pub(crate) mod terrain_library;
 pub(crate) mod world_map;
 
 pub use event_list::render_event_list;
 pub use factal_brief::render_factal_brief;
-pub use factal_settings::render_factal_settings;
-pub use header::render_header;
 pub use layer_drawer::render_layer_drawer;
 pub use replay_controls::render_replay_controls;
+pub use settings::render_settings;
 pub use stellar_observatory::render_stellar_observatory;
-pub use terrain_library::render_terrain_library;
 pub use world_map::render_world_map;

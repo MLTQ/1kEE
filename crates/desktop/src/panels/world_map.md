@@ -107,3 +107,7 @@ local-center query also did not describe the actual globe source window.
 Admin boundaries delegate to admin_layer (shared cache discovery/background loads),
 admin_geometry (hole-aware fill), admin_render (local projection and clipping),
 and admin_controls (nested levels, opacity, status and reload).
+
+The compact main rail is delegated to `panels/map_rail.rs`. It is shared by normal
+and cinematic views and includes body selection, Cache Blast and the single
+Settings entry. Long background-job notes are now in Settings → Overview.

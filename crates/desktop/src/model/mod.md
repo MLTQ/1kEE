@@ -51,13 +51,13 @@ source pollers.
 - **Does**: Holds the explicit directory-pipeline opt-in, optional country
   scope, configurable requests-per-minute pace, and camera-dot visibility.
 - **Interacts with**: `settings_store.rs`, `camera_registry.rs`,
-  `factal_settings.rs`, and both world-map scenes.
+  `settings.rs`, and both world-map scenes.
 
 ### Camera registry progress
 
 - **Does**: Holds the active scan flag, normalized completion fraction, and
-  current discovery/checking counters for the top-bar progress indicator.
-- **Interacts with**: `camera_registry.rs` and `panels/header.rs`.
+  current discovery/checking counters for the Settings Overview progress indicator.
+- **Interacts with**: `camera_registry.rs` and `panels/settings_overview.rs`.
 
 ### `nearby_cameras` / `nearby_camera_snapshot`
 - **Does**: Returns cameras within a radius of the selected event, sorted by
@@ -155,3 +155,7 @@ contours in GPU-rendered local Earth views. It does not enable terrain fill.
 
 `admin_options` stores session-only level selections and optional fill opacity.
 The master visibility toggle preserves these selections while hiding the layer.
+
+`settings_open` replaces the source-specific settings flag and independent
+Terrain Library window state. Section navigation belongs to the single settings
+window. The obsolete collapsed bottom-log state is removed; logs live in Activity.

@@ -14,7 +14,7 @@ Runs the live Factal event polling loop for the desktop app. This file translate
 
 ### `invalidate`
 - **Does**: Forces the next app tick to treat the current Factal configuration as stale and poll again immediately
-- **Interacts with**: `factal_settings.rs`
+- **Interacts with**: `settings_actions.rs`
 
 ### `shutdown`
 - **Does**: Marks the poll manager as shut down so the app stops launching new Factal workers during teardown
@@ -34,7 +34,7 @@ Runs the live Factal event polling loop for the desktop app. This file translate
 | Dependent | Expects | Breaking changes |
 |-----------|---------|------------------|
 | `app.rs` | `tick` is cheap enough to call every frame and only mutates the model when a poll result is ready | Making `tick` blocking or removing the function |
-| `factal_settings.rs` | `invalidate` triggers a fresh poll after saving or clearing a key | Removing the invalidation hook |
+| `settings_actions.rs` | `invalidate` triggers a fresh poll after saving or clearing a key | Removing the invalidation hook |
 | `model.rs` | Parsed events arrive as `EventRecord` values with stable ids and valid coordinates | Changing id construction or returning ungeolocated records |
 
 ## Notes

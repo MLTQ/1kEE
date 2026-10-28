@@ -100,3 +100,7 @@ Pipelines exposes Color by capacity with a shared gas/oil legend, source units, 
 Admin Boundaries expands nested per-level selections and shading/opacity controls
 via `world_map::admin_controls`, including asynchronous availability/errors,
 Local Earth view guidance and explicit reload after building missing caches.
+
+Import Layer and the imported overlay list now appear together at the top of the
+sidebar, including when no layer exists yet. The picker delegates to
+layer_file_import::button and retains its asynchronous loading/disabled state.

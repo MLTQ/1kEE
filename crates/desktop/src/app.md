@@ -61,3 +61,8 @@ UI-thread coordinator for `AppModel`.
 Event follow advances after source polling, before panels read the selection. Its brief remains visible in cinematic mode; other cinematic chrome behavior is unchanged.
 
 Uploaded map-layer completion is polled before rendering, including OBS view.
+
+The top status banner is removed. Settings and the stellar tool render after the
+map and remain reachable in cinematic mode; Focus capture preserves their flags
+while hiding them. Terrain/OSM worker advancement now runs before panels, regardless
+of Settings visibility, cinematic mode or Focus capture.

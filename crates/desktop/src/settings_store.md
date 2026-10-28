@@ -9,15 +9,15 @@ Persists the desktop app's local configuration so it survives restarts. That now
 
 ### `AppSettings`
 - **Does**: Holds the app-managed settings payload for Factal, live camera sources, paced Project Eyes On directory settings, filesystem/tool paths, a legacy contour multiplier, and an optional physical contour width
-- **Interacts with**: `model.rs`, `terrain_assets.rs`, `osm_ingest.rs`, `srtm_focus_cache.rs`, `factal_settings.rs`, `camera_registry.rs`
+- **Interacts with**: `model.rs`, `terrain_assets.rs`, `osm_ingest.rs`, `srtm_focus_cache.rs`, `settings_actions.rs`, `camera_registry.rs`
 
 ### `load_app_settings` / `save_app_settings`
 - **Does**: Reads and writes the full settings JSON from the executable directory
-- **Interacts with**: `model.rs`, `factal_settings.rs`
+- **Interacts with**: `model.rs`, `settings_actions.rs`
 
 ### `effective_asset_root`
 - **Does**: Resolves the current asset root, falling back to the executable directory when no override is saved
-- **Interacts with**: `model.rs`, `terrain_assets.rs`, `header.rs`
+- **Interacts with**: `model.rs`, `terrain_assets.rs`, `settings_paths.rs`
 
 ### `ensure_default_asset_layout`
 - **Does**: Creates `Data/` and `Derived/` under the effective asset root if they do not already exist
@@ -32,7 +32,7 @@ Persists the desktop app's local configuration so it survives restarts. That now
 | Dependent | Expects | Breaking changes |
 |-----------|---------|------------------|
 | `model.rs` | Settings loading is cheap enough to use at startup and returns executable-directory defaults when unset | Making settings resolution expensive or removing the default asset-root fallback |
-| `factal_settings.rs` | Saving an empty key clears the on-disk value and blank path fields revert to auto-detect/default behavior | Changing clear semantics or making blank path fields invalid |
+| `settings_actions.rs` | Saving an empty key clears the on-disk value and blank path fields revert to auto-detect/default behavior | Changing clear semantics or making blank path fields invalid |
 | `camera_registry.rs` | Project Eyes On is disabled by default; country codes are blank or ISO-like and request starts default to 250/min within the supported 10–3,000 range | Enabling network discovery by default or bypassing request-rate normalization |
 | Map renderers | Older files retain their multiplier-derived visual width when it is already visible; new physical widths stay within the 1–16 px range | Dropping the legacy fallback or allowing invalid pixel widths through normalization |
 
