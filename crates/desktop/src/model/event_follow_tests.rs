@@ -306,13 +306,13 @@ fn replay_and_manual_selection_release_follow_control() {
 }
 
 #[test]
-fn cinematic_brief_renders_the_followed_record_to_the_right_of_map_center() {
+fn follow_brief_renders_the_followed_record_to_the_right_of_map_center() {
     let mut model = AppModel::new();
     model.replace_factal_events(vec![event("followed-headline", 10.0, 20.0, 1)]);
     model.toggle_event_follow();
     model.tick_event_follow(0.0);
     model.replace_factal_events(vec![]);
-    assert!(model.cinematic_mode);
+    assert!(model.event_follow.enabled());
     let ctx = egui::Context::default();
     let mut title_position = None;
     for frame in 0..3 {

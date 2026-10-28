@@ -62,7 +62,6 @@ pub struct AppModel {
     pub globe_view: GlobeViewState,
     pub event_follow: event_follow::EventFollow,
     pub focused_city_id: Option<String>,
-    pub cinematic_mode: bool,
     /// Session-only clean window capture; content layers and open briefs stay visible.
     pub obs_view: bool,
     pub show_layer_drawer: bool,
@@ -271,7 +270,6 @@ impl AppModel {
             globe_view: GlobeViewState::from_focus(GeoPoint { lat: 0.0, lon: 0.0 }),
             event_follow: event_follow::EventFollow::default(),
             focused_city_id: None,
-            cinematic_mode: false,
             obs_view: false,
             show_layer_drawer: false,
             show_event_list: false,
@@ -994,7 +992,6 @@ impl AppModel {
         if self.event_follow.enabled() {
             self.stop_event_follow();
         } else if self.active_body == ActiveBody::Earth {
-            self.cinematic_mode = true;
             self.replay_mode = false;
             self.replay_state = None;
             self.globe_view.meander_mode = false;
@@ -1011,7 +1008,7 @@ impl AppModel {
     }
 
     pub fn tick_event_follow(&mut self, now: f64) {
-        if self.active_body != ActiveBody::Earth || self.replay_mode || !self.cinematic_mode {
+        if self.active_body != ActiveBody::Earth || self.replay_mode {
             self.stop_event_follow();
             return;
         }

@@ -23,7 +23,7 @@ UI-thread coordinator for `AppModel`.
   `camera_feed_viewer.rs`.
 - Handles F10 to toggle OBS view and Escape to leave it. Clean capture skips
   operator panels while retaining open Factal briefs, camera feeds, all live
-  polling, and cinematic/event-follow motion. Hidden panel flags are preserved.
+  polling, and meander/event-follow motion. Hidden panel flags are preserved.
 
 ### Camera feed viewer ownership
 
@@ -58,11 +58,11 @@ UI-thread coordinator for `AppModel`.
 - Network or disk-heavy source work belongs in source-module workers; this file
   only schedules and applies ready results.
 
-Event follow advances after source polling, before panels read the selection. Its brief remains visible in cinematic mode; other cinematic chrome behavior is unchanged.
+Event follow advances after source polling, before panels read the selection. Brief visibility follows its own open flag, independently of camera motion.
 
 Uploaded map-layer completion is polled before rendering, including OBS view.
 
 The top status banner is removed. Settings and the stellar tool render after the
-map and remain reachable in cinematic mode; Focus capture preserves their flags
+map; Focus capture preserves their flags
 while hiding them. Terrain/OSM worker advancement now runs before panels, regardless
-of Settings visibility, cinematic mode or Focus capture.
+of Settings visibility or Focus capture.

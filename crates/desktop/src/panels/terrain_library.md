@@ -6,7 +6,7 @@ Settings → Terrain Library. Keep background job advancement independent of UI.
 
 ## Components
 - `tick`: advances terrain/OSM workers and requests progress repaints. Called by
-  the app every frame, including cinematic and Focus capture with settings closed.
+  the app every frame, including Meander, Follow Events and Focus capture with settings closed.
 - `render`: city selection/focus, explicit queue actions, download progress and
   OSM inventory inspection, only while the Terrain Library section is visible.
 - Job row helpers retain progress and completion information.

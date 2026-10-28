@@ -2,7 +2,7 @@
 
 Integration tests render real chrome at wide, minimum-window and narrow-map
 widths. Assert one row, no overlapping labels and access to the required primary
-controls. Pointer-driven navigation verifies Settings in cinematic mode, embedded
+controls. Pointer-driven navigation verifies Settings, embedded
 Terrain Library, Activity, Focus hide/restore, body cycling and import in Layers.
 Synthetic records exercise realistic badge widths without network or save actions.
 
@@ -12,3 +12,7 @@ window height.
 
 The fixture uses a quarter-pixel-aligned contour width to prevent the existing
 Layers slider from rounding a legacy default and persisting during headless render.
+
+Rail tests cover both idle and active Meander, no Cinematic button, direct motion
+controls at full density (including 1100-point chrome), overflow at adjacent widths, and pointer-driven switching between Meander and Follow
+Events. Follow must keep ticking without a separate mode flag.

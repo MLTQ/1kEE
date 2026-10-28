@@ -7,7 +7,7 @@ Appearance, Data Sources, Files & Cache, Terrain Library, and Activity.
 ## Contracts
 - `AppModel::settings_open` is the only global-settings window flag.
 - Sections render inside this window; Terrain Library never opens another window.
-- Window is available in normal and cinematic mode; Focus capture hides it while
+- Window is available from the main rail; Focus capture hides it while
   preserving its open state. The map rail is the shared entry point.
 - Each section has its own scroll position and a bounded viewport. The action
   footer remains outside scrolling; credentials and path save semantics stay intact.

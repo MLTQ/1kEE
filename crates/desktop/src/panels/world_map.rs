@@ -66,7 +66,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
     };
 
     panel_frame.show(ui, |ui| {
-        if model.event_follow.moving() || model.globe_view.auto_spin || (model.cinematic_mode && model.globe_view.meander_mode) {
+        if model.event_follow.moving() || model.globe_view.auto_spin || model.globe_view.meander_mode {
             ui.ctx().request_repaint();
         } else if local_terrain_scene::has_pending_cache(model) {
             // Faster repaint while tile pulse animation is running (~30 fps)

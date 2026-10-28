@@ -11,7 +11,7 @@ source pollers.
 
 ### OBS view
 - `obs_view` is a session-only presentation toggle, initially off. It hides
-  operator chrome without changing layer visibility, selections, cinematic
+  operator chrome without changing layer visibility, selections, camera
   movement, or open-window flags. The Factal brief and live camera remain
   available as broadcast content. Escape restores the existing interface.
 
@@ -132,7 +132,7 @@ orientation or a verified relationship to the incident.
 refreshes and historical replay. `tick_event_follow` selects the new target and
 opens its brief without snapping the camera; replacement cannot refocus an active
 flight. A followed record remains available for its brief after paging out.
-Manual event/city selection, replay, leaving Earth or leaving cinematic mode stops
+Manual event/city selection, replay or leaving Earth stops
 following. Webcams default on; the independent Flock inventory remains off.
 
 `map_events` includes the followed target after it has paged out, so its marker and brief stay tied to the continuing orbit without repopulating the live feed list.
@@ -159,3 +159,6 @@ The master visibility toggle preserves these selections while hiding the layer.
 `settings_open` replaces the source-specific settings flag and independent
 Terrain Library window state. Section navigation belongs to the single settings
 window. The obsolete collapsed bottom-log state is removed; logs live in Activity.
+
+There is no cinematic-mode state. Follow starts directly from its rail toggle and
+continues until explicitly stopped or invalidated by manual navigation, replay or body changes.

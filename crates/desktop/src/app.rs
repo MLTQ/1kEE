@@ -162,9 +162,7 @@ impl eframe::App for DashboardApp {
         // must keep ticking even when no API keys are present.
         ctx.request_repaint_after(Duration::from_secs(1));
 
-        if self.model.obs_view || !self.model.cinematic_mode || self.model.event_follow.enabled() {
-            panels::render_factal_brief(ctx, &mut self.model);
-        }
+        panels::render_factal_brief(ctx, &mut self.model);
 
         // Preserve the panel flags while hiding operator chrome for capture.
         if !self.model.obs_view {

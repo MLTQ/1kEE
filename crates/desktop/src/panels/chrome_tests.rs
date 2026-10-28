@@ -140,12 +140,11 @@ fn context() -> egui::Context {
 
 #[test]
 fn chrome_rail_stays_one_row_with_primary_controls_at_narrow_widths() {
-    for width in [1536., 1100., 850., 540.] {
-        for cinematic in [false, true] {
+    for width in [1536., 1100., 1090., 1080., 850., 540.] {
+        for meander in [false, true] {
             let ctx = context();
             let mut model = model();
-            model.cinematic_mode = cinematic;
-            model.globe_view.meander_mode = cinematic;
+            model.globe_view.meander_mode = meander;
             frame(&ctx, &mut model, width, vec![]);
             let output = frame(&ctx, &mut model, width, vec![]);
             let labels = labels(&output);
@@ -174,14 +173,22 @@ fn chrome_rail_stays_one_row_with_primary_controls_at_narrow_widths() {
                 }
             }
             assert!(!labels.iter().any(|(text, _)| text.contains("Long camera")));
+            assert!(!labels.iter().any(|(text, _)| text == "CINEMATIC"));
+            if width >= 1100. {
+                for name in ["MEANDER", "FOLLOW EVENTS"] {
+                    assert!(
+                        labels.iter().any(|(text, _)| text == name),
+                        "{width}: missing {name}"
+                    );
+                }
+            }
         }
     }
 }
 #[test]
-fn chrome_settings_and_embedded_terrain_remain_accessible_in_cinematic_mode() {
+fn chrome_settings_and_embedded_terrain_remain_accessible() {
     let ctx = context();
     let mut model = model();
-    model.cinematic_mode = true;
     frame(&ctx, &mut model, 1536., vec![]);
     click(&ctx, &mut model, 1536., "Settings");
     assert!(model.settings_open);
@@ -264,3 +271,23 @@ fn chrome_settings_footer_stays_visible_in_every_section() {
 
 #[path = "chrome_preview.rs"]
 mod preview;
+
+#[test]
+fn chrome_camera_motion_controls_work_without_a_mode_toggle() {
+    let ctx = context();
+    let mut model = model();
+    frame(&ctx, &mut model, 1536., vec![]);
+    click(&ctx, &mut model, 1536., "MEANDER");
+    assert!(model.globe_view.meander_mode);
+    click(&ctx, &mut model, 1536., "FOLLOW EVENTS");
+    assert!(model.event_follow.enabled());
+    assert!(!model.globe_view.meander_mode);
+    model.tick_event_follow(0.0);
+    assert!(model.event_follow.enabled());
+    assert!(model.factal_brief_open);
+    click(&ctx, &mut model, 1536., "MEANDER");
+    assert!(!model.event_follow.enabled());
+    assert!(model.globe_view.meander_mode);
+    click(&ctx, &mut model, 1536., "MEANDER");
+    assert!(!model.globe_view.meander_mode);
+}

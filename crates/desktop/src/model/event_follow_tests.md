@@ -10,7 +10,7 @@ Motion tests compare nearby/regional/global duration (never above ten seconds),
 arrival positions and velocities, date-line wrapping, bounded polar motion,
 retarget and orbit-entry continuity (including zoom phases of short flights) in both Globe and Local views, feed selection
 retention and manual/replay cancellation. A headless egui regression paints the
-cinematic brief after its record leaves the live page and checks placement to the
+followed-event brief after its record leaves the live page and checks placement to the
 right of map center.
 
 Card-opacity regressions cover hidden initial/wide travel, arrival at the actual

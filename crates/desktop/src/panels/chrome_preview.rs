@@ -60,7 +60,6 @@ fn chrome_gpu_preview() {
     ] {
         let ctx = context();
         let mut model = model();
-        model.cinematic_mode = true;
         model.show_layer_drawer = drawer;
         model.settings_open = section.is_some();
         if let Some(section) = section {

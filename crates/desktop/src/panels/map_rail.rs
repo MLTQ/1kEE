@@ -1,4 +1,4 @@
-//! Compact map controls shared by normal and cinematic views.
+//! Compact map controls with independent camera-motion actions.
 use super::world_map::contour_asset;
 use crate::{
     model::{ActiveBody, AppModel},
@@ -17,7 +17,7 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
         .stroke(egui::Stroke::new(1.0, theme::panel_stroke()))
         .corner_radius(10.0).inner_margin(egui::Margin::symmetric(12,8))
         .show(ui, |ui| {
-            let density = if ui.available_width() >= 1150.0 { Density::Full }
+            let density = if ui.available_width() >= 1050.0 { Density::Full }
                 else if ui.available_width() >= 800.0 { Density::Compact } else { Density::Minimal };
             ui.horizontal(|ui| {
                 view_buttons(ui, model);
@@ -46,18 +46,15 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
                                 record_buttons(ui, model);
                                 ui.separator();
                                 focus_button(ui, model);
-                                cinematic_button(ui, model);
                                 presentation_buttons(ui, model);
                             });
                         }
                         Density::Compact => {
                             focus_button(ui, model);
-                            cinematic_button(ui, model);
                             ui.menu_button("More", |ui| presentation_buttons(ui, model));
                         }
                         Density::Full => {
                             focus_button(ui, model);
-                            cinematic_button(ui, model);
                             presentation_buttons(ui, model);
                         }
                     }
@@ -175,61 +172,34 @@ fn focus_button(ui: &mut egui::Ui, model: &mut AppModel) {
         ui.ctx().request_repaint();
     }
 }
-fn cinematic_button(ui: &mut egui::Ui, model: &mut AppModel) {
-    let mut control = egui::Button::new(egui::RichText::new("CINEMATIC").small().color(
-        if model.cinematic_mode {
-            egui::Color32::from_rgb(255, 210, 80)
-        } else {
-            theme::text_muted()
-        },
-    ))
-    .fill(egui::Color32::TRANSPARENT)
-    .corner_radius(4.0);
-    if model.cinematic_mode {
-        control = control.fill(egui::Color32::from_rgb(160, 100, 20));
+fn presentation_buttons(ui: &mut egui::Ui, model: &mut AppModel) {
+    if model.active_body == ActiveBody::Earth && button(ui, "FOLLOW EVENTS", model.event_follow.enabled())
+        .on_hover_text("Tour the six most severe Factal events; keeps Globe/Local view. Drag, scroll or arrows to stop.").clicked() {
+        model.toggle_event_follow(); ui.ctx().request_repaint();
     }
-    if ui
-        .add(control)
-        .on_hover_text("Enable cinematic camera controls")
+    if button(ui, "MEANDER", model.globe_view.meander_mode)
+        .on_hover_text("Smooth camera drift")
         .clicked()
     {
-        model.cinematic_mode = !model.cinematic_mode;
-        if !model.cinematic_mode {
-            model.stop_event_follow();
-            model.globe_view.meander_mode = false;
+        let enable = !model.globe_view.meander_mode;
+        if enable {
+            model.event_follow.stop();
+            model.globe_view.stop_motion();
         }
+        model.globe_view.meander_mode = enable;
     }
-}
-fn presentation_buttons(ui: &mut egui::Ui, model: &mut AppModel) {
-    if model.cinematic_mode {
-        if model.active_body == ActiveBody::Earth && button(ui, "FOLLOW EVENTS", model.event_follow.enabled())
-            .on_hover_text("Tour the six most severe Factal events; keeps Globe/Local view. Drag, scroll or arrows to stop.").clicked() {
-            model.toggle_event_follow(); ui.ctx().request_repaint();
-        }
-        if button(ui, "MEANDER", model.globe_view.meander_mode)
-            .on_hover_text("Smooth camera drift")
-            .clicked()
-        {
-            let enable = !model.globe_view.meander_mode;
-            if enable {
-                model.event_follow.stop();
-                model.globe_view.stop_motion();
-            }
-            model.globe_view.meander_mode = enable;
-        }
-        if model.globe_view.meander_mode {
-            ui.scope(|ui| {
-                ui.spacing_mut().slider_width = 60.0;
-                ui.add(
-                    egui::Slider::new(&mut model.globe_view.meander_speed, 0.05..=1.0)
-                        .show_value(false),
-                )
-                .on_hover_text(format!(
-                    "Meander speed {:.0}%",
-                    model.globe_view.meander_speed * 100.0
-                ));
-            });
-        }
+    if model.globe_view.meander_mode {
+        ui.scope(|ui| {
+            ui.spacing_mut().slider_width = 60.0;
+            ui.add(
+                egui::Slider::new(&mut model.globe_view.meander_speed, 0.05..=1.0)
+                    .show_value(false),
+            )
+            .on_hover_text(format!(
+                "Meander speed {:.0}%",
+                model.globe_view.meander_speed * 100.0
+            ));
+        });
     }
     if model.has_factal_api_key() && button(ui, "REPLAY", model.replay_mode).clicked() {
         model.toggle_replay();

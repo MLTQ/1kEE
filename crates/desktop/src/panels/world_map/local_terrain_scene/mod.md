@@ -8,8 +8,8 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 ### OBS view
 - Skips decorative framing, navigation legends, tile-loading grids and progress
   cards during clean window capture. Terrain loading and all configured scene
-  layers continue; this flag does not enable cinematic mode or alter selection.
-- Enabled event pips remain visible in OBS view even during cinematic meander.
+  layers continue; this flag does not change camera motion or selection.
+- Enabled event pips remain visible in OBS view even during meander.
 
 ### `render_local_terrain_scene`
 - **Does**: Drives the local terrain renderer, assembles terrain/road/water/uploaded-layer overlays, and coordinates the split helper modules in this folder
@@ -194,7 +194,7 @@ Offshore platforms share the public-route projection inputs at sea level and dra
 
 Local cable hover reuses the exact projected route vertices during painting. Only the explicitly supplied built-in catalogue supplies metadata, and hidden layers do not offer candidates.
 
-Event follow permits event indicators during cinematic playback so the orbit has a visible event reference. Ordinary cinematic meander still hides them.
+Event indicators follow the Events layer toggle on Earth, independently of Meander, Follow Events or Focus capture. Frame chrome is hidden only by Focus capture.
 
 Event markers use `map_events` so a followed target stays visible after aging out of the live page.
 

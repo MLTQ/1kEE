@@ -133,7 +133,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         if model.obs_view { 0.0 } else { 12.0 },
         theme::canvas_background(),
     );
-    if !model.cinematic_mode && !model.obs_view {
+    if !model.obs_view {
         dissolve::draw_frame(painter, rect);
     }
 
@@ -499,7 +499,6 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 
     let event_markers: Vec<MapMarker> = if !should_show_local_event_indicators(
         model.active_body,
-        model.cinematic_mode && !model.obs_view && !model.event_follow.enabled(),
         model.show_event_markers,
     ) {
         Vec::new()
@@ -1169,10 +1168,9 @@ fn select_contours_within_budget(
 #[inline]
 fn should_show_local_event_indicators(
     active_body: crate::model::ActiveBody,
-    cinematic_mode: bool,
     show_event_markers: bool,
 ) -> bool {
-    active_body == crate::model::ActiveBody::Earth && !cinematic_mode && show_event_markers
+    active_body == crate::model::ActiveBody::Earth && show_event_markers
 }
 
 /// Cherry-red targeting beam: a vertical line falling from the sky to the
@@ -2109,23 +2107,19 @@ mod tests {
     fn local_event_indicators_are_earth_only() {
         assert!(should_show_local_event_indicators(
             crate::model::ActiveBody::Earth,
-            false,
             true,
         ));
         assert!(!should_show_local_event_indicators(
             crate::model::ActiveBody::Moon,
-            false,
             true,
         ));
         assert!(!should_show_local_event_indicators(
             crate::model::ActiveBody::Mars,
-            false,
             true,
         ));
         assert!(!should_show_local_event_indicators(
             crate::model::ActiveBody::Earth,
-            true,
-            true,
+            false,
         ));
     }
 }

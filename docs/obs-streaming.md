@@ -8,21 +8,20 @@ capture.
 ## Choose what goes on air
 
 - **Full dashboard:** leave the interface as it is and capture the whole window.
-- **Clean map:** click **OBS VIEW** in the map toolbar or press **F10** (on a Mac
+- **Clean map:** click **Focus** in the map toolbar or press **F10** (on a Mac
   keyboard, possibly **Fn-F10**). Press **Escape** or **F10** to restore controls.
 
 Clean view keeps enabled event/camera pips and other map layers. An open **Factal
 Brief** stays visible, including briefs opened by **FOLLOW EVENTS**. An open
 live-camera window also stays visible. Navigation, live updates, replay and
-cinematic movement continue.
+camera movement continue.
 
-The header, layer/event drawers, settings windows, map toolbar, local footer,
+The layer/event drawers, settings windows, map toolbar, local footer,
 hover cards, transport detail windows and loading indicators are hidden. Their
 open/closed state and layer choices are preserved when you leave clean view.
 The toggle lasts only for this app session and does not change saved settings.
 
-Set your layers, open the brief, and optionally enable **CINEMATIC → FOLLOW
-EVENTS** or **MEANDER** before entering clean view. OBS view itself does not
+Set your layers, open the brief, and optionally enable **FOLLOW EVENTS** or **MEANDER** before entering clean view. OBS view itself does not
 change camera movement or enable additional layers.
 
 ## OBS setup on macOS
