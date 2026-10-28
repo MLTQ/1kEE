@@ -27,3 +27,4 @@ rayon = "1.11.0"
 puffin = "0.19"
 puffin_http = "0.16"
 lyon_tessellation = "1"
+one-thousand-electric-eye-cache-builder = { path = "../cache_builder" }

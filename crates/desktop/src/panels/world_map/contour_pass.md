@@ -128,3 +128,10 @@ Pipelines paint only a GPU version matching the requested callback. While a
 replacement stages, they hide old geometry/colors so capacity legends and hover
 metadata never describe a previous product/filter batch. Other layers retain
 their existing previous-picture behavior.
+
+Administrative outlines use an eighth independent slot with the same perspective
+horizon and exact-version publication as pipelines. `format` is exposed within
+world_map for lazy initialization of the matching administrative fill pipeline.
+
+The administrative fill callback borrows the same upload budget so combined globe
+uploads stay within the existing per-frame limits.

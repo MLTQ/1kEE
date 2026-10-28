@@ -25,6 +25,23 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
 #[test]
 #[ignore = "requires GPU; optional ONEKEE_ADMIN_PREVIEW PNG"]
 fn admin_gpu_preview_preserves_holes_and_toggle_round_trip() {
+    preview(false);
+}
+
+#[test]
+#[ignore = "requires GPU; optional ONEKEE_ADMIN_GLOBE_PREVIEW PNG"]
+fn admin_globe_gpu_preserves_holes_and_hides_backside() {
+    let globe = preview(true);
+    let local = preview(false);
+    for (a, b) in globe.into_iter().zip(local).take(3) {
+        assert!(
+            a.abs_diff(b) <= 2,
+            "same opacity must match between Globe and Local: {globe:?} vs {local:?}"
+        );
+    }
+}
+
+fn preview(globe: bool) -> [u8; 4] {
     let scratch = tests::Scratch::new();
     let dir = scratch.0.join("admin_cells");
     fs::create_dir_all(&dir).unwrap();
@@ -46,9 +63,12 @@ fn admin_gpu_preview_preserves_holes_and_toggle_round_trip() {
     .unwrap();
     let data = load_from_dirs(std::slice::from_ref(&scratch.0), &[4]);
     let mut model = crate::model::AppModel::new();
+    model.set_contour_stroke_width_px(2.0);
     model.selected_root = Some(scratch.0.clone());
+    model.admin_options.cache_root = Some(scratch.0.clone());
     model.show_admin = true;
-    model.globe_view.local_mode = true;
+    model.globe_view = crate::model::GlobeViewState::from_focus(GeoPoint { lat: 4.0, lon: 4.0 });
+    model.globe_view.local_mode = !globe;
     model.admin_options.enabled = [false; 10];
     model.admin_options.enabled[2] = true;
     model.admin_options.opacity = 0.3;
@@ -57,6 +77,22 @@ fn admin_gpu_preview_preserves_holes_and_toggle_round_trip() {
     let (device, queue) = block_on(adapter.request_device(&Default::default(), None)).unwrap();
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut renderer = egui_wgpu::Renderer::new(&device, format, None, 1, false);
+    renderer
+        .callback_resources
+        .insert(super::super::contour_pass::ContourPassResources::new(
+            &device, format,
+        ));
+    let layout = super::super::globe_scene::GlobeLayout {
+        center: egui::pos2(390., 384.),
+        radius: 330.,
+        focal_length: 2.2,
+        camera_distance: 1.25,
+    };
+    let batch = super::super::admin_globe::prepare(
+        Arc::new(data),
+        std::array::from_fn(|i| crate::theme::admin_color(i as u8 + 2)),
+    );
+    let data = load_from_dirs(std::slice::from_ref(&scratch.0), &[4]);
     let ctx = egui::Context::default();
     crate::theme::install(&ctx);
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024., 768.));
@@ -81,7 +117,19 @@ fn admin_gpu_preview_preserves_holes_and_toggle_round_trip() {
     });
     let target_view = target.create_view(&Default::default());
     let mut pictures = Vec::new();
-    for shade in [false, true, false] {
+    for (shade, back) in [
+        (false, false),
+        (true, false),
+        (false, false),
+        (false, true),
+        (true, true),
+    ] {
+        if back {
+            model.globe_view = crate::model::GlobeViewState::from_focus(GeoPoint {
+                lat: -4.0,
+                lon: -176.0,
+            });
+        }
         model.admin_options.shade = shade;
         for frame in 0..3 {
             let output = ctx.run(
@@ -100,6 +148,7 @@ fn admin_gpu_preview_preserves_holes_and_toggle_round_trip() {
                     let painter = ctx
                         .layer_painter(egui::LayerId::background())
                         .with_clip_rect(map);
+                    painter.add(super::super::contour_pass::residency_callback(map));
                     painter.text(
                         egui::pos2(40., 60.),
                         egui::Align2::LEFT_TOP,
@@ -107,9 +156,20 @@ fn admin_gpu_preview_preserves_holes_and_toggle_round_trip() {
                         egui::FontId::proportional(18.),
                         egui::Color32::WHITE,
                     );
-                    super::super::admin_render::paint(&painter, &data, shade, 0.3, 0., |p| {
-                        egui::pos2(70. + p.lon * 65., 640. - p.lat * 55.)
-                    });
+                    if globe {
+                        super::super::admin_globe::paint(
+                            &painter,
+                            &layout,
+                            &model.globe_view,
+                            &batch,
+                            shade,
+                            0.3,
+                        );
+                    } else {
+                        super::super::admin_render::paint(&painter, &data, shade, 0.3, 0., |p| {
+                            egui::pos2(70. + p.lon * 65., 640. - p.lat * 55.)
+                        });
+                    }
                 },
             );
             for (id, delta) in &output.textures_delta.set {
@@ -179,23 +239,50 @@ fn admin_gpu_preview_preserves_holes_and_toggle_round_trip() {
     }
     let pixel =
         |i: usize, x: usize, y: usize| &pictures[i][(y * 1024 + x) * 4..(y * 1024 + x + 1) * 4];
+    let (interior, hole) = if globe {
+        let front = crate::model::GlobeViewState::from_focus(GeoPoint { lat: 4.0, lon: 4.0 });
+        let screen = |lat, lon| {
+            super::super::globe_scene::project_geo(&layout, &front, GeoPoint { lat, lon }, 0.)
+                .unwrap()
+                .pos
+        };
+        (screen(1., 1.), screen(2.5, 2.5))
+    } else {
+        (egui::pos2(135., 585.), egui::pos2(232., 502.))
+    };
     assert_ne!(
-        pixel(0, 135, 585),
-        pixel(1, 135, 585),
+        pixel(0, interior.x as usize, interior.y as usize),
+        pixel(1, interior.x as usize, interior.y as usize),
         "region interior shades"
     );
     assert_eq!(
-        pixel(0, 232, 502),
-        pixel(1, 232, 502),
+        pixel(0, hole.x as usize, hole.y as usize),
+        pixel(1, hole.x as usize, hole.y as usize),
         "hole remains unshaded"
     );
+    if globe {
+        for y in 0..768 {
+            assert_eq!(
+                &pictures[3][y * 4096..y * 4096 + 780 * 4],
+                &pictures[4][y * 4096..y * 4096 + 780 * 4],
+                "hidden hemisphere never shades"
+            );
+        }
+    }
     for y in 0..768 {
         assert_eq!(
             &pictures[0][y * 4096..y * 4096 + 780 * 4],
             &pictures[2][y * 4096..y * 4096 + 780 * 4]
         );
     }
-    if let Ok(path) = std::env::var("ONEKEE_ADMIN_PREVIEW") {
+    if let Ok(path) = std::env::var(if globe {
+        "ONEKEE_ADMIN_GLOBE_PREVIEW"
+    } else {
+        "ONEKEE_ADMIN_PREVIEW"
+    }) {
         image::save_buffer(path, &pictures[1], 1024, 768, image::ColorType::Rgba8).unwrap();
     }
+    pixel(1, interior.x as usize, interior.y as usize)
+        .try_into()
+        .unwrap()
 }

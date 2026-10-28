@@ -13,6 +13,7 @@ pub const LEVELS: [(u8, &str); 10] = [
 ];
 
 pub struct AdminOptions {
+    pub cache_root: Option<std::path::PathBuf>,
     pub enabled: [bool; 10],
     pub shade: bool,
     pub opacity: f32,
@@ -20,6 +21,7 @@ pub struct AdminOptions {
 impl Default for AdminOptions {
     fn default() -> Self {
         Self {
+            cache_root: None,
             enabled: [
                 true, false, true, false, true, false, true, false, false, false,
             ],

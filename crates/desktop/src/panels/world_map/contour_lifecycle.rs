@@ -57,6 +57,7 @@ impl egui_wgpu::CallbackTrait for Cleanup {
         _encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
+        super::super::admin_globe_pass::begin_frame(resources);
         if let Some(res) = resources.get_mut::<ContourPassResources>() {
             res.used.clear();
             res.uploads = Default::default();
@@ -72,6 +73,7 @@ impl egui_wgpu::CallbackTrait for Cleanup {
         _encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
+        super::super::admin_globe_pass::end_frame(resources);
         if let Some(res) = resources.get_mut::<ContourPassResources>() {
             res.layers.retain(|layer, _| res.used.contains(layer));
             if !res.terrain.used { res.terrain = Default::default(); }

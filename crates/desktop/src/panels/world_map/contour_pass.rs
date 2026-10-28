@@ -44,9 +44,10 @@ pub enum ContourLayer {
     LunarTopo,
     MarsTopo,
     Pipelines,
+    Admin,
 }
 
-const LAYER_COUNT: usize = 7;
+const LAYER_COUNT: usize = 8;
 /// wgpu requires dynamic uniform offsets to be 256-aligned on most hardware.
 const UNIFORM_STRIDE: u64 = 256;
 
@@ -60,6 +61,7 @@ impl ContourLayer {
             ContourLayer::LunarTopo => 4,
             ContourLayer::MarsTopo => 5,
             ContourLayer::Pipelines => 6,
+            ContourLayer::Admin => 7,
         }
     }
 }
@@ -423,10 +425,10 @@ pub struct ContourPassResources {
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     layers: HashMap<ContourLayer, LayerGpu>,
-    uploads: super::line_upload::Budget,
+    pub(super) uploads: super::line_upload::Budget,
     used: std::collections::HashSet<ContourLayer>,
     terrain: tiles::Gpu,
-    format: wgpu::TextureFormat,
+    pub(super) format: wgpu::TextureFormat,
 }
 
 struct LayerGpu {
@@ -652,7 +654,7 @@ impl ContourCallback {
                 stroke_half_px: contour_stroke_half_px(stroke_width_px),
                 feather_px: contour_feather_px(stroke_width_px),
                 pixels_per_point,
-                horizon_z: if layer == ContourLayer::Pipelines { 1.0 / layout.camera_distance } else { 0.0 },
+                horizon_z: if matches!(layer, ContourLayer::Pipelines | ContourLayer::Admin) { 1.0 / layout.camera_distance } else { 0.0 },
                 _pad: [0.0; 2],
             },
         }
@@ -721,7 +723,7 @@ impl egui_wgpu::CallbackTrait for ContourCallback {
         };
         // Pipeline colors encode capacity; an old batch must not be presented
         // under the new legend or picked with the replacement's metadata.
-        if self.layer == ContourLayer::Pipelines && gpu.version != self.version {
+        if matches!(self.layer, ContourLayer::Pipelines | ContourLayer::Admin) && gpu.version != self.version {
             return;
         }
         if gpu.chunks.is_empty() {

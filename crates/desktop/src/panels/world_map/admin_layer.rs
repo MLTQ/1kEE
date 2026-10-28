@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::{
     collections::BTreeMap,
     fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex, OnceLock},
 };
 
@@ -23,11 +23,23 @@ pub(super) struct AdminData {
     pub missing: Vec<u8>,
     pub warnings: Vec<String>,
 }
-type AdminCache = super::layer_snapshot::Snapshot<(PathBuf, Vec<u8>), AdminData>;
+type AdminCache = super::layer_snapshot::Snapshot<
+    (Vec<PathBuf>, Vec<u8>, super::admin_source::Fingerprint),
+    AdminData,
+>;
 static ADMIN_CACHE: OnceLock<Mutex<AdminCache>> = OnceLock::new();
 
-pub(super) fn get(root: &Path, levels: &[u8]) -> Option<Arc<AdminData>> {
-    if levels.is_empty() {
+pub(super) fn get_for(model: &crate::model::AppModel) -> Option<Arc<AdminData>> {
+    let dirs = super::admin_source::directories(model);
+    let status = super::admin_source::poll(&dirs)?;
+    get_from_dirs(dirs, &model.admin_options.levels(), status.files.clone())
+}
+fn get_from_dirs(
+    dirs: Vec<PathBuf>,
+    levels: &[u8],
+    files: super::admin_source::Fingerprint,
+) -> Option<Arc<AdminData>> {
+    if levels.is_empty() || dirs.is_empty() {
         return None;
     }
     let mut levels = levels.to_vec();
@@ -38,15 +50,10 @@ pub(super) fn get(root: &Path, levels: &[u8]) -> Option<Arc<AdminData>> {
         .lock()
         .unwrap()
         .get(
-            (root.to_owned(), levels),
+            (dirs, levels, files),
             "admin-boundaries",
             |a, b| a == b,
-            |(root, levels)| {
-                Some(load_from_dirs(
-                    &super::cell_loader::osm_cache_dir_candidates(&root),
-                    &levels,
-                ))
-            },
+            |(dirs, levels, _)| Some(load_from_dirs(&dirs, &levels)),
         )
 }
 pub(super) fn reload() {

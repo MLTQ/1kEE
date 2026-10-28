@@ -123,3 +123,7 @@ anchors only when the independent Nearby camera links toggle is enabled. They
 indicate the selected event's 250 km proximity subset, not verified footage.
 
 Public pipelines receive the session capacity-color flag as well as source/status filters. Changing it invalidates their prepared batch only; camera motion still changes uniforms alone.
+
+Administrative boundaries draw through admin_globe after terrain and before user
+overlays/markers. Globe and Local use the same levels and shade options; Globe
+uses immutable spherical GPU geometry with perspective horizon clipping.

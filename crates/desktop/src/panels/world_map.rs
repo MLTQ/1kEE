@@ -1,4 +1,7 @@
 mod admin_layer;
+mod admin_source;
+mod admin_globe;
+mod admin_globe_pass;
 mod admin_geometry;
 mod admin_render;
 mod admin_controls;

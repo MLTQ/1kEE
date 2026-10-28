@@ -22,3 +22,8 @@ with explicit missing/error state instead of silently displaying nothing.
   produces data; Reload reads newly created or replaced files without a restart.
 
 The opt-in admin_preview test renders this loaded cache and controls on a GPU.
+
+`get_for` resolves the shared source choice and polls admin_source off-thread.
+Snapshot keys include file fingerprints, so completed/replaced caches become
+visible automatically even if an earlier load found no files. Explicit roots do
+not fall through to an unrelated globally configured Derived directory.

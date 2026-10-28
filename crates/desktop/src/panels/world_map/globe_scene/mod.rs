@@ -208,6 +208,8 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         );
     }
 
+    super::admin_globe::draw(painter, &layout, model);
+
     // ── Submarine cables (drawn under user imports) ────────────────────────
     let mut landing_point_markers = Vec::new();
     if model.show_submarine_cables

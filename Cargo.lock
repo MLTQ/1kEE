@@ -2419,6 +2419,7 @@ dependencies = [
  "gruve-sdk",
  "image",
  "lyon_tessellation",
+ "one-thousand-electric-eye-cache-builder",
  "osmpbf",
  "puffin",
  "puffin_http",

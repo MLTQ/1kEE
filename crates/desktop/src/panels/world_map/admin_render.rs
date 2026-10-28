@@ -15,10 +15,10 @@ pub(super) fn draw(
     if !model.show_admin || model.active_body != ActiveBody::Earth {
         return;
     }
-    let Some(root) = model.selected_root.as_deref() else {
-        return;
-    };
-    let Some(data) = admin_layer::get(root, &model.admin_options.levels()) else {
+    painter
+        .ctx()
+        .request_repaint_after(std::time::Duration::from_secs(3));
+    let Some(data) = admin_layer::get_for(model) else {
         return;
     };
     let half = visual_half_extent_for_zoom(model.globe_view.local_zoom);

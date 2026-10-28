@@ -111,3 +111,7 @@ and admin_controls (nested levels, opacity, status and reload).
 The compact main rail is delegated to `panels/map_rail.rs`. It includes independent
 Meander and Follow Events controls, body selection, Cache Blast and the single
 Settings entry. Long background-job notes are now in Settings → Overview.
+
+Administrative boundaries share source discovery, explicit in-app PBF loading and
+cache observation through admin_source. Local draws the clipped ground-plane
+polygons; admin_globe prepares spherical GPU fills and outlines for Globe.

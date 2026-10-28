@@ -13,3 +13,8 @@ status beneath the master Admin Boundaries toggle in the layer drawer.
 - Parent remains session-only, matching other OSM overlays. No implicit PBF scan.
 
 Opacity uses a separate label so the percentage slider fits the 230-point drawer.
+
+Load from PBF explicitly chooses source and output, then starts the shared importer
+in a background thread; Open boundary cache accepts the parent or admin_cells
+folder directly. Status includes progress, active external builds and read errors.
+Files refresh automatically in Globe and Local; no companion application is required.
