@@ -123,3 +123,8 @@ shared globe frame budget (4 MiB, stop submitting after 2 ms). Previous complete
 buffers remain drawable until all replacement pieces are uploaded. In-flight
 snapshots finish before accepting later arrivals. Hidden layers release both
 pending and displayed buffers. Driver calls cannot be preempted mid-allocation.
+
+Pipelines paint only a GPU version matching the requested callback. While a
+replacement stages, they hide old geometry/colors so capacity legends and hover
+metadata never describe a previous product/filter batch. Other layers retain
+their existing previous-picture behavior.

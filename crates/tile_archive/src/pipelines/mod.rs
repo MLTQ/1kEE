@@ -4,6 +4,9 @@ use cell_format::{CellFeature, CellPoint};
 use serde::{Deserialize, Serialize};
 
 pub mod build;
+mod capacity;
+mod capacity_snapshot;
+pub use capacity::Capacity;
 mod geometry;
 #[cfg(test)]
 mod tests;
@@ -25,6 +28,8 @@ pub struct Info {
     pub accuracy: String,
     pub historical: bool,
     pub planned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity: Option<Capacity>,
 }
 
 pub struct Feature {
@@ -99,6 +104,9 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<Feature>, String> {
             let info: Info =
                 serde_json::from_str(f.name.as_deref().ok_or("Missing pipeline attributes")?)
                     .map_err(|e| e.to_string())?;
+            if info.capacity.as_ref().is_some_and(|c| !c.valid()) {
+                return Err("Invalid pipeline capacity".into());
+            }
             if f.points.len() < 2
                 || f.points.iter().any(|p| {
                     !p.lat.is_finite()
@@ -119,9 +127,15 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<Feature>, String> {
 
 /// Bounds are [min_lat, max_lat, min_lon, max_lon]. Large views use baked overview.
 pub fn load(reader: &Reader, bounds: Option<[f32; 4]>) -> Result<Vec<Feature>, String> {
-    if reader.metadata(MANIFEST)?.is_none() {
-        return Err("No public pipelines in this archive".into());
-    }
+    let manifest = reader
+        .metadata(MANIFEST)?
+        .ok_or("No public pipelines in this archive")?;
+    let mut features = load_geometry(reader, bounds)?;
+    capacity_snapshot::enrich(&mut features, &manifest);
+    Ok(features)
+}
+
+fn load_geometry(reader: &Reader, bounds: Option<[f32; 4]>) -> Result<Vec<Feature>, String> {
     let Some(b) = bounds else {
         return decode(
             &reader
@@ -137,7 +151,7 @@ pub fn load(reader: &Reader, bounds: Option<[f32; 4]>) -> Result<Vec<Feature>, S
     let x0 = ((b[2] * 4.0).floor() as i32).clamp(-720, 719);
     let x1 = ((b[3] * 4.0).floor() as i32).clamp(-720, 719);
     if (y1 - y0 + 1) * (x1 - x0 + 1) > 4096 {
-        return load(reader, None);
+        return load_geometry(reader, None);
     }
     let mut features = Vec::new();
     for y in y0..=y1 {

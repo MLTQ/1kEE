@@ -94,3 +94,5 @@ selection is session-only; it does not enable the layer or change contour data.
 Contours includes Hide distant contours, enabled only in Local Earth view
 while contours are visible. It controls the new invisible visibility pass and
 provides a direct comparison with transparent line rendering.
+
+Pipelines exposes Color by capacity with a shared gas/oil legend, source units, distinct zero/unavailable colors and an explicit not-actual-flow label. OSM remains separately toggleable and uses the unavailable color in this mode.

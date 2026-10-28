@@ -24,3 +24,7 @@ No downloads, source JSON parsing or PBF scans happen during rendering.
   outside the mutex so mesh replacement cannot block the UI on deallocation.
 
 Local hits feed infrastructure_hover instead of painting their own Area. Repeated tile fragments deduplicate by source ID; overlapping routes share one card with source/accuracy metadata.
+
+The mesh key also includes capacity coloring. `pipeline_capacity::color` supplies the same fixed bands as the globe and legend. Archive loads can restore capacities from checksum-matched bundled GEM metadata without changing disk files. Controls expose the optional mode and explain original units, explicit zero and unavailable values.
+
+Local regression checks that mode switching preserves mesh topology/positions and pick identities, visibly separates unknown/zero/positive values, and restores product colors.

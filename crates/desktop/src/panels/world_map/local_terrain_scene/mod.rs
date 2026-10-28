@@ -380,6 +380,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             viewport_center,
             render_zoom,
             model.show_pipeline && model.pipeline_osm,
+            model.pipeline_capacity,
         );
         if (model.show_pipeline || model.show_platforms) && let Some(root) = model.selected_root.as_deref() {
             let view = model.globe_view;
@@ -396,7 +397,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             if model.show_pipeline {
                 super::pipeline_layer::draw(painter, root,
                     Some([bounds.min_lat,bounds.max_lat,bounds.min_lon,bounds.max_lon]), key.clone(),
-                    model.pipeline_filters, move |point| {
+                    model.pipeline_filters, model.pipeline_capacity, move |point| {
                         project_local(&layout, &view, viewport_center, point, 0.0, x_km, y_km).map(|p| p.pos)
                     });
             }

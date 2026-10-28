@@ -121,3 +121,5 @@ hover/click picking. Events and replay tips scale radially from the sphere; glob
 webcams use shorter green surface-normal spires. Event-camera links use ground
 anchors only when the independent Nearby camera links toggle is enabled. They
 indicate the selected event's 250 km proximity subset, not verified footage.
+
+Public pipelines receive the session capacity-color flag as well as source/status filters. Changing it invalidates their prepared batch only; camera motion still changes uniforms alone.

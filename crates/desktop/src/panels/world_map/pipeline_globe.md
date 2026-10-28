@@ -17,3 +17,7 @@ version/root/filter key, so hits always describe the geometry being drawn.
 
 The ignored real-data test checks every eligible overview segment reaches the
 GPU batch and measures one-time preparation without touching the source archive.
+
+Capacity coloring is part of the immutable batch key. Its colors come from pipeline_capacity, matching local rendering and the legend; pick ownership/geometry remains identical. No animation, flow direction or throughput is inferred.
+
+The shared GPU callback hides superseded pipeline versions during staged upload. An opt-in real-data GPU preview checks mode switching and exact product-image restoration; see pipeline_capacity_preview.md.

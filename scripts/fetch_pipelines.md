@@ -19,3 +19,5 @@ standard library, and GDAL ogr2ogr. No registration or form submission occurs.
   format, counted in normalization statistics, and preserved in raw snapshots.
 - GEM data: Global Energy Monitor, GGIT November 2025 / GOIT June 2026 public maps,
   CC BY 4.0: https://globalenergymonitor.org/creative-commons-license .
+
+`capacity()` retains GEM numeric finite nonnegative `capacity`, original `units-of-m` and pinned public-map release. It ignores display/scaled fields, rejects invalid values/booleans/missing units, and preserves reported zero. Normalization counts source features with/without capacity once, regardless of multipart geometry. Unknown units remain available for hover without implying conversion.

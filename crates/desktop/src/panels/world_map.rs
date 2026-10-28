@@ -5,6 +5,7 @@ mod cell_loader;
 mod fire_layer;
 mod infra_layer;
 mod pipeline_layer;
+mod pipeline_capacity;
 mod platform_layer;
 pub(crate) use platform_layer::controls as platform_controls;
 mod pipeline_globe;

@@ -371,7 +371,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     draw_active_fires(painter, &layout, &model.globe_view, model);
     if model.show_pipeline && model.active_body == crate::model::ActiveBody::Earth
         && let Some(root) = model.selected_root.as_deref() {
-        super::pipeline_globe::draw(painter, root, &layout, &model.globe_view, model.pipeline_filters);
+        super::pipeline_globe::draw(painter, root, &layout, &model.globe_view, model.pipeline_filters, model.pipeline_capacity);
     }
     if model.show_platforms && model.active_body == crate::model::ActiveBody::Earth
         && let Some(root) = model.selected_root.as_deref() {

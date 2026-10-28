@@ -719,6 +719,11 @@ impl egui_wgpu::CallbackTrait for ContourCallback {
         let Some(gpu) = res.layers.get(&self.layer) else {
             return;
         };
+        // Pipeline colors encode capacity; an old batch must not be presented
+        // under the new legend or picked with the replacement's metadata.
+        if self.layer == ContourLayer::Pipelines && gpu.version != self.version {
+            return;
+        }
         if gpu.chunks.is_empty() {
             return;
         }

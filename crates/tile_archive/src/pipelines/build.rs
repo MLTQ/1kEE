@@ -62,6 +62,9 @@ pub fn run(
         }
         let route: Route =
             serde_json::from_str(&row).map_err(|e| format!("Pipeline row {}: {e}", line + 1))?;
+        if route.info.capacity.as_ref().is_some_and(|c| !c.valid()) {
+            return Err(format!("Invalid pipeline capacity at row {}", line + 1));
+        }
         if route.points.len() < 2
             || route.points.iter().any(|p| {
                 !p[0].is_finite() || !p[1].is_finite() || p[0].abs() > 180.0 || p[1].abs() > 90.0

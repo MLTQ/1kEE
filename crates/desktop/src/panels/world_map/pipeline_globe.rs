@@ -17,6 +17,7 @@ use tile_archive::pipelines::Filter;
 struct Key {
     root: PathBuf,
     filter: Filter,
+    capacity: bool,
     colors: [egui::Color32; 3],
 }
 struct Batch {
@@ -60,10 +61,12 @@ pub(super) fn draw(
     layout: &GlobeLayout,
     view: &GlobeViewState,
     filter: Filter,
+    capacity: bool,
 ) {
     let key = Key {
         root: root.to_owned(),
         filter,
+        capacity,
         colors: [
             crate::theme::pipeline_gas_color(),
             crate::theme::pipeline_oil_color(),
@@ -88,7 +91,7 @@ pub(super) fn draw(
                     bounds: None,
                 }))
             });
-            let (instances, owners) = prepare(&data.features, key.filter, key.colors);
+            let (instances, owners) = prepare(&data.features, key.filter, key.capacity, key.colors);
             let picking = super::pipeline_pick::Index::new(&instances, owners);
             let batch = Arc::new(Batch {
                 key,
@@ -139,6 +142,9 @@ pub(super) fn draw(
             )
             .into_paint_callback(painter.clip_rect()),
         );
+        if capacity {
+            super::pipeline_capacity::map_label(painter);
+        }
     } else {
         painter.text(
             painter.clip_rect().left_bottom() + egui::vec2(12.0, -30.0),
@@ -150,9 +156,14 @@ pub(super) fn draw(
     }
 }
 
+#[cfg(test)]
+#[path = "pipeline_capacity_preview.rs"]
+mod capacity_preview;
+
 fn prepare(
     features: &[tile_archive::pipelines::Feature],
     filter: Filter,
+    capacity: bool,
     colors: [egui::Color32; 3],
 ) -> (Vec<SegmentInstance>, Vec<usize>) {
     let mut instances = Vec::new();
@@ -162,16 +173,7 @@ fn prepare(
         .enumerate()
         .filter(|(_, f)| filter.accepts(&f.info))
     {
-        let mut color = colors[match f.info.product.as_str() {
-            "gas" => 0,
-            "oil" => 1,
-            _ => 2,
-        }];
-        if f.info.historical {
-            color = color.gamma_multiply(0.35);
-        } else if f.info.planned {
-            color = color.gamma_multiply(0.60);
-        }
+        let color = super::pipeline_capacity::color(&f.info, capacity, colors);
         for pair in f.points.windows(2) {
             if pair[0] != pair[1] {
                 owners.push(owner);
@@ -202,7 +204,12 @@ mod tests {
         let reader = tile_archive::Reader::open(Path::new(&path)).unwrap();
         let features = tile_archive::pipelines::load(&reader, None).unwrap();
         let start = std::time::Instant::now();
-        let (instances, owners) = prepare(&features, Filter::default(), [egui::Color32::WHITE; 3]);
+        let (instances, owners) = prepare(
+            &features,
+            Filter::default(),
+            true,
+            [egui::Color32::WHITE; 3],
+        );
         assert_eq!(instances.len(), owners.len());
         let expected: usize = features
             .iter()

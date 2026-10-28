@@ -198,7 +198,7 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                 ui.checkbox(&mut model.show_pipeline, "Pipelines");
                 if model.show_pipeline {
                     ui.indent("pipeline-options", |ui| {
-                        super::world_map::pipeline_controls(ui, &mut model.pipeline_filters);
+                        super::world_map::pipeline_controls(ui, &mut model.pipeline_filters, &mut model.pipeline_capacity);
                         ui.checkbox(&mut model.pipeline_osm, "OSM pipelines (local view)");
                     });
                 }

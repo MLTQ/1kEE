@@ -178,6 +178,13 @@ fn rows(detail: &Detail) -> Vec<(&'static str, String)> {
         Detail::Pipeline(p) => {
             rows.push(("Type", format!("{} pipeline", p.product)));
             rows.push((
+                "Capacity",
+                super::pipeline_capacity::label(p.capacity.as_ref()),
+            ));
+            if let Some(capacity) = &p.capacity {
+                rows.push(("Capacity source release", capacity.source_release.clone()));
+            }
+            rows.push((
                 "Status",
                 if p.status.is_empty() {
                     "Unknown".into()
@@ -318,6 +325,7 @@ mod tests {
             accuracy: "Approximate".into(),
             historical: false,
             planned: false,
+            capacity: None,
         };
         begin(Some(Pos2::ZERO));
         pipeline(&info, 5.0);
@@ -331,8 +339,26 @@ mod tests {
         assert!(data.contains(&("Owner", "Owner".into())));
         assert!(data.contains(&("Operator", "Operator".into())));
         assert!(data.contains(&("Route accuracy", "Approximate".into())));
+        assert!(data.contains(&("Capacity", "Not reported in available data".into())));
         begin(None);
         FRAME.with(|f| assert!(f.borrow().hits.is_empty()));
+    }
+    #[test]
+    fn pipeline_capacity_hover_keeps_quantity_units_vintage_and_measurement_caveat() {
+        let info: Info = serde_json::from_value(serde_json::json!({
+            "source":"gem-oil","source_id":"P1","name":"Test pipeline","operator":"","owner":"",
+            "product":"oil","status":"operating","accuracy":"unknown","historical":false,"planned":false,
+            "capacity":{"value":123456.78,"unit":"boe/d","source_release":"GOIT June 2026 public map"}
+        })).unwrap();
+        let data = rows(&Detail::Pipeline(info));
+        assert!(data.contains(&(
+            "Capacity",
+            "123456.78 boe/d (source-reported; not actual flow)".into()
+        )));
+        assert!(data.contains(&(
+            "Capacity source release",
+            "GOIT June 2026 public map".into()
+        )));
     }
     #[test]
     fn platform_hover_card_renders_reported_fields_and_overlap_summary() {
@@ -353,6 +379,7 @@ mod tests {
             accuracy: "Approximate".into(),
             historical: false,
             planned: false,
+            capacity: None,
         };
         let ctx = Context::default();
         let mut text = String::new();

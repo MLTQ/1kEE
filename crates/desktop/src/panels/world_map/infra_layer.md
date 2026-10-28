@@ -12,3 +12,5 @@ Each type has independent load bounds/cache state; source reads run on workers.
   invented. Other infrastructure hover behavior stays unchanged.
 - Public EIA/GEM/BSEE metadata lives in independent pipeline_layer/globe modules.
 - Existing cache invalidation uses root, bounds and OSM data generation.
+
+`draw_pipelines` accepts the capacity mode: OSM uses the shared unavailable-capacity gray because its cached attributes contain no capacity. Its hover metadata explicitly has `capacity: None`.

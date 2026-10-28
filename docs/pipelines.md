@@ -7,6 +7,37 @@ routes are hidden by default. Unspecified status remains visible and is labeled
 as such. Hover in both globe and local views shows the source ID, name, owner/operator, status and route-accuracy caveat.
 The existing OSM pipeline layer remains independently toggleable in local view; its hover card shows the retained name, class and way ID, with unavailable status identified explicitly.
 
+## Capacity overlay
+
+Enable **Layers → Infrastructure → Pipelines → Color by capacity** for both globe
+and local views. This shows **source-reported capacity, not actual flow**. A map
+caption preserves that distinction when the drawer is closed. No direction,
+animation, utilization or current throughput is inferred.
+
+Fixed blue bands show gas in billion cubic metres/year: >0–<1, 1–<10, 10–<50,
+and 50+. Fixed amber bands show oil/liquids in the publisher's barrels of oil
+equivalent/day: >0–<100k, 100k–<500k, 500k–<1m, and 1m+. Scales do not change
+when zooming or filtering. Gray means unavailable or units outside these scales;
+lavender means the source explicitly reported zero. Planned/historical routes
+retain their normal dimming when included. OSM has no retained capacity and is
+gray in this mode. Hover shows the exact value, source units and release.
+
+The pinned GEM public maps contain 2,246 gas capacities (including ten reported
+zeros) among 3,534 mapped gas records, and 1,150 among 1,555 oil/liquids records.
+Counts include all statuses and refer to source records, not tile fragments.
+These values may describe projects, segments or whole systems; do not sum
+overlapping sources or repeated route parts into network totals.
+
+New imports retain optional capacity metadata in each tile. Older archives can
+use the bundled 82 KiB capacity supplement: the loader requires both the source
+URL and original raw SHA256 in the archive manifest to match the pinned release
+before joining by source/project ID. Explicit archived values take precedence.
+No source archive is modified and no runtime network fetch occurs. Unmatched
+old archives remain readable with unavailable capacity; rebuild those from the
+raw snapshots with the updated downloader/packer. The supplement retains GEM
+CC BY 4.0 attribution, URLs and hashes in
+`crates/tile_archive/src/pipelines/capacity_snapshot.json`.
+
 ## Installed snapshot
 
 - Original downloads and SHA256 provenance:

@@ -4,6 +4,7 @@ import argparse
 import collections
 import hashlib
 import json
+import math
 import pathlib
 import subprocess
 import tempfile
@@ -21,6 +22,20 @@ BSEE_GAS = {"BLKG", "GAS", "LIFT", "SPLY", "FLG", "BLGH", "INJ", "GASH", "NGER"}
 BSEE_OIL = {"BLKO", "OIL", "BLOH", "OILH", "O/W"}
 BSEE_MIXED = {"G/C", "G/O", "G/OH", "G/CH"}
 HISTORICAL = {"ABN", "REM", "OUT", "A/C", "COMB", "CNCL", "RELQ", "R/A", "R/R", "R/C", "O/C"}
+CAPACITY_RELEASES = {"gem-gas": "GGIT November 2025 public map", "gem-oil": "GOIT June 2026 public map"}
+
+
+def capacity(source, properties):
+    """Retain reported quantities and units; never treat display scaling as data."""
+    if source not in CAPACITY_RELEASES:
+        return None
+    value = properties.get("capacity")
+    unit = properties.get("units-of-m")
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value < 0
+            or not isinstance(unit, str) or not unit.strip()):
+        return None
+    return dict(value=value, unit=unit.strip(), source_release=CAPACITY_RELEASES[source])
 
 
 def fetch(url, path):
@@ -78,6 +93,9 @@ def info(source, p, row, product=None):
         status = str(p.get("status") or "unknown").lower()
         fuel = str(p.get("fuel") or "").lower()
         base.update(source_id=str(p.get("project-id", row)), name=" · ".join(str(p[k]) for k in ("name", "unit-name") if p.get(k)), owner=p.get("owner") or "", product="gas" if source == "gem-gas" else "oil" if fuel == "oil" else "liquids", status=status, historical=status in {"retired", "cancelled", "idle", "idled", "mothballed", "shelved"}, planned=status in {"proposed", "construction", "under construction"}, accuracy="Mixed route accuracy; may be approximated between endpoints")
+    reported_capacity = capacity(source, p)
+    if reported_capacity is not None:
+        base["capacity"] = reported_capacity
     return base
 
 
@@ -94,6 +112,7 @@ def normalize(source, features, stream, product=None):
             stats["non_fuel_records"] += 1
             continue
         stats["source_features"] += 1
+        stats["with_capacity" if "capacity" in metadata else "without_capacity"] += 1
         stats["historical" if metadata["historical"] else "planned" if metadata["planned"] else "current_or_unspecified"] += 1
         parts = [geometry["coordinates"]] if kind == "LineString" else geometry["coordinates"]
         for points in parts:

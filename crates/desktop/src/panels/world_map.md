@@ -101,3 +101,5 @@ results arrive. The canvas must not open SQLite to decide whether to repaint.
 The removed globe status poll ran before input handling at zoom >= 2 and could
 block the whole app on cold-cache WAL/filesystem operations. Its radius-zero,
 local-center query also did not describe the actual globe source window.
+
+`pipeline_capacity` shares capacity coloring, legend and hover wording. Both scenes receive the model coloring flag; it never changes route eligibility or geometry.

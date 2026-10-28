@@ -17,6 +17,7 @@ struct MeshKey {
     request: Request,
     projection: Vec<u32>,
     filter: Filter,
+    capacity: bool,
     colors: [Color32; 3],
 }
 pub(super) struct Snapshot {
@@ -99,6 +100,7 @@ pub(super) fn draw(
     bounds: Option<[f32; 4]>,
     projection: Vec<u32>,
     filter: Filter,
+    capacity: bool,
     project: impl Fn(GeoPoint) -> Option<Pos2> + Send + 'static,
 ) {
     let local = bounds.is_some();
@@ -122,6 +124,7 @@ pub(super) fn draw(
         },
         projection,
         filter,
+        capacity,
         colors,
     };
     let Ok(mut state) = store(local).try_lock() else {
@@ -136,6 +139,7 @@ pub(super) fn draw(
             let (mesh, hits) = prepare(
                 &data.features,
                 key.filter,
+                key.capacity,
                 key.colors,
                 painter.clip_rect(),
                 &project,
@@ -154,7 +158,14 @@ pub(super) fn draw(
             let ctx = painter.ctx().clone();
             std::thread::spawn(move || {
                 let data = Arc::new(load(key.request.clone()));
-                let (mesh, hits) = prepare(&data.features, key.filter, key.colors, rect, project);
+                let (mesh, hits) = prepare(
+                    &data.features,
+                    key.filter,
+                    key.capacity,
+                    key.colors,
+                    rect,
+                    project,
+                );
                 let mut retired = None;
                 if let Ok(mut state) = store(local).lock() {
                     if state.generation == generation {
@@ -187,6 +198,9 @@ pub(super) fn draw(
         return;
     };
     painter.add(egui::Shape::Mesh(prepared.mesh.clone()));
+    if capacity {
+        super::pipeline_capacity::map_label(painter);
+    }
     if let Some(pointer) = super::infrastructure_hover::pointer() {
         for hit in &prepared.hits {
             let distance = super::infrastructure_hover::line_distance(pointer, hit.a, hit.b);
@@ -203,6 +217,7 @@ pub(super) fn draw(
 fn prepare(
     features: &[Feature],
     filter: Filter,
+    capacity: bool,
     colors: [Color32; 3],
     rect: Rect,
     project: impl Fn(GeoPoint) -> Option<Pos2>,
@@ -214,16 +229,7 @@ fn prepare(
         .enumerate()
         .filter(|(_, f)| filter.accepts(&f.info))
     {
-        let mut color = colors[match f.info.product.as_str() {
-            "gas" => 0,
-            "oil" => 1,
-            _ => 2,
-        }];
-        if f.info.historical {
-            color = color.gamma_multiply(0.35);
-        } else if f.info.planned {
-            color = color.gamma_multiply(0.60);
-        }
+        let color = super::pipeline_capacity::color(&f.info, capacity, colors);
         let mut previous = None;
         for p in &f.points {
             let current = project(GeoPoint {
@@ -257,7 +263,12 @@ fn prepare(
     (mesh, hits)
 }
 
-pub(crate) fn controls(ui: &mut egui::Ui, filter: &mut Filter) {
+pub(crate) fn controls(ui: &mut egui::Ui, filter: &mut Filter, capacity: &mut bool) {
+    ui.checkbox(capacity, "Color by capacity");
+    if *capacity {
+        super::pipeline_capacity::legend(ui);
+        ui.separator();
+    }
     ui.horizontal(|ui| {
         ui.checkbox(&mut filter.gas, "Gas");
         ui.checkbox(&mut filter.oil, "Oil");
@@ -305,6 +316,54 @@ pub(crate) fn controls(ui: &mut egui::Ui, filter: &mut Filter) {
 mod tests {
     use super::*;
     #[test]
+    fn capacity_switch_recolors_local_geometry_without_changing_hits() {
+        let features: Vec<_> = [None, Some(0.0), Some(12.5)].into_iter().enumerate().map(|(i, value)| {
+            Feature {
+                info: serde_json::from_value(serde_json::json!({
+                    "source":"gem-gas","source_id":i.to_string(),"name":"test","operator":"","owner":"",
+                    "product":"gas","status":"operating","accuracy":"unknown","historical":false,"planned":false,
+                    "capacity":value.map(|v| serde_json::json!({"value":v,"unit":"bcm/y of gas","source_release":"Test"}))
+                })).unwrap(),
+                points: vec![cell_format::CellPoint {lon:0.0,lat:i as f32},cell_format::CellPoint {lon:1.0,lat:i as f32}],
+            }
+        }).collect();
+        let build = |capacity| {
+            prepare(
+                &features,
+                Filter::default(),
+                capacity,
+                [Color32::WHITE; 3],
+                Rect::EVERYTHING,
+                |p| Some(egui::pos2(p.lon * 100.0, p.lat * 20.0)),
+            )
+        };
+        let (product, product_hits) = build(false);
+        let (capacity, capacity_hits) = build(true);
+        assert_eq!(product.indices, capacity.indices);
+        assert!(
+            product
+                .vertices
+                .iter()
+                .zip(&capacity.vertices)
+                .all(|(a, b)| a.pos == b.pos)
+        );
+        assert!(
+            product_hits
+                .iter()
+                .zip(&capacity_hits)
+                .all(|(a, b)| (a.a, a.b, a.feature) == (b.a, b.b, b.feature))
+        );
+        assert_eq!(capacity_hits.len(), 3);
+        let colors: Vec<_> = capacity
+            .vertices
+            .chunks_exact(4)
+            .map(|v| v[0].color)
+            .collect();
+        assert_ne!(colors[0], colors[1]); // Unknown and explicit zero are visibly different.
+        assert_ne!(colors[1], colors[2]);
+        assert_eq!(build(false).0.vertices, product.vertices);
+    }
+    #[test]
     fn hidden_projection_breaks_lines_instead_of_connecting_across_globe() {
         let info = serde_json::from_value(serde_json::json!({"source":"eia-3","source_id":"1","name":"test","operator":"","owner":"","product":"gas","status":"unknown","accuracy":"unknown","historical":false,"planned":false})).unwrap();
         let features = vec![Feature {
@@ -318,6 +377,7 @@ mod tests {
         let (mesh, _) = prepare(
             &features,
             Filter::default(),
+            false,
             [Color32::WHITE; 3],
             Rect::EVERYTHING,
             |p| (p.lon != 1.0).then_some(Pos2::new(p.lon, 0.0)),

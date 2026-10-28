@@ -23,3 +23,5 @@ Cable routes share the collector, deduplicated by TeleGeography ID. Cards show p
 `prefer_landing` suppresses cable route candidates at a visible landing dot so the existing station tooltip remains accessible. Other infrastructure retains its normal priority.
 
 Cable regression checks fragment deduplication, published fields/source and landing tooltip priority.
+
+Pipeline cards always report capacity availability. Known values retain exact source units and release, explicitly labeled source-reported capacity rather than actual flow. Tests preserve numeric precision, original oil-equivalent units and release; unknown is never shown as zero.

@@ -16,3 +16,5 @@ contains serialized `Info`, not an OSM name. IDs are fragment IDs, never OSM IDs
 - Status, owner vs operator, and unknown/approximate geometry survive packing.
 
 `Filter` independently gates source/product/planned/historical metadata. Unspecified status is visible by default; the UI labels this explicitly.
+
+`Info.capacity` is optional for old archives and preserves source value, units and release. Decode rejects invalid quantities. `load` enriches missing values using the bundled capacity snapshot only after verifying source URL and raw checksum; direct `decode` never enriches. Zero is distinct from missing.

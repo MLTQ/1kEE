@@ -12,6 +12,7 @@ fn info() -> Info {
         accuracy: "Approximate".into(),
         historical: false,
         planned: false,
+        capacity: None,
     }
 }
 
@@ -66,6 +67,51 @@ fn source_and_status_filters_keep_unknowns_honest() {
 }
 
 #[test]
+fn legacy_tiles_have_unknown_capacity_and_invalid_quantities_fail_decode() {
+    let encode = |attributes: serde_json::Value| {
+        cell_format::write::write_cell(
+            0,
+            0,
+            &[(
+                TAG,
+                &[encoded(
+                    1,
+                    &attributes.to_string(),
+                    vec![
+                        CellPoint { lat: 0.1, lon: 0.1 },
+                        CellPoint { lat: 0.1, lon: 0.2 },
+                    ],
+                )],
+            )],
+        )
+    };
+    let mut attributes = serde_json::to_value(info()).unwrap();
+    assert!(attributes.get("capacity").is_none());
+    assert!(
+        decode(&encode(attributes.clone())).unwrap()[0]
+            .info
+            .capacity
+            .is_none()
+    );
+    attributes["capacity"] =
+        serde_json::json!({"value":0,"unit":"bcm/y of gas","source_release":"Test"});
+    assert_eq!(
+        decode(&encode(attributes.clone())).unwrap()[0]
+            .info
+            .capacity
+            .as_ref()
+            .unwrap()
+            .value,
+        0.0
+    );
+    attributes["capacity"]["value"] = (-1).into();
+    assert!(decode(&encode(attributes.clone())).is_err());
+    attributes["capacity"]["value"] = 1.into();
+    attributes["capacity"]["unit"] = "".into();
+    assert!(decode(&encode(attributes)).is_err());
+}
+
+#[test]
 fn pack_read_merge_and_failed_publication_preserve_sources() {
     let root = std::env::temp_dir().join(format!(
         "pipeline-test-{}-{}",
@@ -79,7 +125,13 @@ fn pack_read_merge_and_failed_publication_preserve_sources() {
     let input = root.join("routes.jsonl");
     let manifest = root.join("manifest.json");
     let archive = root.join("pipelines.1ka");
-    let route = serde_json::json!({"info":info(),"points":[[0.1,0.1],[0.3,0.12],[0.6,0.1]]});
+    let mut record = info();
+    record.capacity = Some(Capacity {
+        value: 12.5,
+        unit: "bcm/y of gas".into(),
+        source_release: "Test release".into(),
+    });
+    let route = serde_json::json!({"info":record,"points":[[0.1,0.1],[0.3,0.12],[0.6,0.1]]});
     std::fs::write(&input, format!("{route}\n")).unwrap();
     std::fs::write(
         &manifest,
@@ -92,8 +144,13 @@ fn pack_read_merge_and_failed_publication_preserve_sources() {
     assert_eq!(fine.len(), 3);
     assert_eq!(fine[0].info.owner, "Example owner");
     assert_eq!(fine[0].info.accuracy, "Approximate");
+    assert!(fine.iter().all(|f| f.info.capacity == record.capacity));
     assert_eq!(fine[0].points[0].lon, 0.1);
     assert_eq!(load(&reader, None).unwrap().len(), 1);
+    assert_eq!(
+        load(&reader, None).unwrap()[0].info.capacity,
+        record.capacity
+    );
     assert!(
         load(&reader, Some([10.0, 10.1, 10.0, 10.1]))
             .unwrap()
@@ -107,6 +164,10 @@ fn pack_read_merge_and_failed_publication_preserve_sources() {
     let world = Reader::open(&world).unwrap();
     assert!(world.has_cell(*b"PIPE", 0, 0).unwrap());
     assert_eq!(load(&world, None).unwrap()[0].info.source_id, "P123");
+    assert_eq!(
+        load(&world, None).unwrap()[0].info.capacity,
+        record.capacity
+    );
     let original = std::fs::read(&archive).unwrap();
     assert!(build::run(&input, &manifest, &archive, &mut |_| {}).is_err());
     assert_eq!(original, std::fs::read(&archive).unwrap());
@@ -119,6 +180,17 @@ fn pack_read_merge_and_failed_publication_preserve_sources() {
     )
     .unwrap();
     let failed = root.join("failed.1ka");
+    assert!(build::run(&input, &manifest, &failed, &mut |_| {}).is_err());
+    assert!(!failed.exists());
+    record.capacity.as_mut().unwrap().value = -1.0;
+    std::fs::write(
+        &input,
+        format!(
+            "{}\n",
+            serde_json::json!({"info":record,"points":[[0.1,0.1],[0.2,0.1]]})
+        ),
+    )
+    .unwrap();
     assert!(build::run(&input, &manifest, &failed, &mut |_| {}).is_err());
     assert!(!failed.exists());
     assert!(!std::fs::read_dir(&root).unwrap().any(|p| {

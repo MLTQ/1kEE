@@ -200,7 +200,7 @@ fn draw_infra(
                     source: "osm".into(), source_id: feat.way_id.to_string(), name: feat.name.clone().unwrap_or_default(),
                     operator: String::new(), owner: String::new(), product: feat.class.clone(),
                     status: "Not provided in the local cache".into(), accuracy: "OpenStreetMap geometry; precision varies".into(),
-                    historical: false, planned: false,
+                    historical: false, planned: false, capacity: None,
                 },distance);
             }
         }
@@ -245,18 +245,19 @@ pub(super) fn draw_pipelines(
     viewport_center: GeoPoint,
     _render_zoom: f32,
     show: bool,
+    capacity: bool,
 ) {
     draw_infra(
         painter, layout, view, selected_root, viewport_center, show,
         pipeline_cache,
         "pipeline",
         |cls| {
-            let color = match cls {
+            let color = if capacity { super::pipeline_capacity::UNKNOWN } else { match cls {
                 "gas" => theme::pipeline_gas_color(),
                 "oil" => theme::pipeline_oil_color(),
                 "water" | "sewer" => theme::pipeline_water_color(),
                 _ => theme::pipeline_other_color(),
-            };
+            }};
             egui::Stroke::new(1.2, color)
         },
         |_| None,
