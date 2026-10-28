@@ -14,3 +14,5 @@ the complete compact build rather than only the lookup implementation.
 - All mutations and cleanup are confined to unique owned temporary directories.
 - An atomic suffix prevents parallel tests colliding when wall-clock timestamps
   have coarser resolution than their nanosecond representation.
+
+The all-features fixture also emits ten empty admin levels; repeated completed builds can refresh this independent output without changing compact way state.

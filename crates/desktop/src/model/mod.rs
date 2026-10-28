@@ -1,3 +1,4 @@
+pub mod admin;
 mod arcgis;
 mod cameras;
 mod events;
@@ -95,6 +96,7 @@ pub struct AppModel {
     pub show_trees: bool,
     pub show_buildings: bool,
     pub show_admin: bool,
+    pub admin_options: admin::AdminOptions,
     // Infrastructure layers
     pub show_power: bool,
     pub show_rail: bool,
@@ -298,6 +300,7 @@ impl AppModel {
             show_trees: false,
             show_buildings: false,
             show_admin: false,
+            admin_options: admin::AdminOptions::default(),
             show_power: false,
             show_rail: false,
             show_platforms: false,

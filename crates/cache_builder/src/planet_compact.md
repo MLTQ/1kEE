@@ -15,7 +15,10 @@ keeping all state under `tmp_dir/indexed-pbf-v1` instead of using legacy scratch
   sessions retain up to 16 MiB of decoded blocks plus up to 12 MiB of grouped
   way dependencies; scratch vectors and the active decoder add bounded memory.
 - Uses the existing classification, elevation baking, cell merging and feature
-  checkpoint cadence; it does not extend planet-all's missing admin support or
-  solve the separately tracked cell-output durability/coverage issues.
+  checkpoint cadence; it does not solve the separately tracked cell-output durability/coverage issues.
 - Index errors include their working-directory path. The completion summary
   reports feature/file counts without relying on the legacy partial cell tally.
+
+Admin boundaries reuse the compact lookup after way extraction. Completed older
+way builds can backfill admin output without changing the existing build binding
+or resetting legacy data. Admin errors prevent new completion publication.

@@ -103,3 +103,7 @@ block the whole app on cold-cache WAL/filesystem operations. Its radius-zero,
 local-center query also did not describe the actual globe source window.
 
 `pipeline_capacity` shares capacity coloring, legend and hover wording. Both scenes receive the model coloring flag; it never changes route eligibility or geometry.
+
+Admin boundaries delegate to admin_layer (shared cache discovery/background loads),
+admin_geometry (hole-aware fill), admin_render (local projection and clipping),
+and admin_controls (nested levels, opacity, status and reload).

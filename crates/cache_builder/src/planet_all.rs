@@ -194,16 +194,14 @@ pub fn build_planet_cache_with_progress(
 
     let stats = run_pass2(&cmd, &node_lookup, &mut cp, &checkpoint_path, progress)?;
 
-    if cmd.build_admin {
-        progress(RoadBuildProgress {
-            stage: "Admin Skipped".to_owned(),
-            fraction: 0.98,
-            message: "Note: admin boundaries are not yet supported in planet-all mode.".to_owned(),
-        });
-    }
+    let admin_rings = if cmd.build_admin {
+        crate::admin::build_planet(&cmd, &node_lookup, progress)?
+    } else {
+        0
+    };
 
     let summary = format!(
-        "planet-all: {} features across {} cells; {} cache files written to {}",
+        "planet-all: {} features across {} cells; {} cache files and {admin_rings} admin rings written to {}",
         stats.feature_count,
         stats.cell_count,
         stats.written_cells,

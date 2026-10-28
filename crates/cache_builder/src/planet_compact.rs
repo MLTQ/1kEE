@@ -38,6 +38,12 @@ pub(super) fn build(
         "pipeline": 1,
     }).to_string();
     if state.bind_build(options)? {
+        if cmd.build_admin {
+            let count = crate::admin::build_planet(cmd, &Lookup::Compact(nodes), progress)?;
+            return Ok(format!(
+                "Compact way build already complete; refreshed {count} admin rings."
+            ));
+        }
         return Ok("Compact build already completed for these source/settings. Existing output and legacy files were left intact. Use a new working directory to rebuild.".into());
     }
     let checkpoint_path = directory.join("ways_checkpoint.txt");
@@ -64,17 +70,16 @@ pub(super) fn build(
     });
     let lookup = Arc::new(Lookup::Compact(nodes));
     let stats = run_pass2(cmd, &lookup, &mut cp, &checkpoint_path, progress)?;
+    let admin_rings = if cmd.build_admin {
+        crate::admin::build_planet(cmd, &lookup, progress)?
+    } else {
+        0
+    };
     lookup.validate_source()?;
     state.finish()?;
     let summary = format!(
-        "Compact planet build: {} features; {} cache files written. No expanded planet_nodes.bin created.{}",
-        stats.feature_count,
-        stats.written_cells,
-        if cmd.build_admin {
-            " Admin relations remain unsupported in planet-all."
-        } else {
-            ""
-        }
+        "Compact planet build: {} features; {} cache files written. No expanded planet_nodes.bin created. {admin_rings} admin rings written.",
+        stats.feature_count, stats.written_cells,
     );
     progress(RoadBuildProgress {
         stage: "Completed".into(),

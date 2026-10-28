@@ -25,7 +25,7 @@ pub struct LoadedPolyline {
 /// By default `cache_dir` is `{derived_root}/osm`, but users may have set it
 /// to `{derived_root}` directly (omitting the `osm/` level) or even to an
 /// entirely custom path.  We try the most specific candidates first.
-fn osm_cache_dir_candidates(root: &Path) -> Vec<std::path::PathBuf> {
+pub(super) fn osm_cache_dir_candidates(root: &Path) -> Vec<std::path::PathBuf> {
     let mut candidates = Vec::new();
 
     if let Some(derived) = terrain_assets::find_derived_root(Some(root)) {

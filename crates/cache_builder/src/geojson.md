@@ -42,3 +42,13 @@ binary `.1kc` cells and can read legacy GeoJSON only as a migration fallback.
 - This layer intentionally writes every checkpointed batch durably. Deferring
   arbitrary dirty cells requires a durable delta journal to keep resume offsets
   safe, rather than an unbounded in-memory map.
+
+`write_admin_level_file` publishes each ADMN level atomically through a sibling
+temporary file. It preserves relation IDs across rings and marks `is_polygon`
+only for complete topology including holes; older line-only caches remain readable.
+
+Whole-planet builds replace each level including empty levels. Focused exports
+merge by relation: retain existing complete topology over incoming fragments,
+keep unrelated regions, and replace fragments once a full relation is available.
+
+Focused deduplication is indexed by relation so it never compares every global ring against every other ring.

@@ -152,3 +152,6 @@ contour, bathymetry and 3DEP hillshade visibility remain separate controls.
 contours in GPU-rendered local Earth views. It does not enable terrain fill.
 
 `pipeline_capacity` is a session-only optional coloring mode, initially false. It is independent of source/product/status filters and is passed to both scenes.
+
+`admin_options` stores session-only level selections and optional fill opacity.
+The master visibility toggle preserves these selections while hiding the layer.

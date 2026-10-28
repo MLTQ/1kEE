@@ -129,9 +129,9 @@ pub fn merge_write_feature_cells(
 
 // ── Admin boundary files ──────────────────────────────────────────────────────
 
-/// Write (or overwrite) a per-admin-level binary file.
+/// Atomically publish a level; focused builds preserve previously cached regions.
 ///
-/// `features`: `(relation_id, name, rings)` — each ring becomes its own
+/// `features`: complete/incomplete regions — each ring becomes its own
 /// `CellFeature` (matching prior GeoJSON behaviour where each ring was a
 /// separate LineString Feature).
 ///
@@ -140,23 +140,24 @@ pub fn merge_write_feature_cells(
 pub fn write_admin_level_file(
     cache_dir: &Path,
     admin_level: u8,
-    features: &[(i64, Option<String>, Vec<Vec<GeoPoint>>)],
+    features: &[crate::admin::AdminRegion],
+    replace: bool,
 ) -> Result<usize, String> {
     let admin_dir = cache_dir.join("admin_cells");
     fs::create_dir_all(&admin_dir).map_err(|e| e.to_string())?;
     let path = admin_dir.join(admin_filename(admin_level));
 
     let mut cell_features: Vec<CellFeature> = Vec::new();
-    for (relation_id, name, rings) in features {
-        for ring in rings {
+    for region in features {
+        for ring in &region.rings {
             if ring.len() < 2 {
                 continue;
             }
             cell_features.push(CellFeature {
-                way_id: *relation_id,
+                way_id: region.relation_id,
                 class: admin_level,
-                is_polygon: false,
-                name: name.clone(),
+                is_polygon: region.complete,
+                name: region.name.clone(),
                 points: ring
                     .iter()
                     .map(|pt| CellPoint {
@@ -169,10 +170,55 @@ pub fn write_admin_level_file(
         }
     }
 
+    if !replace {
+        // A focused extract cannot replace complete global topology or erase
+        // regions outside its bounds. Keep complete old relations; accumulate
+        // incomplete fragments until a complete incoming relation replaces them.
+        let previous = match fs::read(&path) {
+            Ok(bytes) => read_single_chunk(&bytes, TAG_ADMN)
+                .ok_or_else(|| format!("Invalid existing admin cache: {}", path.display()))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(error.to_string()),
+        };
+        let complete_new: std::collections::HashSet<_> = cell_features
+            .iter()
+            .filter(|f| f.is_polygon)
+            .map(|f| f.way_id)
+            .collect();
+        let complete_old: std::collections::HashSet<_> = previous
+            .iter()
+            .filter(|f| f.is_polygon)
+            .map(|f| f.way_id)
+            .collect();
+        cell_features.retain(|f| f.is_polygon || !complete_old.contains(&f.way_id));
+        let mut groups: std::collections::BTreeMap<i64, Vec<CellFeature>> =
+            std::collections::BTreeMap::new();
+        for feature in cell_features {
+            groups.entry(feature.way_id).or_default().push(feature);
+        }
+        for old in previous {
+            if complete_new.contains(&old.way_id) {
+                continue;
+            }
+            let group = groups.entry(old.way_id).or_default();
+            if !group.iter().any(|f| {
+                f.points.len() == old.points.len()
+                    && f.points
+                        .iter()
+                        .zip(&old.points)
+                        .all(|(a, b)| a.lat == b.lat && a.lon == b.lon)
+            }) {
+                group.push(old);
+            }
+        }
+        cell_features = groups.into_values().flatten().collect();
+    }
     let count = cell_features.len();
-    // Admin files are global, not per-cell, so cell coordinates are (0, 0).
+    // Atomic per-level publication: readers never observe a half-written chunk.
     let bytes = write_cell(0, 0, &[(TAG_ADMN, &cell_features)]);
-    fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    let temporary = path.with_extension("1kc.tmp");
+    fs::write(&temporary, bytes).map_err(|e| e.to_string())?;
+    fs::rename(&temporary, &path).map_err(|e| e.to_string())?;
     Ok(count)
 }
 

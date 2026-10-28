@@ -656,9 +656,9 @@ pub fn road_minor_color() -> egui::Color32 {
 pub fn admin_color(level: u8) -> egui::Color32 {
     match level {
         2 => egui::Color32::from_rgba_unmultiplied(220, 200, 60, 200), // country — bright yellow
-        4 => egui::Color32::from_rgba_unmultiplied(180, 140, 60, 160), // state — amber
-        6 => egui::Color32::from_rgba_unmultiplied(140, 110, 60, 120), // county — muted
-        _ => egui::Color32::from_rgba_unmultiplied(100, 80, 60, 80),   // municipality — very subtle
+        3..=4 => egui::Color32::from_rgba_unmultiplied(200, 160, 80, 190), // state — amber
+        5..=6 => egui::Color32::from_rgba_unmultiplied(170, 140, 80, 170), // county — muted
+        _ => egui::Color32::from_rgba_unmultiplied(140, 120, 80, 150),   // local divisions
     }
 }
 
@@ -666,9 +666,9 @@ pub fn admin_color(level: u8) -> egui::Color32 {
 pub fn admin_stroke_width(level: u8) -> f32 {
     match level {
         2 => 1.8,
-        4 => 1.2,
-        6 => 0.8,
-        _ => 0.5,
+        3..=4 => 1.2,
+        5..=6 => 1.0,
+        _ => 0.8,
     }
 }
 

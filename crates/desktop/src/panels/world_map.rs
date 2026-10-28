@@ -1,4 +1,8 @@
 mod admin_layer;
+mod admin_geometry;
+mod admin_render;
+mod admin_controls;
+pub(crate) use admin_controls::controls as admin_controls;
 mod building_layer;
 mod camera;
 mod cell_loader;

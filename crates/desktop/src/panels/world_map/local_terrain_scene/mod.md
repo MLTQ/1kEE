@@ -237,3 +237,7 @@ Occluders use the exact displayed tile versions through the existing staged
 handoff. CPU cold-start fallback and Moon/Mars still draw ordinary contours.
 
 Passes the same capacity-color flag to public pipelines and OSM pipelines. Public routes use the shared gas/oil capacity bands; OSM has no retained quantity and uses the unavailable color.
+
+Administrative boundaries delegate to `admin_render`: selected levels, optional
+complete-region shading and safe clipping. The overlay remains independent of
+contour availability and paints before event/camera markers.

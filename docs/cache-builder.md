@@ -11,6 +11,37 @@ The GUI's whole-planet job runs `planet-all`: an OSM vector build. It is separat
 from the Earth contour, Moon, and Mars jobs. Selecting every OSM layer does not
 produce a complete terrain/imagery/labels archive.
 
+## Administrative boundaries
+
+The Admin Boundaries layer reads prebuilt OSM relation caches. It now searches
+`Derived/osm/admin_cells`, `Derived/admin_cells`, `root/osm/admin_cells` and a
+direct `root/admin_cells`, including a configured Derived folder.
+
+Select **Admin Boundaries** in the cache builder and run the whole-planet job.
+Both flat and indexed-PBF node backends build levels 2–11, including inner holes
+and disconnected islands. Existing completed jobs that already selected admin
+can be rerun to backfill it; existing way/node checkpoints are retained. Compact
+jobs still bind their feature settings: use a separate scratch directory when
+changing those settings. An admin-only compact build is also available:
+
+```bash
+cargo run --release -p one-thousand-electric-eye-cache-builder -- planet-all \
+  --planet /path/to/planet.osm.pbf --out-dir /path/to/Derived/osm \
+  --tmp-dir /path/to/admin-scratch --node-storage indexed-pbf --features admin
+```
+
+In the desktop **Local Earth** view, enable **Admin Boundaries**, select the
+nested levels, and optionally enable **Shade regions** and adjust **Opacity**.
+The names are examples; [OSM level assignments vary by country](https://wiki.openstreetmap.org/wiki/Key:admin_level).
+Use **Reload boundaries** after a build. The drawer reports loading, missing
+levels, errors and the number of regions with complete fill geometry.
+
+Older binary/LineString caches remain outlines until rebuilt because they
+omitted inner members. Missing nodes/ways and open fragments are never filled.
+Focused builds retain existing complete regions when merging partial coverage.
+Nested geometry-relation members are currently omitted rather than filled with
+incomplete topology; ordinary label/subarea metadata does not affect geometry.
+
 ## Implemented speed improvements (2026-09-22)
 
 - Pass 1 decodes up to 64 PBF blobs in parallel and encodes compact node records
@@ -118,7 +149,7 @@ The complete source-independent archive described below remains the larger goal.
 | Land contours | Separate per-body SQLite caches | Include body, zoom and tile identity; prebuild selected USGS deep-zoom coverage |
 | Elevation/bathymetry | Optional baked vector heights plus separate raster/preview inputs and contour-derived fill | Package height/preview pyramids for terrain, shading, and sampling at declared resolution |
 | Relief imagery | Separate Natural Earth/terrain assets | Store tiled images/previews and their geographic transforms |
-| Labels and boundaries | Separate catalogs/assets; planet-all currently skips admin relations | Package required catalogs and explicit layer coverage |
+| Labels and boundaries | Separate catalogs/assets; planet-all builds admin relations for levels 2–11 | Package required catalogs and explicit layer coverage |
 | Coverage and provenance | Individual tile manifests and filesystem conventions | Record source snapshot, build version, resolution, bounds, completeness, hashes and missing regions |
 
 SQLite is a practical archive backend to prototype because the app already reads

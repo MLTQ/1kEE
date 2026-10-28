@@ -1,150 +1,243 @@
-// Loads administrative boundary files from the cache.
-// One file per admin level (2=country, 4=state, 6=county, 8=municipality).
-// Files are loaded lazily on first draw call, cached for the session.
-// Reads binary .1kc format, falling back to legacy .geojson.
-
+//! Administrative cache discovery and immutable background snapshots.
+use super::admin_geometry::{self, Fill};
 use crate::model::GeoPoint;
-use cell_format::{TAG_ADMN, admin_filename, read::read_single_chunk};
+use cell_format::{CellFeature, CellPoint, TAG_ADMN, admin_filename, read::read_single_chunk};
 use serde_json::Value;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
+};
 
-// ── Public types ───────────────────────────────────────────────────────────────
-
-pub struct LoadedAdminBoundary {
+pub(super) struct Region {
     pub relation_id: i64,
-    pub admin_level: u8,
-    pub name: Option<String>,
-    pub points: Vec<GeoPoint>,
+    pub level: u8,
+    pub rings: Vec<Vec<GeoPoint>>,
+    pub fill: Option<Fill>,
+    pub bounds: [f32; 4], // min_lon, min_lat, max_lon, max_lat (unwrapped)
 }
-
-// ── Session cache ──────────────────────────────────────────────────────────────
-
-type AdminCache = super::layer_snapshot::Snapshot<(PathBuf, Vec<u8>), Vec<LoadedAdminBoundary>>;
+#[derive(Default)]
+pub(super) struct AdminData {
+    pub regions: Vec<Region>,
+    pub missing: Vec<u8>,
+    pub warnings: Vec<String>,
+}
+type AdminCache = super::layer_snapshot::Snapshot<(PathBuf, Vec<u8>), AdminData>;
 static ADMIN_CACHE: OnceLock<Mutex<AdminCache>> = OnceLock::new();
 
-/// Return the completed snapshot immediately; discovery and parsing run on a worker.
-pub fn get_or_load_admin_boundaries(cache_root: &Path, levels: &[u8]) -> Arc<Vec<LoadedAdminBoundary>> {
+pub(super) fn get(root: &Path, levels: &[u8]) -> Option<Arc<AdminData>> {
+    if levels.is_empty() {
+        return None;
+    }
     let mut levels = levels.to_vec();
     levels.sort_unstable();
     levels.dedup();
-    ADMIN_CACHE.get_or_init(Default::default).lock().unwrap().get(
-        (cache_root.to_owned(), levels), "admin-boundaries", |a,b| a == b,
-        |(root, levels)| Some(load_admin_boundaries(&root, &levels)),
-    ).unwrap_or_default()
+    ADMIN_CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .get(
+            (root.to_owned(), levels),
+            "admin-boundaries",
+            |a, b| a == b,
+            |(root, levels)| {
+                Some(load_from_dirs(
+                    &super::cell_loader::osm_cache_dir_candidates(&root),
+                    &levels,
+                ))
+            },
+        )
+}
+pub(super) fn reload() {
+    if let Some(cache) = ADMIN_CACHE.get() {
+        cache.lock().unwrap().clear();
+    }
 }
 
-// ── Loading ────────────────────────────────────────────────────────────────────
-
-/// Read admin boundary files for each requested level, trying binary `.1kc`
-/// first then falling back to legacy `.geojson`.
-pub fn load_admin_boundaries(cache_root: &Path, levels: &[u8]) -> Vec<LoadedAdminBoundary> {
-    let admin_dir = cache_root.join("admin_cells");
-    if !admin_dir.exists() {
-        return Vec::new();
-    }
-
-    let mut results = Vec::new();
-
+fn load_from_dirs(dirs: &[PathBuf], levels: &[u8]) -> AdminData {
+    let mut data = AdminData::default();
     for &level in levels {
-        // Binary path.
-        let binary_path = admin_dir.join(admin_filename(level));
-        if binary_path.exists() {
-            if let Ok(data) = fs::read(&binary_path) {
-                if let Some(features) = read_single_chunk(&data, TAG_ADMN) {
-                    for f in features {
-                        if f.points.len() < 2 {
-                            continue;
-                        }
-                        results.push(LoadedAdminBoundary {
-                            relation_id: f.way_id,
-                            admin_level: f.class,
-                            name: f.name,
-                            points: f
-                                .points
-                                .into_iter()
-                                .map(|p| GeoPoint {
-                                    lat: p.lat,
-                                    lon: p.lon,
-                                })
-                                .collect(),
-                        });
+        let mut loaded = None;
+        for root in dirs {
+            let binary = root.join("admin_cells").join(admin_filename(level));
+            match fs::read(&binary) {
+                Ok(bytes) => match read_single_chunk(&bytes, TAG_ADMN) {
+                    Some(features) => {
+                        loaded = Some(features);
+                        break;
                     }
-                    continue; // binary level loaded
+                    None => data
+                        .warnings
+                        .push(format!("Invalid boundary cache: {}", binary.display())),
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => data.warnings.push(format!("{}: {e}", binary.display())),
+            }
+            let legacy = root
+                .join("admin_cells")
+                .join(format!("admin_level_{level}.geojson"));
+            match fs::read(&legacy) {
+                Ok(bytes) => match parse_geojson(&bytes, level) {
+                    Ok(features) => {
+                        loaded = Some(features);
+                        break;
+                    }
+                    Err(error) => data.warnings.push(format!("{}: {error}", legacy.display())),
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => data.warnings.push(format!("{}: {e}", legacy.display())),
+            }
+        }
+        let Some(features) = loaded else {
+            data.missing.push(level);
+            continue;
+        };
+        let mut groups: BTreeMap<i64, (Vec<Vec<GeoPoint>>, bool)> = BTreeMap::new();
+        for f in features {
+            let entry = groups.entry(f.way_id).or_insert_with(|| (Vec::new(), true));
+            if f.class != level
+                || f.points.len() < 2
+                || f.points.iter().any(|p| {
+                    !p.lat.is_finite()
+                        || !p.lon.is_finite()
+                        || p.lat.abs() > 90.0
+                        || p.lon.abs() > 180.0
+                })
+            {
+                entry.1 = false;
+                data.warnings.push(format!(
+                    "Invalid geometry in level {level}, relation {}",
+                    f.way_id
+                ));
+                continue;
+            }
+            let ring: Vec<_> = f
+                .points
+                .into_iter()
+                .map(|p| GeoPoint {
+                    lat: p.lat,
+                    lon: p.lon,
+                })
+                .collect();
+            entry.1 &= f.is_polygon && admin_geometry::closed(&ring);
+            entry.0.push(ring);
+        }
+        for (relation_id, (mut rings, complete)) in groups {
+            if rings.is_empty() {
+                continue;
+            }
+            admin_geometry::unwrap_rings(&mut rings);
+            let fill = if complete {
+                match admin_geometry::tessellate(&rings) {
+                    Ok(fill) => Some(fill),
+                    Err(error) => {
+                        data.warnings
+                            .push(format!("Relation {relation_id}: {error}"));
+                        None
+                    }
                 }
-            }
-        }
-
-        // Legacy GeoJSON fallback.
-        let geojson_path = admin_dir.join(format!("admin_level_{level}.geojson"));
-        if !geojson_path.exists() {
-            continue;
-        }
-        let Ok(body) = fs::read_to_string(&geojson_path) else {
-            continue;
-        };
-        let Ok(payload) = serde_json::from_str::<Value>(&body) else {
-            continue;
-        };
-        let Some(features) = payload.get("features").and_then(Value::as_array) else {
-            continue;
-        };
-
-        for feature in features {
-            let props = feature.get("properties").unwrap_or(&Value::Null);
-
-            let relation_id = props
-                .get("relation_id")
-                .and_then(Value::as_i64)
-                .unwrap_or_default();
-            let name = props
-                .get("name")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-                .filter(|n| !n.is_empty());
-            let admin_level_prop = props
-                .get("admin_level")
-                .and_then(Value::as_u64)
-                .unwrap_or(level as u64) as u8;
-
-            let Some(geometry) = feature.get("geometry") else {
-                continue;
+            } else {
+                None
             };
-            let geom_type = geometry.get("type").and_then(Value::as_str).unwrap_or("");
-            if geom_type != "LineString" {
-                continue;
+            let mut bounds = [
+                f32::INFINITY,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+            ];
+            for p in rings.iter().flatten() {
+                bounds[0] = bounds[0].min(p.lon);
+                bounds[1] = bounds[1].min(p.lat);
+                bounds[2] = bounds[2].max(p.lon);
+                bounds[3] = bounds[3].max(p.lat);
             }
-
-            let Some(points) = parse_linestring(geometry) else {
-                continue;
-            };
-            if points.len() < 2 {
-                continue;
-            }
-
-            results.push(LoadedAdminBoundary {
+            data.regions.push(Region {
                 relation_id,
-                admin_level: admin_level_prop,
-                name,
-                points,
+                level,
+                rings,
+                fill,
+                bounds,
             });
         }
     }
-
-    results
+    data
 }
 
-fn parse_linestring(geometry: &Value) -> Option<Vec<GeoPoint>> {
-    let coords = geometry.get("coordinates").and_then(Value::as_array)?;
-    let pts: Vec<GeoPoint> = coords
-        .iter()
-        .filter_map(|c| {
-            let arr = c.as_array()?;
-            let lon = arr.first()?.as_f64()? as f32;
-            let lat = arr.get(1)?.as_f64()? as f32;
-            Some(GeoPoint { lat, lon })
-        })
-        .collect();
-    Some(pts)
+fn parse_geojson(bytes: &[u8], level: u8) -> Result<Vec<CellFeature>, String> {
+    let payload: Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    let features = payload
+        .get("features")
+        .and_then(Value::as_array)
+        .ok_or("Expected a FeatureCollection")?;
+    let mut result = Vec::new();
+    for (index, feature) in features.iter().enumerate() {
+        let props = &feature["properties"];
+        let id = props["relation_id"]
+            .as_i64()
+            .or_else(|| feature["id"].as_i64())
+            .unwrap_or(-(index as i64) - 1);
+        let geometry = &feature["geometry"];
+        let coords = &geometry["coordinates"];
+        let mut rings: Vec<(&Value, bool)> = Vec::new();
+        match geometry["type"].as_str().unwrap_or("") {
+            "LineString" => rings.push((coords, false)),
+            "MultiLineString" => rings.extend(
+                coords
+                    .as_array()
+                    .ok_or("Invalid lines")?
+                    .iter()
+                    .map(|r| (r, false)),
+            ),
+            "Polygon" => rings.extend(
+                coords
+                    .as_array()
+                    .ok_or("Invalid polygon")?
+                    .iter()
+                    .map(|r| (r, true)),
+            ),
+            "MultiPolygon" => {
+                for polygon in coords.as_array().ok_or("Invalid polygons")? {
+                    rings.extend(
+                        polygon
+                            .as_array()
+                            .ok_or("Invalid polygon")?
+                            .iter()
+                            .map(|r| (r, true)),
+                    );
+                }
+            }
+            _ => continue,
+        }
+        for (ring, is_polygon) in rings {
+            let points = ring
+                .as_array()
+                .ok_or("Invalid ring")?
+                .iter()
+                .map(|p| {
+                    Ok(CellPoint {
+                        lon: p[0].as_f64().ok_or("Invalid longitude")? as f32,
+                        lat: p[1].as_f64().ok_or("Invalid latitude")? as f32,
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            result.push(CellFeature {
+                way_id: id,
+                class: level,
+                is_polygon,
+                name: props["name"].as_str().map(str::to_owned),
+                points,
+                elevations: None,
+            });
+        }
+    }
+    Ok(result)
 }
+
+#[cfg(test)]
+#[path = "admin_layer_tests.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "admin_preview.rs"]
+mod preview;

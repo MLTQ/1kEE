@@ -87,7 +87,7 @@ fn compact_build_matches_flat_and_preserves_legacy_state() {
             );
         }
         let expected = files(&root.join("flat/out"));
-        assert_eq!(expected.len(), 2); // One road and one building; one feature per file.
+        assert_eq!(expected.len(), 12); // One road, one building and ten empty admin levels.
         assert_eq!(files(&root.join("indexed-pbf/out")), expected);
         for file in [
             "planet_nodes.bin",

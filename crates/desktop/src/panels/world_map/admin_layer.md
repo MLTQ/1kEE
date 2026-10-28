@@ -1,37 +1,24 @@
-# admin_layer
+# admin_layer.rs
 
 ## Purpose
-
-Loads and caches OSM administrative boundary geometries from pre-built GeoJSON
-files written by the cache builder.  Exposes a single function that returns all
-boundaries for a set of admin levels, loading on a single background worker when the root or requested levels change.
+Load administrative boundary levels from the same Derived/osm, Derived, root/osm
+and direct cache roots as other OSM layers. Return immutable background snapshots
+with explicit missing/error state instead of silently displaying nothing.
 
 ## Components
-
-| Symbol | Kind | Description |
-|---|---|---|
-| `LoadedAdminBoundary` | struct | A single boundary polyline with its OSM relation ID, admin level, optional name, and projected lat/lon points. |
-| `load_admin_boundaries` | fn | Reads `{cache_root}/admin_cells/admin_level_{level}.geojson` for each requested level, parses LineString features, and returns a flat list of boundaries. |
-| `get_or_load_admin_boundaries` | fn | Root-and-level keyed background snapshot; returns a shared Arc immediately. |
-| `ADMIN_CACHE` | static | `OnceLock<Mutex<AdminCache>>` holds channel/snapshot state only. |
+- `get`: single worker keyed by root and selected levels; no UI-thread disk reads.
+- `reload`: invalidates even an empty snapshot and rejects late worker results.
+- `AdminData`: regions, missing levels, diagnostic messages for drawer controls.
+- `Region`: all rings of one OSM relation, prepared bounds and optional fill mesh.
+- `parse_geojson`: supports legacy lines, polygons, multilines and multipolygons.
 
 ## Contracts
+- Prefer ADMN `.1kc`, then legacy GeoJSON per level; unreadable data can fall back.
+- Relation IDs group rings, preserving holes and disconnected islands.
+- Only complete polygon-flagged relations or explicit GeoJSON polygons can fill.
+  Older binary/LineString caches remain outlines until rebuilt with hole support.
+- Invalid coordinates invalidate that relation's fill; errors remain visible.
+- Level/visibility/opacity changes never trigger PBF scans. The cache builder
+  produces data; Reload reads newly created or replaced files without a restart.
 
-- Files are expected at `{cache_root}/admin_cells/admin_level_{level}.geojson`
-  where `level` ∈ {2, 4, 6, 8}.  Missing files are silently skipped.
-- Each file must be a GeoJSON `FeatureCollection` whose features have
-  `geometry.type = "LineString"` and properties `relation_id` (i64),
-  `name` (string or null), `admin_level` (number).
-- `get_or_load_admin_boundaries` never performs I/O or parsing under the UI
-  mutex. One worker publishes only the latest root-and-level request.
-- If the cache root changes (user switches terrain library), the cache is
-  invalidated automatically and reloaded.
-
-## Notes
-
-- Admin boundaries are not cell-streamed — they cover the whole world for each
-  level and are loaded all at once.
-- The `GeoPoint` type is `crate::model::GeoPoint` (lat/lon in degrees, f32).
-- Rendering lives in `local_terrain_scene/mod.rs`; colours and stroke widths
-  come from `crate::theme::admin_color` and `crate::theme::admin_stroke_width`.
-- Level 2 (country) is drawn last so it sits on top of finer-grained levels.
+The opt-in admin_preview test renders this loaded cache and controls on a GPU.

@@ -1,53 +1,33 @@
-# admin.rs — OSM Administrative Boundary Builder
+# admin.rs
 
 ## Purpose
+Build OSM administrative relations for focused and both whole-planet backends.
+Write binary ADMN chunks for levels 2 through 11, including intermediate levels.
 
-Implements two extra PBF scan passes (Pass R and Pass A) plus a stitching step to
-produce per-admin-level GeoJSON files from OSM `boundary=administrative` relations.
+## Components
+- `load_or_build_admin_boundaries`: focused builds use candidate coordinates.
+- `build_planet`: reuses flat or indexed-PBF node lookup; administrative SQLite
+  scratch is separate from existing node/way checkpoints.
+- Relation/way scans: retain outer, inner and empty-role member ways. Ignore
+  label/subarea metadata. Nested geometry relations are omitted because their
+  dependencies require recursive resolution.
+- `stitch_and_write`: assembles exact node-ID chains with `admin_geometry`, marks
+  incomplete relations as outlines, and writes one file per populated level.
 
-## Pass order
+## Contracts
+- Output: `admin_cells/admin_level_N.1kc`, TAG_ADMN, relation ID in way_id,
+  level in class. Each ring is a feature; all rings retain their shared ID.
+- Polygon flags are true only for complete relations including inner rings.
+- Source identity/importer version invalidates only admin scratch.
+- Checkpoints advance after all rows from a blob are saved. Replayed rows are
+  idempotent; no mid-blob checkpoint can skip remaining relations or ways.
+- Missing focused nodes break lines and disable fill, never invent geometry.
+- Completed compact way builds can backfill boundaries without rebuilding ways.
 
-| Pass | What it does |
-|------|--------------|
-| Pass R (relation scan) | Iterates all blobs; saves admin relations + member way IDs to SQLite. |
-| Pass A (admin way scan) | Iterates all blobs; saves ordered node refs for every admin member way. |
-| Stitch + write | Resolves coords, stitches ways into chains, writes `admin_cells/admin_level_N.geojson`. |
+All levels are published, including empty ones, so refreshed sources replace obsolete borders. Checkpoints batch at complete blobs after 256 MiB or a filled record batch.
 
-## Public API
+Compact admin scratch lives under indexed-pbf-v1 with the rest of compact state.
 
-### `load_or_build_admin_boundaries`
-
-```rust
-pub fn load_or_build_admin_boundaries(
-    command: &BboxCommand,
-    bounds: GeoBounds,
-    node_store: &mut NodeStore,
-    progress: &mut dyn FnMut(RoadBuildProgress),
-) -> Result<usize, String>
-```
-
-Called from `roads.rs` after the way scan when `command.build_admin` is true.
-Returns the total number of GeoJSON Feature objects (rings) written.
-
-## Output format
-
-Files are written to `{cache_dir}/admin_cells/admin_level_{N}.geojson` where N ∈ {2, 4, 6, 8}.
-
-Each Feature has:
-- `geometry.type = "LineString"`
-- `geometry.coordinates = [[lon, lat], ...]`
-- `properties.relation_id`
-- `properties.name`
-- `properties.admin_level`
-
-## Checkpointing
-
-Both scans use the `build_state` table with keys `scan_offset_relation_scan` and
-`scan_offset_admin_way_scan` so interrupted runs can resume. Completion flags
-`relation_scan_complete` and `admin_way_scan_complete` prevent redundant re-runs.
-
-## Stitching
-
-`stitch_ways` uses a greedy chain algorithm: it builds an endpoint index keyed by
-`(lat × 1e5, lon × 1e5)` integer pairs, then grows chains by matching the current
-tail against unused ways' start or end points, reversing ways as needed.
+Whole-planet builds replace each level including empty levels. Focused exports
+merge by relation: retain existing complete topology over incoming fragments,
+keep unrelated regions, and replace fragments once a full relation is available.

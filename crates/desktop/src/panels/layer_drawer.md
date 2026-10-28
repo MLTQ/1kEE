@@ -96,3 +96,7 @@ while contours are visible. It controls the new invisible visibility pass and
 provides a direct comparison with transparent line rendering.
 
 Pipelines exposes Color by capacity with a shared gas/oil legend, source units, distinct zero/unavailable colors and an explicit not-actual-flow label. OSM remains separately toggleable and uses the unavailable color in this mode.
+
+Admin Boundaries expands nested per-level selections and shading/opacity controls
+via `world_map::admin_controls`, including asynchronous availability/errors,
+Local Earth view guidance and explicit reload after building missing caches.

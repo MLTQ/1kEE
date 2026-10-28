@@ -408,37 +408,57 @@ impl NodeStore {
             .collect())
     }
 
-    /// For each way_id in the slice, look up its ordered node refs from admin_way_nodes,
-    /// then resolve coords from candidate_nodes. Returns only ways with >= 2 coords.
-    pub fn get_way_coords_for_relation(
-        &self,
-        way_ids: &[i64],
-    ) -> Result<HashMap<i64, Vec<GeoPoint>>, String> {
-        let mut result: HashMap<i64, Vec<GeoPoint>> = HashMap::new();
+    /// Invalidate only administrative scan state when the source or importer changes.
+    pub fn prepare_admin_source(&mut self, source: &Path) -> Result<(), String> {
+        let metadata = fs::metadata(source).map_err(|e| e.to_string())?;
+        let identity = format!(
+            "admin-v2:{:?}:{}:{:?}",
+            fs::canonicalize(source).map_err(|e| e.to_string())?,
+            metadata.len(),
+            metadata.modified().map_err(|e| e.to_string())?
+        );
+        let previous: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT value FROM build_state WHERE key='admin_source'",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        if previous.as_ref() != Some(&identity) {
+            let tx = self.connection.transaction().map_err(|e| e.to_string())?;
+            tx.execute_batch("DELETE FROM admin_relations; DELETE FROM admin_member_ways;
+                DELETE FROM admin_way_nodes;
+                DELETE FROM build_state WHERE key IN ('relation_scan_complete',
+                'admin_way_scan_complete','scan_offset_relation_scan','scan_offset_admin_way_scan');")
+                .map_err(|e| e.to_string())?;
+            tx.execute(
+                "INSERT OR REPLACE INTO build_state(key,value) VALUES ('admin_source',?1)",
+                params![identity],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.commit().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
 
+    /// Preserve node IDs for exact topology, including references outside a focused extract.
+    pub fn admin_way_refs(&self, way_ids: &[i64]) -> Result<HashMap<i64, Vec<i64>>, String> {
+        let mut result = HashMap::new();
+        let mut stmt = self
+            .connection
+            .prepare("SELECT node_id FROM admin_way_nodes WHERE way_id = ?1 ORDER BY seq")
+            .map_err(|e| e.to_string())?;
         for &way_id in way_ids {
-            // Step 1: get ordered node IDs for this way.
-            let mut node_stmt = self
-                .connection
-                .prepare("SELECT node_id FROM admin_way_nodes WHERE way_id = ?1 ORDER BY seq")
-                .map_err(|error| error.to_string())?;
-            let node_ids: Vec<i64> = node_stmt
+            let ids = stmt
                 .query_map(params![way_id], |row| row.get::<_, i64>(0))
-                .map_err(|error| error.to_string())?
-                .collect::<Result<_, _>>()
-                .map_err(|error: rusqlite::Error| error.to_string())?;
-
-            if node_ids.len() < 2 {
-                continue;
-            }
-
-            // Step 2: batch-look up coords.
-            let points = self.points_for_refs(&node_ids)?;
-            if points.len() >= 2 {
-                result.insert(way_id, points);
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            if ids.len() >= 2 {
+                result.insert(way_id, ids);
             }
         }
-
         Ok(result)
     }
 
@@ -476,7 +496,8 @@ impl NodeStore {
     /// Look up coordinates for a batch of node IDs.  Uses a single SQL `IN (…)` per
     /// chunk of 999 IDs (SQLite's default variable limit) instead of one round-trip per
     /// node, giving a 10-50× speedup for typical ways.
-    pub fn points_for_refs(&self, refs: &[i64]) -> Result<Vec<GeoPoint>, String> {
+    /// Same batched lookup, preserving absent coordinates for boundary gaps.
+    pub fn optional_points_for_refs(&self, refs: &[i64]) -> Result<Vec<Option<GeoPoint>>, String> {
         if refs.is_empty() {
             return Ok(Vec::new());
         }
@@ -509,11 +530,8 @@ impl NodeStore {
             }
         }
 
-        // Return points in the same order as `refs`, skipping any missing nodes.
-        Ok(refs
-            .iter()
-            .filter_map(|id| id_to_point.get(id).copied())
-            .collect())
+        // Preserve one result per reference so missing nodes cannot bridge a border.
+        Ok(refs.iter().map(|id| id_to_point.get(id).copied()).collect())
     }
 }
 

@@ -29,7 +29,7 @@ Provides the disk-backed candidate-node cache for the offline OSM builder. It ex
   reusable completed state.
 - **Interacts with**: `load_or_collect_candidate_nodes` in `roads.rs`.
 
-### `NodeStore::points_for_refs`
+### `NodeStore::optional_points_for_refs`
 - **Does**: Resolves way node references back into coordinates during Pass 2; uses a single `WHERE id IN (…)` query per chunk of 999 IDs instead of one round-trip per node (10-50× faster for long ways)
 - **Interacts with**: `roads.rs`
 
@@ -42,11 +42,17 @@ Provides the disk-backed candidate-node cache for the offline OSM builder. It ex
 | Dependent | Expects | Breaking changes |
 |-----------|---------|------------------|
 | `roads.rs` | a completed store can be reopened and queried without loading all nodes into memory | Changing table schema or completion semantics |
-| resumed builds | `insert_batch` is idempotent (ON CONFLICT DO UPDATE), `points_for_refs` works on partial stores | Breaking upsert semantics |
+| resumed builds | `insert_batch` is idempotent (ON CONFLICT DO UPDATE), `optional_points_for_refs` works on partial stores | Breaking upsert semantics |
 | node-scan checkpoint callers | `insert_batch_and_save_scan_offset` stores rows and the next unread offset atomically | Splitting the node and offset commits |
 
 ## Notes
 - Scan offsets are cleared only in the same transaction that marks the candidate
   node store complete; a partial offset surviving a crash is intentional and
   enables resumption.
-- `points_for_refs` chunks at 999 to stay within SQLite's default `SQLITE_LIMIT_VARIABLE_NUMBER`; if that limit is raised in a custom build, the chunk size can be increased proportionally.
+- `optional_points_for_refs` chunks at 999 to stay within SQLite's default `SQLITE_LIMIT_VARIABLE_NUMBER`; if that limit is raised in a custom build, the chunk size can be increased proportionally.
+
+Administrative scans use `prepare_admin_source` to reset only admin tables and
+checkpoints for changed PBF identity or importer version. `admin_way_refs` retains
+ordered node IDs, allowing exact topology and explicit missing-coordinate gaps.
+
+`optional_points_for_refs` retains missing-node positions with the same batched SQL lookup used by roads.

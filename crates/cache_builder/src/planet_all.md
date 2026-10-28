@@ -73,3 +73,7 @@ parallel Pass 2 and incrementally merge feature cells.
   output/checkpoint advancement rather than emitting incomplete geometry.
 - Compact mode validates original-source identity around batches and before
   checkpoint advancement. Its isolated state never reads legacy checkpoints.
+
+When requested, admin boundaries now run after Pass 2 using the existing node
+lookup and dedicated resumable relation/member-way scans. The summary includes
+administrative ring counts; admin geometry is no longer skipped.

@@ -186,6 +186,7 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                 section_label(ui, "URBAN");
                 ui.checkbox(&mut model.show_buildings, "Buildings");
                 ui.checkbox(&mut model.show_admin, "Admin Boundaries");
+                world_map::admin_controls(ui, model);
                 ui.checkbox(&mut model.show_military, "Military");
                 ui.checkbox(&mut model.show_industrial, "Industrial");
                 ui.checkbox(&mut model.show_port, "Ports");

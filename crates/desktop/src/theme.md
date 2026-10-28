@@ -27,3 +27,5 @@ Centralizes the visual language for the 1kEE desktop demo. It installs the activ
 ## Notes
 - `Topo` remains the startup/default theme; `Sodium` is an additional selectable option in Settings.
 - The sodium palette intentionally uses true-black backgrounds with warm amber highlights so the app can read like a low-pressure street-lamp display without changing existing themes.
+
+Admin colors and widths cover intermediate levels 2–11 and keep fine divisions legible on dark maps; country borders remain brightest and widest.
