@@ -605,18 +605,18 @@ pub fn water_color() -> egui::Color32 {
     }
 }
 
-/// Major road overlay color.
+/// Muted roadbed tones keep highways below live markers in the visual hierarchy.
 pub fn road_major_color() -> egui::Color32 {
     match current() {
-        MapTheme::Sodium => egui::Color32::from_rgb(255, 198, 100),
-        MapTheme::Topo => egui::Color32::from_rgb(255, 210, 92),
-        MapTheme::Phosphor => egui::Color32::from_rgb(230, 185, 70),
-        MapTheme::Thermal => egui::Color32::from_rgb(255, 205, 110),
-        MapTheme::Ghost => egui::Color32::from_rgb(212, 184, 150),
-        MapTheme::Akira => egui::Color32::from_rgb(255, 150, 44),
-        MapTheme::Lunar => egui::Color32::from_rgb(210, 200, 175),
-        MapTheme::Mars => egui::Color32::from_rgb(230, 160, 120),
-        MapTheme::MarsDark => egui::Color32::from_rgb(220, 40, 40),
+        MapTheme::Sodium => egui::Color32::from_rgb(146, 105, 60),
+        MapTheme::Topo => egui::Color32::from_rgb(136, 91, 82),
+        MapTheme::Phosphor => egui::Color32::from_rgb(122, 114, 73),
+        MapTheme::Thermal => egui::Color32::from_rgb(137, 99, 111),
+        MapTheme::Ghost => egui::Color32::from_rgb(126, 123, 121),
+        MapTheme::Akira => egui::Color32::from_rgb(148, 61, 72),
+        MapTheme::Lunar => egui::Color32::from_rgb(125, 121, 111),
+        MapTheme::Mars => egui::Color32::from_rgb(142, 89, 72),
+        MapTheme::MarsDark => egui::Color32::from_rgb(138, 44, 50),
     }
 }
 
@@ -635,18 +635,18 @@ pub fn building_color() -> egui::Color32 {
     egui::Color32::from_rgba_unmultiplied(120, 100, 80, 140)
 }
 
-/// Minor road overlay color.
+/// Side streets sit close to the background, in the same subdued palette.
 pub fn road_minor_color() -> egui::Color32 {
     match current() {
-        MapTheme::Sodium => egui::Color32::from_rgb(128, 92, 54),
-        MapTheme::Topo => egui::Color32::from_rgb(116, 132, 142),
-        MapTheme::Phosphor => egui::Color32::from_rgb(98, 132, 88),
-        MapTheme::Thermal => egui::Color32::from_rgb(126, 106, 136),
-        MapTheme::Ghost => egui::Color32::from_rgb(116, 128, 136),
-        MapTheme::Akira => egui::Color32::from_rgb(118, 72, 60),
-        MapTheme::Lunar => egui::Color32::from_rgb(118, 116, 108),
-        MapTheme::Mars => egui::Color32::from_rgb(125, 90, 80),
-        MapTheme::MarsDark => egui::Color32::from_rgb(110, 20, 20),
+        MapTheme::Sodium => egui::Color32::from_rgb(72, 56, 37),
+        MapTheme::Topo => egui::Color32::from_rgb(67, 63, 64),
+        MapTheme::Phosphor => egui::Color32::from_rgb(53, 66, 50),
+        MapTheme::Thermal => egui::Color32::from_rgb(66, 52, 67),
+        MapTheme::Ghost => egui::Color32::from_rgb(64, 67, 69),
+        MapTheme::Akira => egui::Color32::from_rgb(72, 34, 41),
+        MapTheme::Lunar => egui::Color32::from_rgb(62, 61, 57),
+        MapTheme::Mars => egui::Color32::from_rgb(72, 48, 42),
+        MapTheme::MarsDark => egui::Color32::from_rgb(65, 24, 28),
     }
 }
 
@@ -658,7 +658,7 @@ pub fn admin_color(level: u8) -> egui::Color32 {
         2 => egui::Color32::from_rgba_unmultiplied(220, 200, 60, 200), // country — bright yellow
         3..=4 => egui::Color32::from_rgba_unmultiplied(200, 160, 80, 190), // state — amber
         5..=6 => egui::Color32::from_rgba_unmultiplied(170, 140, 80, 170), // county — muted
-        _ => egui::Color32::from_rgba_unmultiplied(140, 120, 80, 150),   // local divisions
+        _ => egui::Color32::from_rgba_unmultiplied(140, 120, 80, 150), // local divisions
     }
 }
 

@@ -1,5 +1,13 @@
 # Road continuity and toggle stalls
 
+## Visual treatment
+
+Roads use muted roadbed colors, with narrower 1.1-point highways and 0.6-point
+side streets. Topo uses dusty clay, Akira uses subdued crimson, and other themes
+retain their palette identity at lower contrast. Minor streets draw underneath
+major routes, keeping intersections readable without bright network linework.
+The existing antialiasing softens edges; no glow pass or new geometry is needed.
+
 ## Cause
 
 The former local road renderer prepared up to 192 vertices per OSM way, sorted

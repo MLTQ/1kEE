@@ -311,11 +311,13 @@ fn draw_local_footer(ui: &mut egui::Ui, model: &mut AppModel, beam_elevation_m: 
                 }
 
                 ui.separator();
-                ui.colored_label(theme::road_major_color(), "MAJOR ROADS");
+                ui.colored_label(theme::road_major_color(), "━");
+                ui.label("MAJOR ROADS");
                 ui.label("primary network");
 
                 ui.separator();
-                ui.colored_label(theme::road_minor_color(), "MINOR ROADS");
+                ui.colored_label(theme::road_minor_color(), "─");
+                ui.label("MINOR ROADS");
                 ui.label("secondary network");
 
                 if model.show_water {

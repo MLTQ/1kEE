@@ -27,5 +27,9 @@ Centralizes the visual language for the 1kEE desktop demo. It installs the activ
 ## Notes
 - `Topo` remains the startup/default theme; `Sodium` is an additional selectable option in Settings.
 - The sodium palette intentionally uses true-black backgrounds with warm amber highlights so the app can read like a low-pressure street-lamp display without changing existing themes.
+- Roads use subdued, opaque roadbed tones rather than bright accents: muted clay
+  in Topo, dusty crimson in Akira/Mars Dark, and matching low-saturation tones in
+  other palettes. Minor roads sit nearer the background; live markers remain
+  brighter. Opaque colors avoid accumulating brightness where road segments join.
 
 Admin colors and widths cover intermediate levels 2–11 and keep fine divisions legible on dark maps; country borders remain brightest and widest.

@@ -14,8 +14,10 @@ line batches. No per-frame CPU road projection/tessellation or point cutoff.
   happens outside the lock and explicit resets defer disposal off the UI thread.
 - Explicit invalidation increments an epoch, preventing in-flight stale builds
   from resurrecting reset data. Failed/panicked workers release the build gate.
-- Widths remain 1.35/0.8 logical points for major/minor roads; the GPU boundary
-  converts them to physical pixels. Projection is shared with terrain/markers.
+- Subdued roadbed colors come from the active theme. Major/minor widths are
+  1.1/0.6 logical points; the GPU boundary converts them to physical pixels.
+  Minor batches draw first so highways remain continuous at intersections.
+  Projection is shared with terrain/markers.
 - `road_cache_building_bounds` continues to describe the pending load envelope.
 - Existing per-way 192-vertex simplification remains; missing source geometry
   cannot be reconstructed by this renderer.

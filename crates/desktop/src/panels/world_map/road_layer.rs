@@ -157,11 +157,12 @@ pub(super) fn draw_roads(
         return;
     };
     let mut batches = Vec::new();
-    if show_major_roads {
-        batches.extend(cache.geometry.major.iter().cloned());
-    }
     if show_minor_roads {
         batches.extend(cache.geometry.minor.iter().cloned());
+    }
+    // Keep the highway network continuous above the quieter street fabric.
+    if show_major_roads {
+        batches.extend(cache.geometry.major.iter().cloned());
     }
     if batches.is_empty() {
         return;
@@ -178,8 +179,8 @@ pub(super) fn draw_roads(
             batches,
             &params,
             1.0,
-            0.8 * ppp,
-            1.35 * ppp,
+            0.6 * ppp,
+            1.1 * ppp,
             painter.ctx().clone(),
         )
         .into_paint_callback(painter.clip_rect()),

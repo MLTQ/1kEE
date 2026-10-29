@@ -45,6 +45,8 @@ Implements the main geographic canvas for the demo. The current version wraps an
 - Local terrain mode now uses a footer control strip below the map for layer spread, terrain zoom readout, and a contour color legend instead of placing those controls over the rendered scene.
 - That footer now exposes a much wider `LAYER SPREAD` range (`0.15..=100.0`), so operators can intentionally reintroduce extremely strong vertical exaggeration after the projection was made zoom-stable.
 - The same footer now also explains the road overlay palette so enabling road layers does not introduce unexplained linework, and it uses semantic labels instead of hard-coded color names so alternate themes read correctly.
+- Road legend labels use normal text with separate subdued color swatches, so
+  the quieter road palette does not make the legend text hard to read.
 - Major/minor road toggles now act as draw filters over one shared local road cache. Toggling a class off should no longer force a full road reload or temporarily blank the other class.
 - The road cache also survives both toggles being off. Road geometry is built
   into GPU line batches in the background without whole-way render budgets.
