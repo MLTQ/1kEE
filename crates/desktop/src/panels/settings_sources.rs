@@ -7,7 +7,8 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
     ui.heading("Factal");
     ui.colored_label(
         theme::text_muted(),
-        "Configure the private Factal token used for live event polling every minute.",
+        "Sync all geolocated Factal events with severity 2+ from the past 24 hours. \
+         Refreshes one minute after each completed sync; older events are available in Replay.",
     );
     ui.add_space(8.0);
 
