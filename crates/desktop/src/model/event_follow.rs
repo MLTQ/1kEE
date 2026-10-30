@@ -84,8 +84,8 @@ impl EventFollow {
             .and_then(|target| self.tour.position(&target.id))
     }
 
-    /// Each successful live payload replaces the ranked tour, including updated
-    /// severity/brief metadata. Repeated payloads preserve the active stop.
+    /// Refresh all eligible stories and their severity/brief metadata while
+    /// preserving visit history and the current flight/dwell.
     pub fn observe(&mut self, events: &[EventRecord]) {
         if self.enabled {
             self.tour

@@ -66,8 +66,9 @@ Infrastructure hover begins with the canvas response before scene paint and rend
 
 FOLLOW EVENTS sits beside MEANDER on the main rail on Earth, with no parent mode toggle. It retains the chosen Globe/Local view, requests animation repaints, and skips the manual inertia controller while active. Canvas navigation or a mode switch cancels follow; MEANDER and REPLAY are exclusive. The scene mode is read after the layer bar so a mode toggle takes effect in the same frame. Cable route cards use the shared infrastructure hover collector; landing dots retain their original hover card.
 
-The FOLLOW EVENTS tooltip describes the six-stop severity tour, travel capped at
-ten seconds with faster nearby hops, and ten-second orbit dwell.
+The FOLLOW EVENTS tooltip describes the full live pool, more frequent visits to
+severe stories and repeat spacing. Travel remains capped at ten seconds with
+faster nearby hops, followed by ten-second orbit dwell.
 
 While FOLLOW EVENTS is enabled, `event_labels` fades in persistent cards for all
 on-screen event anchors after the camera reaches its arrival zoom, in both Globe

@@ -13,7 +13,7 @@ fn model() -> AppModel {
     // Match the drawer slider's step so rendering cannot round/save a legacy width.
     model.set_contour_stroke_width_px(2.0);
     let event = EventRecord {
-        id: "preview".into(),
+        id: "factal-preview".into(),
         title: "UI fixture".into(),
         summary: String::new(),
         severity: EventSeverity::Elevated,
@@ -34,7 +34,7 @@ fn model() -> AppModel {
         }),
     };
     model.events = vec![event; 97];
-    model.selected_event_id = Some("preview".into());
+    model.selected_event_id = Some("factal-preview".into());
     model.cameras = vec![
         CameraFeed {
             id: "preview".into(),

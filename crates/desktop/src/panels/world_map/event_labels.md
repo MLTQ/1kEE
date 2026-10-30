@@ -4,8 +4,8 @@
 
 Paints persistent event tooltip cards during Follow Events, including Focus
 capture. Every event with a scene-projected anchor inside the map receives its
-severity, wrapped headline and location; this is independent of the six-stop
-tour ranking and of pointer position.
+severity, wrapped headline and location; this is independent of the weighted
+tour selection and of pointer position.
 
 ## Components
 

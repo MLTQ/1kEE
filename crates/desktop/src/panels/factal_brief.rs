@@ -32,7 +32,7 @@ pub fn render_factal_brief(ctx: &egui::Context, model: &mut AppModel) {
     }
     window.show(ctx, |ui| {
             if let Some((position, total)) = tour_position {
-                ui.small(format!("Event tour · {position} of {total}"));
+                ui.small(format!("Priority rank · {position} of {total}"));
             }
             ui.heading(event.title.as_str());
             ui.colored_label(event.severity.color(), event.severity.label());

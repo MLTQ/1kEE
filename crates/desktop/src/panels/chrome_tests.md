@@ -16,3 +16,7 @@ Layers slider from rounding a legacy default and persisting during headless rend
 Rail tests cover both idle and active Meander, no Cinematic button, direct motion
 controls at full density (including 1100-point chrome), overflow at adjacent widths, and pointer-driven switching between Meander and Follow
 Events. Follow must keep ticking without a separate mode flag.
+
+Event fixtures use the real `factal-` ID prefix so Follow Events eligibility is
+tested correctly; camera fixture IDs remain independent. A brief alone does not
+identify a Factal event because USGS also carries one for replay persistence.

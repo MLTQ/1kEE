@@ -2,16 +2,18 @@
 
 Owns the live-event idle mode's camera trajectory and stop timing. It has no
 rendering, disk or network work. `AppModel` supplies completed Factal payloads
-and advances it with egui's absolute time; `event_tour.rs` owns ranking and cycling.
+and advances it with egui's absolute time; `event_tour.rs` owns weighted selection.
 
-- Enabling tours the current payload's six most severe geolocated Factal records,
-  or waits for the first payload. Each refresh rebuilds the ranking. A changed
-  top-ranked ID takes priority; otherwise the current flight/dwell continues and
-  the cursor advances through the refreshed order. Brief updates alone do not
-  restart motion. A single record stays in orbit; an empty payload schedules no
-  new stops. Network failures leave the last successful tour available.
+- Enabling starts with the highest-priority eligible record, or waits for real
+  data. All eligible Factal records in the live window join a severity-weighted
+  rotation. Higher-severity stories get more visits, while waiting credit gives
+  other stories turns and recent-stop exclusion spaces out repeats.
+- Refreshes retain scheduling history and update metadata without interrupting
+  flight/dwell, even if a newer or more severe headline arrives. A single record
+  stays in orbit; an empty payload schedules no new stops. Network failures leave
+  the last successful tour available.
 - Each stop gets its flight time plus ten seconds orbiting with its brief open.
-  After the final stop, the tour repeats while waiting for the next payload.
+  Selection continues from the current weighted rotation between payloads.
   Missed frames do not cause catch-up hops through multiple unread briefs.
 - `tick` returns each newly followed ID for selection without a focus snap. It
   retains the active brief/marker if the record ages out of the live page.
