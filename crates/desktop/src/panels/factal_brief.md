@@ -30,3 +30,6 @@ During event follow, the brief displays “Priority rank · N of M” for the cu
 record's severity rank in the entire live pool. This is independent of the
 weighted visit order. A record that has left the refreshed pool keeps its brief
 but omits the rank indicator.
+
+The follow window reserves the five-row chyron and map footer at the bottom of
+the screen. Long briefs scroll inside that height instead of covering the crawl.

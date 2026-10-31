@@ -34,6 +34,7 @@ fn hidden_cards_skip_event_lookup_and_emit_no_shapes() {
                 }),
                 &[],
                 0.0,
+                Some("event-0"),
             );
         },
     );
@@ -41,7 +42,7 @@ fn hidden_cards_skip_event_lookup_and_emit_no_shapes() {
 }
 
 #[test]
-fn all_visible_event_cards_render_without_a_pointer_or_tour_rank_limit() {
+fn only_the_selected_event_card_renders_without_a_pointer() {
     let ctx = egui::Context::default();
     let viewport = Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0));
     let events: Vec<_> = (0..10).map(event).collect();
@@ -74,6 +75,7 @@ fn all_visible_event_cards_render_without_a_pointer_or_tour_rank_limit() {
                 events.iter(),
                 &markers,
                 1.0,
+                Some("event-3"),
             );
         },
     );
@@ -85,13 +87,13 @@ fn all_visible_event_cards_render_without_a_pointer_or_tour_rank_limit() {
             _ => None,
         })
         .collect();
-    for event in &events[..8] {
-        assert_eq!(text.iter().filter(|text| **text == event.title).count(), 1);
+    for (index, event) in events.iter().enumerate() {
+        assert_eq!(
+            text.iter().filter(|text| **text == event.title).count(),
+            usize::from(index == 3)
+        );
     }
-    for event in &events[8..] {
-        assert!(!text.contains(&event.title.as_str()));
-    }
-    assert_eq!(text.iter().filter(|text| **text == "Elevated").count(), 8);
+    assert_eq!(text.iter().filter(|text| **text == "Elevated").count(), 1);
 }
 
 #[test]
@@ -140,6 +142,7 @@ fn moving_cluster_keeps_painted_cards_fixed_and_leaders_attached_until_hidden_tr
                     events.iter(),
                     &markers,
                     opacity,
+                    Some("event-0"),
                 )
             },
         );
@@ -164,11 +167,8 @@ fn moving_cluster_keeps_painted_cards_fixed_and_leaders_attached_until_hidden_tr
             assert!(anchors.is_empty());
             continue;
         }
-        assert_eq!(cards.len(), events.len(), "frame {frame}");
-        assert_eq!(
-            anchors,
-            markers.iter().map(|marker| marker.base).collect::<Vec<_>>()
-        );
+        assert_eq!(cards.len(), 1, "frame {frame}");
+        assert_eq!(anchors, vec![markers[0].base]);
         if frame == 0 {
             initial = cards;
         } else if frame == 121 {
@@ -179,5 +179,35 @@ fn moving_cluster_keeps_painted_cards_fixed_and_leaders_attached_until_hidden_tr
         } else {
             assert_eq!(cards, initial, "cards rearranged on frame {frame}");
         }
+    }
+}
+
+#[test]
+fn a_closed_brief_or_an_offscreen_selected_marker_paints_no_cards() {
+    for (selected, base) in [
+        (None, egui::pos2(200.0, 200.0)),
+        (Some("event-0"), egui::pos2(-100.0, 200.0)),
+    ] {
+        let ctx = egui::Context::default();
+        let event = event(0);
+        let viewport = Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0));
+        let marker = MapMarker::new(&event.id, base, base, 1.0);
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(viewport),
+                ..Default::default()
+            },
+            |ctx| {
+                draw(
+                    &ctx.layer_painter(egui::LayerId::background()),
+                    viewport,
+                    std::iter::once(&event),
+                    std::slice::from_ref(&marker),
+                    1.0,
+                    selected,
+                );
+            },
+        );
+        assert!(output.shapes.is_empty());
     }
 }

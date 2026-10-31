@@ -26,11 +26,13 @@ and advances it with egui's absolute time; `event_tour.rs` owns weighted selecti
 - Quintic Hermite curves preserve position/velocity on retarget and join the
   orbit velocity at arrival. Widen/approach zoom phases scale with duration;
   local heading advances at the orbit rate so nearby hops do not swivel sharply.
-- `event_label_opacity` fades regional cards in over 0.45 seconds after the
+- `event_label_opacity` fades the selected event's card in over 0.45 seconds after the
   flight reaches its arrival pose/zoom. Departure fades from the current opacity
   to zero over 0.25 seconds, then stays hidden throughout travel. Retargeting
   during either fade preserves opacity; no separate zoom threshold can drift
   from the trajectory's actual destination in Globe or Local.
+- The separate five-row chyron remains readable throughout travel; camera
+  opacity never hides or restarts a summary crawl.
 - Manual input, another idle mode, replay or leaving Earth cancels the controller
   and discards the tour. No synthetic events enter runtime state.
 

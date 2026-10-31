@@ -70,15 +70,16 @@ The FOLLOW EVENTS tooltip describes the full live pool, more frequent visits to
 severe stories and repeat spacing. Travel remains capped at ten seconds with
 faster nearby hops, followed by ten-second orbit dwell.
 
-While FOLLOW EVENTS is enabled, `event_labels` fades in persistent cards for all
-on-screen event anchors after the camera reaches its arrival zoom, in both Globe
-and Local, including Focus capture. Cards fade out on departure and stay hidden
-during wide travel; opacity comes from the actual flight timing. Cards
-show severity, headline and location, with nearby placement and leader lines.
-Card slots stay fixed during dwell while their leader lines track orbiting
-markers. New cards fit around established ones; hidden travel resets the layout.
-They do not capture input or depend on hovering; normal event hover cards resume
-when follow stops. Event-marker visibility controls apply to these cards too.
+While FOLLOW EVENTS is enabled, `event_chyron` shows five single-line crawls at
+the bottom of the map, in Globe, Local and Focus capture. Every row includes the
+full title, severity and summary, and finishes scrolling before changing stories.
+It starts with the current event plus four others, favors visible events and
+rotates through the live pool without resetting text on each camera/poll change.
+`draw_event_follow_overlay` keeps only the selected event's map card, and only
+while its Brief is open. That card retains arrival/departure fades and a stable
+slot above the chyron while its leader tracks the marker. All other event cards
+and map hover tooltips are suppressed during follow. Navigation stays available;
+ordinary hover behavior returns when follow stops. Neither overlay captures input.
 
 The canvas submits local line residency cleanup on every frame. Its finish-prepare
 callback drops unused contour/road GPU buffers after all live batches are marked.

@@ -27,7 +27,7 @@ pub fn render_factal_brief(ctx: &egui::Context, model: &mut AppModel) {
             .default_width(360.0)
             .default_height(380.0)
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-20.0, 64.0))
-            .max_height((ctx.screen_rect().height() - 100.0).max(160.0))
+            .max_height((ctx.screen_rect().height() - 100.0 - super::event_chyron::HEIGHT - 120.0).max(120.0))
             .vscroll(true);
     }
     window.show(ctx, |ui| {

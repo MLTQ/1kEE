@@ -20,3 +20,6 @@ Exports the panel renderers used by the desktop shell. This module is the compos
 Exports `render_settings` as the only global settings entry point. The retired
 header and separate Terrain Library window exports are removed. `terrain_library`
 exposes background ticking to the app; `map_rail` owns compact map controls.
+
+`event_chyron` owns the five-row Follow Events crawl shared by the map overlay
+and the Brief's reserved bottom space.

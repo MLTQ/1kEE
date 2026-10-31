@@ -1,4 +1,5 @@
 mod camera_list;
+mod event_chyron;
 mod event_list;
 mod factal_brief;
 mod layer_drawer;
