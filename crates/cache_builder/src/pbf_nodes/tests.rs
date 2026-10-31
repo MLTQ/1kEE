@@ -225,3 +225,6 @@ fn corrupt_descriptor_cannot_silently_hide_nodes() {
     };
     assert!(error.contains("Invalid compact PBF block index"), "{error}");
 }
+
+#[path = "resume_tests.rs"]
+mod resume_tests;

@@ -2399,6 +2399,7 @@ dependencies = [
  "osmpbf",
  "rayon",
  "rfd",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",

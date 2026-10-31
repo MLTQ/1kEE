@@ -15,3 +15,6 @@ data, using committed plain/dense fixtures and generated multi-block PBFs.
 - Grouped way dependencies survive LRU eviction, cache missing IDs, reset between
   blobs, and fall back correctly for oversized dependency lists/unprepared IDs.
 - Test-only source/index files live in unique owned temporary directories.
+
+Remount-specific regressions and opt-in read-only verification of an external
+index copy live in resume_tests.rs, reusing this module's disposable PBF helpers.

@@ -15,6 +15,8 @@ const BATCH: usize = 32;
 #[derive(Serialize, Deserialize)]
 struct State {
     source: Stamp,
+    #[serde(default)]
+    source_fingerprint: Option<String>,
     offset: u64,
     nodes: u64,
     first_way: Option<u64>,
@@ -134,6 +136,7 @@ pub(super) fn open(
         None => {
             let s = State {
                 source: stamp.clone(),
+                source_fingerprint: None,
                 offset: 0,
                 nodes: 0,
                 first_way: None,
@@ -145,8 +148,8 @@ pub(super) fn open(
             s
         }
     };
-    if state.source != stamp {
-        return Err("The PBF source differs from this compact index. Choose a new working directory; existing build files were preserved".into());
+    if !state.source.same_file_metadata(&stamp) {
+        return Err(state.source.mismatch(&stamp));
     }
     let mut blocks = Vec::new();
     {
@@ -168,6 +171,19 @@ pub(super) fn open(
         }
     }
     validate(&blocks, &state)?;
+    let fingerprint = super::source::fingerprint(source, &stamp)?;
+    if let Some(saved) = &state.source_fingerprint {
+        if *saved != fingerprint {
+            return Err("The PBF content fingerprint differs from this compact index. Choose a new working directory; existing build files were preserved".into());
+        }
+    } else if !blocks.is_empty() {
+        verify_legacy_source(source, &stamp, &blocks)?;
+    }
+    if state.source != stamp || state.source_fingerprint.is_none() {
+        state.source = stamp.clone();
+        state.source_fingerprint = Some(fingerprint);
+        save(&connection, &state)?;
+    }
     if !state.indexed {
         let (mut reader, position) = open_planet_at(source, state.offset)?;
         loop {
@@ -274,4 +290,23 @@ pub(super) fn open(
             _lock: lock,
         },
     ))
+}
+
+/// Legacy indexes have no persisted byte fingerprint. Verify up to 64 indexed
+/// node blocks spread over the saved scan before accepting a remount/migration.
+fn verify_legacy_source(source: &Path, stamp: &Stamp, blocks: &[Block]) -> Result<(), String> {
+    let probe = PbfNodes {
+        file: File::open(source).map_err(|e| e.to_string())?,
+        path: source.to_owned(),
+        stamp: stamp.clone(),
+        blocks: blocks.to_vec(),
+        first_way: 0,
+        node_count: 0,
+    };
+    let count = blocks.len().min(64);
+    for i in 0..count {
+        let index = i * (blocks.len() - 1) / (count - 1).max(1);
+        probe.read_block(index).map_err(|e| format!("Cannot verify legacy compact index against this PBF: {e}. Existing build files were preserved"))?;
+    }
+    probe.validate_source()
 }
