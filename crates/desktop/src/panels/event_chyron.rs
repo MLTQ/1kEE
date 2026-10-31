@@ -13,6 +13,7 @@ const START_HOLD: f64 = 2.0;
 const END_HOLD: f64 = 2.0;
 const MIN_READ_TIME: f64 = 10.0;
 pub(super) const HEIGHT: f32 = ROWS as f32 * ROW_HEIGHT + PADDING * 2.0;
+pub(super) const COORDINATE_FOOTER_HEIGHT: f32 = 24.0;
 
 fn state_id() -> egui::Id {
     egui::Id::new("follow_event_chyron")
@@ -160,7 +161,10 @@ pub(super) fn draw<'a>(
     visible: impl Iterator<Item = &'a str>,
 ) -> Option<Rect> {
     let rect = Rect::from_min_size(
-        egui::pos2(viewport.left() + 12.0, viewport.bottom() - HEIGHT - 12.0),
+        egui::pos2(
+            viewport.left() + 12.0,
+            viewport.bottom() - HEIGHT - 12.0 - COORDINATE_FOOTER_HEIGHT,
+        ),
         egui::vec2(viewport.width() - 24.0, HEIGHT),
     );
     if rect.width() < 100.0 || !viewport.contains_rect(rect) {

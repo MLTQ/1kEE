@@ -81,6 +81,10 @@ slot above the chyron while its leader tracks the marker. All other event cards
 and map hover tooltips are suppressed during follow. Navigation stays available;
 ordinary hover behavior returns when follow stops. Neither overlay captures input.
 
+The latitude/longitude readout uses one non-wrapping, bottom-centered row. The
+chyron leaves a 24-point footer below its five lines so coordinates cannot cover
+summary text or grow into a vertical panel.
+
 The canvas submits local line residency cleanup on every frame. Its finish-prepare
 callback drops unused contour/road GPU buffers after all live batches are marked.
 Leaving local mode releases local decoded tiles and CPU contour instances;

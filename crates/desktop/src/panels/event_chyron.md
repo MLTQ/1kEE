@@ -22,6 +22,9 @@ during Follow Events, including Focus capture. No network or model mutations.
   avoiding repeated sorting and text comparison on every animation frame.
 - `HEIGHT` lets the Brief reserve space; `clear` discards session state when
   follow stops. Empty feeds paint nothing, and small feeds never fabricate rows.
+- `COORDINATE_FOOTER_HEIGHT` reserves one compact row beneath the crawl so the
+  map's latitude/longitude readout cannot cover summaries. Its space stays stable
+  as the pointer enters or leaves the globe.
 
 ## Contracts
 | Dependent | Expects | Breaking changes |

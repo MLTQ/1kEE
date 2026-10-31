@@ -9,7 +9,8 @@ entry point, independently of terrain/GPU/feed loading.
   and exactly one selected event card while the Brief is open.
 - Closing the Brief hides all event cards; leaving follow removes the overlay.
 - A deliberately long Brief at 720/800/1080 screen heights scrolls within its
-  reserved height and leaves the five-line chyron plus local footer unobstructed.
+  reserved height and leaves the five-line chyron, coordinate row and local
+  footer unobstructed.
 
 ## Contracts
 Fixtures are test-only real-format Factal records. Rendering does not poll

@@ -32,4 +32,5 @@ weighted visit order. A record that has left the refreshed pool keeps its brief
 but omits the rank indicator.
 
 The follow window reserves the five-row chyron and map footer at the bottom of
-the screen. Long briefs scroll inside that height instead of covering the crawl.
+the screen, including the compact coordinate row. Long briefs scroll inside
+that height instead of covering the crawl or readout.

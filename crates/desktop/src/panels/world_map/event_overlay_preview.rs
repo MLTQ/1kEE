@@ -72,7 +72,7 @@ fn five_line_chyron_gpu_preview() {
         .severity_value = Some(5);
     model.toggle_event_follow();
     model.tick_event_follow(0.0);
-    model.obs_view = true;
+    model.obs_view = false;
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0));
     let markers: Vec<_> = model
         .events
@@ -118,6 +118,14 @@ fn five_line_chyron_gpu_preview() {
                     painter.circle_filled(marker.base, 3.5, EventSeverity::Critical.color());
                 }
                 draw_event_follow_overlay(&painter, rect, &model, &markers);
+                draw_globe_coord_overlay(
+                    ctx,
+                    GeoPoint {
+                        lat: 23.7796,
+                        lon: 66.3724,
+                    },
+                    rect,
+                );
             },
         );
         for (id, delta) in &output.textures_delta.set {

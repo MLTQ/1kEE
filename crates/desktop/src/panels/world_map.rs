@@ -360,7 +360,8 @@ fn draw_globe_coord_overlay(ctx: &egui::Context, geo: crate::model::GeoPoint, re
     let ew = if geo.lon >= 0.0 { 'E' } else { 'W' };
     let text = format!("{:.4}°{}  {:.4}°{}", geo.lat.abs(), ns, geo.lon.abs(), ew);
     egui::Area::new("globe_coord_overlay".into())
-        .fixed_pos(egui::pos2(rect.center().x - 80.0, rect.bottom() - 28.0))
+        .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -4.0))
+        .constrain_to(rect)
         .interactable(false)
         .show(ctx, |ui| {
             egui::Frame::new()
@@ -368,10 +369,9 @@ fn draw_globe_coord_overlay(ctx: &egui::Context, geo: crate::model::GeoPoint, re
                 .corner_radius(5.0)
                 .inner_margin(egui::Margin::symmetric(8, 4))
                 .show(ui, |ui| {
-                    ui.colored_label(
-                        theme::contour_color(),
-                        egui::RichText::new(text).monospace().small(),
-                    );
+                    ui.add(egui::Label::new(
+                        egui::RichText::new(text).monospace().small().color(theme::contour_color()),
+                    ).wrap_mode(egui::TextWrapMode::Extend));
                 });
         });
 }
