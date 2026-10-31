@@ -298,6 +298,7 @@ fn callback_lifecycle(
                         rect,
                         Callback {
                             candidate: candidate.clone(),
+                            palette: [egui::Color32::RED, egui::Color32::GREEN],
                             uniforms,
                             viewport: Viewport::new(layout, view, rect),
                             ctx: ctx.clone(),

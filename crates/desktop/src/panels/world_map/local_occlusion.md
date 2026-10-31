@@ -17,3 +17,5 @@ local contour fragments consult without changing egui's UI depth state.
   leaves lines visible; this approximation is not a continuous terrain mesh.
 - A one-pixel dummy binding supports ordinary lines/roads with occlusion off.
 - CPU fallback and Moon/Mars retain their existing rendering in this first version.
+- Live palette uniforms are excluded from depth-cache identity, so a color-only
+  change reuses the current depth image and uploaded curtain geometry.

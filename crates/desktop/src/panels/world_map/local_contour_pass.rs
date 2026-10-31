@@ -153,10 +153,12 @@ struct LocalContourUniforms {
     depth_center: f32,
     depth_bias: f32,
     screen_guard: f32,
-    _pad0: f32,
+    palette_enabled: f32,
+    major_color: [f32; 4],
+    minor_color: [f32; 4],
 }
 
-const _: () = assert!(std::mem::size_of::<LocalContourUniforms>() == 128);
+const _: () = assert!(std::mem::size_of::<LocalContourUniforms>() == 160);
 
 #[inline]
 fn linear_u8(c: egui::Color32) -> [u8; 4] {
@@ -584,9 +586,22 @@ impl LocalContourCallback {
                 depth_center: 0.0,
                 depth_bias: 0.0,
                 screen_guard: 1.0,
-                _pad0: 0.0,
+                palette_enabled: 0.0,
+                major_color: [0.0; 4],
+                minor_color: [0.0; 4],
             },
         }
+    }
+
+    /// Color the Earth surface by its major/minor flags without rebuilding
+    /// geometry. Other passes preserve their per-instance colors.
+    pub fn with_palette(mut self, major: egui::Color32, minor: egui::Color32) -> Self {
+        if self.pass == LocalContourPass::Surface {
+            self.uniforms.palette_enabled = 1.0;
+            self.uniforms.major_color = linear_u8(major).map(|channel| channel as f32 / 255.0);
+            self.uniforms.minor_color = linear_u8(minor).map(|channel| channel as f32 / 255.0);
+        }
+        self
     }
 
     /// Only the local Earth surface opts in. Roads and staging never occlude.
@@ -815,8 +830,8 @@ mod tests {
 
     #[test]
     fn the_uniform_block_matches_the_shader_layout() {
-        // 32 f32s, and a multiple of 16 so it satisfies uniform alignment.
-        assert_eq!(std::mem::size_of::<LocalContourUniforms>(), 32 * 4);
+        // 40 f32s, and a multiple of 16 so it satisfies uniform alignment.
+        assert_eq!(std::mem::size_of::<LocalContourUniforms>(), 40 * 4);
         assert_eq!(std::mem::size_of::<LocalContourUniforms>() % 16, 0);
         assert!(std::mem::size_of::<LocalContourUniforms>() as u64 <= UNIFORM_STRIDE);
     }
@@ -869,7 +884,9 @@ mod tests {
             "depth_center",
             "depth_bias",
             "screen_guard",
-            "_pad0",
+            "palette_enabled",
+            "major_color",
+            "minor_color",
         ];
         assert_eq!(shader_fields, rust_fields);
     }

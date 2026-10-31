@@ -170,10 +170,12 @@ fn prepare(
 
 fn instances(
     source: &Arc<Frame>,
-    major: egui::Color32,
-    minor: egui::Color32,
     ctx: &egui::Context,
 ) -> Option<Arc<Prepared>> {
+    // Cache coverage for the two contour classes, independent of the theme.
+    // The image compositor supplies the actual palette every frame.
+    let major = egui::Color32::RED;
+    let minor = egui::Color32::GREEN;
     let mut state = cache().lock().unwrap();
     state.active = true;
     let palette = palette_key(major, minor);
@@ -349,7 +351,7 @@ pub(crate) fn paint(
     width: f32,
 ) {
     lifecycle::requested(ContourLayer::SrtmGlobe);
-    let Some(candidate) = instances(source, major, minor, painter.ctx()) else {
+    let Some(candidate) = instances(source, painter.ctx()) else {
         return;
     };
     let rect = painter.clip_rect();
@@ -375,6 +377,7 @@ pub(crate) fn paint(
         rect,
         Callback {
             candidate,
+            palette: [major, minor],
             uniforms,
             viewport: Viewport::new(layout, view, rect),
             ctx: painter.ctx().clone(),
@@ -384,6 +387,7 @@ pub(crate) fn paint(
 
 struct Callback {
     candidate: Arc<Prepared>,
+    palette: [egui::Color32; 2],
     uniforms: ContourUniforms,
     viewport: Viewport,
     ctx: egui::Context,
@@ -419,6 +423,7 @@ impl egui_wgpu::CallbackTrait for Callback {
                 .texture
                 .take()
                 .unwrap_or_else(|| texture::Cache::new(device, res.format));
+            image.set_palette(self.palette[0], self.palette[1]);
             if image.prepare(
                 device,
                 queue,

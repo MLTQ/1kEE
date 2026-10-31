@@ -5,7 +5,7 @@ Draw full-resolution Earth globe contours without rebuilding or uploading the
 entire terrain layer on each arrival. Reuses the common globe line pipeline.
 
 ## Components
-- One CPU worker reuses unchanged tile/palette instances by pinned Arc identity.
+- One CPU worker reuses unchanged tile/classification instances by pinned Arc identity.
   Each point's sphere transform is reused by the next segment in its path.
 - Half-degree spatial bins contain unchanged segments; conservative bounds
   include actual endpoints, including long legacy segments. Chunks are <1 MiB.
@@ -16,11 +16,16 @@ entire terrain layer on each arrival. Reuses the common globe line pipeline.
 - CPU/GPU lifecycle releases hidden terrain and rejects retired worker results.
 
 ## Contracts
-No simplification or coordinate quantization. Segment endpoints and colours
-match the common globe pass. `globe_contour_density` selects whole elevation
+No simplification or coordinate quantization. Native segment endpoints and
+major/minor classification are preserved. `globe_contour_density` selects whole elevation
 planes for wide views using one shared spacing; full geometry stays resident. Bounds culling is conservative.
 Source Arcs remain pinned while their pointer-derived versions can be used.
 Candidate, displayed, and active image-refinement GPU generations survive staging.
+
+Runtime geometry and retained images encode major coverage in red and minor
+coverage in green. The current theme is supplied to the final image compositor,
+so a palette change updates resident and in-flight terrain immediately without
+new instances, uploads, tile eviction or loss of full-detail coverage.
 
 Spatial batches retain elevation spans so density changes only draw ranges,
 with no instance rebuilds or uploads. Finer planes return as visible work falls.

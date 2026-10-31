@@ -6,7 +6,7 @@ expand anti-aliased physical-pixel strokes and optionally reject hidden contours
 Also supplies the depth-only contour-curtain vertex entry point.
 
 ## Contracts
-- Uniforms exactly match the 128-byte Rust `LocalContourUniforms`; group 0 is
+- Uniforms exactly match the 160-byte Rust `LocalContourUniforms`; group 0 is
   the dynamic pass uniform, group 1 the sampled visibility depth texture.
 - The screen projection matches `LocalProjectionParams::project_logical`.
 - Main line clip depth remains zero because egui has no depth attachment.
@@ -17,3 +17,5 @@ Also supplies the depth-only contour-curtain vertex entry point.
 - Curtain tops are inset below crests; simplified geography and pixel derivatives
   provide comparison tolerance. Clear pixels never hide any contour.
 - Roads and disabled views bypass depth sampling and retain existing AA/widths.
+- Opt-in terrain palettes select colors from the per-instance major/minor flag;
+  changing a theme is a uniform update. Other passes keep their baked colors.

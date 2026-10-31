@@ -1293,16 +1293,9 @@ fn gpu_contour_batches(
         return Vec::new();
     }
 
-    let major_color = theme::hot_color();
-    let minor_color = theme::contour_color();
-    // Baked colours must be rebuilt when the palette changes, so the instance
-    // version folds in the two colours the style function can produce.
-    let palette = u64::from(major_color.to_array().iter().fold(0u32, |acc, &c| {
-        acc.wrapping_mul(31).wrapping_add(u32::from(c))
-    }))
-        ^ (u64::from(minor_color.to_array().iter().fold(0u32, |acc, &c| {
-            acc.wrapping_mul(31).wrapping_add(u32::from(c))
-        })) << 32);
+    // Resident geometry stores classification, not theme colors. The visible
+    // callback supplies the current palette through uniforms on every frame.
+    let palette = 0;
 
     let ctx = painter.ctx().clone();
     tiles.iter()
@@ -1316,13 +1309,7 @@ fn gpu_contour_batches(
                     // Identical major/minor rule to the CPU stack.
                     let major =
                         (contour.elevation_m.round() as i32).rem_euclid(EARTH_MAJOR_REM) == 0;
-                    let color = if major { major_color } else { minor_color };
-                    // The pass fade is a uniform, so only the fixed major/minor
-                    // weighting is baked here.
-                    (
-                        color.gamma_multiply(if major { 1.0 } else { 0.78 }),
-                        major,
-                    )
+                    (egui::Color32::WHITE, major)
                 },
             )
         })
@@ -1365,6 +1352,7 @@ fn draw_gpu_contour_pass(
             painter.ctx().clone(),
         )
         .with_occlusion(occlusion)
+        .with_palette(theme::hot_color(), theme::contour_color().gamma_multiply(0.78))
         .into_paint_callback(painter.clip_rect()),
     );
 }

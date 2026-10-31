@@ -9,7 +9,7 @@
 // scalar half of it.
 //
 // The Rust `LocalContourUniforms` struct in local_contour_pass.rs must stay
-// byte-for-byte in sync with `Uniforms` below (128 bytes).
+// byte-for-byte in sync with `Uniforms` below (160 bytes).
 
 struct Uniforms {
     focus_lon: f32,
@@ -48,7 +48,9 @@ struct Uniforms {
     depth_center: f32,
     depth_bias: f32,
     screen_guard: f32,
-    _pad0: f32,
+    palette_enabled: f32,
+    major_color: vec4<f32>,
+    minor_color: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -169,6 +171,9 @@ fn vs_main(in: VsIn) -> VsOut {
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
     out.ground_depth = mix(depth(in.a), depth(in.b), t);
     out.color = in.color;
+    if (u.palette_enabled > 0.5) {
+        out.color = select(u.minor_color, u.major_color, in.major != 0u);
+    }
     out.dist_px = side * half_extent;
     out.stroke_half_px = stroke_half_px;
     out.feather_px = feather_px;

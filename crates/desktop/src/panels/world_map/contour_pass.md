@@ -115,6 +115,8 @@ third without changing the covered quad or antialiasing.
 
 The terrain renderer retains the window target format for its transparent image
 cache; stationary contour frames are composited without repeating native draws.
+Earth terrain stores palette-independent major/minor coverage; its final
+compositor applies the live theme without rebuilding resident instances/images.
 
 ### Staged whole-layer uploads
 Coastlines, global topo, bathymetry, Moon/Mars and pipeline layers now use

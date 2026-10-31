@@ -235,6 +235,9 @@ enabled, matching globe mode. Webcam spires remain independently visible.
 The local Earth GPU contour pass applies `AppModel::contour_occlusion`.
 Occluders use the exact displayed tile versions through the existing staged
 handoff. CPU cold-start fallback and Moon/Mars still draw ordinary contours.
+Earth GPU batches cache only geometry/classification; the visible pass supplies
+the current palette and minor-contour weighting each frame. Theme changes reuse
+the displayed batches, uploads, LOD handoff and occluders without waiting for tiles.
 
 Passes the same capacity-color flag to public pipelines and OSM pipelines. Public routes use the shared gas/oil capacity bands; OSM has no retained quantity and uses the unavailable color.
 

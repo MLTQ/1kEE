@@ -19,7 +19,11 @@ struct Warp {
     current: ContourUniforms,
     saved: ContourUniforms,
     flags: [f32; 4],
+    major_color: [f32; 4],
+    minor_color: [f32; 4],
 }
+
+const _: () = assert!(std::mem::size_of::<Warp>() == 208);
 
 pub(super) struct Cache {
     blit: wgpu::RenderPipeline,
@@ -38,6 +42,8 @@ pub(super) struct Cache {
     working: Option<Refinement>,
     next_chunk: usize,
     complete: bool,
+    palette: Option<[[f32; 4]; 2]>,
+    palette_changed: bool,
 }
 impl Cache {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
@@ -139,6 +145,18 @@ impl Cache {
             working: None,
             next_chunk: 0,
             complete: false,
+            palette: None,
+            palette_changed: false,
+        }
+    }
+    /// Recolor cached red/green class coverage without replacing geometry or
+    /// restarting a frozen full-detail refinement job.
+    pub fn set_palette(&mut self, major: egui::Color32, minor: egui::Color32) {
+        let palette =
+            [major, minor].map(|color| linear_u8(color).map(|channel| channel as f32 / 255.0));
+        if self.palette != Some(palette) {
+            self.palette = Some(palette);
+            self.palette_changed = true;
         }
     }
     fn target(&self, device: &wgpu::Device, format: wgpu::TextureFormat) -> Target {
@@ -206,7 +224,7 @@ impl Cache {
                 .uniforms
                 .as_ref()
                 .is_none_or(|u| !same_camera(u, uniforms));
-        if !changed && self.complete {
+        if !changed && self.complete && !self.palette_changed {
             return false;
         }
         if changed {
@@ -308,11 +326,14 @@ impl Cache {
                 } else {
                     0.
                 },
-                0.,
+                if self.palette.is_some() { 1. } else { 0. },
                 0.,
             ],
+            major_color: self.palette.map_or([0.0; 4], |palette| palette[0]),
+            minor_color: self.palette.map_or([0.0; 4], |palette| palette[1]),
         };
         queue.write_buffer(&self.warp, 0, bytemuck::bytes_of(&warp));
+        self.palette_changed = false;
         let preview = self.preview.as_ref().unwrap();
         let full = self.full.as_ref().unwrap_or(preview);
         self.paint_bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {

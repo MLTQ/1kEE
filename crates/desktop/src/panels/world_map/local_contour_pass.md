@@ -31,6 +31,8 @@ uniform slot and a typed cache namespace so roads never overwrite contour tiles.
 - **Rationale**: Endpoints are raw geography and the shader applies the whole
   transform, so a tile's instances stay valid under any camera motion — panning,
   rotating and zooming reuse resident buffers; returning after eviction reloads them.
+- Roads/custom batches use the stored color. Opt-in Earth terrain uses the
+  major/minor flag with live palette uniforms instead of baking theme colors.
 
 ### `LocalContourCallback`
 
@@ -54,7 +56,7 @@ uniform slot and a typed cache namespace so roads never overwrite contour tiles.
 | Dependent | Expects | Breaking changes |
 |---|---|---|
 | `local_terrain_scene` | Submitting a pass never blocks on geometry building | Building instances inline in `new` or `prepare` |
-| `local_contour_lines.wgsl` | `LocalContourUniforms` field order and size are unchanged | Reordering or resizing without matching the WGSL |
+| `local_contour_lines.wgsl` | `LocalContourUniforms` field order and 160-byte size match | Reordering or resizing without matching the WGSL |
 | Scene stroke controls | Width and fade land only in uniforms | Baking either into instances, which would force a rebuild per frame |
 | `contour_asset::clear_caches` | `clear_instances` drops every cached build | Retaining instances past a cache reset |
 
@@ -80,8 +82,9 @@ uniform slot and a typed cache namespace so roads never overwrite contour tiles.
 - The anti-alias fringe is `contour_pass::contour_feather_px`, shared rather
   than reimplemented, so equal widths render at equal weight in both views.
 - `version_key` folds the tile's `Arc` pointer with the palette. Contours are
-  immutable once loaded, so pointer identity is a sound cache key, and a theme
-  change invalidates the baked colours.
+  immutable once loaded, so pointer identity is a sound cache key. Earth terrain
+  uses a fixed classification key; `with_palette` chooses its live major/minor
+  colors in uniforms, without invalidating geometry, staging or occlusion.
 - Uploads are capped per frame so a jump into a fully-cached area spreads its
   envelope over consecutive frames instead of stalling on one.
 - The count cap is three batches per callback, with a shared 4 MiB / 2 ms
@@ -131,5 +134,5 @@ instances, prepared by the same worker. Both buffers share the upload budget
 and publish atomically; residency and byte accounting include both.
 `local_occlusion` renders a separate cached depth target during prepare. Surface
 fragments sample it when enabled; roads/staging keep occlusion off. Uniforms
-are now 128 bytes, matched by the WGSL layout regression. No UI depth attachment
+are now 160 bytes including the live palette, matched by the WGSL layout regression. No UI depth attachment
 is introduced. The hidden frame residency callback also releases depth images.

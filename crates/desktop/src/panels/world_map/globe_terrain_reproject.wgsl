@@ -1,5 +1,5 @@
 // Pull the retained terrain image through the current camera onto its sphere.
-// Uniform layout matches ContourUniforms (80 bytes) and Warp (176 bytes).
+// Uniform layout matches ContourUniforms (80 bytes) and Warp (208 bytes).
 struct Camera {
     center:vec2<f32>, viewport_min:vec2<f32>, viewport_size:vec2<f32>,
     yaw_sin:f32, yaw_cos:f32, pitch_sin:f32, pitch_cos:f32,
@@ -7,7 +7,10 @@ struct Camera {
     stroke_half_px:f32, feather_px:f32, pixels_per_point:f32, horizon_z:f32,
     pad:vec2<f32>,
 }
-struct Warp { current:Camera, saved:Camera, flags:vec4<f32> }
+struct Warp {
+    current:Camera, saved:Camera, flags:vec4<f32>,
+    major_color:vec4<f32>, minor_color:vec4<f32>,
+}
 @group(0) @binding(0) var preview:texture_2d<f32>;
 @group(0) @binding(1) var detail:texture_2d<f32>;
 @group(0) @binding(2) var linear:sampler;
@@ -41,13 +44,17 @@ fn saved_uv(uv:vec2<f32>)->vec3<f32> {
     if(any(old<vec2<f32>(0.)) || any(old>vec2<f32>(1.))) {return vec3<f32>(0.,0.,-1.);}
     return vec3<f32>(old,1.);
 }
+fn palette(coverage:vec4<f32>)->vec4<f32> {
+    if(w.flags.z>0.) {return coverage.r*w.major_color + coverage.g*w.minor_color;}
+    return coverage;
+}
 @fragment fn fs(in:Out)->@location(0) vec4<f32> {
     if(w.flags.x>0.) {
-        if(w.flags.y>0.) {return textureSampleLevel(detail,linear,in.uv,0.);}
+        if(w.flags.y>0.) {return palette(textureSampleLevel(detail,linear,in.uv,0.));}
         let old=saved_uv(in.uv);
         // Empty pixels inside retained coverage stay empty: never overlay two
         // contour generations or let preview density erase retained planes.
-        if(old.z>0.) {return textureSampleLevel(detail,linear,old.xy,0.);}
+        if(old.z>0.) {return palette(textureSampleLevel(detail,linear,old.xy,0.));}
     }
-    return textureSampleLevel(preview,linear,in.uv,0.);
+    return palette(textureSampleLevel(preview,linear,in.uv,0.));
 }
