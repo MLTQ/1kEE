@@ -5,7 +5,8 @@ Replace the wall of event-map cards with five legible single-line news crawls
 during Follow Events, including Focus capture. No network or model mutations.
 
 ## Components
-- `draw` paints a bottom-aligned five-row panel on the map layer. Each row shows
+- `draw` paints a five-row panel flush with the map's bottom edge. Its background
+  is slightly translucent (216/255 alpha), independently of text colors. Each row shows
   the full normalized `title - level - summary`, with colored severity and a
   subtle highlight for the currently selected story. Text is never ellipsized.
   Summary text uses a bright theme-matched color for contrast over busy maps.
@@ -22,7 +23,7 @@ during Follow Events, including Focus capture. No network or model mutations.
   avoiding repeated sorting and text comparison on every animation frame.
 - `HEIGHT` lets the Brief reserve space; `clear` discards session state when
   follow stops. Empty feeds paint nothing, and small feeds never fabricate rows.
-- `COORDINATE_FOOTER_HEIGHT` reserves one compact row beneath the crawl so the
+- `COORDINATE_FOOTER_HEIGHT` reserves one compact row above the crawl so the
   map's latitude/longitude readout cannot cover summaries. Its space stays stable
   as the pointer enters or leaves the globe.
 

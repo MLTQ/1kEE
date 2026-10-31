@@ -125,6 +125,7 @@ fn five_line_chyron_gpu_preview() {
                         lon: 66.3724,
                     },
                     rect,
+                    model.event_follow.enabled(),
                 );
             },
         );

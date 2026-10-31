@@ -161,10 +161,7 @@ pub(super) fn draw<'a>(
     visible: impl Iterator<Item = &'a str>,
 ) -> Option<Rect> {
     let rect = Rect::from_min_size(
-        egui::pos2(
-            viewport.left() + 12.0,
-            viewport.bottom() - HEIGHT - 12.0 - COORDINATE_FOOTER_HEIGHT,
-        ),
+        egui::pos2(viewport.left() + 12.0, viewport.bottom() - HEIGHT),
         egui::vec2(viewport.width() - 24.0, HEIGHT),
     );
     if rect.width() < 100.0 || !viewport.contains_rect(rect) {
@@ -233,7 +230,7 @@ pub(super) fn draw<'a>(
     painter.rect(
         rect,
         8.0,
-        theme::panel_fill(248),
+        theme::panel_fill(216),
         egui::Stroke::new(1.0, theme::panel_stroke()),
         egui::StrokeKind::Inside,
     );

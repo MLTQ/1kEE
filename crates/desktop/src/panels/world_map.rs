@@ -258,7 +258,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         if let Some(hover) = response.hover_pos() {
             if !model.globe_view.local_mode {
                 if let Some(geo) = globe_scene::screen_to_latlon(rect, &model.globe_view, hover) {
-                    draw_globe_coord_overlay(ui.ctx(), geo, rect);
+                    draw_globe_coord_overlay(ui.ctx(), geo, rect, model.event_follow.enabled());
                 }
             }
         }
@@ -283,7 +283,7 @@ fn draw_event_follow_overlay(
         markers.iter().filter(|marker| rect.contains(marker.base)).map(|marker| marker.id.as_str()),
     );
     let card_viewport = chyron.map_or(rect, |chyron| egui::Rect::from_min_max(
-        rect.min, egui::pos2(rect.right(), chyron.top() - 8.0),
+        rect.min, egui::pos2(rect.right(), chyron.top() - super::event_chyron::COORDINATE_FOOTER_HEIGHT - 8.0),
     ));
     let opacity = model.event_follow.event_label_opacity(painter.ctx().input(|input| input.time));
     let selected = model.selected_event_id.as_deref().filter(|_| model.factal_brief_open);
@@ -355,12 +355,13 @@ fn draw_local_footer(ui: &mut egui::Ui, model: &mut AppModel, beam_elevation_m: 
         });
 }
 
-fn draw_globe_coord_overlay(ctx: &egui::Context, geo: crate::model::GeoPoint, rect: egui::Rect) {
+fn draw_globe_coord_overlay(ctx: &egui::Context, geo: crate::model::GeoPoint, rect: egui::Rect, following: bool) {
     let ns = if geo.lat >= 0.0 { 'N' } else { 'S' };
     let ew = if geo.lon >= 0.0 { 'E' } else { 'W' };
     let text = format!("{:.4}°{}  {:.4}°{}", geo.lat.abs(), ns, geo.lon.abs(), ew);
+    let bottom_offset = if following { super::event_chyron::HEIGHT + 4.0 } else { 4.0 };
     egui::Area::new("globe_coord_overlay".into())
-        .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -4.0))
+        .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -bottom_offset))
         .constrain_to(rect)
         .interactable(false)
         .show(ctx, |ui| {

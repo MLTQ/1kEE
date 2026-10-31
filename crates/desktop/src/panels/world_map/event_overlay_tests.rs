@@ -161,8 +161,7 @@ fn a_long_follow_brief_keeps_the_bottom_chyron_and_local_footer_clear() {
             - 14.0
             - 82.0
             - super::super::event_chyron::HEIGHT
-            - super::super::event_chyron::COORDINATE_FOOTER_HEIGHT
-            - 12.0;
+            - super::super::event_chyron::COORDINATE_FOOTER_HEIGHT;
         assert!(
             brief.bottom() < chyron_top,
             "height {height}: {brief:?}, chyron top {chyron_top}"

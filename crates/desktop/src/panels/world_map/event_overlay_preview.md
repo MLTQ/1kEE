@@ -11,8 +11,8 @@ to inspect native text, clipping, colors, scrolling and reserved bottom space.
 - The example requested by the user is the selected fixture; other rows are
   explicitly sample reports. The grid stands in for terrain so QA is independent
   of live sources, cached tiles or an app restart.
-- Normal-view previews include the bottom latitude/longitude readout to check
-  its single-line layout and separation from all five news rows.
+- Normal-view previews show coordinates directly above the bottom-docked chyron
+  to check its single-line layout, text separation and translucent background.
 
 ## Contracts
 All records are test-only and never enter runtime state. No network, source
