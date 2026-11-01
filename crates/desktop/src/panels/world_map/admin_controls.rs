@@ -10,7 +10,9 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
             .on_hover_text("Fade boundary lines and region shading together in Globe and Local.");
         ui.small("Boundary levels").on_hover_text("OSM level numbers are shown below. Division names and level assignments vary by country.");
         for (index, (level, label)) in LEVELS.iter().enumerate() {
-            ui.checkbox(&mut model.admin_options.enabled[index], format!("{label} ({level})"));
+            ui.checkbox(&mut model.admin_options.enabled[index],
+                egui::RichText::new(format!("{label} ({level})"))
+                    .color(crate::theme::admin_color(*level)));
         }
         ui.checkbox(&mut model.admin_options.shade, "Shade regions")
             .on_hover_text("Shade complete regions, preserving holes and islands. Older line-only caches need rebuilding for shading.");
