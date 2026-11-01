@@ -268,7 +268,9 @@ impl AppModel {
             selected_track_mmsi: None,
             selected_flight_icao24: None,
             globe_view: GlobeViewState::from_focus(GeoPoint { lat: 0.0, lon: 0.0 }),
-            event_follow: event_follow::EventFollow::default(),
+            event_follow: event_follow::EventFollow::with_dwell_seconds(
+                app_settings.event_follow_dwell_seconds,
+            ),
             focused_city_id: None,
             obs_view: false,
             show_layer_drawer: false,
@@ -583,6 +585,7 @@ impl AppModel {
             contour_stroke_scale: self.legacy_contour_stroke_scale,
             contour_stroke_width_px: self.contour_stroke_width_px,
             marker_scale: self.marker_scale,
+            event_follow_dwell_seconds: self.event_follow.dwell_seconds(),
             threedep_enabled: self.settings_threedep_enabled,
             threedep_cache_budget_gb: settings_store::normalize_threedep_cache_budget_gb(
                 self.settings_threedep_cache_budget_gb,
@@ -622,6 +625,7 @@ impl AppModel {
             settings_store::normalize_contour_stroke_scale(settings.contour_stroke_scale);
         self.contour_stroke_width_px = settings.contour_stroke_width_px;
         self.set_marker_scale(settings.marker_scale);
+        self.event_follow.set_dwell_seconds(settings.event_follow_dwell_seconds);
         self.windy_webcams_api_key = settings.windy_webcams_api_key.trim().to_owned();
         self.ny511_api_key = settings.ny511_api_key.trim().to_owned();
         self.eyes_on_enabled = settings.eyes_on_enabled;

@@ -12,9 +12,14 @@ and advances it with egui's absolute time; `event_tour.rs` owns weighted selecti
   flight/dwell, even if a newer or more severe headline arrives. A single record
   stays in orbit; an empty payload schedules no new stops. Network failures leave
   the last successful tour available.
-- Each stop gets its flight time plus ten seconds orbiting with its brief open.
+- Each stop gets its flight time plus the configured dwell orbiting with its
+  brief open (30 seconds by default, adjustable from 5 to 300 seconds).
   Selection continues from the current weighted rotation between payloads.
   Missed frames do not cause catch-up hops through multiple unread briefs.
+- `with_dwell_seconds` restores the saved duration. `set_dwell_seconds` updates
+  the current stop's deadline relative to its original arrival without restarting
+  the camera or tour. A shorter duration already elapsed advances on the next tick.
+  Stop/enable preserves the chosen duration; normalization matches Settings.
 - `tick` returns each newly followed ID for selection without a focus snap. It
   retains the active brief/marker if the record ages out of the live page.
   `tour_position` supplies the current severity rank/count for the brief.

@@ -144,6 +144,9 @@ FOLLOW EVENTS rotates through all eligible live Factal records, revisiting more
 severe stories more often while spacing out recent repeats. Scheduling history
 survives refreshes. Every timed stop uses the same `tick_event_follow` selection
 and brief-opening path; source replacement cannot snap or interrupt the camera.
+Startup and settings reload restore `event_follow_dwell_seconds` into the
+controller, and saving reads its current value. Live edits change the current
+post-arrival deadline without resetting camera motion or tour scheduling.
 
 ### Marker size
 `marker_scale()` and `set_marker_scale()` own the normalized 25–200% webcam/event

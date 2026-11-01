@@ -9,6 +9,10 @@ Synthetic records exercise realistic badge widths without network or save action
 Every settings section must leave Save Settings fully inside its clip rectangle
 and the screen after several layout frames, including the minimum 720-point
 window height.
+This includes the dedicated Follow Events dwell-time section.
+A pointer/keyboard regression opens that section and edits the numeric dwell
+value during an active tour, checking immediate application without saving or
+changing the selected event.
 
 The fixture uses a quarter-pixel-aligned contour width to prevent the existing
 Layers slider from rounding a legacy default and persisting during headless render.

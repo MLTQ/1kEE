@@ -1,25 +1,33 @@
 //! Ranked event touring and smooth camera motion for the live-event idle mode.
 use super::{EventRecord, GeoPoint, GlobeViewState};
+use crate::settings_store::{
+    DEFAULT_EVENT_FOLLOW_DWELL_SECONDS, normalize_event_follow_dwell_seconds,
+};
 #[path = "event_tour.rs"]
 mod event_tour;
 use event_tour::EventTour;
 
 const MAX_FLIGHT_SECONDS: f64 = 10.0;
 const MIN_FLIGHT_SECONDS: f64 = 0.65;
-const ORBIT_SECONDS: f64 = 10.0;
 const ORBIT_RATE: f64 = 0.035;
 const LABEL_FADE_IN_SECONDS: f64 = 0.45;
 const LABEL_FADE_OUT_SECONDS: f64 = 0.25;
 // Latitude, unwrapped longitude, log zoom, local yaw, local pitch.
 type Pose = [f64; 5];
 
-#[derive(Default)]
 pub struct EventFollow {
     enabled: bool,
     tour: EventTour,
     target: Option<EventRecord>,
     flight: Option<Flight>,
     velocity: Pose,
+    dwell_seconds: u32,
+}
+
+impl Default for EventFollow {
+    fn default() -> Self {
+        Self::with_dwell_seconds(DEFAULT_EVENT_FOLLOW_DWELL_SECONDS)
+    }
 }
 
 struct Flight {
@@ -37,6 +45,26 @@ struct Flight {
 }
 
 impl EventFollow {
+    pub fn with_dwell_seconds(seconds: u32) -> Self {
+        Self {
+            enabled: false,
+            tour: EventTour::default(),
+            target: None,
+            flight: None,
+            velocity: [0.0; 5],
+            dwell_seconds: normalize_event_follow_dwell_seconds(seconds),
+        }
+    }
+
+    pub fn dwell_seconds(&self) -> u32 {
+        self.dwell_seconds
+    }
+
+    /// Applies to the current stop without restarting its arrival clock or flight.
+    pub fn set_dwell_seconds(&mut self, seconds: u32) {
+        self.dwell_seconds = normalize_event_follow_dwell_seconds(seconds);
+    }
+
     pub fn enabled(&self) -> bool {
         self.enabled
     }
@@ -125,10 +153,9 @@ impl EventFollow {
             self.velocity = velocity;
         }
         let next = self.tour.take_pending().or_else(|| {
-            let dwell_finished = self
-                .flight
-                .as_ref()
-                .is_none_or(|flight| now >= flight.started + flight.duration + ORBIT_SECONDS);
+            let dwell_finished = self.flight.as_ref().is_none_or(|flight| {
+                now >= flight.started + flight.duration + f64::from(self.dwell_seconds)
+            });
             dwell_finished
                 .then(|| self.tour.next(self.target.as_ref().map(|e| e.id.as_str())))
                 .flatten()

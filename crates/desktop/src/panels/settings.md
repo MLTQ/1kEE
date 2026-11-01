@@ -2,7 +2,7 @@
 
 ## Purpose
 Own the single Settings window with a persistent section navigator: Overview,
-Appearance, Data Sources, Files & Cache, Terrain Library, and Activity.
+Appearance, Follow Events, Data Sources, Files & Cache, Terrain Library, and Activity.
 
 ## Contracts
 - `AppModel::settings_open` is the only global-settings window flag.
@@ -12,6 +12,8 @@ Appearance, Data Sources, Files & Cache, Terrain Library, and Activity.
 - Each section has its own scroll position and a bounded viewport. The action
   footer remains outside scrolling; credentials and path save semantics stay intact.
 - Saving/polling/clearing delegates to settings_actions after content rendering.
+- Follow Events renders a live dwell-time control via `settings_event_follow.rs`;
+  the existing Save Settings action persists its value with all other settings.
 
 Headless chrome integration tests exercise responsive layout and pointer-driven
 navigation; an opt-in GPU preview exports real controls for visual inspection.

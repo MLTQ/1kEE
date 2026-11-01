@@ -273,6 +273,41 @@ fn chrome_settings_footer_stays_visible_in_every_section() {
 mod preview;
 
 #[test]
+fn chrome_follow_dwell_can_be_edited_during_a_tour_without_saving() {
+    let ctx = context();
+    let mut model = model();
+    model.event_follow.set_dwell_seconds(30);
+    model.toggle_event_follow();
+    model.tick_event_follow(0.0);
+    let selected = model.selected_event_id.clone();
+    frame(&ctx, &mut model, 1100.0, vec![]);
+    click(&ctx, &mut model, 1100.0, "Settings");
+    click(&ctx, &mut model, 1100.0, "Follow Events");
+    click(&ctx, &mut model, 1100.0, "30 s");
+    frame(
+        &ctx,
+        &mut model,
+        1100.0,
+        vec![egui::Event::Text("90".into())],
+    );
+    frame(
+        &ctx,
+        &mut model,
+        1100.0,
+        vec![egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    );
+    assert_eq!(model.event_follow.dwell_seconds(), 90);
+    assert!(model.event_follow.enabled());
+    assert_eq!(model.selected_event_id, selected);
+}
+
+#[test]
 fn chrome_camera_motion_controls_work_without_a_mode_toggle() {
     let ctx = context();
     let mut model = model();

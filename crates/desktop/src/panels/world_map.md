@@ -68,7 +68,8 @@ FOLLOW EVENTS sits beside MEANDER on the main rail on Earth, with no parent mode
 
 The FOLLOW EVENTS tooltip describes the full live pool, more frequent visits to
 severe stories and repeat spacing. Travel remains capped at ten seconds with
-faster nearby hops, followed by ten-second orbit dwell.
+faster nearby hops, followed by the configured orbit dwell (Settings → Follow
+Events; 30 seconds by default).
 
 While FOLLOW EVENTS is enabled, `event_chyron` shows five single-line crawls at
 the bottom of the map, in Globe, Local and Focus capture. Every row includes the

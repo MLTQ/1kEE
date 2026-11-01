@@ -28,6 +28,9 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
   four nearest camera feeds, ordered by distance to the focused event. The
   scrollable column follows the tour, supports OBS view, and opens individual
   feeds in the floating camera window when clicked.
+  Adjust stop duration under **Settings → Follow Events → Dwell time**
+  (5–300 seconds, default 30); changes apply immediately, and **Save Settings**
+  keeps the choice across restarts. Dwell begins after camera arrival.
 - **User geodata** — ArcGIS FeatureServer scraping (`arcgis_source.rs`), plus GeoJSON
   and KML/KMZ layer import (`model/geojson_layer.rs`, `model/kml_layer.rs`).
 - **OSM ingest** — planet PBF / Overpass import pipeline producing cached feature cells
