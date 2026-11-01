@@ -31,7 +31,6 @@ impl EventCameraSidebar {
             .selected_event()
             .filter(|_| model.event_follow.target().is_some());
         let title = event.map(|event| event.title.clone());
-        let location = event.map(|event| event.location_name.clone());
         let previous_focus = self.selection_key.map(|(lat, lon, _)| (lat, lon));
         self.update_selection(model, event.map(|event| event.location));
         let focus_changed = previous_focus != self.selection_key.map(|(lat, lon, _)| (lat, lon));
@@ -42,26 +41,29 @@ impl EventCameraSidebar {
             .resizable(true)
             .frame(
                 egui::Frame::side_top_panel(&ctx.style())
-                    .inner_margin(12)
+                    .inner_margin(8)
                     .fill(theme::panel_fill(255)),
             )
             .show(ctx, |ui| {
-                ui.strong("NEAREST CAMERAS");
+                ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+                ui.horizontal(|ui| {
+                    ui.strong("NEAREST CAMERAS");
+                    if title.is_some() {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.small(self.cameras.len().to_string());
+                        });
+                    }
+                });
                 if let Some(title) = &title {
-                    ui.add(egui::Label::new(title).truncate())
-                        .on_hover_text(title);
                     ui.add(
                         egui::Label::new(
-                            egui::RichText::new(location.as_deref().unwrap_or_default())
+                            egui::RichText::new(title)
                                 .small()
                                 .color(theme::text_muted()),
                         )
                         .truncate(),
-                    );
-                    ui.small(format!(
-                        "{} closest feeds · nearest first",
-                        self.cameras.len()
-                    ));
+                    )
+                    .on_hover_text(title);
                 }
                 ui.separator();
 
@@ -90,7 +92,6 @@ impl EventCameraSidebar {
                                     model.open_camera_feed(&ranked.camera.id);
                                 }
                             });
-                            ui.add_space(8.0);
                         }
                     });
                     ctx.request_repaint_after(Duration::from_millis(100));
@@ -193,37 +194,28 @@ fn render_feed(
             theme::camera_color().gamma_multiply(0.35),
         ))
         .corner_radius(5)
-        .inner_margin(8)
+        .inner_margin(6)
         .show(ui, |ui| {
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(format!("{rank:02}  {}", ranked.camera.label)).strong(),
-                )
-                .truncate(),
-            )
-            .on_hover_text(&ranked.camera.label);
             ui.horizontal(|ui| {
-                let provider = ranked
-                    .camera
-                    .provider
-                    .strip_prefix("Project Eyes On · ")
-                    .unwrap_or(&ranked.camera.provider);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.small(format!("{:.1} km", ranked.distance_km));
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(provider)
-                                .small()
-                                .color(theme::text_muted()),
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format!("{rank:02}  {}", ranked.camera.label))
+                                    .strong(),
+                            )
+                            .truncate(),
                         )
-                        .truncate(),
-                    );
+                        .on_hover_text(&ranked.camera.label);
+                    });
                 });
             });
-            let size = egui::vec2(ui.available_width(), ui.available_width() * 9.0 / 16.0);
-            let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-            ui.painter().rect_filled(rect, 3, egui::Color32::BLACK);
             if let Some(texture) = &player.texture {
+                let size = egui::vec2(ui.available_width(), ui.available_width() * 9.0 / 16.0);
+                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+                ui.painter().rect_filled(rect, 3, egui::Color32::BLACK);
                 let image_rect = egui::Rect::from_center_size(
                     rect.center(),
                     fit_size(texture.size_vec2(), size),
@@ -234,44 +226,56 @@ fn render_feed(
                     egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
                 );
-            } else {
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    if player.error.is_some() {
-                        "Feed unavailable"
-                    } else {
-                        "Connecting…"
-                    },
-                    egui::FontId::proportional(13.0),
-                    theme::text_muted(),
-                );
+                open |= response.on_hover_text("Open camera feed").clicked();
             }
-            open |= response.on_hover_text("Open camera feed").clicked();
             ui.horizontal(|ui| {
-                if let Some(error) = &player.error {
-                    ui.colored_label(theme::hot_color(), "Retrying…")
-                        .on_hover_text(error);
-                } else if let Some(at) = player.last_frame_at {
-                    let age = at.elapsed().as_secs();
-                    ui.colored_label(
-                        theme::camera_color(),
-                        if age < 5 {
-                            "Live".to_owned()
-                        } else {
-                            format!("Frame {age}s ago")
-                        },
-                    );
-                } else {
-                    ui.spinner();
-                    ui.small("Connecting…");
-                }
+                let provider = ranked
+                    .camera
+                    .provider
+                    .strip_prefix("Project Eyes On · ")
+                    .unwrap_or(&ranked.camera.provider);
+                let (status, color) = feed_status(player);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    open |= ui.small_button("Open feed").clicked();
+                    open |= ui
+                        .link(egui::RichText::new("Open").small())
+                        .on_hover_text("Open camera feed")
+                        .clicked();
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.set_min_width(ui.available_width());
+                        let response = ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format!("{status} · {provider}"))
+                                    .small()
+                                    .color(color),
+                            )
+                            .truncate(),
+                        );
+                        if let Some(error) = &player.error {
+                            response.on_hover_text(error);
+                        }
+                    });
                 });
             });
         });
     open
+}
+
+fn feed_status(player: &CameraFeedPlayer) -> (String, egui::Color32) {
+    if player.error.is_some() {
+        ("Retrying…".into(), theme::hot_color())
+    } else if let Some(at) = player.last_frame_at {
+        let age = at.elapsed().as_secs();
+        (
+            if age < 5 {
+                "Live".to_owned()
+            } else {
+                format!("Frame {age}s ago")
+            },
+            theme::camera_color(),
+        )
+    } else {
+        ("Connecting…".into(), theme::text_muted())
+    }
 }
 
 #[cfg(test)]

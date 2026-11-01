@@ -55,6 +55,7 @@ fn event_camera_sidebar_gpu_preview() {
         model.obs_view = obs;
         let mut sidebar = EventCameraSidebar::default();
         prime(&ctx, &mut sidebar, &model);
+        fail_second_feed(&mut sidebar);
         let mut renderer = egui_wgpu::Renderer::new(&device, format, None, 1, false);
         for index in 0..4 {
             let (output, _) = frame(&ctx, &mut sidebar, &mut model, 1280.0);

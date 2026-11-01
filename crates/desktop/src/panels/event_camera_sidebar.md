@@ -25,8 +25,14 @@ space so the map, event labels and chyron lay out beside the feeds.
 - Distances are always labeled; geographic proximity implies no incident link.
 
 ### `render_feed`
-- Shows camera name, provider, distance, letterboxed image and connection/frame
-  age state. Clicking a feed or Open feed uses the existing floating viewer.
+- Uses compact local spacing independent of the dashboard's roomier theme.
+- The two-line sidebar header shows the event title and feed count, omitting
+  redundant sorting text and raw location metadata.
+- Each card places camera name/distance on one row, followed by a letterboxed
+  image and one small status/provider/Open row. Padding is six points.
+- Connecting/failed feeds without a texture collapse to two text rows;
+  retries continue and the image expands automatically when a frame arrives.
+- Clicking an image or Open uses the existing floating viewer.
 - Wrap-free truncated names have full hover text; images preserve aspect ratio.
 
 ## Contracts

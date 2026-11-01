@@ -58,6 +58,16 @@ fn prime(ctx: &egui::Context, sidebar: &mut EventCameraSidebar, model: &AppModel
     }
 }
 
+fn fail_second_feed(sidebar: &mut EventCameraSidebar) {
+    let player = sidebar
+        .players
+        .get_mut(&sidebar.cameras[1].camera.id)
+        .unwrap();
+    player.texture = None;
+    player.last_frame_at = None;
+    player.error = Some("Test camera temporarily unavailable".into());
+}
+
 fn frame(
     ctx: &egui::Context,
     sidebar: &mut EventCameraSidebar,
@@ -219,9 +229,11 @@ fn sidebar_is_a_single_right_column_and_brief_stays_beside_it_in_normal_and_obs_
             crate::theme::install(&ctx);
             let mut model = model();
             model.obs_view = obs;
+            model.events[0].location_name = "SRID=4326;POINT (2.398888 48.8319904)".into();
             model.cameras[0].label = "A very long camera name ".repeat(15);
             let mut sidebar = EventCameraSidebar::default();
             prime(&ctx, &mut sidebar, &model);
+            fail_second_feed(&mut sidebar);
             for _ in 0..3 {
                 let _ = frame(&ctx, &mut sidebar, &mut model, width);
             }
@@ -242,14 +254,24 @@ fn sidebar_is_a_single_right_column_and_brief_stays_beside_it_in_normal_and_obs_
                         || text.starts_with("04  ")
                 })
                 .collect();
-            assert!(
-                cards.len() >= 2,
-                "at least two cards fit; remaining feeds scroll"
+            assert_eq!(
+                cards.len(),
+                MAX_FEEDS,
+                "compact mixed-feed layout exposes all four headings"
             );
             for pair in cards.windows(2) {
                 assert!((pair[0].1.left() - pair[1].1.left()).abs() < 1.0);
                 assert!(pair[0].1.bottom() < pair[1].1.top());
             }
+            assert!(
+                cards[2].1.top() - cards[1].1.top() < 80.0,
+                "an unavailable feed must collapse instead of reserving an empty video rectangle"
+            );
+            assert!(
+                !labels
+                    .iter()
+                    .any(|(text, rect, _)| { rect.left() > map.right() && text.contains("SRID=") })
+            );
             let brief = ctx
                 .memory(|memory| memory.area_rect(egui::Id::new("event-follow-brief")))
                 .unwrap();

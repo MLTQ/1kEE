@@ -8,6 +8,8 @@ and OBS views, using inert test-only camera textures and no source polling.
 - `event_camera_sidebar_gpu_preview` exports two 1280×720 PNGs to
   `target/event-camera-qa` or `ONEKEE_EVENT_CAMERA_PREVIEW`.
 - Uses the same render path and primed players as layout regression tests.
+- Includes a collapsed unavailable feed among three live previews to check
+  compact spacing and retained live image area.
 - Requires a GPU and is ignored by the ordinary desktop test run.
 
 ## Contracts
