@@ -13,3 +13,11 @@ contour width, avoiding user settings writes from legacy slider rounding.
 
 The Globe test also compares sampled interior color against Local within two
 8-bit steps, catching opacity/color-space regressions beyond simple nonzero fill.
+
+`admin_real_cache_renders_in_both_views` reads ONEKEE_ADMIN_REAL_CACHE and renders
+published PBF relation 9407 (Andorra) without modifying that cache. It requires
+complete topology, visible outlines, interior shading, an untouched exterior,
+shade-toggle restoration and Globe backside occlusion. The same PNG environment
+variables export both views; this test is opt-in because real data and a GPU are
+external prerequisites. The Local projection is a fixed geographic QA viewport;
+the outline/fill renderer and Globe callbacks are the production implementations.

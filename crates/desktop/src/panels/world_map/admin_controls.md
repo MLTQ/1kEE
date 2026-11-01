@@ -18,3 +18,6 @@ Load from PBF explicitly chooses source and output, then starts the shared impor
 in a background thread; Open boundary cache accepts the parent or admin_cells
 folder directly. Status includes progress, active external builds and read errors.
 Files refresh automatically in Globe and Local; no companion application is required.
+
+Partial caches show published/total regions and explain country-first publication.
+Coverage comes from the source watcher, including after an interrupted builder.

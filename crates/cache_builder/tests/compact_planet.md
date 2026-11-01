@@ -16,3 +16,6 @@ the complete compact build rather than only the lookup implementation.
   have coarser resolution than their nanosecond representation.
 
 The all-features fixture also emits ten empty admin levels; repeated completed builds can refresh this independent output without changing compact way state.
+
+Both backends also emit identical build-status.json coverage; empty completed
+fixtures report completion accurately. This accounts for the thirteenth output.

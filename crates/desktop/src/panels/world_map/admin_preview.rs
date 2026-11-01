@@ -25,14 +25,14 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
 #[test]
 #[ignore = "requires GPU; optional ONEKEE_ADMIN_PREVIEW PNG"]
 fn admin_gpu_preview_preserves_holes_and_toggle_round_trip() {
-    preview(false);
+    preview(false, false);
 }
 
 #[test]
 #[ignore = "requires GPU; optional ONEKEE_ADMIN_GLOBE_PREVIEW PNG"]
 fn admin_globe_gpu_preserves_holes_and_hides_backside() {
-    let globe = preview(true);
-    let local = preview(false);
+    let globe = preview(true, false);
+    let local = preview(false, false);
     for (a, b) in globe.into_iter().zip(local).take(3) {
         assert!(
             a.abs_diff(b) <= 2,
@@ -41,7 +41,14 @@ fn admin_globe_gpu_preserves_holes_and_hides_backside() {
     }
 }
 
-fn preview(globe: bool) -> [u8; 4] {
+#[test]
+#[ignore = "requires GPU and ONEKEE_ADMIN_REAL_CACHE with published Andorra geometry"]
+fn admin_real_cache_renders_in_both_views() {
+    preview(false, true);
+    preview(true, true);
+}
+
+fn preview(globe: bool, real: bool) -> [u8; 4] {
     let scratch = tests::Scratch::new();
     let dir = scratch.0.join("admin_cells");
     fs::create_dir_all(&dir).unwrap();
@@ -61,16 +68,50 @@ fn preview(globe: bool) -> [u8; 4] {
         ),
     )
     .unwrap();
-    let data = load_from_dirs(std::slice::from_ref(&scratch.0), &[4]);
+    let root = if real {
+        PathBuf::from(std::env::var("ONEKEE_ADMIN_REAL_CACHE").expect("published cache root"))
+    } else {
+        scratch.0.clone()
+    };
+    let level = if real { 2 } else { 4 };
+    let mut data = load_from_dirs(std::slice::from_ref(&root), &[level]);
+    if real {
+        data.regions.retain(|r| r.relation_id == 9407);
+        assert_eq!(data.regions.len(), 1, "published Andorra relation");
+        assert!(
+            data.regions[0].fill.is_some(),
+            "real country has complete topology"
+        );
+        assert!(data.regions[0].rings.iter().map(Vec::len).sum::<usize>() > 100);
+    }
+    let data = Arc::new(data);
+    let focus = if real {
+        GeoPoint {
+            lat: 42.55,
+            lon: 1.58,
+        }
+    } else {
+        GeoPoint { lat: 4.0, lon: 4.0 }
+    };
+    let local_project = |p: GeoPoint| {
+        if real {
+            egui::pos2(
+                390. + (p.lon - focus.lon) * 1500.,
+                400. - (p.lat - focus.lat) * 2000.,
+            )
+        } else {
+            egui::pos2(70. + p.lon * 65., 640. - p.lat * 55.)
+        }
+    };
     let mut model = crate::model::AppModel::new();
     model.set_contour_stroke_width_px(2.0);
-    model.selected_root = Some(scratch.0.clone());
-    model.admin_options.cache_root = Some(scratch.0.clone());
+    model.selected_root = Some(root.clone());
+    model.admin_options.cache_root = Some(root);
     model.show_admin = true;
-    model.globe_view = crate::model::GlobeViewState::from_focus(GeoPoint { lat: 4.0, lon: 4.0 });
+    model.globe_view = crate::model::GlobeViewState::from_focus(focus);
     model.globe_view.local_mode = !globe;
     model.admin_options.enabled = [false; 10];
-    model.admin_options.enabled[2] = true;
+    model.admin_options.enabled[level as usize - 2] = true;
     model.admin_options.opacity = 0.3;
     let adapter = block_on(wgpu::Instance::default().request_adapter(&Default::default()))
         .expect("GPU adapter");
@@ -84,15 +125,14 @@ fn preview(globe: bool) -> [u8; 4] {
         ));
     let layout = super::super::globe_scene::GlobeLayout {
         center: egui::pos2(390., 384.),
-        radius: 330.,
+        radius: if real { 3300. } else { 330. },
         focal_length: 2.2,
-        camera_distance: 1.25,
+        camera_distance: if real { 1.06 } else { 1.25 },
     };
     let batch = super::super::admin_globe::prepare(
-        Arc::new(data),
+        Arc::clone(&data),
         std::array::from_fn(|i| crate::theme::admin_color(i as u8 + 2)),
     );
-    let data = load_from_dirs(std::slice::from_ref(&scratch.0), &[4]);
     let ctx = egui::Context::default();
     crate::theme::install(&ctx);
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024., 768.));
@@ -126,8 +166,8 @@ fn preview(globe: bool) -> [u8; 4] {
     ] {
         if back {
             model.globe_view = crate::model::GlobeViewState::from_focus(GeoPoint {
-                lat: -4.0,
-                lon: -176.0,
+                lat: -focus.lat,
+                lon: focus.lon - 180.0,
             });
         }
         model.admin_options.shade = shade;
@@ -152,7 +192,15 @@ fn preview(globe: bool) -> [u8; 4] {
                     painter.text(
                         egui::pos2(40., 60.),
                         egui::Align2::LEFT_TOP,
-                        "Administrative boundaries · synthetic QA geometry",
+                        if real {
+                            if globe {
+                                "Andorra · real PBF boundaries · Globe"
+                            } else {
+                                "Andorra · real PBF boundaries · Local"
+                            }
+                        } else {
+                            "Administrative boundaries · synthetic QA geometry"
+                        },
                         egui::FontId::proportional(18.),
                         egui::Color32::WHITE,
                     );
@@ -166,9 +214,14 @@ fn preview(globe: bool) -> [u8; 4] {
                             0.3,
                         );
                     } else {
-                        super::super::admin_render::paint(&painter, &data, shade, 0.3, 0., |p| {
-                            egui::pos2(70. + p.lon * 65., 640. - p.lat * 55.)
-                        });
+                        super::super::admin_render::paint(
+                            &painter,
+                            &data,
+                            shade,
+                            0.3,
+                            focus.lon,
+                            local_project,
+                        );
                     }
                 },
             );
@@ -239,16 +292,36 @@ fn preview(globe: bool) -> [u8; 4] {
     }
     let pixel =
         |i: usize, x: usize, y: usize| &pictures[i][(y * 1024 + x) * 4..(y * 1024 + x + 1) * 4];
+    let (inside, outside) = if real {
+        (
+            GeoPoint {
+                lat: 42.55,
+                lon: 1.58,
+            },
+            GeoPoint {
+                lat: 42.70,
+                lon: 1.58,
+            },
+        )
+    } else {
+        (
+            GeoPoint { lat: 1., lon: 1. },
+            GeoPoint { lat: 2.5, lon: 2.5 },
+        )
+    };
     let (interior, hole) = if globe {
-        let front = crate::model::GlobeViewState::from_focus(GeoPoint { lat: 4.0, lon: 4.0 });
+        let front = crate::model::GlobeViewState::from_focus(focus);
         let screen = |lat, lon| {
             super::super::globe_scene::project_geo(&layout, &front, GeoPoint { lat, lon }, 0.)
                 .unwrap()
                 .pos
         };
-        (screen(1., 1.), screen(2.5, 2.5))
+        (
+            screen(inside.lat, inside.lon),
+            screen(outside.lat, outside.lon),
+        )
     } else {
-        (egui::pos2(135., 585.), egui::pos2(232., 502.))
+        (local_project(inside), local_project(outside))
     };
     assert_ne!(
         pixel(0, interior.x as usize, interior.y as usize),
@@ -281,6 +354,15 @@ fn preview(globe: bool) -> [u8; 4] {
         "ONEKEE_ADMIN_PREVIEW"
     }) {
         image::save_buffer(path, &pictures[1], 1024, 768, image::ColorType::Rgba8).unwrap();
+    }
+    if real {
+        // Check borders independently of the fill comparison and UI text.
+        let background = pixel(0, 10, 400);
+        let outline_pixels = (100..700)
+            .flat_map(|y| (20..760).map(move |x| (x, y)))
+            .filter(|&(x, y)| pixel(0, x, y) != background)
+            .count();
+        assert!(outline_pixels > 100, "real boundary outline is visible");
     }
     pixel(1, interior.x as usize, interior.y as usize)
         .try_into()

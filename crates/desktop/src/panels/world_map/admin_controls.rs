@@ -23,6 +23,7 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
         let dirs = super::admin_source::directories(model);
         if dirs.is_empty() { ui.small("Load a PBF or open a boundary cache to get started."); return; }
         if let Some(status) = super::admin_source::poll(&dirs) {
+            if let Some(coverage) = &status.coverage { ui.small(coverage); }
             if status.running { ui.small("Extraction running. Completed boundary files will load automatically."); }
             if let Some(error) = &status.error { ui.small(error); }
         }

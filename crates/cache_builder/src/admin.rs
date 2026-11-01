@@ -3,6 +3,10 @@ use crate::geojson::write_admin_level_file;
 use crate::node_store::NodeStore;
 use crate::roads::{RoadBuildProgress, open_planet_at};
 use crate::util::{GeoBounds, GeoPoint};
+#[path = "admin_assembly.rs"]
+mod assembly;
+#[path = "admin_checkpoint.rs"]
+mod checkpoint;
 #[path = "admin_geometry.rs"]
 mod geometry;
 pub use geometry::AdminRegion;
@@ -302,18 +306,20 @@ pub fn build_planet(
     }
     let mut session = lookup.session();
     lookup.validate_source()?;
-    let count = stitch_and_write(
+    let count = assembly::run(
         &command.out_dir,
+        &scratch,
         &store,
-        true,
         &mut |ids| {
-            session.lookup_many(ids).map(|points| {
-                points
-                    .into_iter()
-                    .map(|p| p.map(|(lat, lon)| GeoPoint { lat, lon }))
-                    .collect()
-            })
+            lookup.validate_source()?;
+            let points = session.lookup_many(ids)?;
+            lookup.validate_source()?;
+            Ok(points
+                .into_iter()
+                .map(|p| p.map(|(lat, lon)| GeoPoint { lat, lon }))
+                .collect())
         },
+        &|| lookup.validate_source(),
         progress,
     )?;
     lookup.validate_source()?;

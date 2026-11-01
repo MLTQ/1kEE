@@ -56,3 +56,7 @@ checkpoints for changed PBF identity or importer version. `admin_way_refs` retai
 ordered node IDs, allowing exact topology and explicit missing-coordinate gaps.
 
 `optional_points_for_refs` retains missing-node positions with the same batched SQL lookup used by roads.
+
+Planet assembly reads lightweight per-level relation lists and indexed membership
+on demand instead of collecting every member way in RAM. A covering relation/way
+index is created once; source identity is exposed to bind assembly checkpoints.

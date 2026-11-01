@@ -87,7 +87,11 @@ fn compact_build_matches_flat_and_preserves_legacy_state() {
             );
         }
         let expected = files(&root.join("flat/out"));
-        assert_eq!(expected.len(), 12); // One road, one building and ten empty admin levels.
+        assert_eq!(expected.len(), 13); // Road, building, ten empty levels and coverage status.
+        let coverage: serde_json::Value =
+            serde_json::from_slice(&expected[&PathBuf::from("admin_cells/build-status.json")])
+                .unwrap();
+        assert_eq!(coverage["complete"], true);
         assert_eq!(files(&root.join("indexed-pbf/out")), expected);
         for file in [
             "planet_nodes.bin",
