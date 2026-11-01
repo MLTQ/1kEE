@@ -46,6 +46,7 @@ pub(super) fn draw(painter: &egui::Painter, layout: &GlobeLayout, model: &AppMod
         &batch,
         model.admin_options.shade,
         model.admin_options.opacity,
+        model.admin_options.layer_opacity,
     );
 }
 pub(super) fn paint(
@@ -55,14 +56,19 @@ pub(super) fn paint(
     batch: &Batch,
     shade: bool,
     opacity: f32,
+    layer_opacity: f32,
 ) {
+    let layer_opacity = layer_opacity.clamp(0.0, 1.0);
+    if layer_opacity == 0.0 {
+        return;
+    }
     if shade {
         painter.add(admin_globe_pass::Callback::callback(
             batch.version,
             batch.triangles.clone(),
             layout,
             view,
-            opacity,
+            opacity * layer_opacity,
             painter.ctx().pixels_per_point(),
             painter.clip_rect(),
         ));
@@ -75,7 +81,7 @@ pub(super) fn paint(
             layout,
             view,
             0.0,
-            1.0,
+            layer_opacity,
             1.2,
             painter.ctx().pixels_per_point(),
         )

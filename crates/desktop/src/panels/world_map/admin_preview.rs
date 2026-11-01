@@ -157,20 +157,28 @@ fn preview(globe: bool, real: bool) -> [u8; 4] {
     });
     let target_view = target.create_view(&Default::default());
     let mut pictures = Vec::new();
-    for (shade, back) in [
-        (false, false),
-        (true, false),
-        (false, false),
-        (false, true),
-        (true, true),
+    for (shade, back, opacity) in [
+        (false, false, 1.0),
+        (true, false, 1.0),
+        (false, false, 1.0),
+        (false, true, 1.0),
+        (true, true, 1.0),
+        (true, false, 0.5),
+        (true, false, 0.0),
+        (false, false, 0.0),
+        (false, false, 0.5),
+        (true, false, 1.0),
     ] {
-        if back {
-            model.globe_view = crate::model::GlobeViewState::from_focus(GeoPoint {
+        model.globe_view = crate::model::GlobeViewState::from_focus(if back {
+            GeoPoint {
                 lat: -focus.lat,
                 lon: focus.lon - 180.0,
-            });
-        }
+            }
+        } else {
+            focus
+        });
         model.admin_options.shade = shade;
+        model.admin_options.layer_opacity = opacity;
         for frame in 0..3 {
             let output = ctx.run(
                 egui::RawInput {
@@ -212,6 +220,7 @@ fn preview(globe: bool, real: bool) -> [u8; 4] {
                             &batch,
                             shade,
                             0.3,
+                            model.admin_options.layer_opacity,
                         );
                     } else {
                         super::super::admin_render::paint(
@@ -219,6 +228,7 @@ fn preview(globe: bool, real: bool) -> [u8; 4] {
                             &data,
                             shade,
                             0.3,
+                            model.admin_options.layer_opacity,
                             focus.lon,
                             local_project,
                         );
@@ -347,7 +357,41 @@ fn preview(globe: bool, real: bool) -> [u8; 4] {
             &pictures[0][y * 4096..y * 4096 + 780 * 4],
             &pictures[2][y * 4096..y * 4096 + 780 * 4]
         );
+        assert_eq!(
+            &pictures[1][y * 4096..y * 4096 + 780 * 4],
+            &pictures[9][y * 4096..y * 4096 + 780 * 4],
+            "restoring opacity restores the exact shaded map"
+        );
+        assert_eq!(
+            &pictures[6][y * 4096..y * 4096 + 780 * 4],
+            &pictures[7][y * 4096..y * 4096 + 780 * 4],
+            "zero opacity hides shading"
+        );
     }
+    let background = pixel(6, 10, 400);
+    let difference = |p: &[u8]| {
+        p.iter()
+            .zip(background)
+            .take(3)
+            .map(|(&a, &b)| u64::from(a.abs_diff(b)))
+            .sum::<u64>()
+    };
+    let outline_energy = |i| {
+        (100..700)
+            .flat_map(|y| (20..760).map(move |x| (x, y)))
+            .map(|(x, y)| difference(pixel(i, x, y)))
+            .sum::<u64>()
+    };
+    assert_eq!(outline_energy(6), 0, "zero opacity hides every boundary");
+    assert!(
+        outline_energy(8) > 0 && outline_energy(8) < outline_energy(0),
+        "half opacity visibly fades outlines"
+    );
+    let interior_energy = |i| difference(pixel(i, interior.x as usize, interior.y as usize));
+    assert!(
+        interior_energy(5) > 0 && interior_energy(5) < interior_energy(1),
+        "half opacity visibly fades shading"
+    );
     if let Ok(path) = std::env::var(if globe {
         "ONEKEE_ADMIN_GLOBE_PREVIEW"
     } else {

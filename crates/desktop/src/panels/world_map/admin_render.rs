@@ -34,6 +34,7 @@ pub(super) fn draw(
         &data,
         model.admin_options.shade,
         model.admin_options.opacity,
+        model.admin_options.layer_opacity,
         center.lon,
         |point| {
             let (x, y, _) = params.project_logical(point, 0.0);
@@ -60,9 +61,14 @@ pub(super) fn paint(
     data: &admin_layer::AdminData,
     shade: bool,
     opacity: f32,
+    layer_opacity: f32,
     focus_lon: f32,
     project: impl Fn(GeoPoint) -> Pos2,
 ) {
+    let layer_opacity = layer_opacity.clamp(0.0, 1.0);
+    if layer_opacity == 0.0 {
+        return;
+    }
     let clip = painter.clip_rect();
     let visible: Vec<_> = data
         .regions
@@ -96,7 +102,7 @@ pub(super) fn paint(
                     })
                 })
                 .collect();
-            let color = fill_color(region.relation_id, region.level, opacity);
+            let color = fill_color(region.relation_id, region.level, opacity * layer_opacity);
             let mut mesh = egui::Mesh::default();
             for indices in fill.indices.chunks_exact(3) {
                 let triangle = indices
@@ -123,7 +129,7 @@ pub(super) fn paint(
     for level in (2..=11).rev() {
         let stroke = Stroke::new(
             crate::theme::admin_stroke_width(level).max(0.8),
-            crate::theme::admin_color(level),
+            crate::theme::admin_color(level).gamma_multiply(layer_opacity),
         );
         for &(region, shift) in &visible {
             if region.level != level {

@@ -5,6 +5,9 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
         return;
     }
     ui.indent("admin-options", |ui| {
+        ui.label("Boundary opacity");
+        opacity_slider(ui, &mut model.admin_options.layer_opacity, 0.0..=100.0)
+            .on_hover_text("Fade boundary lines and region shading together in Globe and Local.");
         ui.small("Boundary levels").on_hover_text("OSM level numbers are shown below. Division names and level assignments vary by country.");
         for (index, (level, label)) in LEVELS.iter().enumerate() {
             ui.checkbox(&mut model.admin_options.enabled[index], format!("{label} ({level})"));
@@ -12,9 +15,8 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
         ui.checkbox(&mut model.admin_options.shade, "Shade regions")
             .on_hover_text("Shade complete regions, preserving holes and islands. Older line-only caches need rebuilding for shading.");
         if model.admin_options.shade {
-            ui.label("Opacity");
-            ui.add(egui::Slider::new(&mut model.admin_options.opacity, 0.03..=0.5)
-                .custom_formatter(|v, _| format!("{:.0}%", v*100.0)));
+            ui.label("Shading opacity");
+            opacity_slider(ui, &mut model.admin_options.opacity, 3.0..=50.0);
         }
         if model.active_body != ActiveBody::Earth {
             ui.small("Boundaries are available on Earth in Globe and Local.");
@@ -44,6 +46,20 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
         }
         if let Some(warning) = data.warnings.first() { ui.small(warning); }
     });
+}
+
+fn opacity_slider(
+    ui: &mut egui::Ui,
+    opacity: &mut f32,
+    percent_range: std::ops::RangeInclusive<f32>,
+) -> egui::Response {
+    let mut percent = *opacity * 100.0;
+    let response = ui.add(egui::Slider::new(&mut percent, percent_range)
+        .step_by(1.0).suffix("%").max_decimals(0));
+    if response.changed() {
+        *opacity = percent / 100.0;
+    }
+    response
 }
 
 fn source_controls(ui: &mut egui::Ui, model: &mut AppModel) {

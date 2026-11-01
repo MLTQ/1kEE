@@ -12,7 +12,12 @@ status beneath the master Admin Boundaries toggle in the layer drawer.
   partial coverage, older line-only geometry and parse errors remain observable.
 - Parent remains session-only, matching other OSM overlays. No implicit PBF scan.
 
-Opacity uses a separate label so the percentage slider fits the 230-point drawer.
+Boundary opacity is always visible at the top of the enabled section, before the
+level list. Its 0–100% slider fades outlines and optional shading together in both
+views. Shading opacity remains separately available beneath Shade regions.
+Both use separate labels so percentage sliders fit the 230-point drawer.
+The shared slider edits native percentage values in one-percent steps, so typing
+50% has the same effect as dragging to 50%; the model stores normalized values.
 
 Load from PBF explicitly chooses source and output, then starts the shared importer
 in a background thread; Open boundary cache accepts the parent or admin_cells

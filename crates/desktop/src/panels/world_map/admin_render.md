@@ -14,6 +14,8 @@ Local Earth view using the same ground-plane projection as terrain overlays.
 - Fill precedes every border; countries draw last. Fill colors vary deterministically
   by relation ID. Opacity/level changes affect the live view without retessellation.
 - Fill requires a loader-prepared mesh; incomplete/legacy boundaries stay outlines.
+- Master layer opacity fades outlines and multiplies shading strength at paint
+  time. At zero, neither outlines nor fills are submitted; cached data is retained.
 
 Source selection and automatic refresh are shared with Globe via
 `admin_layer::get_for`; Local retains its ground-plane projection and clipping.

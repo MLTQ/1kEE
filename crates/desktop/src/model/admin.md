@@ -9,6 +9,9 @@ Own session-only admin level, shading and opacity preferences. Visibility remain
 - Labels are examples: division names and level assignments vary by country.
 - Shading defaults off with 16% opacity when enabled. Data availability does not
   silently change selections. An empty selection requests no cache work.
+- `layer_opacity` defaults to 100% and fades borders and shading together in
+  both views. The existing `opacity` is the separate shading strength; its
+  product with layer opacity controls the fill without changing cached geometry.
 
 `cache_root` is a session-only explicit output/cache-folder override. Both map
 views and the source controls resolve it identically; returning to the data folder

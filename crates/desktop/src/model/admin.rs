@@ -16,6 +16,7 @@ pub struct AdminOptions {
     pub cache_root: Option<std::path::PathBuf>,
     pub enabled: [bool; 10],
     pub shade: bool,
+    pub layer_opacity: f32,
     pub opacity: f32,
 }
 impl Default for AdminOptions {
@@ -26,6 +27,7 @@ impl Default for AdminOptions {
                 true, false, true, false, true, false, true, false, false, false,
             ],
             shade: false,
+            layer_opacity: 1.0,
             opacity: 0.16,
         }
     }

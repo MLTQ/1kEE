@@ -13,6 +13,8 @@ contour width, avoiding user settings writes from legacy slider rounding.
 
 The Globe test also compares sampled interior color against Local within two
 8-bit steps, catching opacity/color-space regressions beyond simple nonzero fill.
+Both paths also verify that master opacity fades outlines and fills at 50%,
+removes all geometry at 0%, and restores the exact original frame at 100%.
 
 `admin_real_cache_renders_in_both_views` reads ONEKEE_ADMIN_REAL_CACHE and renders
 published PBF relation 9407 (Andorra) without modifying that cache. It requires
