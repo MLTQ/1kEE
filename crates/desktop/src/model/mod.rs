@@ -929,6 +929,11 @@ impl AppModel {
         self.nearby_camera_snapshot(radius_km).as_ref().clone()
     }
 
+    /// Changes whenever camera registry content or connection metadata changes.
+    pub fn camera_registry_revision(&self) -> u64 {
+        self.camera_registry_revision
+    }
+
     /// Returns a shared, sorted nearby-camera snapshot for the current event.
     /// Globe and local scenes reuse this allocation across frames until either
     /// the selected event, radius, or camera registry content changes.

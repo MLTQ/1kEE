@@ -23,3 +23,6 @@ exposes background ticking to the app; `map_rail` owns compact map controls.
 
 `event_chyron` owns the five-row Follow Events crawl shared by the map overlay
 and the Brief's reserved bottom space.
+
+`EventCameraSidebar` owns the right-hand nearest-feed column during Follow
+Events. The app renders it before the Brief and central map, including OBS view.

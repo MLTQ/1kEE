@@ -1,6 +1,7 @@
 mod app;
 mod arcgis_source;
 mod camera_directory_pipeline;
+mod camera_feed_player;
 mod camera_feed_viewer;
 mod camera_registry;
 mod camera_scrape_catalog;

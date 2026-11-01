@@ -25,6 +25,8 @@ Renders the operator-facing Brief window for the currently selected live event. 
   window ID preserves ordinary brief placement across the title change.
 
 Event-follow mode uses a separate, narrower right-anchored window placement with vertical scrolling to keep the map center clear. Ordinary brief placement is preserved separately. The window can be closed during an orbit; the next new target reopens it.
+Its anchor is constrained to the remaining map rectangle after side panels,
+keeping the Brief beside the nearest-camera column instead of covering feeds.
 
 During event follow, the brief displays “Priority rank · N of M” for the current
 record's severity rank in the entire live pool. This is independent of the

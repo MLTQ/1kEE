@@ -31,6 +31,12 @@ UI-thread coordinator for `AppModel`.
   domain model while rendering its egui window after the central map.
 - **Interacts with**: `CameraFeedViewer` and camera window state in `AppModel`.
 
+### Follow Events camera sidebar
+- Owns `EventCameraSidebar` independently of the floating camera viewer.
+- Renders its right panel before the Brief and central map, including OBS view,
+  so the map and anchored Brief respect the feed column's reserved width.
+- Playback stops and textures release when following ends.
+
 ### DeFlock source lifecycle
 - **Does**: Ticks the cache-first public ALPR adapter and signals its workers on
   shutdown alongside other source adapters.

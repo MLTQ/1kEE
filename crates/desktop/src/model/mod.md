@@ -63,6 +63,9 @@ source pollers.
 - **Does**: Returns cameras within a radius of the selected event, sorted by
   haversine distance; map call sites share an immutable cached snapshot.
 - **Interacts with**: camera sidebar and globe/local terrain marker rendering.
+- `camera_registry_revision()` exposes the invalidation counter so the Follow
+  Events feed sidebar caches its own global nearest-four selection without
+  evicting the map's 250 km snapshot.
 
 ### DeFlock ALPR snapshot fields
 - **Does**: Hold an immutable public OpenStreetMap ALPR snapshot, visibility

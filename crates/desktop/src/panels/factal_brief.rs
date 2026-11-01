@@ -24,6 +24,7 @@ pub fn render_factal_brief(ctx: &egui::Context, model: &mut AppModel) {
         .frame(egui::Frame::window(&ctx.style()));
     if model.event_follow.enabled() {
         window = window.id(egui::Id::new("event-follow-brief"))
+            .constrain_to(ctx.available_rect())
             .default_width(360.0)
             .default_height(380.0)
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-20.0, 64.0))

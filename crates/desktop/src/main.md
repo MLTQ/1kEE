@@ -28,8 +28,8 @@ application with the map-oriented window configuration.
 
 ### `camera_feed_viewer`
 
-- **Does**: Declares the non-blocking snapshot/MJPEG reader and floating egui
-  live-feed window.
+- **Does**: Declares the floating egui live-feed window; `camera_feed_player`
+  shares its non-blocking snapshot/MJPEG playback with the event camera sidebar.
 - **Interacts with**: `app.rs` and camera selection in `model/mod.rs`.
 
 ### `main`

@@ -34,6 +34,7 @@ pub fn request_repaint() {
 pub struct DashboardApp {
     model: AppModel,
     camera_feed_viewer: CameraFeedViewer,
+    event_camera_sidebar: panels::EventCameraSidebar,
     last_theme: theme::MapTheme,
     _puffin_server: Option<puffin_http::Server>,
     /// Gruve mesh bridge: serves the companion web view + announces to the local
@@ -82,6 +83,7 @@ impl DashboardApp {
             last_theme: model.map_theme,
             model,
             camera_feed_viewer: CameraFeedViewer::default(),
+            event_camera_sidebar: panels::EventCameraSidebar::default(),
             _puffin_server: puffin_server,
             gruve,
         }
@@ -162,7 +164,7 @@ impl eframe::App for DashboardApp {
         // must keep ticking even when no API keys are present.
         ctx.request_repaint_after(Duration::from_secs(1));
 
-        panels::render_factal_brief(ctx, &mut self.model);
+        self.event_camera_sidebar.render(ctx, &mut self.model);
 
         // Preserve the panel flags while hiding operator chrome for capture.
         if !self.model.obs_view {
@@ -171,6 +173,8 @@ impl eframe::App for DashboardApp {
                 panels::render_event_list(ctx, &mut self.model);
             }
         }
+
+        panels::render_factal_brief(ctx, &mut self.model);
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::canvas_background()))

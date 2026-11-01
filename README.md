@@ -24,6 +24,10 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
   non-blocking egui live-feed window for snapshots and MJPEG
   (`camera_registry.rs`, `camera_directory_pipeline.rs`,
   `camera_feed_viewer.rs`, `camera_*_catalog.rs`).
+- **Follow Events cameras** — automatically opens a right sidebar with up to
+  four nearest camera feeds, ordered by distance to the focused event. The
+  scrollable column follows the tour, supports OBS view, and opens individual
+  feeds in the floating camera window when clicked.
 - **User geodata** — ArcGIS FeatureServer scraping (`arcgis_source.rs`), plus GeoJSON
   and KML/KMZ layer import (`model/geojson_layer.rs`, `model/kml_layer.rs`).
 - **OSM ingest** — planet PBF / Overpass import pipeline producing cached feature cells

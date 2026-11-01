@@ -2,37 +2,18 @@
 
 ## Purpose
 
-Owns the floating egui live-camera window and its bounded background media
-reader. Network reads and image decoding stay off the UI thread; the panel only
-uploads the most recent decoded frame to an egui texture.
+Owns the floating egui live-camera window. Shared background reading, decoding,
+texture uploads and cancellation live in `camera_feed_player.rs` so the Follow
+Events sidebar uses the same playback path.
 
 ## Components
 
 ### `CameraFeedViewer`
 
-- **Does**: Tracks the selected camera worker, current texture, connection
-  status, last-frame time, and window lifecycle.
+- **Does**: Tracks the window lifecycle and delegates playback to one
+  `CameraFeedPlayer`.
 - **Interacts with**: `DashboardApp` in `app.rs`, camera selection/window state
   in `model/mod.rs`, and `CameraFeed` metadata.
-
-### Snapshot reader
-
-- **Does**: Re-fetches JPEG/PNG image endpoints at a bounded interval with
-  no-cache headers, fresh `COUNTER` placeholders, and a 12 MB response limit.
-- **Rationale**: Many public webcams expose a changing still-image URL rather
-  than a persistent video protocol.
-
-### MJPEG reader
-
-- **Does**: Reads multipart responses incrementally and extracts JPEG frames
-  using start/end markers without retaining an unbounded response body.
-- **Rationale**: egui displays decoded textures, so MJPEG is normalized to the
-  same latest-frame path as snapshots.
-
-### `take_next_jpeg` / `fit_size`
-
-- **Does**: Extracts complete JPEGs from a streaming buffer and fits textures
-  inside the window without distortion or upscaling.
 
 ## Contracts
 
@@ -44,7 +25,7 @@ uploads the most recent decoded frame to an egui texture.
 
 ## Notes
 
-- The worker starts only after explicit operator interaction.
+- The floating player starts only after a camera pip or Open Feed action.
 - Closing or changing the selected feed signals the old worker to stop; a
   request already blocked in the HTTP client may take up to its timeout to exit.
 - Video containers such as HLS/MP4 are reported as unsupported until a video

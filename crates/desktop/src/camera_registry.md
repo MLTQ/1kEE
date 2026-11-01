@@ -60,7 +60,8 @@ Runs the live camera registry polling loop for the desktop app. This module owns
   Project Eyes On opt-in, the registry stays inactive and contains no cameras.
 - Registry adapters remain metadata-oriented. The Project Eyes On adapter adds
   a paced header/reachability probe; actual snapshot/MJPEG reading starts
-  only after a user opens a pip in `camera_feed_viewer.rs`.
+  after a user opens a pip in `camera_feed_viewer.rs` or enables Follow Events,
+  whose sidebar plays up to four nearest candidate feeds.
 
 Saved endpoint reuse has its own progress label. Successful empty results now
 replace the previous registry, so forgetting the last endpoint clears old markers
