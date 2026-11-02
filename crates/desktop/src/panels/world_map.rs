@@ -42,6 +42,8 @@ mod stellar_layer;
 mod terrain_field;
 mod terrain_raster;
 mod layer_snapshot;
+mod swot_layer;
+pub(crate) use swot_layer::controls as swot_controls;
 mod line_upload;
 mod tree_layer;
 mod water_layer;

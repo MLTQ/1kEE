@@ -5,6 +5,9 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 
 ## Components
 
+Terrain cache reset also clears optional SWOT texture snapshots/projected mesh.
+Its single-flight epochs reject results from workers started before the reset.
+
 ### Complete Earth local cores
 - Earth local reads use `contour_selection::ReadSelection::EarthCore` at every
   tier. All contours survive within the owned core, including short fragments

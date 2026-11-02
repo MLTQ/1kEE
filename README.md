@@ -44,6 +44,9 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
 - **Washington LiDAR** — optional DNR bare-earth and top-surface hillshade in
   Local Earth view, with portal access for survey metadata and downloads
   ([usage](docs/washington-lidar.md)).
+- **SWOT marine gravity** — optional offline Scripps SWOT_06 vertical gravity
+  gradient in Globe and Local Earth views, revealing seafloor structure alongside
+  bathymetry ([data-drive preparation and sources](docs/swot-marine-gravity.md)).
 - **Multiplayer** — a companion web view that mirrors the analyst's live view onto a
   local mesh (see below).
 

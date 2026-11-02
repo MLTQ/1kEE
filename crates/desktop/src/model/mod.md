@@ -121,6 +121,9 @@ Public pipelines use `show_pipeline`, `pipeline_filters` (source/product/status)
 
 ### Startup layer visibility
 
+`show_swot_gravity` is an initially hidden, session-only Earth overlay. It
+displays the SWOT_06 vertical gravity gradient independently of bathymetry.
+
 `hillshade_source` is a session-only USGS/Washington bare-earth/top-surface
 selection, initially USGS. The independent hillshade toggle remains off.
 

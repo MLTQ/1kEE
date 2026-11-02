@@ -1,5 +1,11 @@
 # mod.rs
 
+SWOT marine gravity draws only on Earth, above bathymetry and below coastline,
+terrain and operational overlays. Its image and projected mesh are cached by
+source/view; the optional layer performs no drawing-thread disk access.
+`project_surface` exposes the existing unit-sphere projection to imagery so
+texture mesh rebuilds avoid synthetic per-vertex terrain sampling.
+
 ## Purpose
 
 Owns the globe-mode scene composition: terrain and overlay passes, live markers,

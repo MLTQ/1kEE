@@ -20,6 +20,15 @@ mod projection;
 
 pub use projection::project_geo;
 
+/// Unit-sphere imagery avoids synthetic terrain sampling at every mesh vertex.
+pub(super) fn project_surface(
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    point: GeoPoint,
+) -> Option<ProjectedPoint> {
+    projection::project_geo_unit_surface(layout, view, point)
+}
+
 pub struct GlobeScene {
     pub event_markers: Vec<MapMarker>,
     pub camera_markers: Vec<MapMarker>,
@@ -161,6 +170,9 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 selected_root,
                 contour_stroke_width_px,
             );
+        }
+        if model.show_swot_gravity {
+            super::swot_layer::draw_globe(painter, &layout, &model.globe_view, selected_root);
         }
         if model.show_coastlines {
             geography::draw_global_coastlines(

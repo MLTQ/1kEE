@@ -124,6 +124,7 @@ pub fn blast_tile_caches() {
         }
     }
     gebco_depth_fill::clear();
+    super::swot_layer::clear();
     super::local_terrain_scene::hillshade_layer::clear();
     super::local_contour_pass::clear_instances();
     // Road, water and building geometry bakes one terrain elevation per vertex

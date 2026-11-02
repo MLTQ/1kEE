@@ -1,5 +1,9 @@
 # mod.rs
 
+The independent SWOT gravity overlay draws on the Earth sea-level plane before
+contours. It requests a padded, geographically aligned native-grid window via
+`swot_layer`; it does not change elevations, occlusion or terrain streaming.
+
 ## Purpose
 Owns the high-zoom local terrain scene: camera layout, contour/overlay composition, terrain projection, and the scene-level tests that validate the local map stack against real contour cache data. It is the handoff target when the world map leaves the globe view.
 

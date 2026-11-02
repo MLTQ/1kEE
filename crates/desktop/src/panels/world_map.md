@@ -1,5 +1,9 @@
 # world_map.rs
 
+The optional `swot_layer` reads prepared SWOT_06 marine gravity data off the UI
+thread and renders it in both Earth scenes. Its controls are re-exported for the
+Layers drawer; it is independent of the bathymetry and terrain streaming toggles.
+
 ## Purpose
 Implements the main geographic canvas for the demo. The current version wraps an interactive 3D globe scene with drag orbit, wheel zoom, contour-heavy overlays, and preserved event/camera click flow at the panel boundary.
 

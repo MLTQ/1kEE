@@ -80,6 +80,7 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                 }
                 ui.checkbox(&mut model.show_coastlines, "Coastline");
                 ui.checkbox(&mut model.show_bathymetry, "Bathymetry");
+                world_map::swot_controls(ui, model);
                 ui.checkbox(&mut model.show_graticule, "Graticule");
                 ui.checkbox(&mut model.show_reticle, "Reticle");
                 {

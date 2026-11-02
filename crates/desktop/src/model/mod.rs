@@ -81,6 +81,8 @@ pub struct AppModel {
     pub show_water: bool,
     pub show_beam: bool,
     pub show_bathymetry: bool,
+    /// Optional SWOT marine vertical gravity gradient, independent of depth.
+    pub show_swot_gravity: bool,
     /// Optional server-rendered hillshade projected into the local map.
     pub show_hillshade: bool,
     pub hillshade_source: crate::hillshade_source::Source,
@@ -291,6 +293,7 @@ impl AppModel {
             hillshade_source: crate::hillshade_source::Source::default(),
             show_beam: false,
             show_bathymetry: true,
+            show_swot_gravity: false,
             show_contours: true,
             contour_occlusion: true,
             legacy_contour_stroke_scale: app_settings.contour_stroke_scale,

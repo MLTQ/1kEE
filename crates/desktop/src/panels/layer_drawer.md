@@ -8,6 +8,12 @@ optional external overlays without owning their data pipelines.
 
 ## Components
 
+### SWOT marine gravity
+- Delegates an independent Earth-only toggle, load/error status and fixed
+  Eötvös color legend to `world_map::swot_controls`.
+- Describes gravity variation separately from bathymetric depth. No file reads
+  or downloads run inside the drawer.
+
 ### `render_layer_drawer`
 - **Does**: Draws layer controls, source-specific enablement, and imported
   layer/ArcGIS source management when the drawer is open.
