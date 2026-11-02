@@ -5,6 +5,8 @@ terrain and operational overlays. Its image and projected mesh are cached by
 source/view; the optional layer performs no drawing-thread disk access.
 `project_surface` exposes the existing unit-sphere projection to imagery so
 texture mesh rebuilds avoid synthetic per-vertex terrain sampling.
+SWOT receives the actual canvas rectangle for zoom-dependent native viewport
+reads; the overview remains visible while the background window is prepared.
 
 ## Purpose
 

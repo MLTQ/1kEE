@@ -2,6 +2,7 @@
 mod globe;
 mod grid;
 mod local;
+mod viewport;
 
 use super::layer_snapshot::Snapshot;
 use crate::model::{ActiveBody, AppModel};
@@ -15,44 +16,77 @@ pub(super) use local::draw as draw_local;
 struct Request {
     root: Option<PathBuf>,
     region: Option<grid::Region>,
+    max_edge: usize,
+}
+
+struct LoadedImage {
+    texture: egui::TextureHandle,
+    region: Option<grid::Region>,
+}
+
+#[derive(Clone, Copy)]
+enum Scene {
+    Overview,
+    GlobeDetail,
+    Local,
 }
 
 #[derive(Default)]
 struct Cache {
-    image: Snapshot<Request, Result<egui::TextureHandle, String>>,
+    image: Snapshot<Request, Result<LoadedImage, String>>,
     status: String,
 }
 
 static GLOBE: OnceLock<Mutex<Cache>> = OnceLock::new();
 static LOCAL: OnceLock<Mutex<Cache>> = OnceLock::new();
+static DETAIL: OnceLock<Mutex<Cache>> = OnceLock::new();
 
-fn cache(local: bool) -> &'static Mutex<Cache> {
-    if local { &LOCAL } else { &GLOBE }.get_or_init(Default::default)
+fn cache(scene: Scene) -> &'static Mutex<Cache> {
+    match scene {
+        Scene::Overview => &GLOBE,
+        Scene::GlobeDetail => &DETAIL,
+        Scene::Local => &LOCAL,
+    }
+    .get_or_init(Default::default)
 }
 
 fn texture(
     ctx: &egui::Context,
     root: Option<&Path>,
     region: Option<grid::Region>,
-) -> Option<Arc<Result<egui::TextureHandle, String>>> {
+    scene: Scene,
+) -> Option<Arc<Result<LoadedImage, String>>> {
     let request = Request {
         root: root.map(Path::to_path_buf),
         region,
+        max_edge: ctx.input(|i| i.max_texture_side).clamp(
+            1,
+            match scene {
+                Scene::Local => 1024,
+                _ => 4096,
+            },
+        ),
     };
     let wake = ctx.clone();
-    let mut cache = cache(region.is_some()).lock().ok()?;
+    let mut cache = cache(scene).lock().ok()?;
     let image = cache.image.get(
         request,
         "swot-vgg-image",
-        |a, b| a == b,
+        // Keep a correctly georeferenced prior window while the next loads.
+        // Never retain imagery from a different data root.
+        |a, b| a.root == b.root,
         move |request| {
             let result = (|| {
                 let derived = crate::terrain_assets::find_derived_root(request.root.as_deref())
                     .ok_or_else(|| {
                         "Prepare SWOT data in the selected Derived folder first.".to_string()
                     })?;
-                let image = grid::read_image(&derived.join("swot"), request.region)?;
-                Ok(wake.load_texture("swot-vgg", image, egui::TextureOptions::LINEAR))
+                let image =
+                    grid::read_image(&derived.join("swot"), request.region, request.max_edge)?;
+                Ok(LoadedImage {
+                    texture: wake.load_texture("swot-vgg", image, egui::TextureOptions::LINEAR),
+                    region: request.region,
+                })
             })();
             // Cache failures until a root change or layer/cache reset;
             // never re-open a missing file each frame.
@@ -71,7 +105,7 @@ fn texture(
 }
 
 pub(super) fn clear() {
-    for state in [&GLOBE, &LOCAL] {
+    for state in [&GLOBE, &LOCAL, &DETAIL] {
         if let Some(cache) = state.get()
             && let Ok(mut cache) = cache.lock()
         {
@@ -103,7 +137,13 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
             }
         });
         ui.small("Color scale clips at ±20 E; not depth.");
-        if let Ok(cache) = cache(model.globe_view.local_mode).lock() {
+        if let Ok(cache) = cache(if model.globe_view.local_mode {
+            Scene::Local
+        } else {
+            Scene::Overview
+        })
+        .lock()
+        {
             ui.small(if cache.status.is_empty() {
                 "Enable to load prepared data."
             } else {

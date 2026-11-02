@@ -12,16 +12,19 @@ pub(in super::super) fn draw(
     half: f32,
 ) {
     let region = super::grid::Region::around(focus.lat, focus.lon, half);
-    let Some(image) = super::texture(painter.ctx(), root, Some(region)) else {
+    let Some(image) = super::texture(painter.ctx(), root, Some(region), super::Scene::Local) else {
         return;
     };
-    let Ok(texture) = image.as_ref() else {
+    let Ok(image) = image.as_ref() else {
+        return;
+    };
+    let Some(region) = image.region else {
         return;
     };
     let [west, south, east, north] = region.bounds();
     let extent_y = (half * 111.32).max(1.0);
     let extent_x = (half * 111.32 * focus.lat.to_radians().cos().abs().max(0.2)).max(1.0);
-    let mut mesh = egui::Mesh::with_texture(texture.id());
+    let mut mesh = egui::Mesh::with_texture(image.texture.id());
     const CELLS: usize = 48;
     let mut indices = Vec::with_capacity((CELLS + 1).pow(2));
     for row in 0..=CELLS {

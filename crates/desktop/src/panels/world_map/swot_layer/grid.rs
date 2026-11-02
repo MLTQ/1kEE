@@ -17,6 +17,20 @@ pub(super) struct Region {
 }
 
 impl Region {
+    /// Global or unwrapped bounds, snapped outward to stable whole-degree cells.
+    pub fn from_bounds(west: f32, south: f32, east: f32, north: f32) -> Self {
+        let west = west.floor();
+        let east = east.ceil().min(west + 360.0);
+        let north = north.ceil().min(90.0);
+        let south = south.floor().max(-90.0);
+        Self {
+            x: ((west + 180.0) * 60.0).round() as i32,
+            y: ((90.0 - north) * 60.0).round() as i32,
+            width: ((east - west) * 60.0).round() as usize,
+            height: ((north - south) * 60.0).round() as usize,
+        }
+    }
+
     pub fn around(lat: f32, lon: f32, half: f32) -> Self {
         // Pad and snap to whole degrees so small pans reuse the same texture.
         // Match the local scene's latitude/longitude span (cosine is applied
@@ -62,7 +76,11 @@ pub(super) fn color(value: i16) -> egui::Color32 {
     egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2])
 }
 
-pub(super) fn read_image(root: &Path, region: Option<Region>) -> Result<egui::ColorImage, String> {
+pub(super) fn read_image(
+    root: &Path,
+    region: Option<Region>,
+    max_edge: usize,
+) -> Result<egui::ColorImage, String> {
     let (name, size) = if region.is_some() {
         ("vgg_21600x10800.bil", [WIDTH, HEIGHT])
     } else {
@@ -91,29 +109,43 @@ pub(super) fn read_image(root: &Path, region: Option<Region>) -> Result<egui::Co
                     .collect(),
             })
         }
-        Some(region) => read_region(&mut file, region),
+        Some(region) => read_region(&mut file, region, max_edge),
     }
 }
 
-fn read_region(file: &mut (impl Read + Seek), region: Region) -> Result<egui::ColorImage, String> {
+fn read_region(
+    file: &mut (impl Read + Seek),
+    region: Region,
+    max_edge: usize,
+) -> Result<egui::ColorImage, String> {
     if region.width == 0 || region.height == 0 || region.width > WIDTH || region.height > HEIGHT {
         return Err("Invalid SWOT window".into());
     }
-    let size = [region.width.min(1024), region.height.min(1024)];
+    if max_edge == 0 || max_edge > 4096 {
+        return Err("Invalid SWOT texture limit".into());
+    }
+    let size = [region.width.min(max_edge), region.height.min(max_edge)];
     let mut pixels = Vec::with_capacity(size[0] * size[1]);
-    let mut row = vec![0u8; WIDTH * 2];
+    let mut row = vec![0u8; region.width * 2];
     for out_y in 0..size[1] {
         let y = region.y + ((out_y * 2 + 1) * region.height / (size[1] * 2)) as i32;
         if !(0..HEIGHT as i32).contains(&y) {
             pixels.extend(std::iter::repeat_n(egui::Color32::TRANSPARENT, size[0]));
             continue;
         }
-        file.seek(SeekFrom::Start((y as usize * WIDTH * 2) as u64))
-            .and_then(|_| file.read_exact(&mut row))
+        // Read only this window's columns, splitting once at the dateline.
+        let start = region.x.rem_euclid(WIDTH as i32) as usize;
+        let first = region.width.min(WIDTH - start) * 2;
+        file.seek(SeekFrom::Start(((y as usize * WIDTH + start) * 2) as u64))
+            .and_then(|_| file.read_exact(&mut row[..first]))
             .map_err(|e| e.to_string())?;
+        if first < row.len() {
+            file.seek(SeekFrom::Start((y as usize * WIDTH * 2) as u64))
+                .and_then(|_| file.read_exact(&mut row[first..]))
+                .map_err(|e| e.to_string())?;
+        }
         for out_x in 0..size[0] {
-            let x = (region.x + ((out_x * 2 + 1) * region.width / (size[0] * 2)) as i32)
-                .rem_euclid(WIDTH as i32) as usize;
+            let x = (out_x * 2 + 1) * region.width / (size[0] * 2);
             pixels.push(color(i16::from_le_bytes([row[x * 2], row[x * 2 + 1]])));
         }
     }

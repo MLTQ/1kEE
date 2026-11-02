@@ -46,9 +46,14 @@ drive under **Settings → Files & Cache** using the existing Data/Derived paths
 This is a static dataset and needs no routine reload. If replacing prepared
 files while 1kEE is open, restart the app or toggle the layer off and on.
 
-The globe uses an area-average 4096×2048 overview. Local reads sample at most
-1024×1024 pixels from the original one-arcminute grid, with padded reusable
-windows and wrapped dateline reads. No whole-world native grid is held in RAM,
+The globe uses an area-average 4096×2048 overview at wide scales, then
+automatically reads a native-grid window as overview texels magnify beyond a
+physical screen pixel. Windows use up to 4096 pixels per edge (bounded by the
+GPU), retaining every native sample once the visible region fits. Padded,
+geographically aligned prior windows remain visible while new detail loads;
+the overview provides coverage during pans. Local windows retain a 1024-pixel
+edge cap. Longitude wrapping and pole-aware selection preserve coverage.
+No whole-world native grid is held in RAM; reads seek only the needed columns,
 and all source discovery, reads and color conversion run off the drawing thread.
 The images overlay the sphere/sea-level plane; they do not change contour,
 terrain or marker elevations.
@@ -63,3 +68,6 @@ cargo test -p one-thousand-electric-eye-desktop swot_layer
 The conversion fixture covers scale, NaN/missing masks, polar caps, north-up
 registration and overview averaging. Rust tests exercise real row reads,
 dateline wrapping, truncated input rejection, palette units and request bounds.
+Viewport regressions cover real camera zoom, display density, dense canvas
+coverage, both poles and dateline views. An alternating native signal verifies
+that detailed globe imagery no longer loses data at the old 1024-pixel cap.
