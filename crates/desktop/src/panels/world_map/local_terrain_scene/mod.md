@@ -248,3 +248,7 @@ Passes the same capacity-color flag to public pipelines and OSM pipelines. Publi
 Administrative boundaries delegate to `admin_render`: selected levels, optional
 complete-region shading and safe clipping. The overlay remains independent of
 contour availability and paints before event/camera markers.
+
+Selected NCEI gravity-anomaly imagery uses the same sea-level raster drape as
+SWOT, below contours/markers and independent of terrain streaming. It reads
+only its own prepared regional product, never altering elevations.

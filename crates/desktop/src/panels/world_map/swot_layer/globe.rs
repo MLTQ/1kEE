@@ -1,6 +1,6 @@
 //! Keep the global overview visible while a zoom-dependent native window loads.
-use super::super::globe_scene::{GlobeLayout, project_surface};
-use crate::model::{GeoPoint, GlobeViewState};
+use super::super::globe_scene::GlobeLayout;
+use crate::model::GlobeViewState;
 use std::cell::RefCell;
 use std::path::Path;
 use std::sync::Arc;
@@ -73,59 +73,20 @@ fn build(
     texture: egui::TextureId,
     region: Option<super::grid::Region>,
 ) -> egui::Mesh {
-    let mut mesh = egui::Mesh::with_texture(texture);
-    let [left, bottom, right, top] = region.map_or([-180.0, -90.0, 180.0, 90.0], |r| r.bounds());
-    let scale = layout.radius * layout.focal_length / (layout.camera_distance - 1.0);
-    let step = if region.is_some() {
-        (0.5 / scale).sqrt().to_degrees().clamp(0.25, 2.0)
-    } else {
-        2.0
-    };
-    let rows = ((top - bottom) / step).ceil() as usize;
-    let cols = ((right - left) / step).ceil() as usize;
-    // Both textures use their own exact geographic edges and UV map.
-    for row in 0..rows {
-        let south = bottom + (top - bottom) * row as f32 / rows as f32;
-        let north = bottom + (top - bottom) * (row + 1) as f32 / rows as f32;
-        for col in 0..cols {
-            let west = left + (right - left) * col as f32 / cols as f32;
-            let east = left + (right - left) * (col + 1) as f32 / cols as f32;
-            let corners = [(north, west), (north, east), (south, east), (south, west)];
-            let projected =
-                corners.map(|(lat, lon)| project_surface(layout, view, GeoPoint { lat, lon }));
-            // A perspective camera sees only z >= 1/d on the unit sphere;
-            // hemisphere culling alone would paint hidden surface near the limb.
-            if !projected.iter().all(|p| {
-                p.is_some_and(|p| {
-                    p.front_facing && p.depth * 2.0 - 1.0 >= 1.0 / layout.camera_distance
-                })
-            }) {
-                continue;
-            }
-            let index = mesh.vertices.len() as u32;
-            for (i, (lat, lon)) in corners.into_iter().enumerate() {
-                mesh.vertices.push(egui::epaint::Vertex {
-                    pos: projected[i].unwrap().pos,
-                    uv: egui::pos2((lon - left) / (right - left), (top - lat) / (top - bottom)),
-                    color: egui::Color32::WHITE,
-                });
-            }
-            mesh.indices.extend_from_slice(&[
-                index,
-                index + 1,
-                index + 2,
-                index,
-                index + 2,
-                index + 3,
-            ]);
-        }
-    }
-    mesh
+    super::super::raster_mesh::globe(
+        layout,
+        view,
+        texture,
+        region.map_or([-180.0, -90.0, 180.0, 90.0], |r| r.bounds()),
+        region.is_some(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::globe_scene::project_surface;
     use super::*;
+    use crate::model::GeoPoint;
     #[test]
     fn mesh_stays_inside_perspective_horizon_and_global_uv_bounds() {
         let view = GlobeViewState::from_focus(GeoPoint { lat: 0.0, lon: 0.0 });

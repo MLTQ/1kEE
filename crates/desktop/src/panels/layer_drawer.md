@@ -110,3 +110,7 @@ Local Earth view guidance and explicit reload after building missing caches.
 Import Layer and the imported overlay list now appear together at the top of the
 sidebar, including when no layer exists yet. The picker delegates to
 layer_file_import::button and retains its asynchronous loading/disabled state.
+
+Gravity anomaly delegates an independent Earth-only quantity/region selector
+to `world_map::gravity_controls`. It describes mGal, grid spacing and regional
+coverage without reload controls, citations or file access in the drawer.

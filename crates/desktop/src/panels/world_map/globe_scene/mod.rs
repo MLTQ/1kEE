@@ -174,6 +174,15 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         if model.show_swot_gravity {
             super::swot_layer::draw_globe(painter, rect, &layout, &model.globe_view, selected_root);
         }
+        if model.gravity.enabled {
+            super::gravity_layer::draw_globe(
+                painter,
+                &layout,
+                &model.globe_view,
+                selected_root,
+                &model.gravity.map().id,
+            );
+        }
         if model.show_coastlines {
             geography::draw_global_coastlines(
                 painter,

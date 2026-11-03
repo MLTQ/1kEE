@@ -123,6 +123,8 @@ Public pipelines use `show_pipeline`, `pipeline_filters` (source/product/status)
 
 `show_swot_gravity` is an initially hidden, session-only Earth overlay. It
 displays the SWOT_06 vertical gravity gradient independently of bathymetry.
+`gravity` separately owns the initially hidden NCEI anomaly quantity and region
+selection; its mGal fields never change terrain or the SWOT VGG data.
 
 `hillshade_source` is a session-only USGS/Washington bare-earth/top-surface
 selection, initially USGS. The independent hillshade toggle remains off.

@@ -5,7 +5,7 @@ Loads contour geometry from disk into in-memory render caches for both local ter
 
 ## Components
 
-Terrain cache reset also clears optional SWOT texture snapshots/projected mesh.
+Terrain cache reset also clears optional SWOT and NCEI anomaly texture snapshots/projected meshes.
 Its single-flight epochs reject results from workers started before the reset.
 
 ### Complete Earth local cores

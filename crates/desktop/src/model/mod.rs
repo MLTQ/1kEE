@@ -5,6 +5,7 @@ mod events;
 mod event_follow;
 mod flights;
 mod geo;
+pub mod gravity;
 mod geojson_layer;
 mod kml_layer;
 pub mod replay;
@@ -83,6 +84,7 @@ pub struct AppModel {
     pub show_bathymetry: bool,
     /// Optional SWOT marine vertical gravity gradient, independent of depth.
     pub show_swot_gravity: bool,
+    pub gravity: gravity::GravityState,
     /// Optional server-rendered hillshade projected into the local map.
     pub show_hillshade: bool,
     pub hillshade_source: crate::hillshade_source::Source,
@@ -294,6 +296,7 @@ impl AppModel {
             show_beam: false,
             show_bathymetry: true,
             show_swot_gravity: false,
+            gravity: gravity::GravityState::default(),
             show_contours: true,
             contour_occlusion: true,
             legacy_contour_stroke_scale: app_settings.contour_stroke_scale,

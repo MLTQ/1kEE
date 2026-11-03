@@ -135,3 +135,7 @@ Public pipelines receive the session capacity-color flag as well as source/statu
 Administrative boundaries draw through admin_globe after terrain and before user
 overlays/markers. Globe and Local use the same levels and shade options; Globe
 uses immutable spherical GPU geometry with perspective horizon clipping.
+
+Selected NCEI gravity-anomaly imagery paints above SWOT and below coastlines,
+contours and markers. Its geographic bounds/coverage come from the prepared
+map, and loading remains off-thread independently of terrain streaming.

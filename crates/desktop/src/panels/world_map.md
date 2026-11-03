@@ -129,3 +129,7 @@ Settings entry. Long background-job notes are now in Settings → Overview.
 Administrative boundaries share source discovery, explicit in-app PBF loading and
 cache observation through admin_source. Local draws the clipped ground-plane
 polygons; admin_globe prepares spherical GPU fills and outlines for Globe.
+
+NCEI `gravity_layer` separately selects free-air, Bouguer or isostatic residual
+regional maps in mGal. It shares `raster_mesh` projection with SWOT, keeps all
+reads on a worker and exposes quantity/region controls to the layer drawer.

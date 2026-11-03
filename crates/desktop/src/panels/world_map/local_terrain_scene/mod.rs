@@ -291,6 +291,18 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         );
     }
 
+    if model.gravity.enabled && model.active_body == crate::model::ActiveBody::Earth {
+        super::gravity_layer::draw_local(
+            painter,
+            &layout,
+            &model.globe_view,
+            model.selected_root.as_deref(),
+            &model.gravity.map().id,
+            viewport_center,
+            visual_half_extent_for_zoom(model.globe_view.local_zoom),
+        );
+    }
+
     // Draw the contour layer once, followed by independent map overlays.
     if model.show_contours && use_gpu_contours {
         draw_gpu_contour_pass(
