@@ -18,5 +18,6 @@ until completion so hiding the map cannot create parallel stale workers.
 
 The first prepare resets the shared globe upload budget before any layer uploads.
 
-Also clears administrative fill staging/display buffers when no fill callback is
-prepared. This releases GPU memory when shading is hidden or entering Local.
+Also releases the complete administrative line/fill generation and unfinished
+uploads when the boundary callback is absent. The boundary callback itself
+releases fill buffers when shading is disabled.

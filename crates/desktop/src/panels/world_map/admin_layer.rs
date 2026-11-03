@@ -23,19 +23,22 @@ pub(super) struct Region {
     pub fill: Option<Fill>,
     pub bounds: [f32; 4], // min_lon, min_lat, max_lon, max_lat (unwrapped)
 }
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct Source {
+    reload_epoch: u64,
+    dirs: Vec<PathBuf>,
+    levels: Vec<u8>,
+    files: super::admin_source::Fingerprint,
+}
 #[derive(Default)]
 pub(super) struct AdminData {
+    pub source: Arc<Source>,
     pub regions: Vec<Region>,
     pub shadeable: usize,
     pub missing: Vec<u8>,
     pub warnings: Vec<String>,
 }
-type Key = (
-    Vec<PathBuf>,
-    Vec<u8>,
-    super::admin_source::Fingerprint,
-    Request,
-);
+type Key = (Arc<Source>, Request);
 type AdminCache = super::layer_snapshot::Snapshot<Key, AdminData>;
 static ADMIN_CACHE: OnceLock<Mutex<AdminCache>> = OnceLock::new();
 
@@ -43,8 +46,9 @@ static ADMIN_CACHE: OnceLock<Mutex<AdminCache>> = OnceLock::new();
 pub(super) fn displayed(model: &crate::model::AppModel) -> Option<Arc<AdminData>> {
     let cache = ADMIN_CACHE.get()?.lock().unwrap();
     let (key, data) = cache.current()?;
-    (key.0 == super::admin_source::directories(model) && key.1 == model.admin_options.levels())
-        .then(|| Arc::clone(data))
+    (key.0.dirs == super::admin_source::directories(model)
+        && key.0.levels == model.admin_options.levels())
+    .then(|| Arc::clone(data))
 }
 
 pub(super) fn get_for(model: &crate::model::AppModel, request: Request) -> Option<Arc<AdminData>> {
@@ -66,16 +70,23 @@ pub(super) fn get_for(model: &crate::model::AppModel, request: Request) -> Optio
         })
         .cloned()
         .collect();
-    ADMIN_CACHE
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap()
-        .get(
-            (dirs, levels, files, request),
-            "admin-boundaries",
-            |a, b| a.0 == b.0 && a.1 == b.1 && a.2 == b.2,
-            |(dirs, levels, _, request)| Some(load_detail(&dirs, &levels, request)),
-        )
+    let mut cache = ADMIN_CACHE.get_or_init(Default::default).lock().unwrap();
+    let source = Arc::new(Source {
+        reload_epoch: cache.epoch(),
+        dirs,
+        levels,
+        files,
+    });
+    cache.get(
+        (source, request),
+        "admin-boundaries",
+        |a, b| a.0 == b.0,
+        |(source, request)| {
+            let mut data = load_detail(&source.dirs, &source.levels, request);
+            data.source = source;
+            Some(data)
+        },
+    )
 }
 pub(super) fn reload() {
     if let Some(cache) = ADMIN_CACHE.get() {

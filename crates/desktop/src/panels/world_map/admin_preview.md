@@ -27,3 +27,6 @@ the outline/fill renderer and Globe callbacks are the production implementations
 
 GPU previews consume the LOD-backed loader: world detail for the synthetic hole
 and island fixture, and a fine spatial request around Andorra for real-data QA.
+
+The shared admin_test_screen target also drives admin_handoff_tests, which compares
+every frame of a two-stream replacement against complete rendered reference images.

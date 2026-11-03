@@ -14,3 +14,6 @@ verifies repeated non-blocking polls and stale-result rejection.
 
 `current` exposes the published key/value pair to read-only observers without
 changing the pending request or starting a worker.
+
+`epoch` lets downstream presentation caches honor explicit reloads while
+retaining a compatible display during normal camera movement.

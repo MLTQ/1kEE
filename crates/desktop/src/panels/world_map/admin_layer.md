@@ -34,3 +34,7 @@ creating them from existing 1KC files when needed; legacy GeoJSON is generalized
 in memory. Outlines read spatial pieces. Only shaded requests tessellate complete
 rings and compact the mesh to intersecting triangles. The drawer observes the
 published snapshot and its precomputed shadeable count without changing its key.
+
+Each published snapshot carries its source identity (directories, selected levels
+and file fingerprints, plus the explicit reload epoch). Globe compares this identity separately from the view when
+retaining its previous drawing through camera-only replacements.

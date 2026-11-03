@@ -19,3 +19,7 @@ Long outline segments are likewise subdivided before unit-sphere conversion.
 The camera's scale and geographic footprint select an indexed boundary snapshot.
 World geometry uses generalized borders, with finer spatial reads at closer zoom.
 Outline-only snapshots contain no fill meshes or prepared GPU triangles.
+
+Viewport and LOD snapshots within the same source, file generation, selected
+levels and palette retain the previous CPU batch while its successor is prepared.
+The combined GPU callback projects the displayed pair using the current camera.
