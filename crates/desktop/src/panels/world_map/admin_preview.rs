@@ -79,7 +79,20 @@ fn preview(globe: bool, real: bool, theme: MapTheme) -> [u8; 4] {
         scratch.0.clone()
     };
     let level = if real { 2 } else { 4 };
-    let mut data = load_from_dirs(std::slice::from_ref(&root), &[level]);
+    let request = if real {
+        Request {
+            tier: 5,
+            window: Window::around([1.3, 42.35, 1.9, 42.8]),
+            shade: true,
+        }
+    } else {
+        Request {
+            tier: 0,
+            window: Window::WORLD,
+            shade: true,
+        }
+    };
+    let mut data = load_detail(std::slice::from_ref(&root), &[level], request);
     if real {
         data.regions.retain(|r| r.relation_id == 9407);
         assert_eq!(data.regions.len(), 1, "published Andorra relation");

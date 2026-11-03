@@ -18,9 +18,6 @@ pub(super) fn draw(
     painter
         .ctx()
         .request_repaint_after(std::time::Duration::from_secs(3));
-    let Some(data) = admin_layer::get_for(model) else {
-        return;
-    };
     let half = visual_half_extent_for_zoom(model.globe_view.local_zoom);
     let params = projection::local_projection_params(
         layout,
@@ -29,6 +26,15 @@ pub(super) fn draw(
         (half * 111.32 * center.lat.to_radians().cos().abs().max(0.2)).max(1.0),
         (half * 111.32).max(1.0),
     );
+    let request = admin_layer::view::Request::local(
+        &params,
+        painter.clip_rect(),
+        painter.ctx().pixels_per_point(),
+        model.admin_options.shade,
+    );
+    let Some(data) = admin_layer::get_for(model, request) else {
+        return;
+    };
     paint(
         painter,
         &data,

@@ -28,3 +28,6 @@ Files refresh automatically in Globe and Local; no companion application is requ
 
 Partial caches show published/total regions and explain country-first publication.
 Coverage comes from the source watcher, including after an interrupted builder.
+
+Counts describe the loaded camera area and cached eligibility. The drawer observes
+the renderer's last published result, so it cannot start a conflicting world load.

@@ -34,12 +34,12 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
         }
         let levels = model.admin_options.levels();
         if levels.is_empty() { ui.small("Select a boundary level."); return; }
-        let Some(data) = super::admin_layer::get_for(model) else { ui.small("Loading boundaries…"); return; };
+        let Some(data) = super::admin_layer::displayed(model) else { ui.small("Loading boundaries…"); return; };
         if data.regions.is_empty() {
-            ui.small("No boundaries loaded yet. Load from PBF or open an existing boundary cache.");
+            ui.small("No selected boundaries in the loaded area.");
         } else {
-            let fill_count = data.regions.iter().filter(|r| r.fill.is_some()).count();
-            ui.small(format!("{} regions · {fill_count} shadeable", data.regions.len()));
+            let fill_count = data.shadeable;
+            ui.small(format!("{} regions in loaded area · {fill_count} shadeable", data.regions.len()));
             if model.admin_options.shade && fill_count < data.regions.len() {
                 ui.small("Incomplete / older caches show outlines only. Rebuild to add complete regions.");
             }

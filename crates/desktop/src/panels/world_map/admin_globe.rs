@@ -24,7 +24,14 @@ pub(super) fn draw(painter: &egui::Painter, layout: &GlobeLayout, model: &AppMod
     painter
         .ctx()
         .request_repaint_after(std::time::Duration::from_secs(3));
-    let Some(data) = admin_layer::get_for(model) else {
+    let request = admin_layer::view::Request::globe(
+        layout,
+        &model.globe_view,
+        painter.clip_rect(),
+        painter.ctx().pixels_per_point(),
+        model.admin_options.shade,
+    );
+    let Some(data) = admin_layer::get_for(model, request) else {
         return;
     };
     let colors = model.map_theme.admin_palette();

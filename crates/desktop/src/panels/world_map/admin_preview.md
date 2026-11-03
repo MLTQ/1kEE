@@ -24,3 +24,6 @@ shade-toggle restoration and Globe backside occlusion. The same PNG environment
 variables export both views; this test is opt-in because real data and a GPU are
 external prerequisites. The Local projection is a fixed geographic QA viewport;
 the outline/fill renderer and Globe callbacks are the production implementations.
+
+GPU previews consume the LOD-backed loader: world detail for the synthetic hole
+and island fixture, and a fine spatial request around Andorra for real-data QA.

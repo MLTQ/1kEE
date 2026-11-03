@@ -43,11 +43,19 @@ fn admin_fill_does_not_close_incomplete_boundaries() {
 fn admin_dateline_region_has_small_area() {
     let mut rings = vec![ring(&[
         (179., 0.),
-        (-179., 0.),
-        (-179., 2.),
+        (181., 0.),
+        (181., 2.),
         (179., 2.),
         (179., 0.),
     ])];
-    unwrap_rings(&mut rings);
-    assert!((area(&tessellate(&rings).unwrap()) - 4.).abs() < 1e-5);
+    // A hole starts in the other longitude copy (the loader unwraps each ring).
+    rings.push(ring(&[
+        (-179.75, 0.5),
+        (-179.25, 0.5),
+        (-179.25, 1.5),
+        (-179.75, 1.5),
+        (-179.75, 0.5),
+    ]));
+    align_rings(&mut rings);
+    assert!((area(&tessellate(&rings).unwrap()) - 3.5).abs() < 1e-5);
 }

@@ -23,6 +23,10 @@ impl<K, V> Default for Snapshot<K, V> {
     }
 }
 impl<K: Clone + Eq + Send + 'static, V: Send + Sync + 'static> Snapshot<K, V> {
+    pub fn current(&self) -> Option<(&K, &Arc<V>)> {
+        self.current.as_ref().map(|(k, v)| (k, v))
+    }
+
     pub fn clear(&mut self) {
         self.requested = None;
         self.current = None;

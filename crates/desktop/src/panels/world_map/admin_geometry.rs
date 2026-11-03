@@ -17,14 +17,18 @@ pub(super) fn closed(ring: &[GeoPoint]) -> bool {
             .is_some_and(|(a, b)| a.lat == b.lat && a.lon == b.lon)
 }
 
-/// Keep dateline rings contiguous, with every component near the same meridian.
-pub(super) fn unwrap_rings(rings: &mut [Vec<GeoPoint>]) {
-    let anchor = rings.first().and_then(|r| r.first()).map_or(0.0, |p| p.lon);
+/// The archive unwraps consecutive source vertices before simplification. Shift
+/// whole paths only: re-unwrapping a simplified edge can reverse a long arc.
+pub(super) fn align_rings(rings: &mut [Vec<GeoPoint>]) {
+    let anchor = rings.first().and_then(|r| r.first()).map_or(0., |p| p.lon);
     for ring in rings {
-        let mut previous = anchor;
-        for p in ring {
-            p.lon += ((previous - p.lon) / 360.0).round() * 360.0;
-            previous = p.lon;
+        if let Some(first) = ring.first() {
+            let shift = ((anchor - first.lon) / 360.).round() * 360.;
+            if shift != 0. {
+                for p in ring {
+                    p.lon += shift;
+                }
+            }
         }
     }
 }

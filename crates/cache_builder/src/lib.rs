@@ -25,6 +25,29 @@ mod util;
 pub fn run() -> Result<(), String> {
     match args::parse(std::env::args().skip(1))? {
         args::Command::Gui => launch_gui(),
+        args::Command::AdminLods(dir) => {
+            let mut found = false;
+            for level in 2..=11 {
+                let path = dir.join(cell_format::admin_filename(level));
+                if !path.try_exists().map_err(|e| e.to_string())? {
+                    continue;
+                }
+                found = true;
+                let archive = tile_archive::admin_lod::Archive::open(&path, level)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                println!(
+                    "Level {level}, segment counts (world to original): {:?}",
+                    archive.segment_counts().map_err(|e| e.to_string())?
+                );
+            }
+            if !found {
+                return Err(format!(
+                    "No administrative boundary levels in {}",
+                    dir.display()
+                ));
+            }
+            Ok(())
+        }
         args::Command::PackArchive(command) => archive_pack::run(command),
         args::Command::Pipelines(command) => pipelines::run(command),
         args::Command::Platforms(command) => platforms::run(command),

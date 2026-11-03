@@ -20,3 +20,7 @@ Local Earth view using the same ground-plane projection as terrain overlays.
 
 Source selection and automatic refresh are shared with Globe via
 `admin_layer::get_for`; Local retains its ground-plane projection and clipping.
+
+The oblique ground projection also selects the LOD worker's padded source window.
+The renderer receives nearby border pieces and compacted fill meshes, including
+full original coordinates at the closest scales.

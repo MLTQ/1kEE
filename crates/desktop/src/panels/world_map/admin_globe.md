@@ -15,3 +15,7 @@ Longitude/latitude longest-edge bisection (at most two degrees per edge) conform
 large fill triangles to the sphere without changing their planar coverage or
 filling holes. Unwrapped dateline coordinates are retained throughout subdivision.
 Long outline segments are likewise subdivided before unit-sphere conversion.
+
+The camera's scale and geographic footprint select an indexed boundary snapshot.
+World geometry uses generalized borders, with finer spatial reads at closer zoom.
+Outline-only snapshots contain no fill meshes or prepared GPU triangles.
