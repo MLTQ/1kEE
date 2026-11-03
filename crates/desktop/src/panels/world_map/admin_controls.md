@@ -8,7 +8,7 @@ status beneath the master Admin Boundaries toggle in the layer drawer.
 - Children appear only while the parent is enabled; selections survive hiding.
 - Country/state/province/county/municipality labels include OSM levels, with a
   tooltip explaining regional naming differences. Intermediate levels stay usable.
-- Every level label uses its map color, making the checkbox list a compact legend
+- Every level label uses the active map theme's color, making the checkbox list a compact legend
   for outlines and shaded regions. Numeric levels and names remain visible.
 - Missing/empty data includes a concrete build/reload instruction. Loading,
   partial coverage, older line-only geometry and parse errors remain observable.

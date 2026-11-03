@@ -1,5 +1,7 @@
 use std::sync::{OnceLock, RwLock};
 
+mod admin;
+
 // ── Theme enum ────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -647,25 +649,6 @@ pub fn road_minor_color() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(62, 61, 57),
         MapTheme::Mars => egui::Color32::from_rgb(72, 48, 42),
         MapTheme::MarsDark => egui::Color32::from_rgb(65, 24, 28),
-    }
-}
-
-/// Administrative boundary line color, keyed by OSM admin_level.
-/// Level 2 = country, 4 = state/province, 6 = county, 8 = municipality.
-/// Each level has a distinct, theme-neutral hue shared by the drawer and map.
-/// Opacity is controlled separately; keep these base colors opaque for the legend.
-pub fn admin_color(level: u8) -> egui::Color32 {
-    match level {
-        2 => egui::Color32::from_rgb(255, 217, 102), // countries — gold
-        3 => egui::Color32::from_rgb(247, 153, 85),  // intermediate regions — orange
-        4 => egui::Color32::from_rgb(83, 207, 237),  // states / provinces — cyan
-        5 => egui::Color32::from_rgb(103, 155, 255), // regions / districts — blue
-        6 => egui::Color32::from_rgb(228, 132, 231), // counties / districts — magenta
-        7 => egui::Color32::from_rgb(168, 145, 255), // subdistricts — violet
-        8 => egui::Color32::from_rgb(164, 216, 109), // cities / municipalities — green
-        9 => egui::Color32::from_rgb(72, 205, 170),  // local subdivisions — teal
-        10 => egui::Color32::from_rgb(246, 139, 162), // neighborhoods — rose
-        _ => egui::Color32::from_rgb(200, 211, 222), // local areas (11) / unknown — silver
     }
 }
 

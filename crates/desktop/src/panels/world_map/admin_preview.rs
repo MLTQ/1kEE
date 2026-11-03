@@ -1,5 +1,6 @@
 //! Optional GPU verification of actual admin controls and rendering.
 use super::*;
+use crate::theme::MapTheme;
 use eframe::{egui_wgpu, wgpu};
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     use std::{
@@ -25,30 +26,34 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
 #[test]
 #[ignore = "requires GPU; optional ONEKEE_ADMIN_PREVIEW PNG"]
 fn admin_gpu_preview_preserves_holes_and_toggle_round_trip() {
-    preview(false, false);
+    preview(false, false, MapTheme::Topo);
 }
 
 #[test]
 #[ignore = "requires GPU; optional ONEKEE_ADMIN_GLOBE_PREVIEW PNG"]
 fn admin_globe_gpu_preserves_holes_and_hides_backside() {
-    let globe = preview(true, false);
-    let local = preview(false, false);
-    for (a, b) in globe.into_iter().zip(local).take(3) {
-        assert!(
-            a.abs_diff(b) <= 2,
-            "same opacity must match between Globe and Local: {globe:?} vs {local:?}"
-        );
+    for theme in [MapTheme::Sodium, MapTheme::Topo] {
+        let globe = preview(true, false, theme);
+        let local = preview(false, false, theme);
+        for (a, b) in globe.into_iter().zip(local).take(3) {
+            assert!(
+                a.abs_diff(b) <= 2,
+                "{theme:?} fill must match between Globe and Local: {globe:?} vs {local:?}"
+            );
+        }
+        // The same state polygon is amber under Sodium and cyan under Topo.
+        assert_eq!(local[0] > local[2], theme == MapTheme::Sodium);
     }
 }
 
 #[test]
 #[ignore = "requires GPU and ONEKEE_ADMIN_REAL_CACHE with published Andorra geometry"]
 fn admin_real_cache_renders_in_both_views() {
-    preview(false, true);
-    preview(true, true);
+    preview(false, true, MapTheme::Topo);
+    preview(true, true, MapTheme::Topo);
 }
 
-fn preview(globe: bool, real: bool) -> [u8; 4] {
+fn preview(globe: bool, real: bool, theme: MapTheme) -> [u8; 4] {
     let scratch = tests::Scratch::new();
     let dir = scratch.0.join("admin_cells");
     fs::create_dir_all(&dir).unwrap();
@@ -104,6 +109,7 @@ fn preview(globe: bool, real: bool) -> [u8; 4] {
         }
     };
     let mut model = crate::model::AppModel::new();
+    model.map_theme = theme;
     model.set_contour_stroke_width_px(2.0);
     model.selected_root = Some(root.clone());
     model.admin_options.cache_root = Some(root);
@@ -129,10 +135,8 @@ fn preview(globe: bool, real: bool) -> [u8; 4] {
         focal_length: 2.2,
         camera_distance: if real { 1.06 } else { 1.25 },
     };
-    let batch = super::super::admin_globe::prepare(
-        Arc::clone(&data),
-        std::array::from_fn(|i| crate::theme::admin_color(i as u8 + 2)),
-    );
+    let batch =
+        super::super::admin_globe::prepare(Arc::clone(&data), model.map_theme.admin_palette());
     let ctx = egui::Context::default();
     crate::theme::install(&ctx);
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024., 768.));
@@ -226,9 +230,8 @@ fn preview(globe: bool, real: bool) -> [u8; 4] {
                         super::super::admin_render::paint(
                             &painter,
                             &data,
-                            shade,
-                            0.3,
-                            model.admin_options.layer_opacity,
+                            &model.admin_options,
+                            model.map_theme.admin_palette(),
                             focus.lon,
                             local_project,
                         );

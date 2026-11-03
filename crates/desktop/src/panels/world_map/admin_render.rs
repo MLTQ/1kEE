@@ -32,9 +32,8 @@ pub(super) fn draw(
     paint(
         painter,
         &data,
-        model.admin_options.shade,
-        model.admin_options.opacity,
-        model.admin_options.layer_opacity,
+        &model.admin_options,
+        model.map_theme.admin_palette(),
         center.lon,
         |point| {
             let (x, y, _) = params.project_logical(point, 0.0);
@@ -43,8 +42,7 @@ pub(super) fn draw(
     );
 }
 
-fn fill_color(id: i64, level: u8, opacity: f32) -> Color32 {
-    let base = crate::theme::admin_color(level);
+fn fill_color(id: i64, base: Color32, opacity: f32) -> Color32 {
     // Stable per-region variation helps distinguish adjacent regions.
     let mix = (id as u64).wrapping_mul(0x9e3779b97f4a7c15);
     let weight = 0.65 + ((mix >> 56) as f32 / 255.0) * 0.35;
@@ -59,13 +57,12 @@ fn fill_color(id: i64, level: u8, opacity: f32) -> Color32 {
 pub(super) fn paint(
     painter: &egui::Painter,
     data: &admin_layer::AdminData,
-    shade: bool,
-    opacity: f32,
-    layer_opacity: f32,
+    options: &crate::model::admin::AdminOptions,
+    palette: [Color32; 10],
     focus_lon: f32,
     project: impl Fn(GeoPoint) -> Pos2,
 ) {
-    let layer_opacity = layer_opacity.clamp(0.0, 1.0);
+    let layer_opacity = options.layer_opacity.clamp(0.0, 1.0);
     if layer_opacity == 0.0 {
         return;
     }
@@ -87,7 +84,7 @@ pub(super) fn paint(
         })
         .collect();
     // Fill every region before any outline so shading cannot obscure borders.
-    if shade {
+    if options.shade {
         for &(region, shift) in &visible {
             let Some(fill) = &region.fill else {
                 continue;
@@ -102,7 +99,11 @@ pub(super) fn paint(
                     })
                 })
                 .collect();
-            let color = fill_color(region.relation_id, region.level, opacity * layer_opacity);
+            let color = fill_color(
+                region.relation_id,
+                palette[(region.level - 2) as usize],
+                options.opacity * layer_opacity,
+            );
             let mut mesh = egui::Mesh::default();
             for indices in fill.indices.chunks_exact(3) {
                 let triangle = indices
@@ -129,7 +130,7 @@ pub(super) fn paint(
     for level in (2..=11).rev() {
         let stroke = Stroke::new(
             crate::theme::admin_stroke_width(level).max(0.8),
-            crate::theme::admin_color(level).gamma_multiply(layer_opacity),
+            palette[(level - 2) as usize].gamma_multiply(layer_opacity),
         );
         for &(region, shift) in &visible {
             if region.level != level {

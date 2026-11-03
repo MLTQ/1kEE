@@ -11,8 +11,9 @@ hemisphere and verifies no fill leaks through. ONEKEE_ADMIN_GLOBE_PREVIEW export
 its shaded image. Both tests use an explicit source override and normalized
 contour width, avoiding user settings writes from legacy slider rounding.
 
-The Globe test also compares sampled interior color against Local within two
-8-bit steps, catching opacity/color-space regressions beyond simple nonzero fill.
+The Globe test compares sampled interior color against Local within two
+8-bit steps under both Sodium and Topo. The same state polygon must change from
+amber to cyan when using the other theme. The exported final frame uses Topo.
 Both paths also verify that master opacity fades outlines and fills at 50%,
 removes all geometry at 0%, and restores the exact original frame at 100%.
 

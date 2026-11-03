@@ -11,6 +11,7 @@ Local Earth view using the same ground-plane projection as terrain overlays.
   vertices and connect unrelated survivors. Segments crossing the viewport remain.
 - Clip triangles to the canvas before submission, including polygons enclosing
   the entire viewport with all original vertices offscreen.
+- Outlines and fills share one snapshot of the selected theme's palette per frame.
 - Fill precedes every border; countries draw last. Fill colors vary deterministically
   by relation ID. Opacity/level changes affect the live view without retessellation.
 - Fill requires a loader-prepared mesh; incomplete/legacy boundaries stay outlines.

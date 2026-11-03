@@ -27,7 +27,7 @@ pub(super) fn draw(painter: &egui::Painter, layout: &GlobeLayout, model: &AppMod
     let Some(data) = admin_layer::get_for(model) else {
         return;
     };
-    let colors = std::array::from_fn(|i| crate::theme::admin_color(i as u8 + 2));
+    let colors = model.map_theme.admin_palette();
     static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
     let key = (Arc::as_ptr(&data) as usize, colors);
     let batch = CACHE.get_or_init(Default::default).lock().unwrap().get(

@@ -32,9 +32,8 @@ Centralizes the visual language for the 1kEE desktop demo. It installs the activ
   other palettes. Minor roads sit nearer the background; live markers remain
   brighter. Opaque colors avoid accumulating brightness where road segments join.
 
-Admin levels 2–11 each have a distinct fixed hue: gold, orange, cyan, blue,
-magenta, violet, green, teal, rose and silver. The checkbox labels, Globe and
-Local outlines, and region shading share this palette across map themes.
+Each theme defines ten level colors in `theme/admin.rs`. The checkbox labels,
+Globe and Local outlines, and region shading read the selected theme's palette.
 Base colors are opaque; the separate boundary/shading opacity controls provide
 transparency. Country borders retain the brightest color and widest stroke.
 

@@ -4,7 +4,8 @@ Prepares immutable Globe boundary geometry on a single background worker and
 draws fill before borders on Earth. Uses the exact same loaded regions, level
 selection, and even-odd tessellation as Local. Invalid/open regions stay outlines.
 
-Cache identity pins the source Arc and includes the palette. Camera movement and
+Cache identity pins the source Arc and includes the selected theme's ten colors.
+A theme switch prepares a newly colored batch from the loaded regions. Camera movement and
 nonzero opacity changes only update uniforms. Fine division borders precede country borders.
 Master layer opacity fades outline uniforms and multiplies shading opacity;
 zero opacity submits no boundary draw calls. Geometry/palette cache keys stay
