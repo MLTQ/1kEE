@@ -70,6 +70,11 @@ with Metal / Vulkan / DX12 support for wgpu.
 cargo run --release -p one-thousand-electric-eye-desktop
 ```
 
+After updating the source, rebuild the desktop app with the command above before
+opening the binary directly. Tests build a separate test executable; they do not
+update `target/release/one-thousand-electric-eye-desktop`. Close an already-running
+app and launch the rebuilt binary to use new features.
+
 The app launches with no configuration: the globe, graticules, and any keyless layers
 work out of the box. Live feeds and terrain detail are enabled by configuration below —
 everything is optional and independent.
