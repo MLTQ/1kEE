@@ -727,6 +727,31 @@ fn project_visible_markers<T>(
 mod tests {
     use super::*;
 
+    #[test]
+    fn middle_east_recap_keeps_regional_landmarks_clear_of_the_chyron_and_clock() {
+        use crate::model::follow_recap::{RecapRegion, RegionalRecap};
+        for size in [egui::vec2(1280.0, 720.0), egui::vec2(1920.0, 1080.0)] {
+            let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            let mut view = GlobeViewState::from_focus(GeoPoint { lat: 0.0, lon: 0.0 });
+            let mut recap = RegionalRecap::with_events(
+                RecapRegion::MiddleEast, 0.0, 1_800_000_000, view, Vec::new());
+            recap.tick(&mut view, 3.0);
+            let layout = globe_layout(viewport, &view);
+            let map = egui::Rect::from_min_max(viewport.min + egui::vec2(8.0, 8.0),
+                egui::pos2(viewport.right() - 8.0,
+                    viewport.bottom() - super::super::super::event_chyron::HEIGHT - 8.0));
+            let clock = egui::Rect::from_min_size(viewport.min + egui::vec2(12.0, 12.0),
+                egui::vec2(440.0, 132.0));
+            for (lat, lon) in [(41.0, 29.0), (30.0, 31.2), (35.7, 51.4),
+                (36.3, 59.6), (23.6, 58.4), (12.8, 45.0)] {
+                let projected = project_surface(&layout, &view, GeoPoint { lat, lon }).unwrap();
+                assert!(projected.front_facing);
+                assert!(map.contains(projected.pos), "{lat}, {lon}: {:?}", projected.pos);
+                assert!(!clock.contains(projected.pos), "clock covers {lat}, {lon}");
+            }
+        }
+    }
+
     #[derive(Clone, Copy)]
     struct SourceMarker {
         location: GeoPoint,

@@ -142,3 +142,7 @@ map, and loading remains off-thread independently of terrain streaming.
 
 Automatic continental recaps share `active_replay` with manual Replay for flare
 painting and suppress live event markers while playback owns the globe.
+
+A recap framing regression projects Istanbul, Cairo, Tehran, Mashhad, Muscat and
+Aden through the real Middle East globe camera at 720p and 1080p. Their surface
+positions must remain visible above the chyron and outside the clock panel.

@@ -19,6 +19,6 @@ and Cache Blast, without operational status text taking over the map.
 - Imported-layer state remains visible via the Layers dot. Counts remain available
   even at zero. Arbitrarily long progress messages belong in Settings → Overview.
 
-Follow help describes the five-minute live / one-minute continental recap cycle.
+Follow help describes the five-minute live / one-minute regional recap cycle, including the Middle East.
 Meander cancels through `stop_event_follow`, including any active recap, so no
 automatic playback survives switching idle modes.

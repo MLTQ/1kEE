@@ -49,8 +49,8 @@ fn loaded(model: &mut AppModel, events: History) {
 }
 
 #[test]
-fn continents_cover_major_landmasses_islands_and_dateline_without_duplicate_assignments() {
-    use Continent::*;
+fn regions_cover_major_landmasses_islands_and_dateline_without_duplicate_assignments() {
+    use RecapRegion::*;
     for (lat, lon, expected) in [
         (40.7, -74.0, NorthAmerica),
         (19.4, -99.1, NorthAmerica),
@@ -71,15 +71,15 @@ fn continents_cover_major_landmasses_islands_and_dateline_without_duplicate_assi
         (50.5, 30.5, Europe),
         (38.0, 23.7, Europe),
         (55.8, 37.6, Europe),
-        (30.0, 31.2, Africa),
+        (30.0, 31.2, MiddleEast),
         (36.8, 10.2, Africa),
         (-1.3, 36.8, Africa),
         (-18.9, 47.5, Africa),
         (-33.9, 18.4, Africa),
         (14.9, -23.5, Africa),
-        (24.7, 46.7, Asia),
-        (15.4, 44.2, Asia),
-        (39.9, 32.9, Asia),
+        (24.7, 46.7, MiddleEast),
+        (15.4, 44.2, MiddleEast),
+        (39.9, 32.9, MiddleEast),
         (35.7, 139.7, Asia),
         (28.6, 77.2, Asia),
         (35.9, 14.5, Europe),
@@ -95,7 +95,7 @@ fn continents_cover_major_landmasses_islands_and_dateline_without_duplicate_assi
         (-78.0, 166.0, Antarctica),
     ] {
         assert_eq!(
-            Continent::at(GeoPoint { lat, lon }),
+            RecapRegion::at(GeoPoint { lat, lon }),
             Some(expected),
             "{lat}, {lon}"
         );
@@ -103,7 +103,7 @@ fn continents_cover_major_landmasses_islands_and_dateline_without_duplicate_assi
     for lat in -90..=90 {
         for lon in -180..=180 {
             assert!(
-                Continent::at(GeoPoint {
+                RecapRegion::at(GeoPoint {
                     lat: lat as f32,
                     lon: lon as f32
                 })
@@ -112,11 +112,11 @@ fn continents_cover_major_landmasses_islands_and_dateline_without_duplicate_assi
         }
     }
     assert_eq!(
-        Continent::at(GeoPoint {
+        RecapRegion::at(GeoPoint {
             lat: -20.0,
             lon: 180.0
         }),
-        Continent::at(GeoPoint {
+        RecapRegion::at(GeoPoint {
             lat: -20.0,
             lon: -180.0
         })
@@ -135,7 +135,7 @@ fn continents_cover_major_landmasses_islands_and_dateline_without_duplicate_assi
             lon: 181.0,
         },
     ] {
-        assert_eq!(Continent::at(point), None);
+        assert_eq!(RecapRegion::at(point), None);
     }
 }
 
@@ -145,19 +145,23 @@ fn full_rotation_waits_five_live_minutes_and_resumes_in_both_views() {
         let mut model = model(local);
         model.event_follow.set_dwell_seconds(90);
         let mut live_start = 0.0;
-        for expected in Continent::ALL.into_iter().chain([Continent::NorthAmerica]) {
+        for expected in RecapRegion::ALL
+            .into_iter()
+            .chain([RecapRegion::NorthAmerica])
+        {
             model.tick_event_follow(live_start + LIVE_SECONDS - 0.01);
             assert!(model.follow_recaps.active.is_none());
             let started = live_start + LIVE_SECONDS;
             model.tick_event_follow(started);
             assert!(model.event_follow.enabled());
             assert_eq!(
-                model.follow_recaps.active.as_ref().unwrap().continent,
+                model.follow_recaps.active.as_ref().unwrap().region,
                 expected
             );
             assert!(!model.globe_view.local_mode);
             loaded(&mut model, vec![]);
             model.tick_event_follow(started + FRAMING_SECONDS);
+            assert!((model.globe_view.zoom - expected.zoom()).abs() < 0.0001);
             assert_eq!(
                 model.follow_recaps.active.as_ref().unwrap().clock(),
                 "00:00:00"
@@ -184,7 +188,73 @@ fn full_rotation_waits_five_live_minutes_and_resumes_in_both_views() {
 }
 
 #[test]
-fn snapshot_is_filtered_to_one_continent_and_exact_trailing_day() {
+fn middle_east_recap_is_exclusive_of_neighboring_regions() {
+    use RecapRegion::*;
+    let places = [
+        ("cairo", 30.0, 31.2, MiddleEast),
+        ("istanbul", 41.0, 29.0, MiddleEast),
+        ("ankara", 39.9, 32.9, MiddleEast),
+        ("jerusalem", 31.8, 35.2, MiddleEast),
+        ("gaza", 31.5, 34.5, MiddleEast),
+        ("beirut", 33.9, 35.5, MiddleEast),
+        ("damascus", 33.5, 36.3, MiddleEast),
+        ("amman", 32.0, 35.9, MiddleEast),
+        ("baghdad", 33.3, 44.4, MiddleEast),
+        ("tehran", 35.7, 51.4, MiddleEast),
+        ("mashhad", 36.3, 59.6, MiddleEast),
+        ("riyadh", 24.7, 46.7, MiddleEast),
+        ("doha", 25.3, 51.5, MiddleEast),
+        ("dubai", 25.2, 55.3, MiddleEast),
+        ("muscat", 23.6, 58.4, MiddleEast),
+        ("aden", 12.8, 45.0, MiddleEast),
+        ("nicosia", 35.2, 33.4, MiddleEast),
+        ("athens", 38.0, 23.7, Europe),
+        ("tbilisi", 41.7, 44.8, Asia),
+        ("baku", 40.4, 49.9, Asia),
+        ("kabul", 34.5, 69.2, Asia),
+        ("herat", 34.4, 62.2, Asia),
+        ("ashgabat", 38.0, 58.3, Asia),
+        ("karachi", 24.9, 67.0, Asia),
+        ("khartoum", 15.5, 32.6, Africa),
+        ("asmara", 15.3, 38.9, Africa),
+        ("djibouti", 11.6, 43.1, Africa),
+        ("benghazi", 32.1, 20.1, Africa),
+    ];
+    let unix = 1_800_000_000;
+    let history: History = places
+        .iter()
+        .map(|(name, lat, lon, expected)| {
+            let point = GeoPoint {
+                lat: *lat,
+                lon: *lon,
+            };
+            assert_eq!(RecapRegion::at(point), Some(*expected), "{name}");
+            (unix - 1, event(name, point))
+        })
+        .collect();
+    let view = GlobeViewState::from_focus(MiddleEast.center());
+    let mut seen = std::collections::HashSet::new();
+    for region in RecapRegion::ALL {
+        let recap = RegionalRecap::with_events(region, 0.0, unix, view, history.clone());
+        for (_, event) in &recap.replay.events {
+            assert!(
+                seen.insert(event.id.clone()),
+                "{} appeared in multiple recaps",
+                event.id
+            );
+        }
+        if region == MiddleEast {
+            assert_eq!(
+                recap.replay.events.len(),
+                places.iter().filter(|p| p.3 == MiddleEast).count()
+            );
+        }
+    }
+    assert_eq!(seen.len(), places.len());
+}
+
+#[test]
+fn snapshot_is_filtered_to_one_region_and_exact_trailing_day() {
     let view = GlobeViewState::from_focus(GeoPoint {
         lat: 0.0,
         lon: 179.0,
@@ -194,8 +264,8 @@ fn snapshot_is_filtered_to_one_continent_and_exact_trailing_day() {
         lat: 40.0,
         lon: -100.0,
     };
-    let mut recap = ContinentalRecap::with_events(
-        Continent::NorthAmerica,
+    let mut recap = RegionalRecap::with_events(
+        RecapRegion::NorthAmerica,
         5.0,
         unix,
         view,
@@ -204,7 +274,7 @@ fn snapshot_is_filtered_to_one_continent_and_exact_trailing_day() {
             (unix - DAY, event("first", na)),
             (unix - DAY - 1, event("old", na)),
             (unix + 1, event("future", na)),
-            (unix - 100, event("africa", Continent::Africa.center())),
+            (unix - 100, event("africa", RecapRegion::Africa.center())),
         ],
     );
     assert_eq!(recap.replay.events.len(), 2);
@@ -236,10 +306,10 @@ fn loading_waits_without_advancing_clock_and_skipped_frames_do_not_replay_old_fl
     let recap = model.follow_recaps.active.as_ref().unwrap();
     let start = recap.replay.sim_from;
     tx.send(vec![
-        (start, event("start", Continent::NorthAmerica.center())),
+        (start, event("start", RecapRegion::NorthAmerica.center())),
         (
             start + DAY / 2,
-            event("middle", Continent::NorthAmerica.center()),
+            event("middle", RecapRegion::NorthAmerica.center()),
         ),
     ])
     .unwrap();

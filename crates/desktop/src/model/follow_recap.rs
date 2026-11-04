@@ -1,5 +1,5 @@
-//! Live/continental-recap scheduling. Disk loading stays on a short-lived worker.
-pub use super::continents::Continent;
+//! Live/regional-recap scheduling. Disk loading stays on a short-lived worker.
+pub use super::recap_regions::RecapRegion;
 use super::{ActiveBody, AppModel, EventRecord, GeoPoint, GlobeViewState, ReplayState};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
@@ -13,11 +13,11 @@ type History = Vec<(i64, EventRecord)>;
 pub struct FollowRecaps {
     live_since: Option<f64>,
     next: usize,
-    pub active: Option<ContinentalRecap>,
+    pub active: Option<RegionalRecap>,
 }
 
-pub struct ContinentalRecap {
-    pub continent: Continent,
+pub struct RegionalRecap {
+    pub region: RecapRegion,
     pub replay: ReplayState,
     pub started: f64,
     saved_view: GlobeViewState,
@@ -25,9 +25,9 @@ pub struct ContinentalRecap {
     play_started: Option<f64>,
 }
 
-impl ContinentalRecap {
-    fn new(continent: Continent, now: f64, unix: i64, view: GlobeViewState) -> Self {
-        let mut recap = Self::with_events(continent, now, unix, view, Vec::new());
+impl RegionalRecap {
+    fn new(region: RecapRegion, now: f64, unix: i64, view: GlobeViewState) -> Self {
+        let mut recap = Self::with_events(region, now, unix, view, Vec::new());
         let (tx, rx) = mpsc::channel();
         recap.pending = Some(rx);
         std::thread::spawn(move || {
@@ -39,7 +39,7 @@ impl ContinentalRecap {
     }
 
     pub(crate) fn with_events(
-        continent: Continent,
+        region: RecapRegion,
         now: f64,
         unix: i64,
         view: GlobeViewState,
@@ -48,7 +48,7 @@ impl ContinentalRecap {
         let mut replay = ReplayState::new(Vec::new(), unix - DAY, unix, RECAP_SECONDS);
         replay.pause();
         let mut recap = Self {
-            continent,
+            region,
             replay,
             started: now,
             saved_view: view,
@@ -63,7 +63,7 @@ impl ContinentalRecap {
         events.retain(|(unix, event)| {
             *unix >= self.replay.sim_from
                 && *unix <= self.replay.sim_to
-                && Continent::at(event.location) == Some(self.continent)
+                && RecapRegion::at(event.location) == Some(self.region)
         });
         events.sort_by_key(|(unix, _)| *unix);
         self.replay = ReplayState::new(
@@ -116,7 +116,7 @@ impl ContinentalRecap {
         } else {
             self.saved_view.globe_center_latlon()
         };
-        let center = self.continent.center();
+        let center = self.region.center();
         let lon_delta = (center.lon - origin.lon + 180.0).rem_euclid(360.0) - 180.0;
         view.local_mode = false;
         view.focus_on(GeoPoint {
@@ -128,7 +128,7 @@ impl ContinentalRecap {
         } else {
             self.saved_view.zoom
         };
-        view.zoom = (start_zoom.ln() * (1.0 - t) + 1.15_f32.ln() * t).exp();
+        view.zoom = (start_zoom.ln() * (1.0 - t) + self.region.zoom().ln() * t).exp();
         view.stop_motion();
         if t >= 1.0 && !self.loading() {
             let started = *self.play_started.get_or_insert(now);
@@ -205,11 +205,11 @@ impl AppModel {
         } else {
             let since = *self.follow_recaps.live_since.get_or_insert(now);
             if now - since >= LIVE_SECONDS {
-                let continent = Continent::ALL[self.follow_recaps.next];
-                self.follow_recaps.next = (self.follow_recaps.next + 1) % Continent::ALL.len();
+                let region = RecapRegion::ALL[self.follow_recaps.next];
+                self.follow_recaps.next = (self.follow_recaps.next + 1) % RecapRegion::ALL.len();
                 self.event_follow.release_camera();
-                self.follow_recaps.active = Some(ContinentalRecap::new(
-                    continent,
+                self.follow_recaps.active = Some(RegionalRecap::new(
+                    region,
                     now,
                     crate::event_store::now_unix(),
                     self.globe_view,

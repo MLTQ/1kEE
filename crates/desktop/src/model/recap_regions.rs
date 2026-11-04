@@ -2,22 +2,24 @@
 use super::GeoPoint;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Continent {
+pub enum RecapRegion {
     NorthAmerica,
     SouthAmerica,
     Europe,
     Africa,
+    MiddleEast,
     Asia,
     Oceania,
     Antarctica,
 }
 
-impl Continent {
-    pub const ALL: [Self; 7] = [
+impl RecapRegion {
+    pub const ALL: [Self; 8] = [
         Self::NorthAmerica,
         Self::SouthAmerica,
         Self::Europe,
         Self::Africa,
+        Self::MiddleEast,
         Self::Asia,
         Self::Oceania,
         Self::Antarctica,
@@ -29,6 +31,7 @@ impl Continent {
             Self::SouthAmerica => "South America",
             Self::Europe => "Europe",
             Self::Africa => "Africa",
+            Self::MiddleEast => "Middle East",
             Self::Asia => "Asia",
             Self::Oceania => "Oceania",
             Self::Antarctica => "Antarctica",
@@ -41,11 +44,26 @@ impl Continent {
             Self::SouthAmerica => (-20.0, -60.0),
             Self::Europe => (53.0, 20.0),
             Self::Africa => (2.0, 20.0),
+            Self::MiddleEast => (25.0, 45.0),
             Self::Asia => (35.0, 95.0),
             Self::Oceania => (-22.0, 155.0),
             Self::Antarctica => (-85.0, 0.0),
         };
         GeoPoint { lat, lon }
+    }
+
+    /// Individually tuned closer views, rather than the old shared 1.15 overview.
+    pub fn zoom(self) -> f32 {
+        match self {
+            Self::NorthAmerica => 1.6,
+            Self::SouthAmerica => 1.7,
+            Self::Europe => 2.0,
+            Self::Africa => 1.6,
+            Self::MiddleEast => 2.2,
+            Self::Asia => 1.5,
+            Self::Oceania => 1.6,
+            Self::Antarctica => 1.8,
+        }
     }
 
     /// Every valid position belongs to exactly one region, including oceans.
@@ -61,7 +79,36 @@ impl Continent {
             return None;
         }
         let lon = (lon + 180.0).rem_euclid(360.0) - 180.0;
-        Some(if lat < -60.0 {
+        // Assign this dedicated broadcast zone before its neighboring continents.
+        let middle_east = inside(
+            lon,
+            lat,
+            &[
+                (26.0, 42.0),
+                (44.0, 42.0),
+                (44.5, 39.5),
+                (48.5, 39.8),
+                (54.5, 38.5),
+                (60.5, 37.5),
+                (61.0, 36.0),
+                (60.5, 34.0),
+                (61.0, 29.0),
+                (63.5, 27.0),
+                (61.5, 25.0),
+                (60.0, 22.0),
+                (58.0, 18.0),
+                (54.0, 12.0),
+                (42.5, 12.0),
+                (42.5, 16.0),
+                (36.5, 22.0),
+                (25.0, 22.0),
+                (25.0, 31.5),
+                (26.0, 34.0),
+            ],
+        );
+        Some(if middle_east {
+            Self::MiddleEast
+        } else if lat < -60.0 {
             Self::Antarctica
         } else if (lon >= 110.0 && lat < -10.0)
             || (lon >= 130.0 && lat < 0.0)

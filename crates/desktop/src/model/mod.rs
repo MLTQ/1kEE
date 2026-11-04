@@ -1,7 +1,7 @@
 pub mod admin;
 mod arcgis;
 mod cameras;
-mod continents;
+mod recap_regions;
 mod events;
 mod event_follow;
 mod flights;

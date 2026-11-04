@@ -91,18 +91,31 @@ fn five_line_chyron_gpu_preview() {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("target/event-chyron-qa"));
     std::fs::create_dir_all(&dir).unwrap();
-    for (index, time) in [15.0, 15.05, 15.1, 21.1, 30.0, 30.05, 30.1].into_iter().enumerate() {
+    for (index, time) in [15.0, 15.05, 15.1, 21.1, 30.0, 30.05, 30.1]
+        .into_iter()
+        .enumerate()
+    {
         if index == 4 {
-            use crate::model::follow_recap::{Continent, ContinentalRecap};
+            use crate::model::follow_recap::{RecapRegion, RegionalRecap};
             let unix = 1_794_000_000;
-            let events = model.events.iter().enumerate().map(|(index, event)| {
-                let mut event = event.clone();
-                event.location = Continent::NorthAmerica.center();
-                event.id = format!("hist-{index}");
-                (unix - 86_400 + index as i64 * 5400, event)
-            }).collect();
-            let mut recap = ContinentalRecap::with_events(
-                Continent::NorthAmerica, 0.0, unix, model.globe_view, events);
+            let events = model
+                .events
+                .iter()
+                .enumerate()
+                .map(|(index, event)| {
+                    let mut event = event.clone();
+                    event.location = RecapRegion::NorthAmerica.center();
+                    event.id = format!("hist-{index}");
+                    (unix - 86_400 + index as i64 * 5400, event)
+                })
+                .collect();
+            let mut recap = RegionalRecap::with_events(
+                RecapRegion::NorthAmerica,
+                0.0,
+                unix,
+                model.globe_view,
+                events,
+            );
             recap.tick(&mut model.globe_view, 3.0);
             recap.tick(&mut model.globe_view, 33.0);
             model.follow_recaps.active = Some(recap);
@@ -204,7 +217,7 @@ fn five_line_chyron_gpu_preview() {
             let name = match index {
                 2 => "chyron-start.png",
                 3 => "chyron-scrolling.png",
-                _ => "continental-recap.png",
+                _ => "regional-recap.png",
             };
             let pixels = readback.slice(..).get_mapped_range();
             assert!(

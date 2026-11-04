@@ -1,9 +1,9 @@
 //! Broadcast recap identification and elapsed-day clock, including OBS view.
-use crate::model::follow_recap::ContinentalRecap;
+use crate::model::follow_recap::RegionalRecap;
 use crate::theme;
 use egui::{Align2, FontId, Rect};
 
-pub(super) fn draw(painter: &egui::Painter, viewport: Rect, recap: &ContinentalRecap) {
+pub(super) fn draw(painter: &egui::Painter, viewport: Rect, recap: &RegionalRecap) {
     let rect = Rect::from_min_size(
         viewport.left_top() + egui::vec2(12.0, 12.0),
         egui::vec2((viewport.width() - 24.0).min(440.0), 132.0),
@@ -26,7 +26,7 @@ pub(super) fn draw(painter: &egui::Painter, viewport: Rect, recap: &ContinentalR
     label(
         10.0,
         14.0,
-        &format!("24hr recap · {}", recap.continent.name()),
+        &format!("24hr recap · {}", recap.region.name()),
         text,
     );
     painter.text(
@@ -45,7 +45,7 @@ pub(super) fn draw(painter: &egui::Painter, viewport: Rect, recap: &ContinentalR
     let status = if recap.loading() {
         "Loading stored events…".to_owned()
     } else if recap.framing() {
-        "Framing continent…".to_owned()
+        "Framing region…".to_owned()
     } else if recap.replay.events.is_empty() {
         "No stored events in this region · Returning to live shortly".to_owned()
     } else {

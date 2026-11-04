@@ -18,6 +18,6 @@ to inspect native text, clipping, colors, scrolling and reserved bottom space.
 All records are test-only and never enter runtime state. No network, source
 polling, settings writes, native app control or public streaming occurs.
 
-The same GPU preview also exports `continental-recap.png` using a frozen
+The same GPU preview also exports `regional-recap.png` using a frozen
 24-hour snapshot at its midpoint in OBS mode. It paints the real recap header,
 elapsed clock and historical crawl while suppressing the live Brief/card.

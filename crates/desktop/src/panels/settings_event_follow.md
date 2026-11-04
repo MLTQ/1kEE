@@ -20,3 +20,5 @@ experiment during a tour and save the preferred duration for future sessions.
 
 The section explains the automatic five-live-minute / one-minute recap cycle
 and temporary camera-sidebar/Brief suppression independently of dwell timing.
+
+The recap explanation explicitly includes the dedicated Middle East region.

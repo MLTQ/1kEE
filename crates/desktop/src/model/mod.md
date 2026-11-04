@@ -180,3 +180,6 @@ Replay. Follow entry points and timed selection now live in `follow_recap.rs`.
 `active_replay` supplies the current recap or manual playback to globe rendering.
 Five live minutes alternate with one-minute recaps and brief globe framing;
 Follow remains enabled, so live replacements cannot refocus historical playback.
+
+`recap_regions.rs` defines the eight exclusive broadcast zones and individual
+framing targets, including the Middle East. It replaces the continent-only enum.
