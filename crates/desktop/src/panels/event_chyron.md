@@ -37,3 +37,9 @@ during Follow Events, including Focus capture. No network or model mutations.
 ## Notes
 The ticker remains readable during camera travel. The selected map card retains
 the existing arrival/departure fades and is shown only while its Brief is open.
+
+`draw_recap` uses the same row painter with the latest five chronologically
+revealed historical events. Reports enter immediately as their flares spawn;
+future events never appear. Elapsed replay time drives scroll offsets. Live
+crawl state is cleared during recap, so its return cannot retain old live rows
+or introduce historical records into the ordinary pool.

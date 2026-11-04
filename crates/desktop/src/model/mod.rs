@@ -1,9 +1,11 @@
 pub mod admin;
 mod arcgis;
 mod cameras;
+mod continents;
 mod events;
 mod event_follow;
 mod flights;
+pub mod follow_recap;
 mod geo;
 pub mod gravity;
 mod geojson_layer;
@@ -62,6 +64,7 @@ pub struct AppModel {
     pub selected_flight_icao24: Option<String>,
     pub globe_view: GlobeViewState,
     pub event_follow: event_follow::EventFollow,
+    pub follow_recaps: follow_recap::FollowRecaps,
     pub focused_city_id: Option<String>,
     /// Session-only clean window capture; content layers and open briefs stay visible.
     pub obs_view: bool,
@@ -275,6 +278,7 @@ impl AppModel {
             event_follow: event_follow::EventFollow::with_dwell_seconds(
                 app_settings.event_follow_dwell_seconds,
             ),
+            follow_recaps: follow_recap::FollowRecaps::default(),
             focused_city_id: None,
             obs_view: false,
             show_layer_drawer: false,
@@ -1001,38 +1005,6 @@ impl AppModel {
     fn invalidate_nearby_camera_cache(&mut self) {
         self.camera_registry_revision = self.camera_registry_revision.wrapping_add(1);
         self.nearby_camera_cache.get_mut().take();
-    }
-
-    pub fn toggle_event_follow(&mut self) {
-        if self.event_follow.enabled() {
-            self.stop_event_follow();
-        } else if self.active_body == ActiveBody::Earth {
-            self.replay_mode = false;
-            self.replay_state = None;
-            self.globe_view.meander_mode = false;
-            self.globe_view.auto_spin = false;
-            self.event_follow.enable(&self.events);
-        }
-    }
-
-    pub fn stop_event_follow(&mut self) {
-        if self.event_follow.enabled() {
-            self.event_follow.stop();
-            self.globe_view.stop_motion();
-        }
-    }
-
-    pub fn tick_event_follow(&mut self, now: f64) {
-        if self.active_body != ActiveBody::Earth || self.replay_mode {
-            self.stop_event_follow();
-            return;
-        }
-        if let Some(id) = self.event_follow.tick(&mut self.globe_view, now) {
-            self.focused_city_id = None;
-            self.selected_event_id = Some(id);
-            self.selected_camera_id = self.nearby_cameras(250.0).first().map(|c| c.id.clone());
-            self.factal_brief_open = true;
-        }
     }
 
     /// Enter or exit replay mode.  On enter: loads history from the local

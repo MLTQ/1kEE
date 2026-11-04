@@ -22,7 +22,7 @@ pub struct EventCameraSidebar {
 
 impl EventCameraSidebar {
     pub fn render(&mut self, ctx: &egui::Context, model: &mut AppModel) {
-        if !model.event_follow.enabled() {
+        if !model.event_follow.enabled() || model.follow_recaps.active.is_some() {
             self.clear();
             return;
         }

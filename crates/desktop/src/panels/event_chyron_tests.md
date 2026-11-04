@@ -18,3 +18,7 @@ Verify the real egui news crawl at fixed times without live data or the desktop.
 ## Contracts
 Tests inspect actual text shapes, clips and persistent state. All fixtures are
 test-only; no source requests or settings writes occur.
+
+Recap regression uses historical IDs and a fixed playhead: only the five latest
+reached reports paint, future reports stay hidden, and returning live has no
+historical or previous-live rows.

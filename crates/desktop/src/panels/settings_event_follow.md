@@ -17,3 +17,6 @@ experiment during a tour and save the preferred duration for future sessions.
 |---|---|---|
 | `settings.rs` | Renders only the section body, without saving or opening another window | Implicit disk writes or a second window |
 | `model/event_follow.rs` | Setter keeps values within the shared supported range | Divergent bounds or restarting the tour on edits |
+
+The section explains the automatic five-live-minute / one-minute recap cycle
+and temporary camera-sidebar/Brief suppression independently of dwell timing.

@@ -174,7 +174,7 @@ fn focus_button(ui: &mut egui::Ui, model: &mut AppModel) {
 }
 fn presentation_buttons(ui: &mut egui::Ui, model: &mut AppModel) {
     if model.active_body == ActiveBody::Earth && button(ui, "FOLLOW EVENTS", model.event_follow.enabled())
-        .on_hover_text("Explore all live Factal events, visiting more severe stories more often and spacing out repeats. Keeps Globe/Local view. Drag, scroll or arrows to stop.").clicked() {
+        .on_hover_text("Explore all live Factal events, visiting more severe stories more often and spacing out repeats. Every five live minutes, watch a one-minute continental 24hr recap. Returns to your Globe/Local view. Drag, scroll or arrows to stop.").clicked() {
         model.toggle_event_follow(); ui.ctx().request_repaint();
     }
     if button(ui, "MEANDER", model.globe_view.meander_mode)
@@ -183,7 +183,7 @@ fn presentation_buttons(ui: &mut egui::Ui, model: &mut AppModel) {
     {
         let enable = !model.globe_view.meander_mode;
         if enable {
-            model.event_follow.stop();
+            model.stop_event_follow();
             model.globe_view.stop_motion();
         }
         model.globe_view.meander_mode = enable;

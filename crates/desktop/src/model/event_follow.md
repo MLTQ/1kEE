@@ -38,8 +38,12 @@ and advances it with egui's absolute time; `event_tour.rs` owns weighted selecti
   from the trajectory's actual destination in Globe or Local.
 - The separate five-row chyron remains readable throughout travel; camera
   opacity never hides or restarts a summary crawl.
-- Manual input, another idle mode, replay or leaving Earth cancels the controller
+- Manual input, another idle mode, manual Replay or leaving Earth cancels the controller
   and discards the tour. No synthetic events enter runtime state.
 
 `event_follow_tests.rs` checks ranking, queue refresh/cycling, dwell, adaptive
 travel timing, smooth joins, model selection/brief behavior, and cancellation.
+
+`release_camera` drops the active flight/velocity while retaining tour history,
+target and dwell. `follow_recap.rs` uses it to suspend movement during an
+automatic recap; the first returning tick plans a fresh live flight.

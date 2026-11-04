@@ -294,34 +294,35 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let nearby = model.nearby_camera_snapshot(250.0);
 
     // ── Replay flares (shown instead of live markers while replay is active) ──
-    if model.replay_mode && model.active_body == crate::model::ActiveBody::Earth {
-        if let Some(state) = &model.replay_state {
-            let wall_elapsed = state.wall_elapsed();
-            for flare in &state.active_flares {
-                let Some(base) = projection::project_geo_unit_surface(
-                    &layout,
-                    &model.globe_view,
-                    flare.event.location,
-                )
-                .filter(|base| base.front_facing) else {
-                    continue;
-                };
-                let extra_r = (135.0 / layout.radius).clamp(0.060, 0.220) * model.marker_scale();
-                let tip = projection::project_geo_unit_surface_elevated(
-                    &layout,
-                    &model.globe_view,
-                    flare.event.location,
-                    extra_r,
-                )
-                .map(|p| p.pos)
-                .unwrap_or(base.pos);
-                markers::draw_replay_flare(painter, base, tip, flare, wall_elapsed, model.marker_scale());
-            }
+    if model.active_body == crate::model::ActiveBody::Earth
+        && let Some(state) = model.active_replay()
+    {
+        let wall_elapsed = state.wall_elapsed();
+        for flare in &state.active_flares {
+            let Some(base) = projection::project_geo_unit_surface(
+                &layout,
+                &model.globe_view,
+                flare.event.location,
+            )
+            .filter(|base| base.front_facing) else {
+                continue;
+            };
+            let extra_r = (135.0 / layout.radius).clamp(0.060, 0.220) * model.marker_scale();
+            let tip = projection::project_geo_unit_surface_elevated(
+                &layout,
+                &model.globe_view,
+                flare.event.location,
+                extra_r,
+            )
+            .map(|p| p.pos)
+            .unwrap_or(base.pos);
+            markers::draw_replay_flare(painter, base, tip, flare, wall_elapsed, model.marker_scale());
         }
     }
 
     let event_markers: Vec<_> = if !model.show_event_markers
         || model.replay_mode
+        || model.follow_recaps.active.is_some()
         || model.active_body != crate::model::ActiveBody::Earth
     {
         Vec::new()

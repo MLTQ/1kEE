@@ -18,3 +18,7 @@ and Cache Blast, without operational status text taking over the map.
 - Cache Blast only drops in-memory tile caches; it does not delete disk files.
 - Imported-layer state remains visible via the Layers dot. Counts remain available
   even at zero. Arbitrarily long progress messages belong in Settings → Overview.
+
+Follow help describes the five-minute live / one-minute continental recap cycle.
+Meander cancels through `stop_event_follow`, including any active recap, so no
+automatic playback survives switching idle modes.

@@ -72,6 +72,59 @@ fn texts(
 }
 
 #[test]
+fn recap_shows_only_reached_history_and_keeps_live_crawl_separate() {
+    let ctx = egui::Context::default();
+    frame(&ctx, &[event(99)], Some("factal-99"), 1100.0, 0.0);
+    let history = (0..8)
+        .map(|index| {
+            let mut event = event(index);
+            event.id = format!("hist-{index}");
+            (index as i64 * 10, event)
+        })
+        .collect();
+    let mut replay = crate::model::ReplayState::new(history, 0, 100, 60.0);
+    replay.advance_to(30.0);
+    let viewport = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 720.0));
+    let output = ctx.run(
+        egui::RawInput {
+            screen_rect: Some(viewport),
+            time: Some(30.0),
+            ..Default::default()
+        },
+        |ctx| {
+            clear(ctx);
+            draw_recap(
+                &ctx.layer_painter(egui::LayerId::background()),
+                viewport,
+                &replay,
+            );
+        },
+    );
+    let lines: Vec<_> = texts(&output)
+        .iter()
+        .map(|(_, text)| text.galley.text().to_owned())
+        .collect();
+    assert_eq!(lines.len(), 5);
+    for index in 1..=5 {
+        assert!(
+            lines
+                .iter()
+                .any(|text| text.starts_with(&format!("Story {index} -")))
+        );
+    }
+    for index in [0, 6, 7, 99] {
+        assert!(
+            !lines
+                .iter()
+                .any(|text| text.starts_with(&format!("Story {index} -")))
+        );
+    }
+    let live = frame(&ctx, &[event(88)], Some("factal-88"), 1100.0, 31.0);
+    assert_eq!(texts(&live).len(), 1);
+    assert!(texts(&live)[0].1.galley.text().starts_with("Story 88 -"));
+}
+
+#[test]
 fn paints_five_single_lines_with_the_full_title_level_and_summary() {
     for width in [480.0, 1100.0, 1920.0] {
         let ctx = egui::Context::default();

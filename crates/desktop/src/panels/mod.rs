@@ -3,6 +3,7 @@ mod event_camera_sidebar;
 mod event_chyron;
 mod event_list;
 mod factal_brief;
+mod follow_recap;
 mod layer_drawer;
 pub(crate) mod layer_file_import;
 mod map_rail;

@@ -42,3 +42,6 @@ space so the map, event labels and chyron lay out beside the feeds.
 | `app.rs` | Called before the Brief and central map, including OBS view | Rendering after CentralPanel or hiding it in OBS |
 | `model/mod.rs` | Registry replacement/status changes advance the revision | Mutating cameras without invalidation |
 | `camera_feed_player.rs` | Playback stays independent of selected-camera state | Coupling all players to one model selection |
+
+Automatic recaps clear sidebar players/textures and reserve no panel width. The
+next live phase recreates the nearest-feed column from the newly followed stop.

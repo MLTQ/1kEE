@@ -132,6 +132,12 @@ impl EventFollow {
         self.tour.refresh(events, None);
     }
 
+    /// Release the current flight while retaining weighted tour history and dwell.
+    pub fn release_camera(&mut self) {
+        self.flight = None;
+        self.velocity = [0.0; 5];
+    }
+
     pub fn stop(&mut self) {
         self.enabled = false;
         self.tour = EventTour::default();

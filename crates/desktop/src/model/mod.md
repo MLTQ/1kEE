@@ -140,7 +140,7 @@ orientation or a verified relationship to the incident.
 refreshes and historical replay. `tick_event_follow` selects the new target and
 opens its brief without snapping the camera; replacement cannot refocus an active
 flight. A followed record remains available for its brief after paging out.
-Manual event/city selection, replay or leaving Earth stops
+Manual event/city selection, manual Replay or leaving Earth stops
 following. Webcams default on; the independent Flock inventory remains off.
 
 `map_events` includes the followed target after it has paged out, so its marker and brief stay tied to the continuing orbit without repopulating the live feed list.
@@ -173,4 +173,10 @@ Terrain Library window state. Section navigation belongs to the single settings
 window. The obsolete collapsed bottom-log state is removed; logs live in Activity.
 
 There is no cinematic-mode state. Follow starts directly from its rail toggle and
-continues until explicitly stopped or invalidated by manual navigation, replay or body changes.
+continues until explicitly stopped or invalidated by manual navigation, manual Replay or body changes.
+
+`follow_recaps` owns automatic continental playback independently of manual
+Replay. Follow entry points and timed selection now live in `follow_recap.rs`.
+`active_replay` supplies the current recap or manual playback to globe rendering.
+Five live minutes alternate with one-minute recaps and brief globe framing;
+Follow remains enabled, so live replacements cannot refocus historical playback.

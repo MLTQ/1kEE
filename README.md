@@ -31,6 +31,11 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
   Adjust stop duration under **Settings → Follow Events → Dwell time**
   (5–300 seconds, default 30); changes apply immediately, and **Save Settings**
   keeps the choice across restarts. Dwell begins after camera arrival.
+  Every five live minutes, Follow Events frames the next continent and plays
+  its past 24 hours of cached events in a one-minute recap. A labeled elapsed-day
+  clock and historical chyron accompany the flares; camera feeds and the Brief
+  return when live following resumes. All seven continents rotate in about
+  42 minutes, with broad geographic seams for regional assignment.
 - **User geodata** — ArcGIS FeatureServer scraping (`arcgis_source.rs`), plus GeoJSON
   and KML/KMZ layer import (`model/geojson_layer.rs`, `model/kml_layer.rs`).
 - **OSM ingest** — planet PBF / Overpass import pipeline producing cached feature cells

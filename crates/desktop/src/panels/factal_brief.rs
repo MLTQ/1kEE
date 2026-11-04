@@ -2,7 +2,7 @@ use crate::model::AppModel;
 use crate::theme;
 
 pub fn render_factal_brief(ctx: &egui::Context, model: &mut AppModel) {
-    if !model.factal_brief_open {
+    if !model.factal_brief_open || model.follow_recaps.active.is_some() {
         return;
     }
 

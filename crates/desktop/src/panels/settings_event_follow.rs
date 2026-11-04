@@ -7,6 +7,7 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
         theme::text_muted(),
         "Choose how long to stay at each event after arrival.",
     );
+    ui.small("Every five minutes of live following, a one-minute 24hr recap visits the next continent. Camera feeds and the Brief return after the recap.");
     ui.add_space(8.0);
     let mut seconds = model.event_follow.dwell_seconds();
     if ui

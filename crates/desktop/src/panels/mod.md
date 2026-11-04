@@ -26,3 +26,6 @@ and the Brief's reserved bottom space.
 
 `EventCameraSidebar` owns the right-hand nearest-feed column during Follow
 Events. The app renders it before the Brief and central map, including OBS view.
+
+`follow_recap` paints the broadcast recap identifier, UTC window and elapsed-day
+clock alongside the replay chyron in the map overlay, including OBS view.

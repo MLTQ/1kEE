@@ -133,3 +133,7 @@ polygons; admin_globe prepares spherical GPU fills and outlines for Globe.
 NCEI `gravity_layer` separately selects free-air, Bouguer or isostatic residual
 regional maps in mGal. It shares `raster_mesh` projection with SWOT, keeps all
 reads on a worker and exposes quantity/region controls to the layer drawer.
+
+Automatic Follow recaps take the overlay path before the OBS early return. They
+paint only the recap chyron and clock/header, suppressing the live selected card.
+The camera stays in Globe view for recap and returns to its saved view for live.

@@ -139,3 +139,6 @@ uses immutable spherical GPU geometry with perspective horizon clipping.
 Selected NCEI gravity-anomaly imagery paints above SWOT and below coastlines,
 contours and markers. Its geographic bounds/coverage come from the prepared
 map, and loading remains off-thread independently of terrain streaming.
+
+Automatic continental recaps share `active_replay` with manual Replay for flare
+painting and suppress live event markers while playback owns the globe.

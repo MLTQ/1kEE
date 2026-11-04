@@ -226,6 +226,68 @@ pub(super) fn draw<'a>(
     if state.rows.iter().all(Option::is_none) {
         return None;
     }
+    paint_rows(painter, viewport, rect, &state.rows, galleys, selected, now);
+    painter
+        .ctx()
+        .data_mut(|data| data.insert_temp(state_id(), state));
+    painter
+        .ctx()
+        .request_repaint_after(std::time::Duration::from_millis(33));
+    Some(rect)
+}
+
+/// Timed recap reports replace the oldest of five rows immediately on reveal.
+/// The future suffix is excluded, and no live crawl state enters this panel.
+pub(super) fn draw_recap(
+    painter: &egui::Painter,
+    viewport: Rect,
+    replay: &crate::model::ReplayState,
+) -> Option<Rect> {
+    let rect = Rect::from_min_size(
+        egui::pos2(viewport.left() + 12.0, viewport.bottom() - HEIGHT),
+        egui::vec2(viewport.width() - 24.0, HEIGHT),
+    );
+    if rect.width() < 100.0 || !viewport.contains_rect(rect) {
+        return None;
+    }
+    let reached = replay.revealed_events();
+    let mut rows: [Option<Row>; ROWS] = Default::default();
+    let mut galleys: [Option<Arc<egui::Galley>>; ROWS] = Default::default();
+    for (index, (unix, event)) in reached
+        .iter()
+        .skip(reached.len().saturating_sub(ROWS))
+        .enumerate()
+    {
+        let story = Story::from_event(event);
+        galleys[index] = Some(story.layout(painter));
+        rows[index] = Some(Row {
+            story,
+            started: (*unix - replay.sim_from) as f64
+                / (replay.sim_to - replay.sim_from).max(1) as f64
+                * replay.wall_duration,
+        });
+    }
+    paint_rows(
+        painter,
+        viewport,
+        rect,
+        &rows,
+        galleys,
+        None,
+        replay.wall_elapsed(),
+    );
+    Some(rect)
+}
+
+fn paint_rows(
+    painter: &egui::Painter,
+    viewport: Rect,
+    rect: Rect,
+    rows: &[Option<Row>; ROWS],
+    galleys: [Option<Arc<egui::Galley>>; ROWS],
+    selected: Option<&str>,
+    now: f64,
+) {
     let painter = painter.with_clip_rect(viewport);
     painter.rect(
         rect,
@@ -234,7 +296,7 @@ pub(super) fn draw<'a>(
         egui::Stroke::new(1.0, theme::panel_stroke()),
         egui::StrokeKind::Inside,
     );
-    for (index, (row, galley)) in state.rows.iter().zip(galleys).enumerate() {
+    for (index, (row, galley)) in rows.iter().zip(galleys).enumerate() {
         let Some((row, galley)) = row.as_ref().zip(galley) else {
             continue;
         };
@@ -263,13 +325,6 @@ pub(super) fn draw<'a>(
             painter.ctx().style().visuals.text_color(),
         );
     }
-    painter
-        .ctx()
-        .data_mut(|data| data.insert_temp(state_id(), state));
-    painter
-        .ctx()
-        .request_repaint_after(std::time::Duration::from_millis(33));
-    Some(rect)
 }
 
 fn priority(event: &EventRecord) -> i64 {

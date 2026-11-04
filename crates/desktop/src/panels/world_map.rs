@@ -280,6 +280,12 @@ fn draw_event_follow_overlay(
         super::event_chyron::clear(painter.ctx());
         return;
     }
+    if let Some(recap) = &model.follow_recaps.active {
+        super::event_chyron::clear(painter.ctx());
+        super::event_chyron::draw_recap(painter, rect, &recap.replay);
+        super::follow_recap::draw(painter, rect, recap);
+        return;
+    }
     let chyron = super::event_chyron::draw(
         painter,
         rect,

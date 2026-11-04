@@ -36,3 +36,6 @@ but omits the rank indicator.
 The follow window reserves the five-row chyron and map footer at the bottom of
 the screen, including the compact coordinate row. Long briefs scroll inside
 that height instead of covering the crawl or readout.
+
+Automatic continental recaps suppress the live Brief without changing its open
+flag. Live touring reopens/selects the next stop through its normal path.
