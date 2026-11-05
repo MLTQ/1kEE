@@ -15,3 +15,5 @@ normal rendering and cache reloads do not launch the companion or scan PBF files
 
 On macOS, the narrow AVFoundation bindings provide native asynchronous radio
 playback, with no external audio player dependency. Other platforms use ffplay.
+
+The buildout adapter uses a temporary file in the cache directory to publish three validated tables atomically.

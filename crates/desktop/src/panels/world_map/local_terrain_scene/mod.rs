@@ -148,6 +148,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             flight_markers: Vec::new(),
             arcgis_feature_markers: Vec::new(),
             landing_point_markers: Vec::new(),
+            buildout_markers: Vec::new(),
             beam_elevation_m: None,
         };
     };
@@ -615,6 +616,10 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 .collect()
         };
 
+    let buildout_markers = crate::buildout::markers::draw(painter, &model.buildout, model.active_body, |point| {
+        projection::project_local(&layout, &model.globe_view, viewport_center, point, 0.0, extent_x_km, extent_y_km)
+            .map(|p| p.pos)
+    });
     draw_active_fires(
         painter,
         &layout,
@@ -748,6 +753,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         flight_markers: Vec::new(),
         arcgis_feature_markers: Vec::new(),
         landing_point_markers,
+        buildout_markers,
         beam_elevation_m: Some(beam_elevation_m),
     }
 }

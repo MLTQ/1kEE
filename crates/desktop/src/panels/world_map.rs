@@ -234,6 +234,8 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
                 {
                     model.selected_landing_point =
                         (model.selected_landing_point != Some(index)).then_some(index);
+                } else {
+                    crate::buildout::markers::pick(&mut model.buildout, &scene.buildout_markers, pointer);
                 }
             }
         }
@@ -260,6 +262,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         map_detail_panels::draw_flight_detail_panel(ui.ctx(), model);
         map_detail_panels::draw_landing_detail_panel(ui.ctx(), model);
         draw_arcgis_detail_panel(ui.ctx(), model);
+        crate::buildout::view::window(ui.ctx(), &mut model.buildout);
         if let Some(hover) = response.hover_pos() {
             if !model.globe_view.local_mode {
                 if let Some(geo) = globe_scene::screen_to_latlon(rect, &model.globe_view, hover) {

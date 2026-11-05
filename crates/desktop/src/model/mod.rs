@@ -152,6 +152,7 @@ pub struct AppModel {
     pub deflock_alpr_locations: Arc<Vec<DeflockAlprLocation>>,
     /// User-downloaded Flock positions, with their own provenance and filters.
     pub flock: crate::flock_source::Source,
+    pub buildout: crate::buildout::Source,
     /// Optional public ALPR overlay. It remains off until the operator enables it.
     pub show_deflock_alprs: bool,
     /// Human-readable cache/refresh state for the public ALPR source.
@@ -346,6 +347,13 @@ impl AppModel {
             selected_arcgis_feature: None,
             deflock_alpr_locations: Arc::new(Vec::new()),
             flock: crate::flock_source::Source::default(),
+            buildout: crate::buildout::Source::new(
+                app_settings.ai_buildout_enabled,
+                crate::buildout::cache_path(
+                    app_settings.data_root.as_deref(),
+                    selected_root.as_deref(),
+                ),
+            ),
             show_deflock_alprs: false,
             deflock_status: "cache pending".into(),
             deflock_snapshot_revision: 0,
@@ -577,6 +585,7 @@ impl AppModel {
             windy_webcams_api_key: self.windy_webcams_api_key.trim().to_owned(),
             ny511_api_key: self.ny511_api_key.trim().to_owned(),
             eyes_on_enabled: self.eyes_on_enabled,
+            ai_buildout_enabled: self.buildout.enabled,
             eyes_on_country_code: settings_store::normalize_eyes_on_country_code(
                 &self.eyes_on_country_code,
             ),
@@ -605,7 +614,12 @@ impl AppModel {
                     self.settings_local_contour_vram_budget_gb,
                 ),
         };
-        settings_store::save_app_settings(&settings)
+        settings_store::save_app_settings(&settings)?;
+        self.buildout.set_path(crate::buildout::cache_path(
+            settings_store::load_app_settings().data_root.as_deref(),
+            self.selected_root.as_deref(),
+        ));
+        Ok(())
     }
 
     pub fn apply_saved_settings(&mut self) {
@@ -617,6 +631,11 @@ impl AppModel {
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_default();
+        self.buildout.enabled = settings.ai_buildout_enabled;
+        self.buildout.set_path(crate::buildout::cache_path(
+            settings.data_root.as_deref(),
+            self.selected_root.as_deref(),
+        ));
         self.settings_data_root = settings.data_root.unwrap_or_default();
         self.settings_derived_root = settings.derived_root.unwrap_or_default();
         self.settings_srtm_root = settings.srtm_root.unwrap_or_default();

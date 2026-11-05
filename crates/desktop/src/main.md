@@ -53,3 +53,5 @@ application with the map-oriented window configuration.
 
 - Source module registration retains fire_source alongside the packed archive
   and baked-height helpers when integrating upstream changes.
+
+The buildout module owns public campus, rule and news ingestion and its desktop browser.

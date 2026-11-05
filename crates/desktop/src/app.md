@@ -76,3 +76,5 @@ of Settings visibility or Focus capture.
 Owns `EventRadio` alongside the camera players. Brief and event-list actions use
 the same radio window, rendered after map interaction, including OBS view. Drop
 releases its player and cancels directory work; no radio network work runs at startup.
+
+The buildout source drains its background worker and checks its daily deadline before the map renders.

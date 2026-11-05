@@ -114,3 +114,5 @@ layer_file_import::button and retains its asynchronous loading/disabled state.
 Gravity anomaly delegates an independent Earth-only quantity/region selector
 to `world_map::gravity_controls`. It describes mGal, grid spacing and regional
 coverage without reload controls, citations or file access in the drawer.
+
+Public Data includes the saved AI data center buildout toggle, refresh status, publisher attribution and browser button.

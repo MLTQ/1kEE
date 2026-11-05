@@ -252,3 +252,5 @@ contour availability and paints before event/camera markers.
 Selected NCEI gravity-anomaly imagery uses the same sea-level raster drape as
 SWOT, below contours/markers and independent of terrain streaming. It reads
 only its own prepared regional product, never altering elevations.
+
+Local Earth projects buildout campuses and geolocated rules at ground level and passes visible marker positions to the shared picker.

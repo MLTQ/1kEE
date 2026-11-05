@@ -133,6 +133,7 @@ impl eframe::App for DashboardApp {
         self.model.flock.tick(self.model.selected_root.as_deref());
         submarine_cables::tick(&mut self.model);
         fire_source::tick(&mut self.model);
+        self.model.buildout.tick();
         self.model.tick_event_follow(ctx.input(|i| i.time));
 
         // Advance stellar time.

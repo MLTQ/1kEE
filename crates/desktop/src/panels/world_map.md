@@ -137,3 +137,5 @@ reads on a worker and exposes quantity/region controls to the layer drawer.
 Automatic Follow recaps take the overlay path before the OBS early return. They
 paint only the recap chyron and clock/header, suppressing the live selected card.
 The camera stays in Globe view for recap and returns to its saved view for live.
+
+A buildout marker click opens its record in the shared campus, rule and news browser. Existing event, camera and infrastructure click targets retain priority.

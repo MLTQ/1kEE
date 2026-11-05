@@ -60,6 +60,8 @@ pub struct AppSettings {
     /// requests to directory-listed feeds.
     #[serde(default)]
     pub eyes_on_enabled: bool,
+    #[serde(default)]
+    pub ai_buildout_enabled: bool,
     /// Optional ISO alpha-2 country code used to scope directory discovery.
     #[serde(default)]
     pub eyes_on_country_code: String,
@@ -123,6 +125,7 @@ impl Default for AppSettings {
             windy_webcams_api_key: String::new(),
             ny511_api_key: String::new(),
             eyes_on_enabled: false,
+            ai_buildout_enabled: false,
             eyes_on_country_code: String::new(),
             eyes_on_requests_per_minute: DEFAULT_EYES_ON_REQUESTS_PER_MINUTE,
             aisstream_api_key: String::new(),

@@ -183,3 +183,5 @@ Follow remains enabled, so live replacements cannot refocus historical playback.
 
 `recap_regions.rs` defines the eight exclusive broadcast zones and individual
 framing targets, including the Middle East. It replaces the continent-only enum.
+
+The buildout source owns one immutable snapshot for both Earth scenes and the record browser. It follows saved data paths and restores the layer opt-in at startup.

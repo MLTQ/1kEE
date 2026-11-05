@@ -41,6 +41,7 @@ pub struct GlobeScene {
     /// (index into `submarine_cables::catalog().landings`, screen_pos) for
     /// landing-point hover and click detection.
     pub landing_point_markers: Vec<(usize, egui::Pos2)>,
+    pub buildout_markers: Vec<crate::buildout::markers::Marker>,
     /// Terrain elevation (metres) at the beam contact point, if available.
     pub beam_elevation_m: Option<f32>,
 }
@@ -392,6 +393,11 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             .collect()
     };
 
+    let buildout_markers = crate::buildout::markers::draw(painter, &model.buildout, model.active_body, |point| {
+        project_surface(&layout, &model.globe_view, point)
+            .filter(|p| p.depth >= (1.0 + 1.0 / layout.camera_distance) * 0.5)
+            .map(|p| p.pos)
+    });
     draw_active_fires(painter, &layout, &model.globe_view, model);
     if model.show_pipeline && model.active_body == crate::model::ActiveBody::Earth
         && let Some(root) = model.selected_root.as_deref() {
@@ -542,6 +548,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         flight_markers,
         arcgis_feature_markers,
         landing_point_markers,
+        buildout_markers,
         beam_elevation_m: None,
     }
 }

@@ -61,3 +61,5 @@ Serialization coverage checks saved scale, legacy default and invalid/clamped va
 legacy settings default to 30 seconds; load/save normalize it to 5–300 seconds.
 The controller uses the same normalization so live edits and restored values agree.
 Serialization coverage checks the saved duration, legacy/new defaults and bounds.
+
+The saved AI buildout opt-in defaults to false for new and existing configurations.

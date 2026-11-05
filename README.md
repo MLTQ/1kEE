@@ -48,6 +48,12 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
   bundled TeleGeography snapshot (`submarine_cables.rs`, works offline) and live
   NASA FIRMS active-fire detections (`fire_source.rs`, rendered by
   `panels/world_map/fire_layer.rs`, cached locally). Both default to off.
+- **AI data center buildout** — enable **Layers → Public Data → AI data center buildout**.
+  1kEE checks [Zack’s Lab](https://www.zackslab.com/buildout) daily while running,
+  and keeps the last successful snapshot for offline use. Filled dots mark campus
+  locations, rings mark approximate locations, and purple squares mark rules with
+  coordinates. Click a marker for details. **Browse buildout** opens
+  all campuses, jurisdictional rules and dated news with source links.
 - **Terrain & bodies** — GEBCO / SRTM / Natural Earth elevation, the Yale Bright
   Star Catalogue and planetary ephemeris, and a replay timeline.
 - **Washington LiDAR** — optional DNR bare-earth and top-surface hillshade in

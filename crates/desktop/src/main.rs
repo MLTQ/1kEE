@@ -1,4 +1,5 @@
 mod app;
+mod buildout;
 mod arcgis_source;
 mod camera_directory_pipeline;
 mod camera_feed_player;

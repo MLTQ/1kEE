@@ -269,6 +269,9 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                 });
                 ui.add_space(4.0);
 
+                crate::buildout::view::controls(ui, model);
+                ui.add_space(4.0);
+
                 ui.checkbox(&mut model.show_submarine_cables, "Submarine cables")
                     .on_hover_text(
                         "Cable routes and landing points from a bundled TeleGeography \
