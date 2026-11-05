@@ -29,3 +29,6 @@ Events. The app renders it before the Brief and central map, including OBS view.
 
 `follow_recap` paints the broadcast recap identifier, UTC window and elapsed-day
 clock alongside the replay chyron in the map overlay, including OBS view.
+
+`EventRadio` owns explicit event-area radio discovery and playback; the Brief
+and event list share its Nearby radio action.

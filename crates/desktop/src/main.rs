@@ -21,6 +21,7 @@ mod moving_tracks;
 mod osm_ingest;
 mod panels;
 mod planet_ephemeris;
+mod radio;
 mod settings_store;
 mod submarine_cables;
 mod stellar_catalog;

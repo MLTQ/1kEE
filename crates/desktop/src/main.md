@@ -12,6 +12,7 @@ application with the map-oriented window configuration.
 - `flock_source` loads the downloaded Flock TSV as a separate public position layer.
 - `elevation_sources` supplies bounded international terrain acquisition to the
   existing Earth contour and point-sampling pipelines.
+- `radio` supplies open-directory discovery, saved public streams and native audio playback.
 - **Does**: Makes source adapters, model modules, map panels, and application
   lifecycle code available inside the desktop binary.
 - **Interacts with**: all crate-local modules.

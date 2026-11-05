@@ -1,5 +1,7 @@
 # event_overlay_tests.rs
 
+Brief rendering supplies an inert radio controller; these fixtures do not query radio or play audio.
+
 ## Purpose
 Verify the combined Follow Events presentation through the exact map overlay
 entry point, independently of terrain/GPU/feed loading.

@@ -2,6 +2,7 @@ mod camera_list;
 mod event_camera_sidebar;
 mod event_chyron;
 mod event_list;
+mod event_radio;
 mod factal_brief;
 mod follow_recap;
 mod layer_drawer;
@@ -16,6 +17,7 @@ pub(crate) mod world_map;
 
 pub use event_list::render_event_list;
 pub use event_camera_sidebar::EventCameraSidebar;
+pub use event_radio::EventRadio;
 pub use factal_brief::render_factal_brief;
 pub use layer_drawer::render_layer_drawer;
 pub use replay_controls::render_replay_controls;

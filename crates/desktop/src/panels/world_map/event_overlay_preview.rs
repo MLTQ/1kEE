@@ -128,7 +128,7 @@ fn five_line_chyron_gpu_preview() {
                 ..Default::default()
             },
             |ctx| {
-                super::super::super::render_factal_brief(ctx, &mut model);
+                super::super::super::render_factal_brief(ctx, &mut model, &mut crate::panels::EventRadio::default());
                 let painter = ctx.layer_painter(egui::LayerId::background());
                 painter.rect_filled(rect, 0.0, crate::theme::canvas_background());
                 for x in (0..1280).step_by(80) {

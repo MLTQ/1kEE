@@ -1,5 +1,7 @@
 # event_overlay_preview.rs
 
+Brief rendering supplies an inert radio controller; these fixtures do not query radio or play audio.
+
 ## Purpose
 Render the actual selected map card, five-row chyron and Brief through egui/wgpu
 to inspect native text, clipping, colors, scrolling and reserved bottom space.

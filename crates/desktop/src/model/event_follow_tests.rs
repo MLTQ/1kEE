@@ -339,7 +339,7 @@ fn follow_brief_renders_the_followed_record_to_the_right_of_map_center() {
                 time: Some(frame as f64 * 0.1),
                 ..Default::default()
             },
-            |ctx| crate::panels::render_factal_brief(ctx, &mut model),
+            |ctx| crate::panels::render_factal_brief(ctx, &mut model, &mut crate::panels::EventRadio::default()),
         );
         for shape in output.shapes {
             if let egui::Shape::Text(t) = shape.shape {

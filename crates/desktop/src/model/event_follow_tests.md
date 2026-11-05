@@ -1,5 +1,7 @@
 # event_follow_tests.rs
 
+Brief rendering supplies an inert radio controller; these fixtures do not query radio or play audio.
+
 Exercises the event tour and camera controller with deterministic event fixtures
 and absolute times. It covers numeric severity and category fallback, recency ties,
 the full unique pool, invalid/non-Factal exclusion, ranking revisions, refreshes

@@ -411,7 +411,7 @@ fn recap_hides_live_sidebar_and_brief_without_changing_open_flags() {
             },
             |ctx| {
                 sidebar.render(ctx, &mut model);
-                crate::panels::render_factal_brief(ctx, &mut model);
+                crate::panels::render_factal_brief(ctx, &mut model, &mut crate::panels::EventRadio::default());
                 assert!(ctx.available_rect().width() > 1200.0);
             },
         );
@@ -422,7 +422,7 @@ fn recap_hides_live_sidebar_and_brief_without_changing_open_flags() {
     model.tick_event_follow(363.5);
     let output = ctx.run(Default::default(), |ctx| {
         sidebar.render(ctx, &mut model);
-        crate::panels::render_factal_brief(ctx, &mut model);
+        crate::panels::render_factal_brief(ctx, &mut model, &mut crate::panels::EventRadio::default());
     });
     assert!(output.shapes.iter().any(|shape| match &shape.shape {
         egui::Shape::Text(text) => text.galley.text() == "NEAREST CAMERAS",

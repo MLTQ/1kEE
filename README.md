@@ -39,6 +39,9 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
   closer camera zoom tuned for each region.
 - **User geodata** — ArcGIS FeatureServer scraping (`arcgis_source.rs`), plus GeoJSON
   and KML/KMZ layer import (`model/geojson_layer.rs`, `model/kml_layer.rs`).
+- **Nearby radio** — find open public-safety and emergency radio near a selected
+  event, browse feeds, and listen in a small player. Supports saved public streams
+  and native macOS audio ([coverage and usage](docs/emergency-radio.md)).
 - **OSM ingest** — planet PBF / Overpass import pipeline producing cached feature cells
   (`osm_ingest/`).
 - **Public geospatial layers** — submarine cables and landing points from a

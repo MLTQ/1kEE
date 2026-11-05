@@ -1,5 +1,7 @@
 # follow_recap_tests.rs
 
+Brief rendering supplies an inert radio controller; these fixtures do not query radio or play audio.
+
 Deterministic timing/coordinate tests for automatic regional recaps. Fixtures
 are test-only and API keys are cleared; no network requests or settings writes.
 Tests replace the short-lived SQLite receiver with known data.

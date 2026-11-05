@@ -72,3 +72,7 @@ The top status banner is removed. Settings and the stellar tool render after the
 map; Focus capture preserves their flags
 while hiding them. Terrain/OSM worker advancement now runs before panels, regardless
 of Settings visibility or Focus capture.
+
+Owns `EventRadio` alongside the camera players. Brief and event-list actions use
+the same radio window, rendered after map interaction, including OBS view. Drop
+releases its player and cancels directory work; no radio network work runs at startup.

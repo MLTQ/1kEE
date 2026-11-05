@@ -35,6 +35,7 @@ pub struct DashboardApp {
     model: AppModel,
     camera_feed_viewer: CameraFeedViewer,
     event_camera_sidebar: panels::EventCameraSidebar,
+    event_radio: panels::EventRadio,
     last_theme: theme::MapTheme,
     _puffin_server: Option<puffin_http::Server>,
     /// Gruve mesh bridge: serves the companion web view + announces to the local
@@ -84,6 +85,7 @@ impl DashboardApp {
             model,
             camera_feed_viewer: CameraFeedViewer::default(),
             event_camera_sidebar: panels::EventCameraSidebar::default(),
+            event_radio: panels::EventRadio::default(),
             _puffin_server: puffin_server,
             gruve,
         }
@@ -170,11 +172,11 @@ impl eframe::App for DashboardApp {
         if !self.model.obs_view {
             panels::render_layer_drawer(ctx, &mut self.model);
             if self.model.show_event_list {
-                panels::render_event_list(ctx, &mut self.model);
+                panels::render_event_list(ctx, &mut self.model, &mut self.event_radio);
             }
         }
 
-        panels::render_factal_brief(ctx, &mut self.model);
+        panels::render_factal_brief(ctx, &mut self.model, &mut self.event_radio);
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::canvas_background()))
@@ -187,6 +189,7 @@ impl eframe::App for DashboardApp {
             panels::render_stellar_observatory(ctx, &mut self.model);
         }
         self.camera_feed_viewer.render(ctx, &mut self.model);
+        self.event_radio.render(ctx, self.model.selected_event());
 
         // Refresh the snapshot the companion web view polls, now that this frame's
         // interaction has been folded into the model.

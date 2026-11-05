@@ -1,7 +1,7 @@
 use crate::model::AppModel;
 use crate::theme;
 
-pub fn render_factal_brief(ctx: &egui::Context, model: &mut AppModel) {
+pub fn render_factal_brief(ctx: &egui::Context, model: &mut AppModel, radio: &mut super::EventRadio) {
     if !model.factal_brief_open || model.follow_recaps.active.is_some() {
         return;
     }
@@ -39,6 +39,7 @@ pub fn render_factal_brief(ctx: &egui::Context, model: &mut AppModel) {
             ui.colored_label(event.severity.color(), event.severity.label());
             ui.label(event.location_name.as_str());
             ui.small(format!("Occurred: {}", event.occurred_at));
+            radio.button(ui, &event);
 
             ui.add_space(10.0);
             ui.colored_label(theme::text_muted(), "Summary");

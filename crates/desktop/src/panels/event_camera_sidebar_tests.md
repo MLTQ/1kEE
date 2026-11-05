@@ -1,5 +1,7 @@
 # event_camera_sidebar_tests.rs
 
+Brief rendering supplies an inert radio controller; these fixtures do not query radio or play audio.
+
 ## Purpose
 Regression coverage for event-relative feed selection, worker lifecycle and
 native sidebar layout. All events and feeds are private test fixtures; inert

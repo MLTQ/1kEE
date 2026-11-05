@@ -151,7 +151,7 @@ fn a_long_follow_brief_keeps_the_bottom_chyron_and_local_footer_clear() {
                     time: Some(frame as f64 * 0.1),
                     ..Default::default()
                 },
-                |ctx| super::super::render_factal_brief(ctx, &mut model),
+                |ctx| super::super::render_factal_brief(ctx, &mut model, &mut crate::panels::EventRadio::default()),
             );
         }
         let brief = ctx

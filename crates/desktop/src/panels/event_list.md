@@ -8,6 +8,7 @@ Shows the currently loaded event queue and lets the analyst choose which inciden
 ### `render_event_list`
 - **Does**: Renders event cards with severity, timing, source, summary, and selection controls
 - **Interacts with**: `AppModel::select_event` in `model.rs`, theme helpers in `theme.rs`
+- Offers `EventRadio::button` for the focused event, including records without briefs.
 
 ## Contracts
 

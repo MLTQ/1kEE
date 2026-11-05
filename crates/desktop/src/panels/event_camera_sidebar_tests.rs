@@ -85,7 +85,7 @@ fn frame(
         },
         |ctx| {
             sidebar.render(ctx, model);
-            super::super::factal_brief::render_factal_brief(ctx, model);
+            super::super::factal_brief::render_factal_brief(ctx, model, &mut crate::panels::EventRadio::default());
             egui::CentralPanel::default().show(ctx, |ui| {
                 map = ui.max_rect();
                 ui.painter().rect_filled(map, 0, theme::canvas_background());
