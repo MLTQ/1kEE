@@ -303,6 +303,24 @@ fn resident_theme_changes_recolor_complete_and_inflight_globe_images() {
     assert!(original.chunks_exact(4).any(|p| p[1] > 10));
     let full = image.full.as_ref().unwrap().texture.clone();
     let progress = image.next_chunk;
+    // Primary RGB colors hide an erroneous gamma conversion. Check the actual
+    // Topo orange/blue against the independently rendered class coverage too.
+    let major = egui::Color32::from_rgb(245, 125, 78);
+    let minor = egui::Color32::from_rgb(96, 164, 181).gamma_multiply(0.78);
+    image.set_palette(major, minor);
+    assert!(!step(&mut image, &uniforms));
+    let topo = composite(&device, &queue, &image);
+    for (coverage, actual) in original.chunks_exact(4).zip(topo.chunks_exact(4)) {
+        for channel in 0..3 {
+            let expected = (coverage[0] as f32 * major.to_array()[channel] as f32 / 255.0
+                + coverage[1] as f32 * minor.to_array()[channel] as f32 / 255.0)
+                .round().clamp(0.0, 255.0) as u8;
+            assert!(actual[channel].abs_diff(expected) <= 2,
+                "retained Topo palette changed channel {channel}: {actual:?}, coverage={coverage:?}, expected={expected}");
+        }
+    }
+    assert_eq!(image.full.as_ref().unwrap().texture, full);
+    assert_eq!(image.next_chunk, progress);
     image.set_palette(egui::Color32::BLUE, egui::Color32::YELLOW);
     assert!(!step(&mut image, &uniforms));
     assert_eq!(image.full.as_ref().unwrap().texture, full);

@@ -274,7 +274,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         // ── Outside sphere — very faint limb halo only ────────────────────
         let edge_dist = sqrt(dx*dx + dy*dy) / u.radius - 1.0;
         let halo      = exp(-edge_dist * 12.0) * 0.045;
-        return vec4<f32>(u.ocean_col.rgb * halo * 2.0, halo);
+        return map_output_linear(vec4<f32>(u.ocean_col.rgb * halo * 2.0, halo));
     }
 
     // Front-face hit (smaller t).
@@ -354,5 +354,5 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     rgb = mix(rgb, u.mount_col.rgb * 0.85, edge_a);
 
     // Fully opaque inside the sphere (premultiplied: colour*1, alpha=1).
-    return vec4<f32>(rgb, 1.0);
+    return map_output_linear(vec4<f32>(rgb, 1.0));
 }

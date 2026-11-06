@@ -60,7 +60,7 @@ struct VsIn {
     @builtin(vertex_index) vidx: u32,
     @location(0) a: vec3<f32>,      // endpoint A: (lon, lat, elevation_m)
     @location(1) b: vec3<f32>,      // endpoint B: (lon, lat, elevation_m)
-    @location(2) color: vec4<f32>,  // premultiplied linear RGBA
+    @location(2) color: vec4<f32>,  // exact stored Color32 display RGBA
     @location(3) major: u32,        // 1 for major contours, 0 for minor
 }
 
@@ -202,7 +202,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // minor contours each get their own factor. At a pixel and above it is 1.0.
     let sub_pixel = clamp(2.0 * in.stroke_half_px, 0.0, 1.0);
     // Colour is premultiplied — scale the whole vector by coverage x pass fade.
-    return in.color * (edge * u.alpha * sub_pixel);
+    return map_output_gamma(in.color * (edge * u.alpha * sub_pixel));
 }
 
 // Ground distance remains constant down a vertical contour curtain. For the

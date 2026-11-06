@@ -22,6 +22,9 @@ planes for wide views using one shared spacing; full geometry stays resident. Bo
 Source Arcs remain pinned while their pointer-derived versions can be used.
 Candidate, displayed, and active image-refinement GPU generations survive staging.
 
+Diagnostic colors retain exact Color32 display bytes; runtime coverage primaries
+are unchanged and the final compositor supplies the display-space palette.
+
 Runtime geometry and retained images encode major coverage in red and minor
 coverage in green. The current theme is supplied to the final image compositor,
 so a palette change updates resident and in-flight terrain immediately without

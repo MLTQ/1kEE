@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use super::contour_asset::ContourPath;
-use super::globe_pass::color_to_linear;
+use super::gpu_color;
 use super::local_terrain_scene::projection::LocalProjectionParams;
 use crate::settings_store;
 
@@ -109,7 +109,7 @@ impl LocalSegmentInstance {
         Self {
             a,
             b,
-            color: linear_u8(color),
+            color: color.to_array(),
             major: u32::from(major),
         }
     }
@@ -159,13 +159,6 @@ struct LocalContourUniforms {
 }
 
 const _: () = assert!(std::mem::size_of::<LocalContourUniforms>() == 160);
-
-#[inline]
-fn linear_u8(c: egui::Color32) -> [u8; 4] {
-    let mut l = color_to_linear(c);
-    l[3] = (c.a() as f32 / 255.0).powf(2.2);
-    l.map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
-}
 
 // ── Instance building ────────────────────────────────────────────────────────
 
@@ -264,7 +257,7 @@ pub fn instances_for_tile(
                     .par_iter()
                     .flat_map_iter(|contour| {
                         let (color, is_major) = style_fn(contour);
-                        let color = linear_u8(color);
+                        let color = color.to_array();
                         let major = u32::from(is_major);
                         contour.points.windows(2).map(move |pair| LocalSegmentInstance {
                             a: [pair[0].lon, pair[0].lat, contour.elevation_m],
@@ -366,7 +359,7 @@ impl LocalContourPassResources {
     pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("local_contour_pass_shader"),
-            source: wgpu::ShaderSource::Wgsl(LOCAL_CONTOUR_WGSL.into()),
+            source: gpu_color::shader(LOCAL_CONTOUR_WGSL),
         });
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -450,7 +443,7 @@ impl LocalContourPassResources {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
+                compilation_options: gpu_color::fragment_options(target_format),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,
                     blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
@@ -578,9 +571,8 @@ impl LocalContourCallback {
                 feather_px_minor: super::contour_pass::contour_feather_px(stroke_width_px_minor),
                 feather_px_major: super::contour_pass::contour_feather_px(stroke_width_px_major),
                 pixels_per_point,
-                // Same gamma-space→linear-space correction the CPU path applied
-                // through `gamma_multiply`.
-                alpha: alpha.powf(2.2),
+                // Match egui's display-space `gamma_multiply` fade.
+                alpha,
                 occlusion_enabled: 0.0,
                 depth_scale: 0.01,
                 depth_center: 0.0,
@@ -598,8 +590,8 @@ impl LocalContourCallback {
     pub fn with_palette(mut self, major: egui::Color32, minor: egui::Color32) -> Self {
         if self.pass == LocalContourPass::Surface {
             self.uniforms.palette_enabled = 1.0;
-            self.uniforms.major_color = linear_u8(major).map(|channel| channel as f32 / 255.0);
-            self.uniforms.minor_color = linear_u8(minor).map(|channel| channel as f32 / 255.0);
+            self.uniforms.major_color = gpu_color::rgba(major);
+            self.uniforms.minor_color = gpu_color::rgba(minor);
         }
         self
     }
@@ -907,3 +899,7 @@ mod tests {
         assert_ne!(version_key(&a, 7), version_key(&a, 8));
     }
 }
+
+#[cfg(test)]
+#[path = "contour_palette_gpu_tests.rs"]
+mod palette_gpu_tests;

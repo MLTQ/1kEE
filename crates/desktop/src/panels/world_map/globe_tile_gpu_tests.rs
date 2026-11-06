@@ -377,7 +377,7 @@ fn benchmark_native_globe_tiles() {
     let baseline: Vec<SegmentInstance> = flat
         .par_iter()
         .flat_map_iter(|c| {
-            let color = linear_u8(egui::Color32::from_rgb(234, 58, 12));
+            let color = egui::Color32::from_rgb(234, 58, 12).to_array();
             c.points.windows(2).map(move |p| SegmentInstance {
                 a: unit_vec(p[0]),
                 b: unit_vec(p[1]),

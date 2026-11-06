@@ -6,6 +6,10 @@ Renders globe contour polylines as cached, GPU-instanced line segments. It
 keeps per-frame work to uniform updates and an instanced draw while geometry is
 rebuilt only when source contours or their palette changes.
 
+Color32 bytes stay in display space. `gpu_color` specializes final output for
+the actual framebuffer format, matching egui's Unorm preference and sRGB fallback.
+Pass fades and alpha remain ordinary multipliers, without a compensating power.
+
 Public pipelines use a seventh independent slot and `SegmentInstance::line`.
 Their geometry is prepared on a worker; camera movement updates only uniforms.
 The prior padding float at offset 68 is now `horizon_z`: pipelines use the

@@ -45,8 +45,9 @@ fn saved_uv(uv:vec2<f32>)->vec3<f32> {
     return vec3<f32>(old,1.);
 }
 fn palette(coverage:vec4<f32>)->vec4<f32> {
-    if(w.flags.z>0.) {return coverage.r*w.major_color + coverage.g*w.minor_color;}
-    return coverage;
+    let stored=map_sample_gamma(coverage);
+    if(w.flags.z>0.) {return map_output_gamma(stored.r*w.major_color + stored.g*w.minor_color);}
+    return map_output_gamma(stored);
 }
 @fragment fn fs(in:Out)->@location(0) vec4<f32> {
     if(w.flags.x>0.) {

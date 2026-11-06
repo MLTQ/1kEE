@@ -27,12 +27,15 @@ uniform slot and a typed cache namespace so roads never overwrite contour tiles.
 ### `LocalSegmentInstance`
 
 - **Does**: One polyline segment: two `(lon, lat, elevation_m)` endpoints, a
-  baked premultiplied-linear colour, and a major/minor flag. 32 bytes.
+  baked Color32 display channels, and a major/minor flag. 32 bytes.
 - **Rationale**: Endpoints are raw geography and the shader applies the whole
   transform, so a tile's instances stay valid under any camera motion — panning,
   rotating and zooming reuse resident buffers; returning after eviction reloads them.
 - Roads/custom batches use the stored color. Opt-in Earth terrain uses the
   major/minor flag with live palette uniforms instead of baking theme colors.
+- Color32 bytes, palette uniforms and pass fading follow egui's display-space
+  contract. `gpu_color` converts only at the actual framebuffer boundary;
+  alpha/fade are not raised to a power. No geometry or cache format changes.
 
 ### `LocalContourCallback`
 
@@ -97,6 +100,8 @@ uniform slot and a typed cache namespace so roads never overwrite contour tiles.
   including hidden layers. Later road prepares cannot lose their live buffers.
 - Road/contour hardware regression in `local_line_gpu_tests.rs` checks actual
   shader pixels at joins, separate widths, and completion of deferred uploads.
+- `contour_palette_gpu_tests.rs` compares baked/live native colors and pass
+  fades with egui's independent line output on Unorm and sRGB framebuffers.
 - A single tile can exceed the device's `max_buffer_size` on its own — a dense
   bucket-10 tile is ~4.3 M segments — so uploads go through
   `contour_pass::split_instance_buffers` rather than one allocation per tile.

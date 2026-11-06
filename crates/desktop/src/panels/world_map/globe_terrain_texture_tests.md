@@ -18,3 +18,7 @@ the same resident buffers and completed texture, verifies changed pixels and exa
 round-trip output, then switches during a two-million-segment refinement step.
 The frozen job finishes on its original target; no geometry upload or image
 retirement occurs because only colors changed.
+
+The same resident-image regression compares the actual Topo orange and faded
+blue with independently rendered class coverage. Unlike primary RGB fixtures,
+these midtone channels expose an incorrect color-space conversion.

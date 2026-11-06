@@ -19,3 +19,6 @@ Also supplies the depth-only contour-curtain vertex entry point.
 - Roads and disabled views bypass depth sampling and retain existing AA/widths.
 - Opt-in terrain palettes select colors from the per-instance major/minor flag;
   changing a theme is a uniform update. Other passes keep their baked colors.
+- Colors retain Color32 display channels. Shared `color_output.wgsl` converts
+  final covered/faded output for the actual Unorm or sRGB framebuffer; alpha
+  has no transfer curve. CPU-to-GPU publication therefore preserves the palette.

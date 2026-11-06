@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use super::contour_asset::ContourPath;
-use super::globe_pass::color_to_linear;
+use super::gpu_color;
 use crate::model::{GeoPoint, GlobeViewState};
 
 /// Identifies a contour layer. Each layer owns one uniform-buffer slot and one
@@ -115,7 +115,7 @@ const _: () = assert!(std::mem::size_of::<ContourUniforms>() == 80);
 // ── Segment instances ─────────────────────────────────────────────────────────
 
 /// One polyline segment: unit-sphere endpoints plus a baked
-/// premultiplied-linear colour. 28 bytes, `step_mode: Instance`.
+/// Color32 display channels. 28 bytes, `step_mode: Instance`.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SegmentInstance {
@@ -132,7 +132,7 @@ impl SegmentInstance {
 
     /// Public surface overlays reuse the same immutable GPU line batches.
     pub fn line(a: GeoPoint, b: GeoPoint, color: egui::Color32) -> Self {
-        Self { a: unit_vec(a), b: unit_vec(b), color: linear_u8(color) }
+        Self { a: unit_vec(a), b: unit_vec(b), color: color.to_array() }
     }
 }
 
@@ -144,20 +144,6 @@ fn unit_vec(p: GeoPoint) -> [f32; 3] {
     let lon = p.lon.to_radians();
     let lat_cos = lat.cos();
     [lat_cos * lon.cos(), lat.sin(), lat_cos * lon.sin()]
-}
-
-/// Quantize an egui colour (premultiplied sRGB) to premultiplied-linear u8s,
-/// the format the instance buffer stores and the shader consumes directly.
-///
-/// The alpha channel goes through the same sRGB→linear curve as the colour
-/// channels: egui blends translucent strokes in gamma space, this pass blends
-/// in linear space, and over the dark globe background gamma blending is
-/// equivalent to linear blending with alpha raised to ~2.2. Without this the
-/// GPU lines render dramatically brighter than the CPU path they replaced.
-fn linear_u8(c: egui::Color32) -> [u8; 4] {
-    let mut l = color_to_linear(c);
-    l[3] = (c.a() as f32 / 255.0).powf(2.2);
-    l.map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
 }
 
 #[inline]
@@ -381,7 +367,7 @@ pub fn instances_for(
                     contours
                         .par_iter()
                         .flat_map_iter(|contour| {
-                            let color = linear_u8(color_fn(contour));
+                            let color = color_fn(contour).to_array();
                             contour.points.windows(2).map(move |pair| SegmentInstance {
                                 a: unit_vec(pair[0]),
                                 b: unit_vec(pair[1]),
@@ -529,7 +515,7 @@ impl ContourPassResources {
     fn with_shader(device: &wgpu::Device, target_format: wgpu::TextureFormat, source: &str, topology: wgpu::PrimitiveTopology) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("contour_pass_shader"),
-            source: wgpu::ShaderSource::Wgsl(source.into()),
+            source: gpu_color::shader(source),
         });
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -606,7 +592,7 @@ impl ContourPassResources {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
+                compilation_options: gpu_color::fragment_options(target_format),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,
                     blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
@@ -668,9 +654,8 @@ impl ContourUniforms {
             radius_focal: layout.radius * layout.focal_length,
             camera_distance: layout.camera_distance,
             radius_offset,
-            // Same gamma-space→linear-space correction as `linear_u8`:
-            // the CPU path applied this fade via `gamma_multiply`.
-            alpha: alpha.powf(2.2),
+            // Match egui's display-space `gamma_multiply` fade.
+            alpha,
             // The UI-selected width is already in physical pixels.
             stroke_half_px: contour_stroke_half_px(stroke_width_px),
             feather_px: contour_feather_px(stroke_width_px),

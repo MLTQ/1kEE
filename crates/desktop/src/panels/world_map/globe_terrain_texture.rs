@@ -93,7 +93,7 @@ impl Cache {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("globe terrain reprojection"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("globe_terrain_reproject.wgsl").into()),
+            source: gpu_color::shader(include_str!("globe_terrain_reproject.wgsl")),
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
@@ -112,7 +112,7 @@ impl Cache {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs"),
-                compilation_options: Default::default(),
+                compilation_options: gpu_color::fragment_options(format),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
@@ -152,8 +152,7 @@ impl Cache {
     /// Recolor cached red/green class coverage without replacing geometry or
     /// restarting a frozen full-detail refinement job.
     pub fn set_palette(&mut self, major: egui::Color32, minor: egui::Color32) {
-        let palette =
-            [major, minor].map(|color| linear_u8(color).map(|channel| channel as f32 / 255.0));
+        let palette = [major, minor].map(gpu_color::rgba);
         if self.palette != Some(palette) {
             self.palette = Some(palette);
             self.palette_changed = true;

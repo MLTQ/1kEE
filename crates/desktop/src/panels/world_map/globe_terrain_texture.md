@@ -27,3 +27,7 @@ updates only the final compositor's uniforms, including its completed-image fast
 path. A theme switch preserves the full image, geometry buffers and any frozen
 refinement already in progress. Generic diagnostic images can still pass through
 unchanged when no coverage palette is set.
+
+Palette uniforms retain Color32 display channels. Shader assembly and fragment
+specialization use `gpu_color`; sampled class coverage and final output respect
+the actual Unorm/sRGB format instead of assuming an sRGB surface.

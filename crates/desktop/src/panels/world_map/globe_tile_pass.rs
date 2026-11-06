@@ -54,13 +54,13 @@ pub(super) fn end_frame() {
 fn build_tile(tile: &LocalTileGeometry, major: egui::Color32, minor: egui::Color32) -> Tile {
     let mut bins: HashMap<(i32, i32), Chunk> = HashMap::new();
     for contour in tile.contours.iter() {
-        let color = linear_u8(
+        let color = (
             if (contour.elevation_m.round() as i32).rem_euclid(50) == 0 {
                 major
             } else {
                 minor
-            },
-        );
+            }
+        ).to_array();
         let Some(&first) = contour.points.first() else {
             continue;
         };

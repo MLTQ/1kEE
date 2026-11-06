@@ -8,6 +8,8 @@ The hardware regression exceeds the per-frame upload budget, keeps the previous
 picture until all replacement tiles upload, releases retired buffers, and
 compares pixels from the old six-vertex pipeline against the new strip+culling.
 Both pipelines consume identical native segment coordinates.
+Diagnostic fixture colors retain exact Color32 display bytes, matching runtime
+line instances and the selected framebuffer's final color conversion.
 Lifecycle callbacks also supply the live palette expected by the coverage-image
 compositor; palette-only pixel/reuse regressions live in the texture tests.
 

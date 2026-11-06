@@ -7,6 +7,10 @@ Layers drawer; it is independent of the bathymetry and terrain streaming toggles
 ## Purpose
 Implements the main geographic canvas for the demo. The current version wraps an interactive 3D globe scene with drag orbit, wheel zoom, contour-heavy overlays, and preserved event/camera click flow at the panel boundary.
 
+`gpu_color` shares the native shader output boundary: contour colors/fades match
+egui's display-space rendering, while the backdrop encodes its linear shading
+for the actual framebuffer. Palette selection and terrain geometry are separate.
+
 ## Components
 
 ### Focus view
