@@ -585,7 +585,7 @@ impl LocalContourCallback {
         }
     }
 
-    /// Color the Earth surface by its major/minor flags without rebuilding
+    /// Color any body's surface by its major/minor flags without rebuilding
     /// geometry. Other passes preserve their per-instance colors.
     pub fn with_palette(mut self, major: egui::Color32, minor: egui::Color32) -> Self {
         if self.pass == LocalContourPass::Surface {
@@ -596,7 +596,7 @@ impl LocalContourCallback {
         self
     }
 
-    /// Only the local Earth surface opts in. Roads and staging never occlude.
+    /// Local terrain on any body can opt in. Roads and staging never occlude.
     pub fn with_occlusion(mut self, enabled: bool) -> Self {
         self.uniforms.occlusion_enabled = if enabled && self.pass == LocalContourPass::Surface {
             1.0
@@ -795,7 +795,7 @@ impl egui_wgpu::CallbackTrait for ResidencyCallback {
 
 #[cfg(test)]
 #[path = "local_occlusion_gpu_tests.rs"]
-mod occlusion_gpu_tests;
+pub(crate) mod occlusion_gpu_tests;
 
 #[cfg(test)]
 #[path = "local_line_gpu_tests.rs"]

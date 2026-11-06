@@ -4,6 +4,10 @@
 Private offscreen GPU tests for real contour depth visibility, camera/source
 invalidation and a repeatable synthetic visual/performance comparison.
 
+The test-only `Harness` also serves `local_terrain_scene/celestial_gpu_tests.rs`.
+Its renderer, optional palette and pixel readback stay isolated from the app;
+the celestial checks build batches through the production scene entry point.
+
 ## Coverage
 - Nearby ridges hide lower distant lines without removing foreground, ridge
   crests or higher distant terrain.

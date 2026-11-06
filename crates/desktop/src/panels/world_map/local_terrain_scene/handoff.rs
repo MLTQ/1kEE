@@ -117,8 +117,9 @@ pub(super) fn select(
         HashSet::new()
     };
     local_contour_pass::retain_instances(&keep);
-    // Cold starts can use the composed CPU picture while the first upload is
-    // staged. Subsequent updates always retain the previous displayed frame.
+    // Cold starts expose geometry only for overlay/height metadata while the
+    // first upload is staged. Contours draw only from published GPU batches.
+    // Subsequent updates always retain the previous displayed frame.
     if state.display.tiles.is_empty()
         && let Some(frame) = &state.prepared
     {

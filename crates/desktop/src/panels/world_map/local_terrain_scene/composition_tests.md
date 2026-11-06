@@ -10,3 +10,7 @@ only outside those pieces. Cuts insert endpoints and never bridge gaps. Empty
 decoded cells replace old geometry; missing cells do not. Tests verify stable
 Arc reuse, area conservation, disjoint rectangles and legacy clipping at
 negative Mexico coordinates.
+
+Lunar and Martian fixtures give neighboring tiles the same overlapping source
+line. Their GPU pieces must exactly meet at the owned-core seam without overlap
+or a gap, using each body's source grid.

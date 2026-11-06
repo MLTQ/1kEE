@@ -16,6 +16,7 @@ local contour fragments consult without changing egui's UI depth state.
   crest strokes and compensate for simplification. Missing/omitted geometry
   leaves lines visible; this approximation is not a continuous terrain mesh.
 - A one-pixel dummy binding supports ordinary lines/roads with occlusion off.
-- CPU fallback and Moon/Mars retain their existing rendering in this first version.
+- Native local terrain on Earth, Moon and Mars shares the optional visibility
+  pass. Body-specific classification and colors do not change its depth geometry.
 - Live palette uniforms are excluded from depth-cache identity, so a color-only
   change reuses the current depth image and uploaded curtain geometry.

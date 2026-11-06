@@ -20,17 +20,17 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
         }
     }
 }
-struct Harness {
+pub(crate) struct Harness {
     device: wgpu::Device,
     queue: wgpu::Queue,
     renderer: egui_wgpu::Renderer,
-    ctx: egui::Context,
+    pub(crate) ctx: egui::Context,
     target: wgpu::Texture,
     size: [u32; 2],
-    palette: Option<[egui::Color32; 2]>,
+    pub(crate) palette: Option<[egui::Color32; 2]>,
 }
 impl Harness {
-    fn new(size: [u32; 2]) -> Self {
+    pub(crate) fn new(size: [u32; 2]) -> Self {
         let instance = wgpu::Instance::default();
         let adapter = block_on(instance.request_adapter(&Default::default())).expect("GPU adapter");
         eprintln!("occlusion GPU: {:?}", adapter.get_info());
@@ -67,7 +67,7 @@ impl Harness {
             palette: None,
         }
     }
-    fn render(
+    pub(crate) fn render(
         &mut self,
         batches: &[LocalTileBatch],
         p: &LocalProjectionParams,
@@ -153,7 +153,7 @@ impl Harness {
             .submit(commands.into_iter().chain([encoder.finish()]));
         self.device.poll(wgpu::Maintain::Wait);
     }
-    fn pixels(&self) -> Vec<u8> {
+    pub(crate) fn pixels(&self) -> Vec<u8> {
         let row = (self.size[0] * 4).div_ceil(256) * 256;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,

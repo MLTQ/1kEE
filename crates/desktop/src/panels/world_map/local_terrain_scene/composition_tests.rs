@@ -1,6 +1,31 @@
 use super::*;
 use crate::model::GeoPoint;
 
+#[test]
+fn celestial_overlapping_sources_have_disjoint_gpu_ownership() {
+    for body in [ActiveBody::Moon, ActiveBody::Mars] {
+        let step = lod::step(body, lod::ZOOMS[4]);
+        let a = source(4, 0, 0, 1, &[(-2.0 * step, 0.0), (3.0 * step, 0.0)]);
+        let b = source(4, 0, 1, 1, &[(-2.0 * step, 0.0), (3.0 * step, 0.0)]);
+        let result = compose(body, vec![a, b], HashMap::new());
+        assert_eq!(result.frame.tiles.len(), 2);
+        let mut ranges = Vec::new();
+        for tile in &result.frame.tiles {
+            let owned = core(body, tile.id);
+            assert_eq!(tile.contours.len(), 1);
+            let points = &tile.contours[0].points;
+            assert!((points[0].lon - owned.min_lon as f32).abs() < 1e-6);
+            assert!((points.last().unwrap().lon - owned.max_lon as f32).abs() < 1e-6);
+            ranges.push((points[0].lon, points.last().unwrap().lon));
+        }
+        ranges.sort_by(|a, b| a.0.total_cmp(&b.0));
+        assert_eq!(
+            ranges[0].1, ranges[1].0,
+            "{body:?} seam overlaps or has a gap"
+        );
+    }
+}
+
 fn source(
     zoom_bucket: i32,
     lat_bucket: i32,

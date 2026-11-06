@@ -52,35 +52,35 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 ### Contour width routing
 
 - **Does**: Converts the shared physical primary width to the existing local
-  relative scale before threading it through ordinary and transition contour
-  stacks. This retains alpha and major/minor weight relationships.
+  relative scale before threading it through native contour
+  passes. This retains alpha and major/minor weight relationships.
 - **Interacts with**: `AppModel::contour_stroke_scale_for_pixels_per_point`
   and `geography.rs`.
 
 ### Local stroke floor
 
 - **Does**: Raises each derived local contour, coastline, and bathymetry stroke
-  to one physical pixel when the selected primary width or transition fade
+  to one physical pixel when the selected primary width or pass fade
   would otherwise make it sub-pixel.
-- **Interacts with**: `draw_contour_stack` and `geography.rs`.
+- **Interacts with**: `contours.rs` and `geography.rs`.
 - **Rationale**: The width control's lower bound must be visible in both map
   views without flattening local stroke relationships at normal widths.
 
-### Contour projection budget
+### Native contour rendering
 
-- **Does**: Projects ordered local contours in fixed Rayon chunks and stops at
-  the existing render-point safety cap before allocating paths that would be
-  discarded.
-- **Interacts with**: `draw_contour_stack` and `contour_asset.rs` merged arcs.
-- **Rationale**: Keeps accepted contour ordering and visual output identical
-  while preventing a dense tile arrival from projecting the entire 13×13
-  source set after the cap is already exhausted.
+- Earth, Moon and Mars all use `contours.rs` and the native instanced renderer.
+- Body-specific classification keeps 50 m Earth majors and 1,000 m lunar/Martian
+  majors, including negative elevations. Palette and camera changes use uniforms.
+- The compositor clips overlapping source geometry into disjoint owned cores.
+- Cold starts show Preparing terrain while workers/uploads complete; later
+  updates retain prior GPU terrain. There is no CPU contour projection fallback
+  or per-frame point cap. CPU projection remains for independent overlays.
 
 ### Local contour envelope
 
 - **Does**: Selects enough nonoverlapping Earth cores to cover the oblique
-  viewport. Moon/Mars retain their 13×13 overlapping source envelope and
-  midpoint ownership; existing bounds culling limits projection to the scene.
+  viewport. Moon/Mars retain their source envelope; composition clips the
+  overlaps to owned geographic cores before GPU instance building.
 - **Interacts with**: `contour_asset.rs` and `srtm_focus_cache` region APIs.
 
 ### Terrain composition and indicator heights
@@ -108,7 +108,7 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 | `world_map.rs` | This module remains the local-mode renderer entrypoint and can be switched to by zoom/focus state alone | Moving the local scene entrypoint or changing its model/context contract |
 | Overlay renderers | Imported user layers, roads, water, and contours share the same local projection space | Changing coordinate transforms without updating overlay helpers |
 | Scene tests | The local contour loader stays reachable through `contour_asset::load_srtm_region_for_view` for end-to-end validation | Renaming/removing that loader without updating the tests |
-| Globe scene | A shared physical primary width produces matching derived local widths, with every local stroke clamped to at least 1 px | Applying a different conversion or bypassing the floor in transition rendering |
+| Globe scene | A shared physical primary width produces matching derived local widths, with every local stroke clamped to at least 1 px | Applying a different conversion or bypassing the floor in native rendering |
 | Local indicators | Marker sampling never blocks paint; the targeting beam uses loaded contours | Adding synchronous elevation I/O during rendering |
 
 ## Notes
@@ -123,17 +123,15 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
   that crosses the visible edge. The loader returns its ready/progress snapshot
   to the pulse grid and overlay, avoiding extra cache queries during local
   paint.
-- Local contour line projection is chunked in source/elevation order. Rayon
-  still handles point projection, while egui submission stays serial and
-  stops before work the existing point budget would never draw.
+- Native contour instances build on workers and upload in bounded pieces.
+  No terrain paths are projected or tessellated on the UI thread.
 
 ### 3DEP deep zoom
 
 - Earth requests now pass through `contour_fallback.rs`. If fine tiles do not
   cover the viewport, SRTM stays visible at the full requested camera zoom.
   The Earth loading grid uses the returned source zoom/radius, while projection
-  and unrelated overlays continue using the camera zoom. The transition loader
-  uses the same source-selection path.
+  and unrelated overlays continue using the camera zoom.
 
 - **Does**: `local_render_zoom` no longer clamps the tile spec at 20. The 3DEP
   tiers continue the ladder to `LOCAL_ZOOM_MAX`, so tile detail keeps improving
@@ -147,38 +145,23 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
   envelope for the network-sourced tiers. Moon and Mars keep the full radius —
   they have their own spec ladders and local sources.
 
-### Contour budget selection
-
-- **Does**: `select_contours_within_budget` trims the culled set to
-  `MAX_CONTOUR_RENDER_POINTS` by keeping the longest contours, then the caller
-  restores elevation order for drawing.
-- **Interacts with**: `draw_contour_stack`, and mirrors the length-ordered
-  decimation in `contour_asset::query_local_contours_batch`.
-- **Rationale**: A 3DEP tile is ~4.3 M points, so the frame budget is always
-  binding at deep zoom and *what* it keeps matters more than how much. Length is
-  a good proxy for visual importance — the longest 10% of contours hold ~73% of
-  all points — and it is stable as the camera moves, which is what stops
-  contours flickering in and out at the budget boundary.
-- The AABB cull margin is `OBLIQUE_VISIBLE_EXTENT_FACTOR`, not the nominal half
-  extent. A tighter margin culls terrain that is still on screen, which no cache
-  or tile size can compensate for.
-
 ### GPU contour rendering
 
-- **Does**: `gpu_contour_batches` picks up per-tile instance batches from
-  `local_contour_pass`, and `draw_gpu_contour_pass` submits one paint callback
-  per contour pass. When no batch is ready the scene falls through to
-  `draw_contour_stack`.
+- **Does**: `contours::batches` picks up per-tile instance batches from
+  `local_contour_pass`, and `contours::paint` submits one paint callback
+  per contour pass for all three bodies. Upload-only staging never draws; the
+  visible pass uses only the published GPU display.
 - **Interacts with**: `local_contour_pass`, `projection::local_projection_params`.
-- **Rationale**: The CPU stack projects and tessellates every point every frame,
+- **Rationale**: The removed CPU stack projected and tessellated every point every frame,
   which is what forced `MAX_CONTOUR_RENDER_POINTS`. Geometry uploaded once per
-  source tile is redrawn for free, so Earth is no longer subject to a per-frame
+  source tile is redrawn for free, so no body is subject to a per-frame
   point budget at all — the ceiling became a resident-memory budget instead.
-- `MAX_CONTOUR_RENDER_POINTS` and `select_contours_within_budget` now govern
-  only the fallback path and the Moon/Mars scenes.
-- `EARTH_MAJOR_REM` is shared by both renderers so they classify major contours
-  identically; the GPU path bakes the resulting colour and a major flag into
-  each instance.
+- The old CPU contour stack, point-budget selection and unused transition
+  overlay are removed. Full visible geometry is limited by residency, not a
+  per-frame projection budget.
+- Body-specific classification keys preserve 50 m Earth majors and 1,000 m
+  lunar/Martian majors. Colors remain live uniforms; body switches cannot reuse
+  another body's classification, including when an Arc/tile ID is shared.
 
 - The loading grid uses per-tile measured workflow fractions from
   `contour_loading.rs` rather than a repeating timer. Mars supplies its own
@@ -233,9 +216,9 @@ policy applies to all three bodies without changing persisted address grids.
 `handoff.rs` prepares a background composition of ready source cores before GPU
 staging. Missing edge cells retain coarse pieces only in their own gaps; they
 cannot block the rest of a detail upgrade. Candidate batches upload without
-drawing overlapping tiers, while the prior picture remains visible. CPU and
-GPU share clipped geometry; CPU-only Moon/Mars publish directly. Progress still
-describes actual loading. Offscreen tile references are pruned by owned cores
+drawing overlapping tiers, while the prior picture remains visible. All bodies
+share clipped geometry and publish only after their native GPU uploads finish. Progress describes
+actual loading. Offscreen tile references are pruned by owned cores
 and elevation bounds. Root/body changes, exit, and cache reset clear the handoff.
 See `composition` and `handoff` for ownership, coalescing, and publication.
 
@@ -244,7 +227,7 @@ enabled, matching globe mode. Webcam spires remain independently visible.
 
 The local Earth GPU contour pass applies `AppModel::contour_occlusion`.
 Occluders use the exact displayed tile versions through the existing staged
-handoff. CPU cold-start fallback and Moon/Mars still draw ordinary contours.
+handoff. All three bodies use the same optional visibility pass after their GPU upload.
 Earth GPU batches cache only geometry/classification; the visible pass supplies
 the current palette and minor-contour weighting each frame. Theme changes reuse
 the displayed batches, uploads, LOD handoff and occluders without waiting for tiles.
