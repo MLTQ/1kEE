@@ -28,6 +28,9 @@ struct Uniforms {
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
 const PI: f32 = 3.14159265358979;
+// Keep the shaded globe subordinate to native contours and map overlays.
+// This is a linear-light exposure, independent of the theme's line palette.
+const BACKDROP_EXPOSURE: f32 = 0.12;
 
 // ── Vertex shader: fullscreen triangle ─────────────────────────────────────
 @vertex
@@ -274,7 +277,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
         // ── Outside sphere — very faint limb halo only ────────────────────
         let edge_dist = sqrt(dx*dx + dy*dy) / u.radius - 1.0;
         let halo      = exp(-edge_dist * 12.0) * 0.045;
-        return map_output_linear(vec4<f32>(u.ocean_col.rgb * halo * 2.0, halo));
+        return map_output_linear(vec4<f32>(u.ocean_col.rgb * halo * 2.0 * BACKDROP_EXPOSURE, halo));
     }
 
     // Front-face hit (smaller t).
@@ -350,9 +353,9 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
 
     // ── Sphere-edge stroke (replaces circle_stroke in draw_backdrop) ───────
     // Thin brightening at the very limb.
-    let edge_a = smoothstep(0.09, 0.0, rim - 0.92) * 0.55;
+    let edge_a = smoothstep(0.92, 1.0, rim) * 0.55;
     rgb = mix(rgb, u.mount_col.rgb * 0.85, edge_a);
 
     // Fully opaque inside the sphere (premultiplied: colour*1, alpha=1).
-    return map_output_linear(vec4<f32>(rgb, 1.0));
+    return map_output_linear(vec4<f32>(rgb * BACKDROP_EXPOSURE, 1.0));
 }
