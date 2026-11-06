@@ -78,6 +78,70 @@ impl Default for EventRadio {
 }
 
 impl EventRadio {
+    pub(crate) fn title_bar_button(
+        &mut self,
+        ctx: &egui::Context,
+        window: &egui::Response,
+        event: &EventRecord,
+    ) {
+        let style = ctx.style();
+        let frame = egui::Frame::window(&style);
+        let heading = egui::TextStyle::Heading.resolve(&style);
+        let height = ctx
+            .fonts(|f| f.row_height(&heading))
+            .max(style.spacing.interact_size.y)
+            + frame.inner_margin.sum().y;
+        let center = egui::pos2(
+            window.rect.right() - frame.stroke.width - height / 2.0 - 29.0,
+            window.rect.top() + frame.stroke.width + height / 2.0,
+        );
+        let rect = egui::Rect::from_center_size(center, egui::vec2(24.0, 24.0));
+        let id = window.id.with("nearby-radio-title-action");
+        let ui = egui::Ui::new(
+            ctx.clone(),
+            id.with("container"),
+            egui::UiBuilder::new()
+                .layer_id(window.layer_id)
+                .max_rect(rect),
+        );
+        let response = ui
+            .interact(rect, id, egui::Sense::click())
+            .on_hover_text("Nearby emergency radio");
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Nearby emergency radio")
+        });
+        let visuals = ui.style().interact(&response);
+        if response.hovered() {
+            ui.painter().rect_filled(rect, 4, visuals.bg_fill);
+        }
+        let stroke = egui::Stroke::new(1.4, visuals.fg_stroke.color);
+        let body =
+            egui::Rect::from_center_size(center + egui::vec2(0.0, 2.0), egui::vec2(16.0, 11.0));
+        ui.painter()
+            .rect_stroke(body, 2, stroke, egui::StrokeKind::Inside);
+        ui.painter().line_segment(
+            [
+                body.left_top() + egui::vec2(1.0, -1.0),
+                center + egui::vec2(6.0, -9.0),
+            ],
+            stroke,
+        );
+        ui.painter()
+            .circle_stroke(body.left_center() + egui::vec2(4.5, 0.0), 2.2, stroke);
+        for y in [-2.0, 1.0] {
+            ui.painter().line_segment(
+                [
+                    body.right_center() + egui::vec2(-5.5, y),
+                    body.right_center() + egui::vec2(-2.0, y),
+                ],
+                stroke,
+            );
+        }
+        if response.clicked() {
+            self.open_for(ctx, event);
+        }
+    }
+
     pub(crate) fn button(&mut self, ui: &mut egui::Ui, event: &EventRecord) {
         if ui
             .button("Nearby radio")
@@ -124,7 +188,7 @@ impl EventRadio {
         if self.pending.is_some() {
             return;
         }
-        self.status = "Searching the public radio directory…".into();
+        self.status = "Searching public radio sources…".into();
         self.warning = None;
         self.error = None;
         let (sender, receiver) = crossbeam_channel::bounded(1);
@@ -148,9 +212,15 @@ impl EventRadio {
                     self.catalog = report.feeds;
                     self.warning = report.warning;
                     self.fetched_at = Some(Instant::now());
+                    let weather = self
+                        .catalog
+                        .iter()
+                        .filter(|feed| feed.kinds == [RadioKind::Weather])
+                        .count();
                     self.status = format!(
-                        "{} open feeds in directory · cached for 15 minutes",
-                        self.catalog.len()
+                        "{} scanner/dispatch · {} weather feeds · cached for 15 minutes",
+                        self.catalog.len() - weather,
+                        weather
                     );
                     self.pending = None;
                 }
@@ -295,7 +365,7 @@ impl EventRadio {
             &mut self.browse_all,
             "Browse all open feeds, including outside this area",
         );
-        ui.small("Station locations are approximate; proximity does not confirm coverage of this incident.");
+        ui.small("Station/coverage locations are approximate; proximity does not confirm coverage of this incident.");
         self.player_controls(ui);
         if self.pending.is_some() {
             ui.horizontal(|ui| {
@@ -348,9 +418,9 @@ impl EventRadio {
                             if let Some(uuid) = &feed.directory_id { catalog::record_play(uuid.clone()); }
                         }
                         if stream_url(&feed.homepage).is_ok() { ui.hyperlink_to("Source website", &feed.homepage); }
-                        if feed.directory_id.is_none() {
-                            ui.small("Saved stream");
-                            if ui.small_button("Remove").clicked() { remove = Some(feed.id.clone()); }
+                        ui.small(feed.source_label());
+                        if feed.id.starts_with("saved:") && ui.small_button("Remove").clicked() {
+                            remove = Some(feed.id.clone());
                         }
                     });
                 });
@@ -366,11 +436,19 @@ impl EventRadio {
         });
         ui.separator();
         ui.horizontal_wrapped(|ui| {
-            ui.small("Directory:");
+            ui.small("Sources:");
             ui.hyperlink_to("Radio Browser", "https://www.radio-browser.info/");
+            ui.hyperlink_to("WeatherRadio", "https://www.weatherradio.org/");
+            ui.hyperlink_to("NCISS", "https://nciss.live/");
+            ui.hyperlink_to("ScanBC", "https://www.scanbc.com/");
             ui.small("Broader dispatch coverage:");
             ui.hyperlink_to("Broadcastify", "https://www.broadcastify.com/listen/");
             ui.hyperlink_to("OpenMHz", "https://openmhz.com/");
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.small("Area centers:");
+            ui.hyperlink_to("© OpenStreetMap contributors", "https://www.openstreetmap.org/copyright");
+            ui.hyperlink_to("US Census", "https://www.census.gov/geographies/reference-files/time-series/geo/gazetteer-files.html");
         });
     }
 

@@ -138,20 +138,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     }
 
     let layout = layout(rect);
-    let Some(focus) = model.terrain_focus_location() else {
-        contour_asset::leave_local_view();
-        ui_overlays::draw_empty_state(painter, rect, "No terrain focus selected");
-        return GlobeScene {
-            event_markers: Vec::new(),
-            camera_markers: Vec::new(),
-            ship_markers: Vec::new(),
-            flight_markers: Vec::new(),
-            arcgis_feature_markers: Vec::new(),
-            landing_point_markers: Vec::new(),
-            buildout_markers: Vec::new(),
-            beam_elevation_m: None,
-        };
-    };
+    let focus = local_focus(model);
 
     let viewport_center = model.globe_view.local_center;
     let render_zoom = local_render_zoom(model.globe_view.local_zoom);
@@ -1034,7 +1021,7 @@ pub fn paint_transition_overlay(
 }
 
 pub fn is_active(model: &AppModel) -> bool {
-    if !model.globe_view.local_mode || model.terrain_focus_location().is_none() {
+    if !model.globe_view.local_mode {
         return false;
     }
     if model.active_body == crate::model::ActiveBody::Moon {
@@ -1043,7 +1030,13 @@ pub fn is_active(model: &AppModel) -> bool {
     if model.active_body == crate::model::ActiveBody::Mars {
         return terrain_assets::find_mars_data_root(model.selected_root.as_deref()).is_some();
     }
-    terrain_assets::find_srtm_root(model.selected_root.as_deref()).is_some()
+    // Earth can render cached/streamed terrain and vector layers without a raw
+    // SRTM installation. Source readiness must not override the selected view.
+    true
+}
+
+fn local_focus(model: &AppModel) -> GeoPoint {
+    model.terrain_focus_location().unwrap_or(model.globe_view.local_center)
 }
 
 #[allow(dead_code)]
@@ -1053,7 +1046,7 @@ pub fn transition_progress(zoom: f32) -> f32 {
 }
 
 pub fn has_pending_cache(model: &AppModel) -> bool {
-    if !model.globe_view.local_mode || model.terrain_focus_location().is_none() {
+    if !model.globe_view.local_mode {
         return false;
     }
     contour_asset::local_contours_pending(model.active_body)
@@ -1865,6 +1858,21 @@ pub(super) fn road_tile_zoom(render_zoom: f32) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requested_local_view_uses_viewport_without_an_event_or_city() {
+        let mut model = AppModel::new();
+        model.events.clear();
+        model.selected_event_id = None;
+        model.focused_city_id = None;
+        model.active_body = crate::model::ActiveBody::Earth;
+        model.globe_view.local_center = GeoPoint { lat: 48.85, lon: 2.35 };
+        model.globe_view.local_mode = false;
+        assert!(!is_active(&model));
+        model.globe_view.local_mode = true;
+        assert!(is_active(&model));
+        assert_eq!(local_focus(&model), model.globe_view.local_center);
+    }
 
     #[test]
     fn local_contour_builds_cover_the_full_source_envelope() {

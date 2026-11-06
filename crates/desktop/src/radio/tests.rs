@@ -90,7 +90,7 @@ fn saved_stream_round_trip_preserves_user_pin_and_rejects_corrupt_input() {
 }
 
 #[test]
-#[ignore = "contacts the public Radio Browser directory; explicit smoke test only"]
+#[ignore = "contacts public radio metadata APIs; explicit smoke test only"]
 fn radio_live_catalog_smoke() {
     let report = catalog::fetch(&std::sync::atomic::AtomicBool::new(false)).unwrap();
     assert!(!report.feeds.is_empty());
@@ -99,5 +99,19 @@ fn radio_live_catalog_smoke() {
         report.feeds.len(),
         report.feeds.iter().filter(|f| f.latitude.is_some()).count(),
         report.warning
+    );
+    let mut sources = std::collections::BTreeMap::new();
+    for feed in &report.feeds {
+        *sources.entry(feed.source_label()).or_insert(0usize) += 1;
+    }
+    println!("Sources: {sources:?}");
+    let weather = report
+        .feeds
+        .iter()
+        .filter(|feed| feed.kinds == [RadioKind::Weather])
+        .count();
+    println!(
+        "Categories: {weather} weather-only, {} other scanner/dispatch feeds",
+        report.feeds.len() - weather
     );
 }

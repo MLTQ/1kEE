@@ -9,6 +9,12 @@ Owns the high-zoom local terrain scene: camera layout, contour/overlay compositi
 
 ## Components
 
+### Explicit Earth Local view
+- `is_active` honors the Local toggle independently of selected events/cities or
+  a raw SRTM directory. Cached contours, streamed terrain and vectors remain usable.
+- `local_focus` uses the viewport center when no event/city is selected, so Local
+  works during ordinary map navigation as well as event inspection.
+
 ### OBS view
 - Skips decorative framing, navigation legends, tile-loading grids and progress
   cards during clean window capture. Terrain loading and all configured scene

@@ -1,0 +1,688 @@
+{
+  "retrieved": "2026-11-06",
+  "sources": [
+    {
+      "url": "https://nciss.live/",
+      "notes": "Provider documents direct streams for custom media players."
+    },
+    {
+      "url": "https://www.scanbc.com/",
+      "notes": "Direct mounts published by provider player. Approximate settlement coverage centers are bundled from a one-time OpenStreetMap lookup, never event coordinates or receiver positions."
+    },
+    {
+      "url": "https://www2.census.gov/geo/docs/maps-data/data/gazetteer/2025_Gazetteer/2025_gaz_counties_19.txt",
+      "sha256": "7a39f89f7271383ef3d53c4d5ac88adbfd58a9b792cc10328819154811cd951a",
+      "notes": "NCISS county-specific coverage uses Census representative county points, not transmitter locations."
+    },
+    {
+      "url": "https://www.openstreetmap.org/copyright",
+      "notes": "ScanBC settlement centers: © OpenStreetMap contributors, ODbL. One-time cached Nominatim extraction of 15 public settlements on 2026-11-06; no runtime geocoding.",
+      "usage_policy": "https://operations.osmfoundation.org/policies/nominatim/"
+    }
+  ],
+  "feeds": [
+    {
+      "id": "nciss:01ps",
+      "name": "Adair County Public Safety",
+      "url": "https://nciss.live/stream/01ps",
+      "homepage": "https://nciss.live/",
+      "kinds": [
+        "Police",
+        "Fire",
+        "Ems"
+      ],
+      "latitude": 41.328528,
+      "longitude": -94.478164,
+      "locality": "Adair County, Iowa, US · county coverage center",
+      "directory_id": null
+    },
+    {
+      "id": "nciss:08ps",
+      "name": "Boone County Public Safety",
+      "url": "https://nciss.live/stream/08ps",
+      "homepage": "https://nciss.live/",
+      "kinds": [
+        "Police",
+        "Fire",
+        "Ems"
+      ],
+      "latitude": 42.03862,
+      "longitude": -93.939383,
+      "locality": "Boone County, Iowa, US · county coverage center",
+      "directory_id": null
+    },
+    {
+      "id": "nciss:13ps",
+      "name": "Calhoun County Public Safety",
+      "url": "https://nciss.live/stream/13ps",
+      "homepage": "https://nciss.live/",
+      "kinds": [
+        "Police",
+        "Fire",
+        "Ems"
+      ],
+      "latitude": 42.386061,
+      "longitude": -94.643602,
+      "locality": "Calhoun County, Iowa, US · county coverage center",
+      "directory_id": null
+    },
+    {
+      "id": "nciss:14ps",
+      "name": "Carroll County Public Safety",
+      "url": "https://nciss.live/stream/14ps",
+      "homepage": "https://nciss.live/",
+      "kinds": [
+        "Police",
+        "Fire",
+        "Ems"
+      ],
+      "latitude": 42.039502,
+      "longitude": -94.86765,
+      "locality": "Carroll County, Iowa, US · county coverage center",
+      "directory_id": null
+    },
+    {
+      "id": "nciss:25ps",
+      "name": "Dallas County Public Safety",
+      "url": "https://nciss.live/stream/25ps",
+      "homepage": "https://nciss.live/",
+      "kinds": [
+        "Police",
+        "Fire",
+        "Ems"
+      ],
+      "latitude": 41.68532,
+      "longitude": -94.040706,
+      "locality": "Dallas County, Iowa, US · county coverage center",
+      "directory_id": null
+    },
+    {
+      "id": "nciss:37ps",
+      "name": "Greene County Public Safety",
+      "url": "https://nciss.live/stream/37ps",
+      "homepage": "https://nciss.live/",
+      "kinds": [
+        "Police",
+        "Fire",
+        "Ems"
+      ],
+      "latitude": 42.042513,
+      "longitude": -94.388727,
+      "locality": "Greene County, Iowa, US · county coverage center",
+      "directory_id": null
+    },
+    {
+      "id": "nciss:39ps",
+      "name": "Guthrie County Public Safety",
+      "url": "https://nciss.live/stream/39ps",
+      "homepage": "https://nciss.live/",
+      "kinds": [
+        "Police",
+        "Fire",
+        "Ems"
+      ],
+      "latitude": 41.683573,
+      "longitude": -94.501272,
+      "locality": "Guthrie County, Iowa, US · county coverage center",
+      "directory_id": null
+    },
+    {
+      "id": "nciss:40ps",
+      "name": "Hamilton County Public Safety",
+      "url": "https://nciss.live/stream/40ps",
+      "homepage": "https://nciss.live/",
+      "kinds": [
+        "Police",
+        "Fire",
+        "Ems"
+      ],
+      "latitude": 42.390789,
+      "longitude": -93.70913,
+      "locality": "Hamilton County, Iowa, US · county coverage center",
+      "directory_id": null
+    },
+    {
+      "id": "nciss:61ps",
+      "name": "Madison County Public Safety",
+      "url": "https://nciss.live/stream/61ps",
+      "homepage": "https://nciss.live/",
+      "kinds": [
+        "Police",
+        "Fire",
+        "Ems"
+      ],
+      "latitude": 41.330622,
+      "longitude": -94.015184,
+      "locality": "Madison County, Iowa, US · county coverage center",
+      "directory_id": null
+    },
+    {
+      "id": "nciss:85ps",
+      "name": "Story County Public Safety",
+      "url": "https://nciss.live/stream/85ps",
+      "homepage": "https://nciss.live/",
+      "kinds": [
+        "Police",
+        "Fire",
+        "Ems"
+      ],
+      "latitude": 42.037538,
+      "longitude": -93.466093,
+      "locality": "Story County, Iowa, US · county coverage center",
+      "directory_id": null
+    },
+    {
+      "id": "nciss:94ps",
+      "name": "Webster County Public Safety",
+      "url": "https://nciss.live/stream/94ps",
+      "homepage": "https://nciss.live/",
+      "kinds": [
+        "Police",
+        "Fire",
+        "Ems"
+      ],
+      "latitude": 42.433579,
+      "longitude": -94.175831,
+      "locality": "Webster County, Iowa, US · county coverage center",
+      "directory_id": null
+    },
+    {
+      "id": "nciss:99ps",
+      "name": "Wright County Public Safety",
+      "url": "https://nciss.live/stream/99ps",
+      "homepage": "https://nciss.live/",
+      "kinds": [
+        "Police",
+        "Fire",
+        "Ems"
+      ],
+      "latitude": 42.733007,
+      "longitude": -93.734735,
+      "locality": "Wright County, Iowa, US · county coverage center",
+      "directory_id": null
+    },
+    {
+      "id": "nciss:iangboone",
+      "name": "Iowa National Guard — Boone",
+      "url": "https://nciss.live/stream/iangboone",
+      "homepage": "https://nciss.live/",
+      "kinds": [
+        "PublicSafety"
+      ],
+      "latitude": null,
+      "longitude": null,
+      "locality": "Iowa, US · regional coverage; location unmapped",
+      "directory_id": null
+    },
+    {
+      "id": "nciss:ispa",
+      "name": "Iowa State Patrol Area A",
+      "url": "https://nciss.live/stream/ispa",
+      "homepage": "https://nciss.live/",
+      "kinds": [
+        "Police"
+      ],
+      "latitude": null,
+      "longitude": null,
+      "locality": "Iowa, US · regional coverage; location unmapped",
+      "directory_id": null
+    },
+    {
+      "id": "nciss:ispb",
+      "name": "Iowa State Patrol Area B",
+      "url": "https://nciss.live/stream/ispb",
+      "homepage": "https://nciss.live/",
+      "kinds": [
+        "Police"
+      ],
+      "latitude": null,
+      "longitude": null,
+      "locality": "Iowa, US · regional coverage; location unmapped",
+      "directory_id": null
+    },
+    {
+      "id": "nciss:medevac",
+      "name": "Iowa Air Medical",
+      "url": "https://nciss.live/stream/medevac",
+      "homepage": "https://nciss.live/",
+      "kinds": [
+        "Ems",
+        "Aviation"
+      ],
+      "latitude": null,
+      "longitude": null,
+      "locality": "Iowa, US · regional coverage; location unmapped",
+      "directory_id": null
+    },
+    {
+      "id": "nciss:r1tac",
+      "name": "Iowa Region 1 Interop",
+      "url": "https://nciss.live/stream/r1tac",
+      "homepage": "https://nciss.live/",
+      "kinds": [
+        "PublicSafety"
+      ],
+      "latitude": null,
+      "longitude": null,
+      "locality": "Iowa, US · regional coverage; location unmapped",
+      "directory_id": null
+    },
+    {
+      "id": "nciss:r4tac",
+      "name": "Iowa Region 4 Interop",
+      "url": "https://nciss.live/stream/r4tac",
+      "homepage": "https://nciss.live/",
+      "kinds": [
+        "PublicSafety"
+      ],
+      "latitude": null,
+      "longitude": null,
+      "locality": "Iowa, US · regional coverage; location unmapped",
+      "directory_id": null
+    },
+    {
+      "id": "scanbc:birken",
+      "name": "ScanBC · Birken / Pemberton",
+      "url": "https://icecast0.scanbc.com/birken",
+      "homepage": "https://www.scanbc.com/",
+      "kinds": [
+        "PublicSafety"
+      ],
+      "latitude": 50.3203804,
+      "longitude": -122.808078,
+      "locality": "British Columbia, CA · Pemberton area center (approximate)",
+      "directory_id": null,
+      "coordinate_city": "Pemberton"
+    },
+    {
+      "id": "scanbc:kamloops",
+      "name": "ScanBC · Kamloops",
+      "url": "https://icecast0.scanbc.com/kamloops",
+      "homepage": "https://www.scanbc.com/",
+      "kinds": [
+        "PublicSafety"
+      ],
+      "latitude": 50.6758269,
+      "longitude": -120.339415,
+      "locality": "British Columbia, CA · Kamloops area center (approximate)",
+      "directory_id": null,
+      "coordinate_city": "Kamloops"
+    },
+    {
+      "id": "scanbc:summerlandfd",
+      "name": "ScanBC · Summerland & Area",
+      "url": "https://icecast0.scanbc.com/summerlandfd",
+      "homepage": "https://www.scanbc.com/",
+      "kinds": [
+        "Fire",
+        "Ems"
+      ],
+      "latitude": 49.6,
+      "longitude": -119.666667,
+      "locality": "British Columbia, CA · Summerland area center (approximate)",
+      "directory_id": null,
+      "coordinate_city": "Summerland"
+    },
+    {
+      "id": "scanbc:northok",
+      "name": "ScanBC · North Okanagan",
+      "url": "https://icecast0.scanbc.com/northok",
+      "homepage": "https://www.scanbc.com/",
+      "kinds": [
+        "PublicSafety"
+      ],
+      "latitude": 50.2668671,
+      "longitude": -119.2718157,
+      "locality": "British Columbia, CA · Vernon area center (approximate)",
+      "directory_id": null,
+      "coordinate_city": "Vernon"
+    },
+    {
+      "id": "scanbc:nanaimo",
+      "name": "ScanBC · Nanaimo / Mid-Island",
+      "url": "https://icecast0.scanbc.com/nanaimo",
+      "homepage": "https://www.scanbc.com/",
+      "kinds": [
+        "PublicSafety"
+      ],
+      "latitude": 49.163877,
+      "longitude": -123.938122,
+      "locality": "British Columbia, CA · Nanaimo area center (approximate)",
+      "directory_id": null,
+      "coordinate_city": "Nanaimo"
+    },
+    {
+      "id": "scanbc:kelowna",
+      "name": "ScanBC · Kelowna",
+      "url": "https://icecast0.scanbc.com/kelowna",
+      "homepage": "https://www.scanbc.com/",
+      "kinds": [
+        "Fire",
+        "Ems"
+      ],
+      "latitude": 49.8879177,
+      "longitude": -119.495902,
+      "locality": "British Columbia, CA · Kelowna area center (approximate)",
+      "directory_id": null,
+      "coordinate_city": "Kelowna"
+    },
+    {
+      "id": "scanbc:quesnel",
+      "name": "ScanBC · Quesnel",
+      "url": "https://icecast0.scanbc.com/quesnel",
+      "homepage": "https://www.scanbc.com/",
+      "kinds": [
+        "PublicSafety"
+      ],
+      "latitude": 52.9794279,
+      "longitude": -122.493627,
+      "locality": "British Columbia, CA · Quesnel area center (approximate)",
+      "directory_id": null,
+      "coordinate_city": "Quesnel"
+    },
+    {
+      "id": "scanbc:southcoastvhf",
+      "name": "ScanBC · South Coast VHF",
+      "url": "https://icecast0.scanbc.com/southcoastvhf",
+      "homepage": "https://www.scanbc.com/",
+      "kinds": [
+        "PublicSafety"
+      ],
+      "latitude": 49.2608724,
+      "longitude": -123.113952,
+      "locality": "British Columbia, CA · Vancouver area center (approximate)",
+      "directory_id": null,
+      "coordinate_city": "Vancouver"
+    },
+    {
+      "id": "scanbc:swbcehsprov",
+      "name": "ScanBC · SW BC EHS Provincial",
+      "url": "https://icecast0.scanbc.com/swbcehsprov",
+      "homepage": "https://www.scanbc.com/",
+      "kinds": [
+        "Ems"
+      ],
+      "latitude": 49.2608724,
+      "longitude": -123.113952,
+      "locality": "British Columbia, CA · Vancouver area center (approximate)",
+      "directory_id": null,
+      "coordinate_city": "Vancouver"
+    },
+    {
+      "id": "scanbc:nelson",
+      "name": "ScanBC · Nelson",
+      "url": "https://icecast0.scanbc.com/nelson",
+      "homepage": "https://www.scanbc.com/",
+      "kinds": [
+        "PublicSafety",
+        "Ems"
+      ],
+      "latitude": 49.494891,
+      "longitude": -117.290039,
+      "locality": "British Columbia, CA · Nelson area center (approximate)",
+      "directory_id": null,
+      "coordinate_city": "Nelson"
+    },
+    {
+      "id": "scanbc:trail",
+      "name": "ScanBC · Trail",
+      "url": "https://icecast0.scanbc.com/trail",
+      "homepage": "https://www.scanbc.com/",
+      "kinds": [
+        "PublicSafety"
+      ],
+      "latitude": 49.0945296,
+      "longitude": -117.7097659,
+      "locality": "British Columbia, CA · Trail area center (approximate)",
+      "directory_id": null,
+      "coordinate_city": "Trail"
+    },
+    {
+      "id": "scanbc:valley",
+      "name": "ScanBC · Fraser Valley",
+      "url": "https://icecast0.scanbc.com/valley",
+      "homepage": "https://www.scanbc.com/",
+      "kinds": [
+        "Fire",
+        "Ems"
+      ],
+      "latitude": 49.1709788,
+      "longitude": -121.95255,
+      "locality": "British Columbia, CA · Chilliwack area center (approximate)",
+      "directory_id": null,
+      "coordinate_city": "Chilliwack"
+    },
+    {
+      "id": "scanbc:vernonsar",
+      "name": "ScanBC · Vernon SAR",
+      "url": "https://icecast0.scanbc.com/vernonsar",
+      "homepage": "https://www.scanbc.com/",
+      "kinds": [
+        "PublicSafety"
+      ],
+      "latitude": 50.2668671,
+      "longitude": -119.2718157,
+      "locality": "British Columbia, CA · Vernon area center (approximate)",
+      "directory_id": null,
+      "coordinate_city": "Vernon"
+    },
+    {
+      "id": "scanbc:swbcws",
+      "name": "ScanBC · SW BC Wildfire Service",
+      "url": "https://icecast0.scanbc.com/swbcws",
+      "homepage": "https://www.scanbc.com/",
+      "kinds": [
+        "Fire"
+      ],
+      "latitude": 49.2608724,
+      "longitude": -123.113952,
+      "locality": "British Columbia, CA · Vancouver area center (approximate)",
+      "directory_id": null,
+      "coordinate_city": "Vancouver"
+    },
+    {
+      "id": "scanbc:fsj",
+      "name": "ScanBC · Fort St. John",
+      "url": "https://icecast0.scanbc.com/fsj",
+      "homepage": "https://www.scanbc.com/",
+      "kinds": [
+        "PublicSafety"
+      ],
+      "latitude": 56.2527571,
+      "longitude": -120.8472064,
+      "locality": "British Columbia, CA · Fort St. John area center (approximate)",
+      "directory_id": null,
+      "coordinate_city": "Fort St. John"
+    },
+    {
+      "id": "scanbc:crestonfire",
+      "name": "ScanBC · Creston Valley Fire",
+      "url": "https://icecast0.scanbc.com/crestonfire",
+      "homepage": "https://www.scanbc.com/",
+      "kinds": [
+        "Fire"
+      ],
+      "latitude": 49.0974046,
+      "longitude": -116.5130934,
+      "locality": "British Columbia, CA · Creston area center (approximate)",
+      "directory_id": null,
+      "coordinate_city": "Creston"
+    },
+    {
+      "id": "scanbc:crdfirepager",
+      "name": "ScanBC · Capital Region Fire Pager",
+      "url": "https://icecast0.scanbc.com/crdfirepager",
+      "homepage": "https://www.scanbc.com/",
+      "kinds": [
+        "Fire"
+      ],
+      "latitude": 48.4283182,
+      "longitude": -123.364953,
+      "locality": "British Columbia, CA · Victoria area center (approximate)",
+      "directory_id": null,
+      "coordinate_city": "Victoria"
+    },
+    {
+      "id": "scanbc:cyhc",
+      "name": "ScanBC · CYHC – Vancouver Harbour",
+      "url": "https://icecast0.scanbc.com/cyhc",
+      "homepage": "https://www.scanbc.com/",
+      "kinds": [
+        "Aviation"
+      ],
+      "latitude": 49.2608724,
+      "longitude": -123.113952,
+      "locality": "British Columbia, CA · Vancouver area center (approximate)",
+      "directory_id": null,
+      "coordinate_city": "Vancouver"
+    },
+    {
+      "id": "scanbc:cyvr1_app",
+      "name": "ScanBC · CYVR Vancouver Terminal",
+      "url": "https://icecast0.scanbc.com/cyvr1_app",
+      "homepage": "https://www.scanbc.com/",
+      "kinds": [
+        "Aviation"
+      ],
+      "latitude": 49.163168,
+      "longitude": -123.137414,
+      "locality": "British Columbia, CA · Richmond area center (approximate)",
+      "directory_id": null,
+      "coordinate_city": "Richmond"
+    },
+    {
+      "id": "scanbc:cyvr1_ctr",
+      "name": "ScanBC · CZVR Vancouver Centre",
+      "url": "https://icecast0.scanbc.com/cyvr1_ctr",
+      "homepage": "https://www.scanbc.com/",
+      "kinds": [
+        "Aviation"
+      ],
+      "latitude": 49.163168,
+      "longitude": -123.137414,
+      "locality": "British Columbia, CA · Richmond area center (approximate)",
+      "directory_id": null,
+      "coordinate_city": "Richmond"
+    },
+    {
+      "id": "scanbc:cyvr1_gnd_twr",
+      "name": "ScanBC · CYVR Ground / Delivery",
+      "url": "https://icecast0.scanbc.com/cyvr1_gnd_twr",
+      "homepage": "https://www.scanbc.com/",
+      "kinds": [
+        "Aviation"
+      ],
+      "latitude": 49.163168,
+      "longitude": -123.137414,
+      "locality": "British Columbia, CA · Richmond area center (approximate)",
+      "directory_id": null,
+      "coordinate_city": "Richmond"
+    },
+    {
+      "id": "scanbc:cyvr1_twr",
+      "name": "ScanBC · CYVR Tower",
+      "url": "https://icecast0.scanbc.com/cyvr1_twr",
+      "homepage": "https://www.scanbc.com/",
+      "kinds": [
+        "Aviation"
+      ],
+      "latitude": 49.163168,
+      "longitude": -123.137414,
+      "locality": "British Columbia, CA · Richmond area center (approximate)",
+      "directory_id": null,
+      "coordinate_city": "Richmond"
+    }
+  ],
+  "area_centers": {
+    "Chilliwack": {
+      "lat": 49.1709788,
+      "lon": -121.95255,
+      "display_name": "Chilliwack, Kent, Fraser Valley Regional District, British Columbia, Canada",
+      "source": "https://nominatim.openstreetmap.org/search?city=Chilliwack&state=British+Columbia&country=Canada&format=jsonv2&limit=1&accept-language=en"
+    },
+    "Creston": {
+      "lat": 49.0974046,
+      "lon": -116.5130934,
+      "display_name": "Creston, Regional District of Central Kootenay, British Columbia, Canada",
+      "source": "https://nominatim.openstreetmap.org/search?city=Creston&state=British+Columbia&country=Canada&format=jsonv2&limit=1&accept-language=en"
+    },
+    "Fort St. John": {
+      "lat": 56.2527571,
+      "lon": -120.8472064,
+      "display_name": "Fort St. John, Peace River Regional District, British Columbia, Canada",
+      "source": "https://nominatim.openstreetmap.org/search?city=Fort+St.+John&state=British+Columbia&country=Canada&format=jsonv2&limit=1&accept-language=en"
+    },
+    "Kamloops": {
+      "lat": 50.6758269,
+      "lon": -120.339415,
+      "display_name": "Kamloops, Thompson-Nicola Regional District, British Columbia, Canada",
+      "source": "https://nominatim.openstreetmap.org/search?city=Kamloops&state=British+Columbia&country=Canada&format=jsonv2&limit=1&accept-language=en"
+    },
+    "Kelowna": {
+      "lat": 49.8879177,
+      "lon": -119.495902,
+      "display_name": "Kelowna, Westbank First Nation #9, Regional District of Central Okanagan, British Columbia, Canada",
+      "source": "https://nominatim.openstreetmap.org/search?city=Kelowna&state=British+Columbia&country=Canada&format=jsonv2&limit=1&accept-language=en"
+    },
+    "Nanaimo": {
+      "lat": 49.163877,
+      "lon": -123.938122,
+      "display_name": "Nanaimo, Regional District of Nanaimo, British Columbia, Canada",
+      "source": "https://nominatim.openstreetmap.org/search?city=Nanaimo&state=British+Columbia&country=Canada&format=jsonv2&limit=1&accept-language=en"
+    },
+    "Nelson": {
+      "lat": 49.494891,
+      "lon": -117.290039,
+      "display_name": "Nelson, Regional District of Central Kootenay, British Columbia, Canada",
+      "source": "https://nominatim.openstreetmap.org/search?city=Nelson&state=British+Columbia&country=Canada&format=jsonv2&limit=1&accept-language=en"
+    },
+    "Pemberton": {
+      "lat": 50.3203804,
+      "lon": -122.808078,
+      "display_name": "Pemberton, Squamish-Lillooet Regional District, British Columbia, V0N 2L1, Canada",
+      "source": "https://nominatim.openstreetmap.org/search?city=Pemberton&state=British+Columbia&country=Canada&format=jsonv2&limit=1&accept-language=en"
+    },
+    "Quesnel": {
+      "lat": 52.9794279,
+      "lon": -122.493627,
+      "display_name": "Quesnel, Cariboo Regional District, British Columbia, Canada",
+      "source": "https://nominatim.openstreetmap.org/search?city=Quesnel&state=British+Columbia&country=Canada&format=jsonv2&limit=1&accept-language=en"
+    },
+    "Richmond": {
+      "lat": 49.163168,
+      "lon": -123.137414,
+      "display_name": "Richmond, Metro Vancouver Regional District, British Columbia, Canada",
+      "source": "https://nominatim.openstreetmap.org/search?city=Richmond&state=British+Columbia&country=Canada&format=jsonv2&limit=1&accept-language=en"
+    },
+    "Summerland": {
+      "lat": 49.6,
+      "lon": -119.666667,
+      "display_name": "Summerland, Regional District of Okanagan-Similkameen, British Columbia, Canada",
+      "source": "https://nominatim.openstreetmap.org/search?city=Summerland&state=British+Columbia&country=Canada&format=jsonv2&limit=1&accept-language=en"
+    },
+    "Trail": {
+      "lat": 49.0945296,
+      "lon": -117.7097659,
+      "display_name": "Trail, Regional District of Kootenay Boundary, British Columbia, Canada",
+      "source": "https://nominatim.openstreetmap.org/search?city=Trail&state=British+Columbia&country=Canada&format=jsonv2&limit=1&accept-language=en"
+    },
+    "Vancouver": {
+      "lat": 49.2608724,
+      "lon": -123.113952,
+      "display_name": "Vancouver, Metro Vancouver Regional District, British Columbia, Canada",
+      "source": "https://nominatim.openstreetmap.org/search?city=Vancouver&state=British+Columbia&country=Canada&format=jsonv2&limit=1&accept-language=en"
+    },
+    "Vernon": {
+      "lat": 50.2668671,
+      "lon": -119.2718157,
+      "display_name": "Vernon, Regional District of North Okanagan, British Columbia, Canada",
+      "source": "https://nominatim.openstreetmap.org/search?city=Vernon&state=British+Columbia&country=Canada&format=jsonv2&limit=1&accept-language=en"
+    },
+    "Victoria": {
+      "lat": 48.4283182,
+      "lon": -123.364953,
+      "display_name": "Victoria, Capital Regional District, British Columbia, Canada",
+      "source": "https://nominatim.openstreetmap.org/search?city=Victoria&state=British+Columbia&country=Canada&format=jsonv2&limit=1&accept-language=en"
+    }
+  }
+}

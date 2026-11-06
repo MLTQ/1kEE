@@ -1,7 +1,9 @@
 //! Public radio metadata, geographic matching and stream validation.
 pub(crate) mod catalog;
+mod community;
 pub(crate) mod player;
 pub(crate) mod saved;
+mod weather_radio;
 
 use crate::model::{EventRecord, GeoPoint};
 use serde::{Deserialize, Serialize};
@@ -75,6 +77,19 @@ pub(crate) struct RadioFeed {
 }
 
 impl RadioFeed {
+    pub fn source_label(&self) -> &'static str {
+        if self.id.starts_with("saved:") {
+            "Saved stream"
+        } else if self.id.starts_with("gwes:") {
+            "GWES WeatherRadio"
+        } else if self.id.starts_with("nciss:") {
+            "NCISS"
+        } else if self.id.starts_with("scanbc:") {
+            "ScanBC"
+        } else {
+            "Radio Browser"
+        }
+    }
     pub fn distance_km(&self, area: &RadioArea) -> Option<f64> {
         let (lat, lon) = (self.latitude?, self.longitude?);
         valid_coordinates(lat, lon)

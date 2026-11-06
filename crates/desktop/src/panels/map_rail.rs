@@ -95,8 +95,9 @@ fn view_buttons(ui: &mut egui::Ui, model: &mut AppModel) {
         if button(ui, "LOCAL", model.globe_view.local_mode).clicked()
             && !model.globe_view.local_mode
         {
+            let center = model.globe_view.globe_center_latlon();
             model.stop_event_follow();
-            model.globe_view.local_center = model.globe_view.globe_center_latlon();
+            model.globe_view.local_center = center;
             model.globe_view.local_mode = true;
         }
     })
@@ -107,6 +108,7 @@ fn view_buttons(ui: &mut egui::Ui, model: &mut AppModel) {
         ActiveBody::Earth => "Local terrain view",
     });
 }
+
 fn body_button(ui: &mut egui::Ui, model: &mut AppModel) {
     let (label, color, next) = match model.active_body {
         ActiveBody::Earth => ("EARTH", egui::Color32::from_rgb(210, 206, 194), "Moon"),
@@ -216,3 +218,7 @@ fn presentation_buttons(ui: &mut egui::Ui, model: &mut AppModel) {
         model.stellar_observatory_open = !model.stellar_observatory_open;
     }
 }
+
+#[cfg(test)]
+#[path = "map_rail_tests.rs"]
+mod tests;

@@ -4,6 +4,75 @@ use crate::model::{EventSeverity, GeoPoint};
 #[path = "event_radio_preview.rs"]
 mod preview;
 
+#[test]
+fn brief_radio_icon_is_in_the_title_bar_and_opens_without_a_body_row() {
+    for follow in [false, true] {
+        let ctx = egui::Context::default();
+        let mut model = crate::model::AppModel::new();
+        model.factal_api_key.clear();
+        let mut record = event("factal-radio-title", 50.67, -120.34);
+        record.factal_brief = Some(crate::model::FactalBrief {
+            factal_id: "radio-title".into(),
+            severity_value: Some(2),
+            occurred_at_raw: None,
+            point_wkt: None,
+            vertical: None,
+            subvertical: None,
+            topics: Vec::new(),
+            content: None,
+            raw_json_pretty: "{}".into(),
+        });
+        model.replace_factal_events(vec![record]);
+        if follow {
+            model.toggle_event_follow();
+            model.tick_event_follow(0.0);
+        }
+        model.factal_brief_open = true;
+        let mut radio = primed();
+        let mut frame = |events| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1200.0, 800.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| super::super::render_factal_brief(ctx, &mut model, &mut radio),
+            )
+        };
+        for _ in 0..3 {
+            frame(Vec::new());
+        }
+        let window_id = egui::Id::new(if follow {
+            "event-follow-brief"
+        } else {
+            "Factal Brief"
+        });
+        let action = ctx
+            .read_response(window_id.with("move").with("nearby-radio-title-action"))
+            .expect("title action");
+        let window = ctx.memory(|m| m.area_rect(window_id)).unwrap();
+        assert!(action.rect.top() < window.top() + 40.0);
+        let pos = action.rect.center();
+        for pressed in [true, false] {
+            frame(vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                },
+            ]);
+        }
+        assert!(radio.open, "radio action failed in follow={follow}");
+        assert!(radio.playing.is_none());
+        assert!(model.factal_brief_open);
+    }
+}
+
 fn event(id: &str, lat: f32, lon: f32) -> EventRecord {
     EventRecord {
         id: id.into(),

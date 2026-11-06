@@ -40,5 +40,7 @@ that height instead of covering the crawl or readout.
 Automatic continental recaps suppress the live Brief without changing its open
 flag. Live touring reopens/selects the next stop through its normal path.
 
-The Nearby radio button passes the displayed event to the shared `EventRadio`
-window. Radio playback remains pinned until the user searches another event.
+A small drawn radio icon in the native Brief title bar passes the displayed
+event to `EventRadio`, without occupying a row in the brief body. The action uses
+the window's own layer, sits beside Close, and moves with both ordinary and
+anchored Follow windows. Radio playback stays pinned until an explicit new search.

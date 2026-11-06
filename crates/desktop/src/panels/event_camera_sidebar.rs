@@ -194,28 +194,19 @@ fn render_feed(
             theme::camera_color().gamma_multiply(0.35),
         ))
         .corner_radius(5)
-        .inner_margin(6)
+        .inner_margin(2)
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.small(format!("{:.1} km", ranked.distance_km));
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        ui.set_min_width(ui.available_width());
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(format!("{rank:02}  {}", ranked.camera.label))
-                                    .strong(),
-                            )
-                            .truncate(),
-                        )
-                        .on_hover_text(&ranked.camera.label);
-                    });
+            let width = ui.available_width();
+            let size = player
+                .texture
+                .as_ref()
+                .map_or(egui::vec2(width, 46.0), |texture| {
+                    let aspect = texture.size_vec2().y / texture.size_vec2().x.max(1.0);
+                    egui::vec2(width, width * aspect.clamp(9.0 / 16.0, 3.0 / 4.0))
                 });
-            });
+            let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+            ui.painter().rect_filled(rect, 3, egui::Color32::BLACK);
             if let Some(texture) = &player.texture {
-                let size = egui::vec2(ui.available_width(), ui.available_width() * 9.0 / 16.0);
-                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-                ui.painter().rect_filled(rect, 3, egui::Color32::BLACK);
                 let image_rect = egui::Rect::from_center_size(
                     rect.center(),
                     fit_size(texture.size_vec2(), size),
@@ -226,38 +217,61 @@ fn render_feed(
                     egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
                 );
-                open |= response.on_hover_text("Open camera feed").clicked();
             }
-            ui.horizontal(|ui| {
-                let provider = ranked
-                    .camera
-                    .provider
-                    .strip_prefix("Project Eyes On · ")
-                    .unwrap_or(&ranked.camera.provider);
-                let (status, color) = feed_status(player);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    open |= ui
-                        .link(egui::RichText::new("Open").small())
-                        .on_hover_text("Open camera feed")
-                        .clicked();
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        ui.set_min_width(ui.available_width());
-                        let response = ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(format!("{status} · {provider}"))
-                                    .small()
-                                    .color(color),
-                            )
-                            .truncate(),
-                        );
-                        if let Some(error) = &player.error {
-                            response.on_hover_text(error);
-                        }
-                    });
-                });
-            });
+            paint_feed_label(ui, rect, ranked, rank);
+            let (status, color) = feed_status(player);
+            if player.texture.is_none() || player.error.is_some() {
+                ui.painter().text(
+                    rect.left_bottom() + egui::vec2(5.0, -5.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    &status,
+                    egui::FontId::proportional(10.0),
+                    color,
+                );
+            }
+            let mut help = format!(
+                "{}\n{} · {}\nClick to open camera feed",
+                ranked.camera.label, ranked.camera.provider, status
+            );
+            if let Some(error) = &player.error {
+                help.push_str(&format!("\n{error}"));
+            }
+            open = response
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(help)
+                .clicked();
         });
     open
+}
+
+fn paint_feed_label(ui: &egui::Ui, rect: egui::Rect, ranked: &RankedCamera, rank: usize) {
+    let painter = ui.painter().with_clip_rect(rect);
+    let band = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), 23.0));
+    painter.rect_filled(band, 0, egui::Color32::from_black_alpha(180));
+    let distance = painter.layout_no_wrap(
+        format!("{:.1} km", ranked.distance_km),
+        egui::FontId::proportional(10.0),
+        egui::Color32::from_gray(220),
+    );
+    let distance_pos = egui::pos2(
+        band.right() - distance.size().x - 5.0,
+        band.center().y - distance.size().y / 2.0,
+    );
+    let mut job = egui::text::LayoutJob::simple(
+        format!("{rank:02}  {}", ranked.camera.label),
+        egui::FontId::proportional(12.0),
+        egui::Color32::WHITE,
+        (distance_pos.x - band.left() - 15.0).max(1.0),
+    );
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    let name = ui.fonts(|fonts| fonts.layout_job(job));
+    painter.galley(
+        egui::pos2(band.left() + 5.0, band.center().y - name.size().y / 2.0),
+        name,
+        egui::Color32::WHITE,
+    );
+    painter.galley(distance_pos, distance, egui::Color32::WHITE);
 }
 
 fn feed_status(player: &CameraFeedPlayer) -> (String, egui::Color32) {

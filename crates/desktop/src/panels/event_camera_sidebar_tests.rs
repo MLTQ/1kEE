@@ -85,7 +85,11 @@ fn frame(
         },
         |ctx| {
             sidebar.render(ctx, model);
-            super::super::factal_brief::render_factal_brief(ctx, model, &mut crate::panels::EventRadio::default());
+            super::super::factal_brief::render_factal_brief(
+                ctx,
+                model,
+                &mut crate::panels::EventRadio::default(),
+            );
             egui::CentralPanel::default().show(ctx, |ui| {
                 map = ui.max_rect();
                 ui.painter().rect_filled(map, 0, theme::canvas_background());
@@ -239,6 +243,12 @@ fn sidebar_is_a_single_right_column_and_brief_stays_beside_it_in_normal_and_obs_
             }
             let (output, map) = frame(&ctx, &mut sidebar, &mut model, width);
             let labels = text_shapes(&output);
+            assert!(
+                !labels
+                    .iter()
+                    .any(|(text, rect, _)| rect.left() > map.right()
+                        && (text == "Open" || text.contains("Live ·")))
+            );
             let header = labels
                 .iter()
                 .find(|(text, _, _)| text == "NEAREST CAMERAS")
@@ -283,6 +293,57 @@ fn sidebar_is_a_single_right_column_and_brief_stays_beside_it_in_normal_and_obs_
             assert_eq!(sidebar.players.len(), MAX_FEEDS);
         }
     }
+}
+
+#[test]
+fn camera_image_and_overlay_share_the_open_click_and_four_three_gets_more_height() {
+    let ctx = egui::Context::default();
+    let ranked = RankedCamera {
+        camera: camera("image-click", 0.0),
+        distance_km: 0.7,
+    };
+    let image = egui::ColorImage::new([640, 480], egui::Color32::from_rgb(45, 70, 90));
+    let player = CameraFeedPlayer::fixture(&ctx, &ranked.camera, image).0;
+    let mut clicked = false;
+    let mut frame = |events| {
+        ctx.run(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.set_width(300.0);
+                    clicked |= render_feed(ui, &ranked, 1, &player);
+                });
+            },
+        )
+    };
+    let output = frame(Vec::new());
+    let image = output
+        .shapes
+        .iter()
+        .find_map(|s| match &s.shape {
+            egui::Shape::Mesh(mesh) if mesh.texture_id == player.texture.as_ref().unwrap().id() => {
+                Some(mesh.calc_bounds())
+            }
+            _ => None,
+        })
+        .expect("preview image");
+    assert!((image.height() / image.width() - 0.75).abs() < 0.01);
+    let pos = image.center();
+    for pressed in [true, false] {
+        frame(vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            },
+        ]);
+    }
+    assert!(clicked);
 }
 
 #[test]

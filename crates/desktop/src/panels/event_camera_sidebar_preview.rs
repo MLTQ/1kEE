@@ -55,6 +55,16 @@ fn event_camera_sidebar_gpu_preview() {
         model.obs_view = obs;
         let mut sidebar = EventCameraSidebar::default();
         prime(&ctx, &mut sidebar, &model);
+        let first = &sidebar.cameras[0].camera;
+        sidebar.players.insert(
+            first.id.clone(),
+            CameraFeedPlayer::fixture(
+                &ctx,
+                first,
+                egui::ColorImage::new([640, 480], egui::Color32::from_rgb(45, 70, 90)),
+            )
+            .0,
+        );
         fail_second_feed(&mut sidebar);
         let mut renderer = egui_wgpu::Renderer::new(&device, format, None, 1, false);
         for index in 0..4 {

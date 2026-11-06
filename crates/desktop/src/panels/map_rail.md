@@ -15,6 +15,8 @@ and Cache Blast, without operational status text taking over the map.
 - Follow Events help describes the full live pool, severity-weighted revisits and
   repeat spacing; it no longer promises a six-record tour.
 - View changes stop event-follow. Replay, brief and observatory retain their actions.
+- Local snapshots the visible globe center before cancelling a recap, so restoring
+  the recap's saved camera cannot redirect the requested Local area.
 - Cache Blast only drops in-memory tile caches; it does not delete disk files.
 - Imported-layer state remains visible via the Layers dot. Counts remain available
   even at zero. Arbitrarily long progress messages belong in Settings → Overview.

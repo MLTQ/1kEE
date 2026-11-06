@@ -1,4 +1,4 @@
-//! Bounded, on-demand discovery through Radio Browser's open directory.
+//! Bounded, on-demand discovery through public radio catalogs and direct-stream publishers.
 use super::{RadioFeed, RadioKind, restricted_provider, stream_url, valid_coordinates};
 use reqwest::blocking::Client;
 use serde::Deserialize;
@@ -59,7 +59,7 @@ fn client() -> Result<Client, String> {
         .map_err(|e| e.to_string())
 }
 
-fn get_json<T: serde::de::DeserializeOwned>(
+pub(super) fn get_json<T: serde::de::DeserializeOwned>(
     client: &Client,
     url: reqwest::Url,
 ) -> Result<T, String> {
@@ -120,6 +120,24 @@ pub(crate) fn fetch(cancel: &AtomicBool) -> Result<CatalogReport, String> {
     let mut urls = HashSet::new();
     let mut failures = 0;
     let mut successes = 0;
+    for feed in super::community::feeds() {
+        ids.insert(feed.id.clone());
+        urls.insert(feed.url.clone());
+        feeds.push(feed);
+    }
+    if !cancel.load(Ordering::Acquire) {
+        match super::weather_radio::fetch(&client) {
+            Ok(weather) => {
+                for feed in weather {
+                    if urls.insert(feed.url.clone()) {
+                        ids.insert(feed.id.clone());
+                        feeds.push(feed);
+                    }
+                }
+            }
+            Err(_) => failures += 1,
+        }
+    }
     for &(field, term) in QUERIES {
         if cancel.load(Ordering::Acquire) {
             return Err("Search cancelled.".into());
@@ -163,10 +181,10 @@ pub(crate) fn fetch(cancel: &AtomicBool) -> Result<CatalogReport, String> {
         }
     }
     if successes == 0 {
-        return Err("The public radio directory is unavailable. Try again later; saved feeds remain available.".into());
+        failures += 1;
     }
     Ok(CatalogReport { feeds, warning: (failures > 0).then(||
-        "Some directory searches were unavailable or reached their limit. Results may be incomplete.".into()) })
+        "Some radio sources were unavailable or reached their limit. Results may be incomplete; bundled community feeds are still available.".into()) })
 }
 
 impl Station {

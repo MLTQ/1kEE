@@ -28,11 +28,14 @@ space so the map, event labels and chyron lay out beside the feeds.
 - Uses compact local spacing independent of the dashboard's roomier theme.
 - The two-line sidebar header shows the event title and feed count, omitting
   redundant sorting text and raw location metadata.
-- Each card places camera name/distance on one row, followed by a letterboxed
-  image and one small status/provider/Open row. Padding is six points.
-- Connecting/failed feeds without a texture collapse to two text rows;
+- Camera name/location and distance share a translucent band over the image.
+  There are no separate header or status/provider/Open rows; padding is two points.
+- Previews use source aspect up to 4:3, giving taller feeds the space reclaimed
+  from chrome while preserving image proportions. Wider feeds remain compact.
+- Connecting/failed feeds without a texture collapse to a 46-point tile;
   retries continue and the image expands automatically when a frame arrives.
-- Clicking an image or Open uses the existing floating viewer.
+- Clicking anywhere on the tile uses the existing floating viewer. Provider,
+  status and error details remain available on hover; retries appear over the tile.
 - Wrap-free truncated names have full hover text; images preserve aspect ratio.
 
 ## Contracts

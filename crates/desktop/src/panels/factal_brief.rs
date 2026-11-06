@@ -31,7 +31,7 @@ pub fn render_factal_brief(ctx: &egui::Context, model: &mut AppModel, radio: &mu
             .max_height((ctx.screen_rect().height() - 100.0 - super::event_chyron::HEIGHT - super::event_chyron::COORDINATE_FOOTER_HEIGHT - 120.0).max(120.0))
             .vscroll(true);
     }
-    window.show(ctx, |ui| {
+    let shown = window.show(ctx, |ui| {
             if let Some((position, total)) = tour_position {
                 ui.small(format!("Priority rank · {position} of {total}"));
             }
@@ -39,7 +39,6 @@ pub fn render_factal_brief(ctx: &egui::Context, model: &mut AppModel, radio: &mu
             ui.colored_label(event.severity.color(), event.severity.label());
             ui.label(event.location_name.as_str());
             ui.small(format!("Occurred: {}", event.occurred_at));
-            radio.button(ui, &event);
 
             ui.add_space(10.0);
             ui.colored_label(theme::text_muted(), "Summary");
@@ -116,4 +115,7 @@ pub fn render_factal_brief(ctx: &egui::Context, model: &mut AppModel, radio: &mu
                     });
             });
         });
+    if let Some(shown) = shown {
+        radio.title_bar_button(ctx, &shown.response, &event);
+    }
 }

@@ -16,6 +16,8 @@ channel-backed players prevent network requests and settings writes.
   long camera name, single-column ordering and the Brief's non-overlap.
   A failed feed collapses so all four camera headings fit without scrolling;
   raw WKT location strings do not occupy the compact header.
+- Cards omit the provider/Open row; a 4:3 image occupies its full aspect and
+  clicking it exercises the same open action as clicking its overlay.
 - Waiting/empty states do not create players; a tour target survives paging out.
 - `frame`, `prime` and `fail_second_feed` are shared by the optional GPU preview.
 

@@ -6,8 +6,13 @@ player. Audio and event context never follow tour changes automatically.
 
 ## Components
 - `button` / `open_for` snapshot a selected event and launch an explicit search.
+- `title_bar_button` draws an accessible, clickable radio glyph in the Brief's
+  existing title bar without increasing content height.
 - `search` runs one bounded, cancellable metadata worker. Results are cached for
   15 minutes; geographic/category/text filtering is local.
+- Source labels distinguish GWES weather, independent dispatch/scanner streams
+  and user-saved URLs. Only the latter expose Remove. Catalog totals separate
+  weather from scanner/dispatch; area-center attribution credits OSM and Census.
 - `render` takes only the optional selected event, drains completion, renders
   feed cards, and offers player controls.
 - `new_feed` / `persist` save user-pinned streams separately from API settings.
