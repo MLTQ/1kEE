@@ -52,3 +52,7 @@ merge by relation: retain existing complete topology over incoming fragments,
 keep unrelated regions, and replace fragments once a full relation is available.
 
 Focused deduplication is indexed by relation so it never compares every global ring against every other ring.
+
+admin_cell_features shares exact region-to-feature encoding with the resumable
+assembly checkpoint; focused merges and streamed planet publication use identical
+IDs, names, ring ordering and completeness flags.

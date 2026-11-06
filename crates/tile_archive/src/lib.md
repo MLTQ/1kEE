@@ -32,3 +32,5 @@ read-only connections, never a shared connection mutex.
   readers and CTF1 payloads remain compatible.
 
 - `platforms`: small validated offshore inventories in the independent RIGS/grid-4 namespace, copyable into world archives.
+
+`admin_lod` builds and queries spatial boundary LOD sidecars from existing ADMN files.

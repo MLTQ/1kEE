@@ -1,0 +1,25 @@
+# event_overlay_preview.rs
+
+Brief rendering supplies an inert radio controller; these fixtures do not query radio or play audio.
+
+## Purpose
+Render the actual selected map card, five-row chyron and Brief through egui/wgpu
+to inspect native text, clipping, colors, scrolling and reserved bottom space.
+
+## Components
+- `five_line_chyron_gpu_preview` is opt-in/ignored and uses a private 1280×720
+  texture. It exports start and scrolling frames to `target/event-chyron-qa`, or
+  `ONEKEE_EVENT_OVERLAY_PREVIEW` when set.
+- The example requested by the user is the selected fixture; other rows are
+  explicitly sample reports. The grid stands in for terrain so QA is independent
+  of live sources, cached tiles or an app restart.
+- Normal-view previews show coordinates directly above the bottom-docked chyron
+  to check its single-line layout, text separation and translucent background.
+
+## Contracts
+All records are test-only and never enter runtime state. No network, source
+polling, settings writes, native app control or public streaming occurs.
+
+The same GPU preview also exports `regional-recap.png` using a frozen
+24-hour snapshot at its midpoint in OBS mode. It paints the real recap header,
+elapsed clock and historical crawl while suppressing the live Brief/card.

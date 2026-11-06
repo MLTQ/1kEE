@@ -12,6 +12,7 @@ pub(super) type Fingerprint = Vec<(PathBuf, u64, Option<SystemTime>)>;
 pub(super) struct Status {
     pub files: Fingerprint,
     pub running: bool,
+    pub coverage: Option<String>,
     pub error: Option<String>,
 }
 type Watch = super::layer_snapshot::Snapshot<(Vec<PathBuf>, u64), Status>;
@@ -52,6 +53,17 @@ fn inspect(dirs: &[PathBuf]) -> Status {
             Ok(running) => status.running |= running,
             Err(e) => status.error = Some(e),
         }
+        if status.coverage.is_none() {
+            let path = root.join("admin_cells/build-status.json");
+            match std::fs::read(&path) {
+                Ok(bytes) => match coverage_text(&bytes) {
+                    Ok(text) => status.coverage = Some(text),
+                    Err(error) => status.error = Some(format!("{}: {error}", path.display())),
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => status.error = Some(format!("{}: {e}", path.display())),
+            }
+        }
         for level in 2..=11 {
             for extension in ["1kc", "geojson"] {
                 let path = root
@@ -66,6 +78,36 @@ fn inspect(dirs: &[PathBuf]) -> Status {
         }
     }
     status
+}
+
+fn coverage_text(bytes: &[u8]) -> Result<String, String> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    if value["version"].as_u64() != Some(1) {
+        return Err("Unsupported boundary coverage status".into());
+    }
+    let levels = value["levels"]
+        .as_array()
+        .ok_or("Missing boundary coverage levels")?;
+    let mut published = 0u64;
+    let mut total = 0u64;
+    for level in levels {
+        published += level["published"]
+            .as_u64()
+            .ok_or("Invalid published count")?;
+        total += level["total"].as_u64().ok_or("Invalid boundary total")?;
+    }
+    if published > total {
+        return Err("Invalid boundary coverage counts".into());
+    }
+    if value["complete"].as_bool() == Some(true) && published == total {
+        Ok(format!(
+            "Extraction complete · {published} regions processed"
+        ))
+    } else {
+        Ok(format!(
+            "Partial coverage · {published} / {total} regions published. Countries load first; more appear as extraction progresses."
+        ))
+    }
 }
 
 #[derive(Clone)]
@@ -112,7 +154,7 @@ pub(super) fn start(source: PathBuf, output: PathBuf) {
             }
             boundaries::load(&source, &output, &mut |p| report(p.fraction, format!("{}: {}", p.stage, p.message), true))
                 .map(|n| format!("Loaded {n} boundary rings. Available in Globe and Local."))
-        })).unwrap_or_else(|_| Err("Boundary import stopped unexpectedly. Scan checkpoints are retained; retry to resume.".into()));
+        })).unwrap_or_else(|_| Err("Boundary import stopped unexpectedly. Saved regions and scan progress are retained; retry to resume.".into()));
         match result {
             Ok(message) => report(1.0, message, false),
             Err(error) => report(0.0, format!("Boundary import failed: {error}"), false),
@@ -124,6 +166,14 @@ pub(super) fn start(source: PathBuf, output: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unfinished_coverage_is_visible_even_when_all_level_files_exist() {
+        let text=coverage_text(br#"{"version":1,"complete":false,"levels":[{"published":1,"total":238},{"published":0,"total":3043}]}"#).unwrap();
+        assert!(text.contains("Partial coverage"));
+        assert!(text.contains("1 / 3281"));
+        assert!(!text.contains("Extraction complete"));
+        assert!(coverage_text(br#"{"version":1,"levels":[{"published":5,"total":1}]}"#).is_err());
+    }
     #[test]
     fn observes_new_and_replaced_cache_files_and_normalizes_admin_folder() {
         let root = std::env::temp_dir().join(format!("admin-watch-{}", std::process::id()));

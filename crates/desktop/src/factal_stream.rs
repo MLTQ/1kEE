@@ -1,16 +1,17 @@
-use crate::model::{AppModel, EventRecord, EventSeverity, FactalBrief, GeoPoint};
-use reqwest::blocking::Client;
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
-use serde_json::Value;
-use std::collections::HashSet;
+use crate::model::{AppModel, EventRecord};
+use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-const FACTAL_BASE_URL: &str = "https://www.factal.com/api/v2/item/";
-const FACTAL_LATEST_URL: &str = "https://www.factal.com/api/v2/item/?severity__gte=2";
+mod api;
+mod history;
+mod parse;
+
+use api::{FetchError, Snapshot};
+pub use history::{history_tick, is_history_fetching, trigger_history_fetch};
+
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 struct PollManager {
     active: Option<ActivePoll>,
@@ -22,46 +23,51 @@ struct PollManager {
 
 struct ActivePoll {
     generation: u64,
-    handle: JoinHandle<PollOutcome>,
+    handle: JoinHandle<Result<Snapshot, FetchError>>,
 }
 
-enum PollOutcome {
-    Success(Vec<EventRecord>),
-    AuthError,
-    RateLimited,
-    Error(String),
+impl PollManager {
+    fn poll_due(&self, now: Instant) -> bool {
+        !self.shutdown && self.active.is_none() && self.next_poll_at.is_some_and(|next| now >= next)
+    }
+
+    fn poll_finished(&mut self, generation: u64, now: Instant) {
+        // A manual refresh/key change keeps its immediate request pending.
+        if self.generation == generation {
+            self.next_poll_at = Some(now + POLL_INTERVAL);
+        }
+    }
 }
 
 pub fn tick(model: &mut AppModel) {
     let key = model.factal_api_key.trim().to_owned();
     let now = Instant::now();
-    let mut finished = None;
-
-    {
+    let finished = {
         let mut manager = manager().lock().unwrap();
-
         if manager.tracked_key != key {
             manager.tracked_key = key.clone();
             manager.generation = manager.generation.wrapping_add(1);
             manager.next_poll_at = Some(now);
             manager.shutdown = false;
         }
-
-        if let Some(active) = manager.active.as_ref() {
-            if active.handle.is_finished() {
-                finished = manager
-                    .active
-                    .take()
-                    .map(|active| (active.generation, active.handle));
-            }
+        if manager
+            .active
+            .as_ref()
+            .is_some_and(|active| active.handle.is_finished())
+        {
+            let active = manager.active.take().unwrap();
+            manager.poll_finished(active.generation, now);
+            Some(active)
+        } else {
+            None
         }
-    }
+    };
 
-    if let Some((generation, handle)) = finished {
-        match handle.join() {
-            Ok(outcome) => apply_outcome(model, generation, outcome),
+    if let Some(active) = finished {
+        match active.handle.join() {
+            Ok(outcome) => apply_outcome(model, active.generation, outcome),
             Err(_) => {
-                if generation == current_generation() {
+                if active.generation == current_generation() {
                     model.factal_stream_status = "error".into();
                     model.push_log("Factal poll worker panicked before returning data.".into());
                 }
@@ -70,48 +76,32 @@ pub fn tick(model: &mut AppModel) {
     }
 
     if key.is_empty() {
-        if model.factal_stream_status != "inactive" {
-            model.factal_stream_status = "inactive".into();
-        }
+        model.factal_stream_status = "inactive".into();
         return;
     }
 
-    let mut should_spawn = false;
-    let mut spawn_generation = 0_u64;
-    {
-        let mut manager = manager().lock().unwrap();
-        if !manager.shutdown
-            && manager.active.is_none()
-            && now >= manager.next_poll_at.unwrap_or(now)
-        {
-            should_spawn = true;
-            spawn_generation = manager.generation;
-            manager.next_poll_at = Some(now + POLL_INTERVAL);
-        }
-    }
-
-    if should_spawn {
-        let api_key = key;
-        let handle = thread::spawn(move || fetch_latest_events(&api_key));
-
-        let mut manager = manager().lock().unwrap();
-        if !manager.shutdown && manager.generation == spawn_generation {
-            manager.active = Some(ActivePoll {
-                generation: spawn_generation,
-                handle,
-            });
-            if model.factal_stream_status != "live" {
-                model.factal_stream_status = "syncing".into();
-            }
+    let mut manager = manager().lock().unwrap();
+    if manager.poll_due(now) {
+        let handle = thread::spawn(move || {
+            let outcome = api::fetch_live_events(&key);
+            crate::app::request_repaint();
+            outcome
+        });
+        manager.active = Some(ActivePoll {
+            generation: manager.generation,
+            handle,
+        });
+        manager.next_poll_at = None;
+        if model.factal_stream_status != "live" {
+            model.factal_stream_status = "syncing".into();
         }
     }
 }
 
 pub fn invalidate() {
-    let now = Instant::now();
     let mut manager = manager().lock().unwrap();
     manager.generation = manager.generation.wrapping_add(1);
-    manager.next_poll_at = Some(now);
+    manager.next_poll_at = Some(Instant::now());
     manager.shutdown = false;
 }
 
@@ -122,27 +112,14 @@ pub fn shutdown() {
     manager.next_poll_at = None;
 }
 
-fn apply_outcome(model: &mut AppModel, generation: u64, outcome: PollOutcome) {
+fn apply_outcome(model: &mut AppModel, generation: u64, outcome: Result<Snapshot, FetchError>) {
     if generation != current_generation() {
         return;
     }
 
     match outcome {
-        PollOutcome::Success(events) => {
-            let count = events.len();
-            let should_log = model.factal_stream_status != "live" || model.events.len() != count;
-            // Persist to history store before replacing live events.
-            crate::event_store::upsert_events(&events);
-            model.replace_factal_events(events);
-            model.factal_stream_status = "live".into();
-            if should_log {
-                model.push_log(format!(
-                    "Factal sync loaded {} geolocated live event(s).",
-                    count
-                ));
-            }
-        }
-        PollOutcome::AuthError => {
+        Ok(snapshot) => apply_snapshot(model, snapshot),
+        Err(FetchError::Auth) => {
             let was_status = model.factal_stream_status.clone();
             model.factal_stream_status = "auth error".into();
             if was_status != "auth error" {
@@ -151,21 +128,65 @@ fn apply_outcome(model: &mut AppModel, generation: u64, outcome: PollOutcome) {
                 );
             }
         }
-        PollOutcome::RateLimited => {
+        Err(FetchError::RateLimited) => {
             let was_status = model.factal_stream_status.clone();
             model.factal_stream_status = "rate limited".into();
             if was_status != "rate limited" {
                 model.push_log(
-                    "Factal API rate limited the live poll; the app will retry automatically."
+                    "Factal API rate limited the live poll; keeping the previous events and retrying after one minute."
                         .into(),
                 );
             }
         }
-        PollOutcome::Error(error) => {
+        Err(FetchError::Other(error)) => {
             model.factal_stream_status = "error".into();
-            model.push_log(format!("Factal poll failed: {}", error));
+            model.push_log(format!(
+                "Factal poll failed; keeping the previous events: {error}"
+            ));
         }
     }
+}
+
+fn apply_snapshot(model: &mut AppModel, snapshot: Snapshot) {
+    let previous: HashMap<_, _> = model
+        .events
+        .iter()
+        .filter(|event| event.id.starts_with("factal-"))
+        .map(|event| (event.id.as_str(), event))
+        .collect();
+    let added = snapshot
+        .events
+        .iter()
+        .filter(|event| !previous.contains_key(event.id.as_str()))
+        .count();
+    let updated = snapshot
+        .events
+        .iter()
+        .filter(|event| {
+            previous
+                .get(event.id.as_str())
+                .is_some_and(|old| raw_payload(old) != raw_payload(event))
+        })
+        .count();
+    let removed = previous.len() + added - snapshot.events.len();
+    let should_log = model.factal_stream_status != "live" || added + updated + removed > 0;
+    let count = snapshot.events.len();
+    crate::event_store::upsert_events(&snapshot.events);
+    model.replace_factal_events(snapshot.events);
+    model.factal_stream_status = "live".into();
+    if should_log {
+        model.push_log(format!(
+            "Factal sync: {added} new, {updated} updated, {removed} removed; {count} geolocated event(s) in the past 24h ({} items across {} page(s)).",
+            snapshot.stats.items, snapshot.stats.pages
+        ));
+    }
+}
+
+fn raw_payload(event: &EventRecord) -> Option<&str> {
+    event
+        .factal_brief
+        .as_ref()
+        .map(|brief| brief.raw_json_pretty.as_str())
 }
 
 fn current_generation() -> u64 {
@@ -185,397 +206,6 @@ fn manager() -> &'static Mutex<PollManager> {
     })
 }
 
-fn fetch_latest_events(api_key: &str) -> PollOutcome {
-    let client = match Client::builder().timeout(REQUEST_TIMEOUT).build() {
-        Ok(client) => client,
-        Err(error) => return PollOutcome::Error(error.to_string()),
-    };
-
-    let mut headers = HeaderMap::new();
-    let token = format!("Token {}", api_key.trim());
-    let token_value = match HeaderValue::from_str(&token) {
-        Ok(value) => value,
-        Err(error) => return PollOutcome::Error(error.to_string()),
-    };
-    headers.insert(AUTHORIZATION, token_value);
-
-    let response = match client.get(FACTAL_LATEST_URL).headers(headers).send() {
-        Ok(response) => response,
-        Err(error) => return PollOutcome::Error(error.to_string()),
-    };
-
-    match response.status().as_u16() {
-        200 => {}
-        401 | 403 => return PollOutcome::AuthError,
-        429 => return PollOutcome::RateLimited,
-        code => {
-            return PollOutcome::Error(format!("Factal API returned unexpected status {}", code));
-        }
-    }
-
-    let body = match response.text() {
-        Ok(body) => body,
-        Err(error) => return PollOutcome::Error(error.to_string()),
-    };
-    let payload: Value = match serde_json::from_str(&body) {
-        Ok(payload) => payload,
-        Err(error) => return PollOutcome::Error(error.to_string()),
-    };
-
-    let mut ids = HashSet::new();
-    let mut events = Vec::new();
-    for raw_event in payload
-        .get("results")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        if let Some(event) = parse_event(raw_event) {
-            if ids.insert(event.id.clone()) {
-                events.push(event);
-            }
-        }
-    }
-
-    PollOutcome::Success(events)
-}
-
-fn parse_event(raw: &Value) -> Option<EventRecord> {
-    let id = string_value(raw.get("id")?)?;
-    let occurred_at_raw = raw.get("date").and_then(Value::as_str).map(str::to_owned);
-    let occurred_at = occurred_at_raw
-        .as_deref()
-        .unwrap_or("Unknown timestamp")
-        .replace('T', " ");
-    let summary = normalize_text(raw.get("content").and_then(Value::as_str).unwrap_or(""));
-    let severity = classify_severity(raw.get("severity"));
-    let severity_value = raw.get("severity").and_then(|value| {
-        value
-            .as_i64()
-            .or_else(|| value.as_f64().map(|value| value as i64))
-    });
-
-    let topics = raw.get("topics").and_then(Value::as_array)?;
-    let mut title = None;
-    let mut location = None;
-    let mut location_name = None;
-    let mut point_wkt = None;
-    let mut vertical = None;
-    let mut subvertical = None;
-    let mut topic_names = Vec::new();
-
-    for wrapper in topics {
-        let Some(topic) = wrapper.get("topic") else {
-            continue;
-        };
-
-        if let Some(topic_name) = topic
-            .get("name")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            topic_names.push(topic_name.to_owned());
-        }
-
-        if title.is_none() {
-            title = topic
-                .get("name")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned);
-        }
-
-        if location.is_none() {
-            let lat = value_as_f32(topic.get("latitude"));
-            let lon = value_as_f32(topic.get("longitude"));
-            if let (Some(lat), Some(lon)) = (lat, lon) {
-                location = Some(GeoPoint { lat, lon });
-                point_wkt = topic
-                    .get("point")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned);
-                location_name = topic
-                    .get("point")
-                    .and_then(Value::as_str)
-                    .or_else(|| topic.get("name").and_then(Value::as_str))
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned);
-            }
-        }
-
-        if let Some(category) = topic
-            .get("category")
-            .and_then(Value::as_str)
-            .or_else(|| topic.get("kind").and_then(Value::as_str))
-        {
-            match category.to_ascii_lowercase().as_str() {
-                "vertical" => {
-                    if vertical.is_none() {
-                        vertical = topic
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                            .map(str::to_owned);
-                    }
-                }
-                "subvertical" => {
-                    if subvertical.is_none() {
-                        subvertical = topic
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                            .map(str::to_owned);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let location = location?;
-    let title = title.unwrap_or_else(|| {
-        summary
-            .split('.')
-            .next()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("Factal live event")
-            .to_owned()
-    });
-
-    Some(EventRecord {
-        id: format!("factal-{}", id),
-        title,
-        summary: if summary.is_empty() {
-            "Live event synced from the Factal API.".into()
-        } else {
-            summary
-        },
-        severity,
-        location_name: location_name
-            .unwrap_or_else(|| format!("{:.4}, {:.4}", location.lat, location.lon)),
-        location,
-        source: "Factal API".into(),
-        occurred_at,
-        factal_brief: Some(FactalBrief {
-            factal_id: id,
-            severity_value,
-            occurred_at_raw,
-            point_wkt,
-            vertical,
-            subvertical,
-            topics: topic_names,
-            content: raw
-                .get("content")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned),
-            raw_json_pretty: serde_json::to_string_pretty(raw).unwrap_or_else(|_| raw.to_string()),
-        }),
-    })
-}
-
-fn classify_severity(value: Option<&Value>) -> EventSeverity {
-    let severity = value
-        .and_then(|value| {
-            value
-                .as_i64()
-                .or_else(|| value.as_f64().map(|value| value as i64))
-        })
-        .unwrap_or(0);
-
-    if severity >= 4 {
-        EventSeverity::Critical
-    } else if severity >= 2 {
-        EventSeverity::Elevated
-    } else {
-        EventSeverity::Advisory
-    }
-}
-
-fn normalize_text(content: &str) -> String {
-    content.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn string_value(value: &Value) -> Option<String> {
-    if let Some(value) = value.as_str() {
-        Some(value.to_owned())
-    } else if let Some(value) = value.as_i64() {
-        Some(value.to_string())
-    } else if let Some(value) = value.as_u64() {
-        Some(value.to_string())
-    } else {
-        value.as_f64().map(|value| value.to_string())
-    }
-}
-
-fn value_as_f32(value: Option<&Value>) -> Option<f32> {
-    let value = value?;
-    if let Some(number) = value.as_f64() {
-        Some(number as f32)
-    } else if let Some(number) = value.as_i64() {
-        Some(number as f32)
-    } else if let Some(text) = value.as_str() {
-        text.parse::<f32>().ok()
-    } else {
-        None
-    }
-}
-
-// ── History backfill ──────────────────────────────────────────────────────────
-
-struct HistoryManager {
-    active: Option<JoinHandle<HistoryOutcome>>,
-}
-
-enum HistoryOutcome {
-    Success(usize),
-    AuthError,
-    Error(String),
-}
-
-fn history_manager() -> &'static Mutex<HistoryManager> {
-    static MANAGER: OnceLock<Mutex<HistoryManager>> = OnceLock::new();
-    MANAGER.get_or_init(|| Mutex::new(HistoryManager { active: None }))
-}
-
-/// Spawn a background thread to page through Factal history and persist it.
-/// No-ops if a fetch is already in progress.
-pub fn trigger_history_fetch(api_key: String, days_back: u32) {
-    let mut mgr = history_manager().lock().unwrap();
-    if mgr.active.is_some() {
-        return;
-    }
-    let handle = thread::spawn(move || fetch_and_store_history(&api_key, days_back));
-    mgr.active = Some(handle);
-}
-
-/// Poll the history fetch thread; updates model status when it finishes.
-/// Call each frame from `app.rs`.
-pub fn history_tick(model: &mut AppModel) {
-    let finished = {
-        let mut mgr = history_manager().lock().unwrap();
-        if mgr.active.as_ref().is_some_and(|h| h.is_finished()) {
-            mgr.active.take()
-        } else {
-            None
-        }
-    };
-
-    if let Some(handle) = finished {
-        match handle.join() {
-            Ok(HistoryOutcome::Success(n)) => {
-                let msg = format!("{n} historical events loaded");
-                model.replay_history_status = msg.clone();
-                model.push_log(format!(
-                    "Factal history fetch complete: {n} event(s) stored."
-                ));
-                // Rebuild whenever replay is open — history may have arrived after
-                // the initial rebuild (which only had today's live events).
-                if model.replay_mode {
-                    model.rebuild_replay_state();
-                }
-            }
-            Ok(HistoryOutcome::AuthError) => {
-                model.replay_history_status = "Auth error during history fetch".into();
-            }
-            Ok(HistoryOutcome::Error(e)) => {
-                model.replay_history_status = format!("History fetch error: {e}");
-            }
-            Err(_) => {
-                model.replay_history_status = "History fetch panicked".into();
-            }
-        }
-    }
-}
-
-pub fn is_history_fetching() -> bool {
-    history_manager().lock().unwrap().active.is_some()
-}
-
-fn fetch_and_store_history(api_key: &str, days_back: u32) -> HistoryOutcome {
-    let client = match Client::builder().timeout(Duration::from_secs(30)).build() {
-        Ok(c) => c,
-        Err(e) => return HistoryOutcome::Error(e.to_string()),
-    };
-
-    let mut headers = HeaderMap::new();
-    let token = format!("Token {}", api_key.trim());
-    let token_value = match HeaderValue::from_str(&token) {
-        Ok(v) => v,
-        Err(e) => return HistoryOutcome::Error(e.to_string()),
-    };
-    headers.insert(AUTHORIZATION, token_value);
-
-    let from_unix = crate::event_store::now_unix() - (days_back as i64) * 86_400;
-    let date_gte = crate::event_store::unix_to_date_str(from_unix);
-    let mut url = format!("{FACTAL_BASE_URL}?severity__gte=2&date__gte={date_gte}");
-    let mut total = 0usize;
-
-    loop {
-        let response = match client.get(&url).headers(headers.clone()).send() {
-            Ok(r) => r,
-            Err(e) => return HistoryOutcome::Error(e.to_string()),
-        };
-
-        match response.status().as_u16() {
-            200 => {}
-            401 | 403 => return HistoryOutcome::AuthError,
-            429 => {
-                // Back off for 60 s before retrying the same page.
-                thread::sleep(Duration::from_secs(60));
-                continue;
-            }
-            code => return HistoryOutcome::Error(format!("HTTP {code}")),
-        }
-
-        let body = match response.text() {
-            Ok(b) => b,
-            Err(e) => return HistoryOutcome::Error(e.to_string()),
-        };
-        let payload: Value = match serde_json::from_str(&body) {
-            Ok(v) => v,
-            Err(e) => return HistoryOutcome::Error(e.to_string()),
-        };
-
-        let mut ids: HashSet<String> = HashSet::new();
-        let mut page_events: Vec<EventRecord> = Vec::new();
-        for raw in payload
-            .get("results")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            if let Some(ev) = parse_event(raw) {
-                if ids.insert(ev.id.clone()) {
-                    page_events.push(ev);
-                }
-            }
-        }
-        total += page_events.len();
-        crate::event_store::upsert_events(&page_events);
-
-        match payload
-            .get("next")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-        {
-            Some(next) => {
-                url = next.to_owned();
-                // Polite inter-page delay to avoid hammering the API.
-                thread::sleep(Duration::from_millis(600));
-            }
-            None => break,
-        }
-    }
-
-    HistoryOutcome::Success(total)
-}
+#[cfg(test)]
+#[path = "factal_stream/tests.rs"]
+mod tests;

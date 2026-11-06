@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use super::contour_asset::ContourPath;
-use super::globe_pass::color_to_linear;
+use super::gpu_color;
 use crate::model::{GeoPoint, GlobeViewState};
 
 /// Identifies a contour layer. Each layer owns one uniform-buffer slot and one
@@ -89,7 +89,7 @@ impl ContourLayer {
 //   80 bytes total
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct ContourUniforms {
+pub(super) struct ContourUniforms {
     center: [f32; 2],
     viewport_min: [f32; 2],
     viewport_size: [f32; 2],
@@ -115,7 +115,7 @@ const _: () = assert!(std::mem::size_of::<ContourUniforms>() == 80);
 // ── Segment instances ─────────────────────────────────────────────────────────
 
 /// One polyline segment: unit-sphere endpoints plus a baked
-/// premultiplied-linear colour. 28 bytes, `step_mode: Instance`.
+/// Color32 display channels. 28 bytes, `step_mode: Instance`.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SegmentInstance {
@@ -132,7 +132,7 @@ impl SegmentInstance {
 
     /// Public surface overlays reuse the same immutable GPU line batches.
     pub fn line(a: GeoPoint, b: GeoPoint, color: egui::Color32) -> Self {
-        Self { a: unit_vec(a), b: unit_vec(b), color: linear_u8(color) }
+        Self { a: unit_vec(a), b: unit_vec(b), color: color.to_array() }
     }
 }
 
@@ -144,20 +144,6 @@ fn unit_vec(p: GeoPoint) -> [f32; 3] {
     let lon = p.lon.to_radians();
     let lat_cos = lat.cos();
     [lat_cos * lon.cos(), lat.sin(), lat_cos * lon.sin()]
-}
-
-/// Quantize an egui colour (premultiplied sRGB) to premultiplied-linear u8s,
-/// the format the instance buffer stores and the shader consumes directly.
-///
-/// The alpha channel goes through the same sRGB→linear curve as the colour
-/// channels: egui blends translucent strokes in gamma space, this pass blends
-/// in linear space, and over the dark globe background gamma blending is
-/// equivalent to linear blending with alpha raised to ~2.2. Without this the
-/// GPU lines render dramatically brighter than the CPU path they replaced.
-fn linear_u8(c: egui::Color32) -> [u8; 4] {
-    let mut l = color_to_linear(c);
-    l[3] = (c.a() as f32 / 255.0).powf(2.2);
-    l.map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
 }
 
 #[inline]
@@ -381,7 +367,7 @@ pub fn instances_for(
                     contours
                         .par_iter()
                         .flat_map_iter(|contour| {
-                            let color = linear_u8(color_fn(contour));
+                            let color = color_fn(contour).to_array();
                             contour.points.windows(2).map(move |pair| SegmentInstance {
                                 a: unit_vec(pair[0]),
                                 b: unit_vec(pair[1]),
@@ -488,6 +474,38 @@ pub(crate) fn split_instance_buffers<T: bytemuck::Pod>(
 }
 
 impl ContourPassResources {
+    pub(super) fn write_view(
+        &self,
+        queue: &wgpu::Queue,
+        layer: ContourLayer,
+        uniforms: &ContourUniforms,
+    ) {
+        queue.write_buffer(
+            &self.uniform_buf,
+            layer.slot() as u64 * UNIFORM_STRIDE,
+            bytemuck::bytes_of(uniforms),
+        );
+    }
+    pub(super) fn draw_chunks(
+        &self,
+        render_pass: &mut wgpu::RenderPass<'static>,
+        layer: ContourLayer,
+        chunks: &[InstanceChunk],
+    ) {
+        if chunks.is_empty() {
+            return;
+        }
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(0, &self.bind_group, &[layer.slot() * UNIFORM_STRIDE as u32]);
+        for chunk in chunks {
+            if chunk.count == 0 {
+                continue;
+            }
+            render_pass.set_vertex_buffer(0, chunk.buffer.slice(..));
+            render_pass.draw(0..4, 0..chunk.count);
+        }
+    }
+
     /// Create the render pipeline and the slotted uniform buffer.
     /// Call once from `DashboardApp::new`, next to `GlobePassResources::new`.
     pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
@@ -497,7 +515,7 @@ impl ContourPassResources {
     fn with_shader(device: &wgpu::Device, target_format: wgpu::TextureFormat, source: &str, topology: wgpu::PrimitiveTopology) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("contour_pass_shader"),
-            source: wgpu::ShaderSource::Wgsl(source.into()),
+            source: gpu_color::shader(source),
         });
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -574,7 +592,7 @@ impl ContourPassResources {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
+                compilation_options: gpu_color::fragment_options(target_format),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,
                     blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
@@ -614,6 +632,52 @@ pub struct ContourCallback {
     uniforms: ContourUniforms,
 }
 
+impl ContourUniforms {
+    pub(super) fn for_view(
+        layer: ContourLayer,
+        layout: &super::globe_scene::GlobeLayout,
+        view: &GlobeViewState,
+        radius_offset: f32,
+        alpha: f32,
+        stroke_width_px: f32,
+        pixels_per_point: f32,
+    ) -> Self {
+        Self {
+            center: [layout.center.x, layout.center.y],
+            // Filled in by set_viewport once the callback rectangle is known.
+            viewport_min: [0.0, 0.0],
+            viewport_size: [1.0, 1.0],
+            yaw_sin: view.yaw.sin(),
+            yaw_cos: view.yaw.cos(),
+            pitch_sin: view.pitch.sin(),
+            pitch_cos: view.pitch.cos(),
+            radius_focal: layout.radius * layout.focal_length,
+            camera_distance: layout.camera_distance,
+            radius_offset,
+            // Match egui's display-space `gamma_multiply` fade.
+            alpha,
+            // The UI-selected width is already in physical pixels.
+            stroke_half_px: contour_stroke_half_px(stroke_width_px),
+            feather_px: contour_feather_px(stroke_width_px),
+            pixels_per_point,
+            horizon_z: if matches!(layer, ContourLayer::Pipelines | ContourLayer::Admin) {
+                1.0 / layout.camera_distance
+            } else {
+                0.0
+            },
+            _pad: [0.0; 2],
+        }
+    }
+    pub(super) fn set_viewport(&mut self, rect: egui::Rect) {
+        let ppp = self.pixels_per_point;
+        self.viewport_min = [rect.min.x * ppp, rect.min.y * ppp];
+        self.viewport_size = [
+            (rect.width() * ppp).max(1.0),
+            (rect.height() * ppp).max(1.0),
+        ];
+    }
+}
+
 impl ContourCallback {
     /// Build a callback for one layer. `radius_offset` is the constant
     /// altitude offset previously passed to `draw_geo_path`; `alpha` is the
@@ -635,40 +699,22 @@ impl ContourCallback {
             layer,
             version,
             instances,
-            uniforms: ContourUniforms {
-                center: [layout.center.x, layout.center.y],
-                // Filled in by `into_paint_callback` once the rect is known.
-                viewport_min: [0.0, 0.0],
-                viewport_size: [1.0, 1.0],
-                yaw_sin: view.yaw.sin(),
-                yaw_cos: view.yaw.cos(),
-                pitch_sin: view.pitch.sin(),
-                pitch_cos: view.pitch.cos(),
-                radius_focal: layout.radius * layout.focal_length,
-                camera_distance: layout.camera_distance,
+            uniforms: ContourUniforms::for_view(
+                layer,
+                layout,
+                view,
                 radius_offset,
-                // Same gamma-space→linear-space correction as `linear_u8`:
-                // the CPU path applied this fade via `gamma_multiply`.
-                alpha: alpha.powf(2.2),
-                // The UI-selected width is already in physical pixels.
-                stroke_half_px: contour_stroke_half_px(stroke_width_px),
-                feather_px: contour_feather_px(stroke_width_px),
+                alpha,
+                stroke_width_px,
                 pixels_per_point,
-                horizon_z: if matches!(layer, ContourLayer::Pipelines | ContourLayer::Admin) { 1.0 / layout.camera_distance } else { 0.0 },
-                _pad: [0.0; 2],
-            },
+            ),
         }
     }
 
     /// egui-wgpu executes paint callbacks with the GPU viewport set to `rect`
     /// (in physical pixels), so the NDC transform must be relative to it.
     pub fn into_paint_callback(mut self, rect: egui::Rect) -> egui::PaintCallback {
-        let ppp = self.uniforms.pixels_per_point;
-        self.uniforms.viewport_min = [rect.min.x * ppp, rect.min.y * ppp];
-        self.uniforms.viewport_size = [
-            (rect.width() * ppp).max(1.0),
-            (rect.height() * ppp).max(1.0),
-        ];
+        self.uniforms.set_viewport(rect);
         egui_wgpu::Callback::new_paint_callback(rect, self)
     }
 }
@@ -688,11 +734,7 @@ impl egui_wgpu::CallbackTrait for ContourCallback {
 
         res.used.insert(self.layer);
 
-        queue.write_buffer(
-            &res.uniform_buf,
-            self.layer.slot() as u64 * UNIFORM_STRIDE,
-            bytemuck::bytes_of(&self.uniforms),
-        );
+        res.write_view(queue, self.layer, &self.uniforms);
 
         let gpu = res.layers.entry(self.layer).or_default();
         if gpu.version != self.version || gpu.pending.is_some() {
@@ -723,25 +765,10 @@ impl egui_wgpu::CallbackTrait for ContourCallback {
         };
         // Pipeline colors encode capacity; an old batch must not be presented
         // under the new legend or picked with the replacement's metadata.
-        if matches!(self.layer, ContourLayer::Pipelines | ContourLayer::Admin) && gpu.version != self.version {
+        if self.layer == ContourLayer::Pipelines && gpu.version != self.version {
             return;
         }
-        if gpu.chunks.is_empty() {
-            return;
-        }
-        render_pass.set_pipeline(&res.pipeline);
-        render_pass.set_bind_group(
-            0,
-            &res.bind_group,
-            &[self.layer.slot() * UNIFORM_STRIDE as u32],
-        );
-        for chunk in &gpu.chunks {
-            if chunk.count == 0 {
-                continue;
-            }
-            render_pass.set_vertex_buffer(0, chunk.buffer.slice(..));
-            render_pass.draw(0..4, 0..chunk.count);
-        }
+        res.draw_chunks(render_pass, self.layer, &gpu.chunks);
     }
 }
 

@@ -80,6 +80,8 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                 }
                 ui.checkbox(&mut model.show_coastlines, "Coastline");
                 ui.checkbox(&mut model.show_bathymetry, "Bathymetry");
+                world_map::swot_controls(ui, model);
+                world_map::gravity_controls(ui, model);
                 ui.checkbox(&mut model.show_graticule, "Graticule");
                 ui.checkbox(&mut model.show_reticle, "Reticle");
                 {
@@ -265,6 +267,9 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                         crate::deflock_source::OPENSTREETMAP_ATTRIBUTION_URL,
                     );
                 });
+                ui.add_space(4.0);
+
+                crate::buildout::view::controls(ui, model);
                 ui.add_space(4.0);
 
                 ui.checkbox(&mut model.show_submarine_cables, "Submarine cables")

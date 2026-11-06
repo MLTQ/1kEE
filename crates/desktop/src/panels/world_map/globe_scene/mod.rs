@@ -20,6 +20,15 @@ mod projection;
 
 pub use projection::project_geo;
 
+/// Unit-sphere imagery avoids synthetic terrain sampling at every mesh vertex.
+pub(super) fn project_surface(
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    point: GeoPoint,
+) -> Option<ProjectedPoint> {
+    projection::project_geo_unit_surface(layout, view, point)
+}
+
 pub struct GlobeScene {
     pub event_markers: Vec<MapMarker>,
     pub camera_markers: Vec<MapMarker>,
@@ -32,6 +41,7 @@ pub struct GlobeScene {
     /// (index into `submarine_cables::catalog().landings`, screen_pos) for
     /// landing-point hover and click detection.
     pub landing_point_markers: Vec<(usize, egui::Pos2)>,
+    pub buildout_markers: Vec<crate::buildout::markers::Marker>,
     /// Terrain elevation (metres) at the beam contact point, if available.
     pub beam_elevation_m: Option<f32>,
 }
@@ -162,6 +172,18 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 contour_stroke_width_px,
             );
         }
+        if model.show_swot_gravity {
+            super::swot_layer::draw_globe(painter, rect, &layout, &model.globe_view, selected_root);
+        }
+        if model.gravity.enabled {
+            super::gravity_layer::draw_globe(
+                painter,
+                &layout,
+                &model.globe_view,
+                selected_root,
+                &model.gravity.map().id,
+            );
+        }
         if model.show_coastlines {
             geography::draw_global_coastlines(
                 painter,
@@ -273,34 +295,35 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let nearby = model.nearby_camera_snapshot(250.0);
 
     // ── Replay flares (shown instead of live markers while replay is active) ──
-    if model.replay_mode && model.active_body == crate::model::ActiveBody::Earth {
-        if let Some(state) = &model.replay_state {
-            let wall_elapsed = state.wall_elapsed();
-            for flare in &state.active_flares {
-                let Some(base) = projection::project_geo_unit_surface(
-                    &layout,
-                    &model.globe_view,
-                    flare.event.location,
-                )
-                .filter(|base| base.front_facing) else {
-                    continue;
-                };
-                let extra_r = (135.0 / layout.radius).clamp(0.060, 0.220) * model.marker_scale();
-                let tip = projection::project_geo_unit_surface_elevated(
-                    &layout,
-                    &model.globe_view,
-                    flare.event.location,
-                    extra_r,
-                )
-                .map(|p| p.pos)
-                .unwrap_or(base.pos);
-                markers::draw_replay_flare(painter, base, tip, flare, wall_elapsed, model.marker_scale());
-            }
+    if model.active_body == crate::model::ActiveBody::Earth
+        && let Some(state) = model.active_replay()
+    {
+        let wall_elapsed = state.wall_elapsed();
+        for flare in &state.active_flares {
+            let Some(base) = projection::project_geo_unit_surface(
+                &layout,
+                &model.globe_view,
+                flare.event.location,
+            )
+            .filter(|base| base.front_facing) else {
+                continue;
+            };
+            let extra_r = (135.0 / layout.radius).clamp(0.060, 0.220) * model.marker_scale();
+            let tip = projection::project_geo_unit_surface_elevated(
+                &layout,
+                &model.globe_view,
+                flare.event.location,
+                extra_r,
+            )
+            .map(|p| p.pos)
+            .unwrap_or(base.pos);
+            markers::draw_replay_flare(painter, base, tip, flare, wall_elapsed, model.marker_scale());
         }
     }
 
     let event_markers: Vec<_> = if !model.show_event_markers
         || model.replay_mode
+        || model.follow_recaps.active.is_some()
         || model.active_body != crate::model::ActiveBody::Earth
     {
         Vec::new()
@@ -370,6 +393,11 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             .collect()
     };
 
+    let buildout_markers = crate::buildout::markers::draw(painter, &model.buildout, model.active_body, |point| {
+        project_surface(&layout, &model.globe_view, point)
+            .filter(|p| p.depth >= (1.0 + 1.0 / layout.camera_distance) * 0.5)
+            .map(|p| p.pos)
+    });
     draw_active_fires(painter, &layout, &model.globe_view, model);
     if model.show_pipeline && model.active_body == crate::model::ActiveBody::Earth
         && let Some(root) = model.selected_root.as_deref() {
@@ -520,6 +548,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         flight_markers,
         arcgis_feature_markers,
         landing_point_markers,
+        buildout_markers,
         beam_elevation_m: None,
     }
 }
@@ -704,6 +733,31 @@ fn project_visible_markers<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn middle_east_recap_keeps_regional_landmarks_clear_of_the_chyron_and_clock() {
+        use crate::model::follow_recap::{RecapRegion, RegionalRecap};
+        for size in [egui::vec2(1280.0, 720.0), egui::vec2(1920.0, 1080.0)] {
+            let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+            let mut view = GlobeViewState::from_focus(GeoPoint { lat: 0.0, lon: 0.0 });
+            let mut recap = RegionalRecap::with_events(
+                RecapRegion::MiddleEast, 0.0, 1_800_000_000, view, Vec::new());
+            recap.tick(&mut view, 3.0);
+            let layout = globe_layout(viewport, &view);
+            let map = egui::Rect::from_min_max(viewport.min + egui::vec2(8.0, 8.0),
+                egui::pos2(viewport.right() - 8.0,
+                    viewport.bottom() - super::super::super::event_chyron::HEIGHT - 8.0));
+            let clock = egui::Rect::from_min_size(viewport.min + egui::vec2(12.0, 12.0),
+                egui::vec2(440.0, 132.0));
+            for (lat, lon) in [(41.0, 29.0), (30.0, 31.2), (35.7, 51.4),
+                (36.3, 59.6), (23.6, 58.4), (12.8, 45.0)] {
+                let projected = project_surface(&layout, &view, GeoPoint { lat, lon }).unwrap();
+                assert!(projected.front_facing);
+                assert!(map.contains(projected.pos), "{lat}, {lon}: {:?}", projected.pos);
+                assert!(!clock.contains(projected.pos), "clock covers {lat}, {lon}");
+            }
+        }
+    }
 
     #[derive(Clone, Copy)]
     struct SourceMarker {

@@ -111,17 +111,6 @@ impl ReplayState {
         self.elapsed_before_pause + live
     }
 
-    /// Simulated seconds elapsed within [sim_from, sim_to].
-    fn sim_elapsed_secs(&self) -> f64 {
-        let frac = (self.wall_elapsed() / self.wall_duration).clamp(0.0, 1.0);
-        frac * (self.sim_to - self.sim_from) as f64
-    }
-
-    /// Current simulated unix timestamp.
-    fn sim_now(&self) -> f64 {
-        self.sim_from as f64 + self.sim_elapsed_secs()
-    }
-
     /// Fraction through the replay `[0, 1]`.
     pub fn progress(&self) -> f32 {
         (self.wall_elapsed() / self.wall_duration).clamp(0.0, 1.0) as f32
@@ -180,16 +169,38 @@ impl ReplayState {
         if self.is_paused() {
             return false;
         }
-        let wall_now = self.wall_elapsed();
-        let sim_now = self.sim_now();
+        self.update_flares(self.wall_elapsed());
+        !self.is_finished()
+    }
+
+    /// Drive a paused replay with a nondecreasing external clock (automatic recaps).
+    pub fn advance_to(&mut self, elapsed: f64) {
+        self.play_start = None;
+        self.elapsed_before_pause = elapsed.max(0.0);
+        self.update_flares(self.elapsed_before_pause);
+    }
+
+    /// Only records already reached by the playhead, in chronological order.
+    pub fn revealed_events(&self) -> &[(i64, EventRecord)] {
+        &self.events[..self.next_idx]
+    }
+
+    fn update_flares(&mut self, wall_now: f64) {
+        let sim_now = self.sim_from as f64
+            + (wall_now / self.wall_duration).clamp(0.0, 1.0)
+                * (self.sim_to - self.sim_from) as f64;
 
         // Spawn events whose simulated time has been reached.
         while self.next_idx < self.events.len() {
             let (evt_unix, _) = &self.events[self.next_idx];
             if (*evt_unix as f64) <= sim_now {
                 let (_, event) = self.events[self.next_idx].clone();
-                self.active_flares
-                    .push(ActiveFlare::for_event(event, wall_now));
+                self.active_flares.push(ActiveFlare::for_event(
+                    event,
+                    ((*evt_unix - self.sim_from) as f64
+                        / (self.sim_to - self.sim_from).max(1) as f64)
+                        * self.wall_duration,
+                ));
                 self.next_idx += 1;
             } else {
                 break;
@@ -198,7 +209,5 @@ impl ReplayState {
 
         // Expire flares past their fade duration.
         self.active_flares.retain(|f| !f.is_expired(wall_now));
-
-        !self.is_finished()
     }
 }

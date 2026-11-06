@@ -32,4 +32,11 @@ Centralizes the visual language for the 1kEE desktop demo. It installs the activ
   other palettes. Minor roads sit nearer the background; live markers remain
   brighter. Opaque colors avoid accumulating brightness where road segments join.
 
-Admin colors and widths cover intermediate levels 2–11 and keep fine divisions legible on dark maps; country borders remain brightest and widest.
+Each theme defines ten level colors in `theme/admin.rs`. The checkbox labels,
+Globe and Local outlines, and region shading read the selected theme's palette.
+Base colors are opaque; the separate boundary/shading opacity controls provide
+transparency. Country borders retain the brightest color and widest stroke.
+
+Native Earth terrain applies these colors at draw time: Globe recolors retained
+class-coverage images, and Local updates major/minor uniforms. Palette changes
+do not invalidate source tiles or wait for geometry rebuilds/uploads.

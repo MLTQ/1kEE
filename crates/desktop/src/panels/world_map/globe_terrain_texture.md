@@ -16,8 +16,18 @@ image contains every native contour plane and subsequent frames draw one quad.
 The refinement owns its uniform bind group; live camera uniform writes cannot
 change an in-progress image. GPU tile versions needed by the job remain pinned.
 Images from different generations never overlap within retained coverage.
-Resizing, incompatible source/palette or stroke changes retire old images.
+Resizing, incompatible geometry/classification or stroke changes retire old images.
 Same-camera compositing preserves exact pixels; moving reprojection interpolates
 pixels without changing contour coordinates. Newly exposed areas refine over
 several frames. Three viewport-sized textures are the maximum retained set.
 Hiding the layer releases images, jobs, pinned sources and uploaded tiles.
+
+Runtime images retain major/minor coverage rather than theme colors. `set_palette`
+updates only the final compositor's uniforms, including its completed-image fast
+path. A theme switch preserves the full image, geometry buffers and any frozen
+refinement already in progress. Generic diagnostic images can still pass through
+unchanged when no coverage palette is set.
+
+Palette uniforms retain Color32 display channels. Shader assembly and fragment
+specialization use `gpu_color`; sampled class coverage and final output respect
+the actual Unorm/sRGB format instead of assuming an sRGB surface.

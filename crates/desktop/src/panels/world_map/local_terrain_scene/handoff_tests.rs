@@ -85,10 +85,12 @@ fn complete(state: &mut Handoff) {
 
 fn fallback(detail: LocalContourLoad) -> LocalContourLoad {
     let mut base = frame(12.0, 0);
-    base.detail = Some(crate::panels::world_map::contour_asset::LocalContourDetail {
-        source_zoom: detail.source_zoom,
-        tiles: detail.tiles,
-    });
+    base.detail = Some(
+        crate::panels::world_map::contour_asset::LocalContourDetail {
+            source_zoom: detail.source_zoom,
+            tiles: detail.tiles,
+        },
+    );
     base
 }
 
@@ -112,7 +114,12 @@ fn small_pan_with_a_missing_fine_edge_keeps_visible_detail_and_its_priority() {
     complete(&mut state);
     state.publish(state.candidate(), vec![], false, true);
     assert_eq!(state.generation, generation);
-    let retained = state.display.tiles.iter().find(|t| t.id == fine_id).unwrap();
+    let retained = state
+        .display
+        .tiles
+        .iter()
+        .find(|t| t.id == fine_id)
+        .unwrap();
     assert!(Arc::ptr_eq(&retained.contours, &fine_lines));
     assert_eq!(state.display.tiles.len(), 2); // base only outside the fine core
 
@@ -301,6 +308,44 @@ fn root_body_reset_and_offscreen_pan_release_display_and_reject_late_workers() {
         );
         assert!(state.prepared.is_none());
         assert!(state.working.is_none());
+    }
+}
+
+#[test]
+fn celestial_gpu_publication_waits_for_uploads_and_body_switch_retires_display() {
+    let mut state = Handoff::default();
+    for body in [ActiveBody::Moon, ActiveBody::Mars, ActiveBody::Moon] {
+        let mut camera = view(0.2);
+        camera.body = body;
+        state.observe(None, camera, &frame(8.0, 0));
+        assert!(
+            state.display.tiles.is_empty(),
+            "previous body's terrain survived the switch"
+        );
+        complete(&mut state);
+        let candidate = state.candidate();
+        let ready = vec![LocalTileBatch {
+            id: LocalBatchId::Contour(candidate.tiles[0].id),
+            version: state.epoch,
+            instances: Arc::new(vec![]),
+            occlusion: Default::default(),
+        }];
+        state.publish(candidate.clone(), ready.clone(), true, false);
+        assert!(
+            state.display.tiles.is_empty(),
+            "cold terrain published before upload"
+        );
+        state.publish(candidate, ready, true, true);
+        assert_eq!(state.display.batches.len(), 1);
+        let old = state.display.frame_id;
+        state.observe(None, camera, &frame(16.0, 0));
+        complete(&mut state);
+        state.publish(state.candidate(), vec![], true, false);
+        assert_eq!(
+            state.display.frame_id, old,
+            "replacement upload erased old GPU terrain"
+        );
+        assert_eq!(state.display.batches.len(), 1);
     }
 }
 

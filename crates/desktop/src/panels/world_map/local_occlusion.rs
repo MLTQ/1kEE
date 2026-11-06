@@ -134,7 +134,13 @@ impl Resources {
             (u.viewport_size_x / downscale).ceil().max(1.0) as u32,
             (u.viewport_size_y / downscale).ceil().max(1.0) as u32,
         ];
-        let mut key = bytemuck::bytes_of(u).to_vec();
+        // Appearance is independent of visibility. A live theme update must
+        // reuse the same depth image and never rebuild its curtains.
+        let mut depth_uniforms = *u;
+        depth_uniforms.palette_enabled = 0.0;
+        depth_uniforms.major_color = [0.0; 4];
+        depth_uniforms.minor_color = [0.0; 4];
+        let mut key = bytemuck::bytes_of(&depth_uniforms).to_vec();
         let mut drawable: Vec<_> = batches
             .iter()
             .filter_map(|b| {

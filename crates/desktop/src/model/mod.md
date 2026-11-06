@@ -63,6 +63,9 @@ source pollers.
 - **Does**: Returns cameras within a radius of the selected event, sorted by
   haversine distance; map call sites share an immutable cached snapshot.
 - **Interacts with**: camera sidebar and globe/local terrain marker rendering.
+- `camera_registry_revision()` exposes the invalidation counter so the Follow
+  Events feed sidebar caches its own global nearest-four selection without
+  evicting the map's 250 km snapshot.
 
 ### DeFlock ALPR snapshot fields
 - **Does**: Hold an immutable public OpenStreetMap ALPR snapshot, visibility
@@ -118,6 +121,11 @@ Public pipelines use `show_pipeline`, `pipeline_filters` (source/product/status)
 
 ### Startup layer visibility
 
+`show_swot_gravity` is an initially hidden, session-only Earth overlay. It
+displays the SWOT_06 vertical gravity gradient independently of bathymetry.
+`gravity` separately owns the initially hidden NCEI anomaly quantity and region
+selection; its mGal fields never change terrain or the SWOT VGG data.
+
 `hillshade_source` is a session-only USGS/Washington bare-earth/top-surface
 selection, initially USGS. The independent hillshade toggle remains off.
 
@@ -132,14 +140,18 @@ orientation or a verified relationship to the incident.
 refreshes and historical replay. `tick_event_follow` selects the new target and
 opens its brief without snapping the camera; replacement cannot refocus an active
 flight. A followed record remains available for its brief after paging out.
-Manual event/city selection, replay or leaving Earth stops
+Manual event/city selection, manual Replay or leaving Earth stops
 following. Webcams default on; the independent Flock inventory remains off.
 
 `map_events` includes the followed target after it has paged out, so its marker and brief stay tied to the continuing orbit without repopulating the live feed list.
 
-FOLLOW EVENTS now tours the six highest-severity records from each successful
-Factal payload. Every timed stop uses the same `tick_event_follow` selection and
-brief-opening path; source replacement still cannot snap the active camera.
+FOLLOW EVENTS rotates through all eligible live Factal records, revisiting more
+severe stories more often while spacing out recent repeats. Scheduling history
+survives refreshes. Every timed stop uses the same `tick_event_follow` selection
+and brief-opening path; source replacement cannot snap or interrupt the camera.
+Startup and settings reload restore `event_follow_dwell_seconds` into the
+controller, and saving reads its current value. Live edits change the current
+post-arrival deadline without resetting camera motion or tour scheduling.
 
 ### Marker size
 `marker_scale()` and `set_marker_scale()` own the normalized 25–200% webcam/event
@@ -161,4 +173,15 @@ Terrain Library window state. Section navigation belongs to the single settings
 window. The obsolete collapsed bottom-log state is removed; logs live in Activity.
 
 There is no cinematic-mode state. Follow starts directly from its rail toggle and
-continues until explicitly stopped or invalidated by manual navigation, replay or body changes.
+continues until explicitly stopped or invalidated by manual navigation, manual Replay or body changes.
+
+`follow_recaps` owns automatic continental playback independently of manual
+Replay. Follow entry points and timed selection now live in `follow_recap.rs`.
+`active_replay` supplies the current recap or manual playback to globe rendering.
+Five live minutes alternate with one-minute recaps and brief globe framing;
+Follow remains enabled, so live replacements cannot refocus historical playback.
+
+`recap_regions.rs` defines the eight exclusive broadcast zones and individual
+framing targets, including the Middle East. It replaces the continent-only enum.
+
+The buildout source owns one immutable snapshot for both Earth scenes and the record browser. It follows saved data paths and restores the layer opt-in at startup.

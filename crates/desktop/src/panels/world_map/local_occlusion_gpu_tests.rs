@@ -20,16 +20,17 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
         }
     }
 }
-struct Harness {
+pub(crate) struct Harness {
     device: wgpu::Device,
     queue: wgpu::Queue,
     renderer: egui_wgpu::Renderer,
-    ctx: egui::Context,
+    pub(crate) ctx: egui::Context,
     target: wgpu::Texture,
     size: [u32; 2],
+    pub(crate) palette: Option<[egui::Color32; 2]>,
 }
 impl Harness {
-    fn new(size: [u32; 2]) -> Self {
+    pub(crate) fn new(size: [u32; 2]) -> Self {
         let instance = wgpu::Instance::default();
         let adapter = block_on(instance.request_adapter(&Default::default())).expect("GPU adapter");
         eprintln!("occlusion GPU: {:?}", adapter.get_info());
@@ -63,9 +64,10 @@ impl Harness {
             ctx: Default::default(),
             target,
             size,
+            palette: None,
         }
     }
-    fn render(
+    pub(crate) fn render(
         &mut self,
         batches: &[LocalTileBatch],
         p: &LocalProjectionParams,
@@ -92,19 +94,20 @@ impl Harness {
                     .with_clip_rect(rect);
                 painter.add(residency_callback(rect, ctx));
                 if !batches.is_empty() {
-                    painter.add(
-                        LocalContourCallback::new(
-                            LocalContourPass::Surface,
-                            batches.to_vec(),
-                            p,
-                            1.0,
-                            1.0,
-                            1.0,
-                            ctx.clone(),
-                        )
-                        .with_occlusion(on)
-                        .into_paint_callback(rect),
-                    );
+                    let mut callback = LocalContourCallback::new(
+                        LocalContourPass::Surface,
+                        batches.to_vec(),
+                        p,
+                        1.0,
+                        1.0,
+                        1.0,
+                        ctx.clone(),
+                    )
+                    .with_occlusion(on);
+                    if let Some([major, minor]) = self.palette {
+                        callback = callback.with_palette(major, minor);
+                    }
+                    painter.add(callback.into_paint_callback(rect));
                 }
                 if !roads.is_empty() {
                     painter.add(
@@ -150,7 +153,7 @@ impl Harness {
             .submit(commands.into_iter().chain([encoder.finish()]));
         self.device.poll(wgpu::Maintain::Wait);
     }
-    fn pixels(&self) -> Vec<u8> {
+    pub(crate) fn pixels(&self) -> Vec<u8> {
         let row = (self.size[0] * 4).div_ceil(256) * 256;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
@@ -258,6 +261,112 @@ fn lit(pixels: &[u8], row: usize) -> usize {
     (64..192)
         .filter(|&x| pixels[(row * 256 + x) * 4] > 20)
         .count()
+}
+
+#[test]
+#[ignore = "requires GPU; verifies immediate resident local recoloring and unchanged depth/roads"]
+fn resident_theme_changes_recolor_local_tiles_without_reuploads() {
+    let mut h = Harness::new([256, 256]);
+    let p = params();
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(256.0, 256.0));
+    let mut terrain = batch(vec![line(-0.2, 0.1), line(0.2, 0.1)], 77);
+    Arc::make_mut(&mut terrain.instances)[0].major = 1;
+    let mut road = batch(vec![line(0.7, 0.1)], 88);
+    road.id = LocalBatchId::Road {
+        major: true,
+        chunk: 0,
+    };
+    let snapshot = |h: &Harness| {
+        h.renderer
+            .callback_resources
+            .get::<LocalContourPassResources>()
+            .unwrap()
+            .tiles
+            .iter()
+            .map(|(key, tile)| {
+                (
+                    *key,
+                    tile.chunks
+                        .iter()
+                        .chain(&tile.occlusion)
+                        .map(|chunk| chunk.buffer.clone())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<HashMap<_, _>>()
+    };
+    h.palette = Some([egui::Color32::RED, egui::Color32::GREEN]);
+    for _ in 0..3 {
+        h.render(
+            std::slice::from_ref(&terrain),
+            &p,
+            true,
+            rect,
+            std::slice::from_ref(&road),
+        );
+    }
+    let original = h.pixels();
+    assert!(
+        original
+            .chunks_exact(4)
+            .any(|p| p[0] > 20 && p[1] == 0 && p[2] == 0)
+    );
+    assert!(
+        original
+            .chunks_exact(4)
+            .any(|p| p[1] > 20 && p[0] == 0 && p[2] == 0)
+    );
+    let buffers = snapshot(&h);
+    assert_eq!(buffers.len(), 2);
+    let depth_renders = h.renders();
+    assert!(depth_renders > 0);
+    let white = |pixels: &[u8]| {
+        pixels
+            .chunks_exact(4)
+            .filter(|p| p[0] > 20 && p[0] == p[1] && p[1] == p[2])
+            .count()
+    };
+    assert!(white(&original) > 0, "road is visible");
+    h.palette = Some([egui::Color32::BLUE, egui::Color32::YELLOW]);
+    h.render(
+        std::slice::from_ref(&terrain),
+        &p,
+        true,
+        rect,
+        std::slice::from_ref(&road),
+    );
+    let recolored = h.pixels();
+    assert_ne!(recolored, original);
+    assert!(
+        recolored
+            .chunks_exact(4)
+            .any(|p| p[2] > 20 && p[0] == 0 && p[1] == 0)
+    );
+    assert_eq!(
+        white(&recolored),
+        white(&original),
+        "road colors must not change"
+    );
+    assert_eq!(
+        snapshot(&h),
+        buffers,
+        "resident line/curtain buffers must be reused"
+    );
+    assert_eq!(
+        h.renders(),
+        depth_renders,
+        "palette must not redraw visibility"
+    );
+    h.palette = Some([egui::Color32::RED, egui::Color32::GREEN]);
+    h.render(
+        std::slice::from_ref(&terrain),
+        &p,
+        true,
+        rect,
+        std::slice::from_ref(&road),
+    );
+    assert_eq!(h.pixels(), original);
+    assert_eq!(snapshot(&h), buffers);
 }
 
 #[test]

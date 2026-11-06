@@ -4,6 +4,8 @@ use crate::{model::AppModel, theme};
 mod actions;
 #[path = "settings_appearance.rs"]
 mod appearance;
+#[path = "settings_event_follow.rs"]
+mod event_follow;
 #[path = "settings_overview.rs"]
 mod overview;
 #[path = "settings_paths.rs"]
@@ -16,15 +18,17 @@ enum Section {
     #[default]
     Overview,
     Appearance,
+    FollowEvents,
     Sources,
     Paths,
     Terrain,
     Activity,
 }
 impl Section {
-    const ALL: [(Self, &'static str); 6] = [
+    const ALL: [(Self, &'static str); 7] = [
         (Self::Overview, "Overview"),
         (Self::Appearance, "Appearance"),
+        (Self::FollowEvents, "Follow Events"),
         (Self::Sources, "Data Sources"),
         (Self::Paths, "Files & Cache"),
         (Self::Terrain, "Terrain Library"),
@@ -90,6 +94,7 @@ pub fn render_settings(ctx: &egui::Context, model: &mut AppModel) {
                         .show(ui, |ui| match section {
                             Section::Overview => overview::render(ui, model),
                             Section::Appearance => appearance::render(ui, model),
+                            Section::FollowEvents => event_follow::render(ui, model),
                             Section::Sources => sources::render(ui, model),
                             Section::Paths => paths::render(ui, model),
                             Section::Terrain => super::terrain_library::render(ui, model),

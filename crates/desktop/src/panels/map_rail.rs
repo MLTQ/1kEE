@@ -95,8 +95,9 @@ fn view_buttons(ui: &mut egui::Ui, model: &mut AppModel) {
         if button(ui, "LOCAL", model.globe_view.local_mode).clicked()
             && !model.globe_view.local_mode
         {
+            let center = model.globe_view.globe_center_latlon();
             model.stop_event_follow();
-            model.globe_view.local_center = model.globe_view.globe_center_latlon();
+            model.globe_view.local_center = center;
             model.globe_view.local_mode = true;
         }
     })
@@ -107,6 +108,7 @@ fn view_buttons(ui: &mut egui::Ui, model: &mut AppModel) {
         ActiveBody::Earth => "Local terrain view",
     });
 }
+
 fn body_button(ui: &mut egui::Ui, model: &mut AppModel) {
     let (label, color, next) = match model.active_body {
         ActiveBody::Earth => ("EARTH", egui::Color32::from_rgb(210, 206, 194), "Moon"),
@@ -174,7 +176,7 @@ fn focus_button(ui: &mut egui::Ui, model: &mut AppModel) {
 }
 fn presentation_buttons(ui: &mut egui::Ui, model: &mut AppModel) {
     if model.active_body == ActiveBody::Earth && button(ui, "FOLLOW EVENTS", model.event_follow.enabled())
-        .on_hover_text("Tour the six most severe Factal events; keeps Globe/Local view. Drag, scroll or arrows to stop.").clicked() {
+        .on_hover_text("Explore all live Factal events, visiting more severe stories more often and spacing out repeats. Every five live minutes, watch a one-minute regional 24hr recap, including the Middle East. Returns to your Globe/Local view. Drag, scroll or arrows to stop.").clicked() {
         model.toggle_event_follow(); ui.ctx().request_repaint();
     }
     if button(ui, "MEANDER", model.globe_view.meander_mode)
@@ -183,7 +185,7 @@ fn presentation_buttons(ui: &mut egui::Ui, model: &mut AppModel) {
     {
         let enable = !model.globe_view.meander_mode;
         if enable {
-            model.event_follow.stop();
+            model.stop_event_follow();
             model.globe_view.stop_motion();
         }
         model.globe_view.meander_mode = enable;
@@ -216,3 +218,7 @@ fn presentation_buttons(ui: &mut egui::Ui, model: &mut AppModel) {
         model.stellar_observatory_open = !model.stellar_observatory_open;
     }
 }
+
+#[cfg(test)]
+#[path = "map_rail_tests.rs"]
+mod tests;

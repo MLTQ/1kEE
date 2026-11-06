@@ -2,6 +2,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::path::Path;
 use std::time::Duration;
 
+pub mod admin_lod;
 pub mod contour_clip;
 pub mod contour_grid;
 pub mod contours;

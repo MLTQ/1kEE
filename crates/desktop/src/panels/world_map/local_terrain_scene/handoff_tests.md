@@ -18,3 +18,7 @@ zoom-out still replaces it. Cold partial detail must also replace only its own
 core without waiting for missing fine edge cells.
 Fully covered base tiles must not trigger composition on every repeated loader
 snapshot, and their shared handles must still be released by offscreen pruning.
+
+Moon/Mars GPU publication tests require completed uploads on cold starts,
+retain the prior GPU batch during replacement, and clear it immediately when
+switching between bodies, including returning to a previously visited body.

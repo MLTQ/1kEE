@@ -1,6 +1,8 @@
 mod app;
+mod buildout;
 mod arcgis_source;
 mod camera_directory_pipeline;
+mod camera_feed_player;
 mod camera_feed_viewer;
 mod camera_registry;
 mod camera_scrape_catalog;
@@ -20,6 +22,7 @@ mod moving_tracks;
 mod osm_ingest;
 mod panels;
 mod planet_ephemeris;
+mod radio;
 mod settings_store;
 mod submarine_cables;
 mod stellar_catalog;

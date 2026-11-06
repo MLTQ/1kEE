@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 pub enum Command {
     Gui,
+    AdminLods(PathBuf),
     PackArchive(crate::archive_pack::Command),
     Pipelines(crate::pipelines::Command),
     Platforms(crate::platforms::Command),
@@ -104,6 +105,13 @@ where
 
     match command.as_str() {
         "gui" => Ok(Command::Gui),
+        "admin-lods" => {
+            let dir = args.next().ok_or("Expected admin-lods <admin_cells directory>")?;
+            if args.next().is_some() {
+                return Err("Expected one admin_cells directory".into());
+            }
+            Ok(Command::AdminLods(PathBuf::from(dir)))
+        }
         "pack-archive" => crate::archive_pack::parse(args).map(Command::PackArchive),
         "pipelines" => crate::pipelines::parse(args).map(Command::Pipelines),
         "platforms" => crate::platforms::parse(args).map(Command::Platforms),
@@ -431,6 +439,7 @@ fn usage() -> String {
     "Usage:
   one-thousand-electric-eye-cache-builder
   one-thousand-electric-eye-cache-builder gui
+  one-thousand-electric-eye-cache-builder admin-lods <Derived/osm/admin_cells>
   one-thousand-electric-eye-cache-builder pack-archive --out <Derived/world.1ka>
       [--osm-cache-dir <Derived/osm>] [--earth-contours <database>]
       [--moon-contours <database>] [--mars-contours <database>]

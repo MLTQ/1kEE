@@ -129,24 +129,11 @@ pub fn merge_write_feature_cells(
 
 // ── Admin boundary files ──────────────────────────────────────────────────────
 
-/// Atomically publish a level; focused builds preserve previously cached regions.
-///
-/// `features`: complete/incomplete regions — each ring becomes its own
-/// `CellFeature` (matching prior GeoJSON behaviour where each ring was a
-/// separate LineString Feature).
-///
-/// Writes to `{cache_dir}/admin_cells/admin_level_{admin_level}.1kc`.
-/// Returns the total number of ring features written.
-pub fn write_admin_level_file(
-    cache_dir: &Path,
+/// Convert complete relation geometry into the shared binary feature contract.
+pub(crate) fn admin_cell_features(
     admin_level: u8,
     features: &[crate::admin::AdminRegion],
-    replace: bool,
-) -> Result<usize, String> {
-    let admin_dir = cache_dir.join("admin_cells");
-    fs::create_dir_all(&admin_dir).map_err(|e| e.to_string())?;
-    let path = admin_dir.join(admin_filename(admin_level));
-
+) -> Vec<CellFeature> {
     let mut cell_features: Vec<CellFeature> = Vec::new();
     for region in features {
         for ring in &region.rings {
@@ -169,6 +156,29 @@ pub fn write_admin_level_file(
             });
         }
     }
+
+    cell_features
+}
+
+/// Atomically publish a level; focused builds preserve previously cached regions.
+///
+/// `features`: complete/incomplete regions — each ring becomes its own
+/// `CellFeature` (matching prior GeoJSON behaviour where each ring was a
+/// separate LineString Feature).
+///
+/// Writes to `{cache_dir}/admin_cells/admin_level_{admin_level}.1kc`.
+/// Returns the total number of ring features written.
+pub fn write_admin_level_file(
+    cache_dir: &Path,
+    admin_level: u8,
+    features: &[crate::admin::AdminRegion],
+    replace: bool,
+) -> Result<usize, String> {
+    let admin_dir = cache_dir.join("admin_cells");
+    fs::create_dir_all(&admin_dir).map_err(|e| e.to_string())?;
+    let path = admin_dir.join(admin_filename(admin_level));
+
+    let mut cell_features = admin_cell_features(admin_level, features);
 
     if !replace {
         // A focused extract cannot replace complete global topology or erase

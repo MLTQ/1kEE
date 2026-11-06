@@ -6,6 +6,10 @@ Renders globe contour polylines as cached, GPU-instanced line segments. It
 keeps per-frame work to uniform updates and an instanced draw while geometry is
 rebuilt only when source contours or their palette changes.
 
+Color32 bytes stay in display space. `gpu_color` specializes final output for
+the actual framebuffer format, matching egui's Unorm preference and sRGB fallback.
+Pass fades and alpha remain ordinary multipliers, without a compensating power.
+
 Public pipelines use a seventh independent slot and `SegmentInstance::line`.
 Their geometry is prepared on a worker; camera movement updates only uniforms.
 The prior padding float at offset 68 is now `horizon_z`: pipelines use the
@@ -115,6 +119,8 @@ third without changing the covered quad or antialiasing.
 
 The terrain renderer retains the window target format for its transparent image
 cache; stationary contour frames are composited without repeating native draws.
+Earth terrain stores palette-independent major/minor coverage; its final
+compositor applies the live theme without rebuilding resident instances/images.
 
 ### Staged whole-layer uploads
 Coastlines, global topo, bathymetry, Moon/Mars and pipeline layers now use
@@ -129,9 +135,7 @@ replacement stages, they hide old geometry/colors so capacity legends and hover
 metadata never describe a previous product/filter batch. Other layers retain
 their existing previous-picture behavior.
 
-Administrative outlines use an eighth independent slot with the same perspective
-horizon and exact-version publication as pipelines. `format` is exposed within
-world_map for lazy initialization of the matching administrative fill pipeline.
-
-The administrative fill callback borrows the same upload budget so combined globe
-uploads stay within the existing per-frame limits.
+Administrative outlines use an eighth uniform slot with the perspective horizon.
+The combined boundary callback reuses the contour view, line pipeline and chunk
+drawing for its displayed generation. It stages lines and shading together using
+the shared upload budget.

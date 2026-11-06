@@ -9,7 +9,7 @@
 // scalar half of it.
 //
 // The Rust `LocalContourUniforms` struct in local_contour_pass.rs must stay
-// byte-for-byte in sync with `Uniforms` below (128 bytes).
+// byte-for-byte in sync with `Uniforms` below (160 bytes).
 
 struct Uniforms {
     focus_lon: f32,
@@ -48,7 +48,9 @@ struct Uniforms {
     depth_center: f32,
     depth_bias: f32,
     screen_guard: f32,
-    _pad0: f32,
+    palette_enabled: f32,
+    major_color: vec4<f32>,
+    minor_color: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -58,7 +60,7 @@ struct VsIn {
     @builtin(vertex_index) vidx: u32,
     @location(0) a: vec3<f32>,      // endpoint A: (lon, lat, elevation_m)
     @location(1) b: vec3<f32>,      // endpoint B: (lon, lat, elevation_m)
-    @location(2) color: vec4<f32>,  // premultiplied linear RGBA
+    @location(2) color: vec4<f32>,  // exact stored Color32 display RGBA
     @location(3) major: u32,        // 1 for major contours, 0 for minor
 }
 
@@ -169,6 +171,9 @@ fn vs_main(in: VsIn) -> VsOut {
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
     out.ground_depth = mix(depth(in.a), depth(in.b), t);
     out.color = in.color;
+    if (u.palette_enabled > 0.5) {
+        out.color = select(u.minor_color, u.major_color, in.major != 0u);
+    }
     out.dist_px = side * half_extent;
     out.stroke_half_px = stroke_half_px;
     out.feather_px = feather_px;
@@ -197,7 +202,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // minor contours each get their own factor. At a pixel and above it is 1.0.
     let sub_pixel = clamp(2.0 * in.stroke_half_px, 0.0, 1.0);
     // Colour is premultiplied — scale the whole vector by coverage x pass fade.
-    return in.color * (edge * u.alpha * sub_pixel);
+    return map_output_gamma(in.color * (edge * u.alpha * sub_pixel));
 }
 
 // Ground distance remains constant down a vertical contour curtain. For the

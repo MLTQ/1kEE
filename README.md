@@ -24,19 +24,47 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
   non-blocking egui live-feed window for snapshots and MJPEG
   (`camera_registry.rs`, `camera_directory_pipeline.rs`,
   `camera_feed_viewer.rs`, `camera_*_catalog.rs`).
+- **Follow Events cameras** — automatically opens a right sidebar with up to
+  four nearest camera feeds, ordered by distance to the focused event. The
+  scrollable column follows the tour, supports OBS view, and opens individual
+  feeds in the floating camera window when clicked.
+  Adjust stop duration under **Settings → Follow Events → Dwell time**
+  (5–300 seconds, default 30); changes apply immediately, and **Save Settings**
+  keeps the choice across restarts. Dwell begins after camera arrival.
+  Every five live minutes, Follow Events frames the next region and plays
+  its past 24 hours of cached events in a one-minute recap. A labeled elapsed-day
+  clock and historical chyron accompany the flares; camera feeds and the Brief
+  return when live following resumes. All seven continents plus a dedicated
+  Middle East zone rotate in about 48 minutes, with broad geographic seams for regional assignment and a
+  closer camera zoom tuned for each region.
 - **User geodata** — ArcGIS FeatureServer scraping (`arcgis_source.rs`), plus GeoJSON
   and KML/KMZ layer import (`model/geojson_layer.rs`, `model/kml_layer.rs`).
+- **Nearby radio** — find open public-safety and emergency radio near a selected
+  event, browse feeds, and listen in a small player. Supports saved public streams
+  and native macOS audio ([coverage and usage](docs/emergency-radio.md)).
 - **OSM ingest** — planet PBF / Overpass import pipeline producing cached feature cells
   (`osm_ingest/`).
 - **Public geospatial layers** — submarine cables and landing points from a
   bundled TeleGeography snapshot (`submarine_cables.rs`, works offline) and live
   NASA FIRMS active-fire detections (`fire_source.rs`, rendered by
   `panels/world_map/fire_layer.rs`, cached locally). Both default to off.
+- **AI data center buildout** — enable **Layers → Public Data → AI data center buildout**.
+  1kEE checks [Zack’s Lab](https://www.zackslab.com/buildout) daily while running,
+  and keeps the last successful snapshot for offline use. Filled dots mark campus
+  locations, rings mark approximate locations, and purple squares mark rules with
+  coordinates. Click a marker for details. **Browse buildout** opens
+  all campuses, jurisdictional rules and dated news with source links.
 - **Terrain & bodies** — GEBCO / SRTM / Natural Earth elevation, the Yale Bright
   Star Catalogue and planetary ephemeris, and a replay timeline.
 - **Washington LiDAR** — optional DNR bare-earth and top-surface hillshade in
   Local Earth view, with portal access for survey metadata and downloads
   ([usage](docs/washington-lidar.md)).
+- **Gravity anomaly maps** — optional free-air, Bouguer and isostatic residual
+  choices with 17 regional NCEI grids in Globe and Local views, prepared on the
+  data drive ([coverage and preparation](docs/gravity-anomaly-maps.md)).
+- **SWOT marine gravity** — optional offline Scripps SWOT_06 vertical gravity
+  gradient in Globe and Local Earth views, revealing seafloor structure alongside
+  bathymetry ([data-drive preparation and sources](docs/swot-marine-gravity.md)).
 - **Multiplayer** — a companion web view that mirrors the analyst's live view onto a
   local mesh (see below).
 
@@ -51,6 +79,11 @@ with Metal / Vulkan / DX12 support for wgpu.
 ```bash
 cargo run --release -p one-thousand-electric-eye-desktop
 ```
+
+After updating the source, rebuild the desktop app with the command above before
+opening the binary directly. Tests build a separate test executable; they do not
+update `target/release/one-thousand-electric-eye-desktop`. Close an already-running
+app and launch the rebuilt binary to use new features.
 
 The app launches with no configuration: the globe, graticules, and any keyless layers
 work out of the box. Live feeds and terrain detail are enabled by configuration below —

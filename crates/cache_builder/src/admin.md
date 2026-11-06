@@ -36,3 +36,8 @@ Scans iterate only relation/way groups, avoiding expansion of billions of dense
 node elements that cannot match. Fresh and resumed scans report bytes/total and
 matched records at durable checkpoints. Assembly reports relation/name/count
 progress at most once per second, followed by per-level write progress.
+
+Whole-planet assembly now delegates to admin_assembly/admin_checkpoint. Countries
+publish first; each relation and reused node coordinate is durable. Completed
+snapshots appear during extraction and survive restarts. Focused builds retain
+the existing merge behavior in stitch_and_write.

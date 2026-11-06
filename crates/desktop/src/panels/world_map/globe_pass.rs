@@ -67,9 +67,8 @@ const _: () = assert!(std::mem::size_of::<GlobeUniforms>() == 128);
 
 /// Convert an egui `Color32` (sRGB, [0, 255]) to linear-float `[f32; 4]`.
 ///
-/// The wgpu surface is `*Srgb`-formatted, so the hardware automatically applies
-/// sRGB encoding to whatever we write in the fragment shader — meaning we must
-/// supply linear values.
+/// Used for linear-light shading. The shader must encode its final output for
+/// the actual target; egui prefers Unorm surfaces without automatic sRGB encoding.
 pub fn color_to_linear(c: egui::Color32) -> [f32; 4] {
     [
         srgb_byte_to_linear(c.r()),
@@ -102,7 +101,7 @@ impl GlobePassResources {
     pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("globe_pass_shader"),
-            source: wgpu::ShaderSource::Wgsl(GLOBE_WGSL.into()),
+            source: super::gpu_color::shader(GLOBE_WGSL),
         });
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -153,7 +152,7 @@ impl GlobePassResources {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
+                compilation_options: super::gpu_color::fragment_options(target_format),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,
                     blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),

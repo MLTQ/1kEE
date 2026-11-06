@@ -55,3 +55,11 @@ Persists the desktop app's local configuration so it survives restarts. That now
 `marker_scale` defaults to 1.0 for legacy settings, persists the shared webcam/event
 size, and normalizes finite values to 0.25–2.0; invalid values restore the default.
 Serialization coverage checks saved scale, legacy default and invalid/clamped values.
+
+### Follow Events dwell time
+`event_follow_dwell_seconds` persists the post-arrival stop duration. New and
+legacy settings default to 30 seconds; load/save normalize it to 5–300 seconds.
+The controller uses the same normalization so live edits and restored values agree.
+Serialization coverage checks the saved duration, legacy/new defaults and bounds.
+
+The saved AI buildout opt-in defaults to false for new and existing configurations.

@@ -53,6 +53,7 @@ fn chrome_gpu_preview() {
         ("settings", Some(Section::Overview), false),
         ("terrain", Some(Section::Terrain), false),
         ("appearance", Some(Section::Appearance), false),
+        ("follow-events", Some(Section::FollowEvents), false),
         ("sources", Some(Section::Sources), false),
         ("paths", Some(Section::Paths), false),
         ("activity", Some(Section::Activity), false),

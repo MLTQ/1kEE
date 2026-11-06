@@ -16,3 +16,6 @@ Build complete rings or honest open fragments without bridging missing nodes.
 - Inner rings are retained; the renderer fills each relation with even-odd winding.
 
 `CoordinateResolver` names the batched optional-coordinate contract shared by both backends.
+
+All stitched rings resolve in one batched call, preserving chain boundaries while
+preventing repeated decompression of the same PBF blocks for country islands.

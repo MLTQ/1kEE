@@ -14,3 +14,8 @@ expanded node file only when the user selects compact lookup.
   blocks are bounded to 33 MiB; decoded blocks to two million nodes.
 - `PbfNodes` shares positional read-only I/O; `Session` owns its bounded cache.
 - `BuildState` holds the separate compact-directory lock for the whole build.
+
+Source stamping is now in source.rs. Strict device-aware checks still protect an
+active build. Reopening permits a remounted device only with matching inode,
+length, mtime and a sampled content fingerprint (verified descriptor migration
+for legacy checkpoints), preserving prior scans rather than rebuilding them.

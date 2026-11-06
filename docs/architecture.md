@@ -71,8 +71,14 @@ table above the struct is the source of truth for both sides.
 
 ### Event ingest (Factal)
 - Input: Factal API event records (title, severity, timestamp, summary, coordinates).
-- Output: normalized events in `AppModel`, persisted to the event store for replay.
-- Open work: retry/backoff tuning, dedupe, TTL/aging (see `.beads`).
+- Output: all geolocated severity ≥2 items from the past 24 hours in `AppModel`,
+  persisted to the event store for replay. Live and explicit replay backfill
+  share validated `next` pagination and cross-page ID deduplication.
+- One live worker runs at a time, followed by a one-minute cooldown. Only complete
+  snapshots replace the feed; failed pages preserve the previous snapshot.
+- Activity counts Factal additions/revisions/removals independently of USGS;
+  unchanged successful syncs stay quiet.
+- Open work: persistent replay coverage metadata and stored event revisions.
 
 ### Camera registry
 - Input: openly published camera metadata and feed URLs (registries + provider scrapers),

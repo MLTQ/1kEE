@@ -24,14 +24,19 @@ pub fn assemble(
         rings: Vec::new(),
         complete: true,
     };
-    for chain in stitch(ways) {
+    let chains = stitch(ways);
+    let refs: Vec<_> = chains.iter().flatten().copied().collect();
+    // Resolve all rings together: country islands often refer to the same PBF
+    // blocks. Per-ring lookups repeatedly decompress those blocks after eviction.
+    let resolved = resolve(&refs)?;
+    if resolved.len() != refs.len() {
+        return Err("Admin coordinate lookup changed reference count".into());
+    }
+    let mut points = resolved.into_iter();
+    for chain in chains {
         region.complete &= chain.len() >= 4 && chain.first() == chain.last();
-        let points = resolve(&chain)?;
-        if points.len() != chain.len() {
-            return Err("Admin coordinate lookup changed reference count".into());
-        }
         let mut run = Vec::new();
-        for point in points {
+        for point in points.by_ref().take(chain.len()) {
             if let Some(point) = point {
                 run.push(point);
             } else {

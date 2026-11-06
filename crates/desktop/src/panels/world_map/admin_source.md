@@ -11,4 +11,9 @@ output are chosen explicitly. An active compact-index lock attaches to the exist
 output through the cache watcher; no second writer starts. Errors/panics end
 the busy state and remain visible, with scan checkpoints available for a retry.
 Background work does not depend on the drawer staying open. Choices are session
-state; closing the app ends its own extraction, which can resume from scan checkpoints.
+state; closing the app ends its own extraction, which resumes from completed
+regions, saved coordinates and scan checkpoints. Already published regions remain usable.
+
+The worker reads build-status.json separately from geometry fingerprints and shows
+published/total coverage. Empty level snapshots no longer imply full coverage.
+Progress-only changes never invalidate or rebuild the loaded region geometry.

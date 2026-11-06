@@ -1,72 +1,93 @@
-//! Ranked stops from the latest successful Factal payload.
+//! Severity-weighted, repeat-spaced stops from the complete live Factal feed.
 use super::super::{EventRecord, EventSeverity};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 
-const MAX_STOPS: usize = 6;
+const MAX_RECENT_STOPS: usize = 6;
+
+struct Entry {
+    event: EventRecord,
+    credit: i64,
+}
 
 #[derive(Default)]
 pub(super) struct EventTour {
-    entries: Vec<EventRecord>,
-    next_index: usize,
-    pending: Option<EventRecord>,
+    entries: Vec<Entry>,
+    recent: VecDeque<String>,
+    pending_start: bool,
 }
 
 impl EventTour {
     pub fn refresh(&mut self, events: &[EventRecord], current: Option<&str>) {
-        let entries = ranked(events);
-        let head_changed = self.entries.first().map(|e| &e.id) != entries.first().map(|e| &e.id);
-        let old_next = self.entries.get(self.next_index).map(|e| e.id.clone());
-        self.entries = entries;
-        if head_changed {
-            // A new highest-priority item takes over smoothly on the next tick.
-            // The same head/current ID must never restart its flight or dwell.
-            self.pending = self
-                .entries
-                .first()
-                .filter(|e| Some(e.id.as_str()) != current)
-                .cloned();
-            self.next_index = usize::from(self.entries.len() > 1);
-        } else {
-            // Refresh metadata/ranking without repeatedly sending the camera
-            // back to stop one and starving the remaining stops on every poll.
-            self.next_index = self
-                .entries
-                .iter()
-                .position(|e| Some(e.id.as_str()) == current)
-                .map(|i| (i + 1) % self.entries.len())
-                .or_else(|| {
-                    self.entries
-                        .iter()
-                        .position(|e| Some(&e.id) == old_next.as_ref())
-                })
-                .unwrap_or(0);
-            self.pending = self
-                .pending
-                .take()
-                .and_then(|pending| self.entries.iter().find(|e| e.id == pending.id).cloned());
-        }
+        // Preserve both waiting credit and recent visits by ID. A minute poll
+        // must not reset coverage or force another visit to the latest headline.
+        let mut credits: HashMap<_, _> = std::mem::take(&mut self.entries)
+            .into_iter()
+            .map(|entry| (entry.event.id, entry.credit))
+            .collect();
+        self.entries = ranked(events)
+            .into_iter()
+            .map(|event| Entry {
+                credit: credits.remove(&event.id).unwrap_or(0),
+                event,
+            })
+            .collect();
+        self.recent
+            .retain(|id| self.entries.iter().any(|entry| entry.event.id == *id));
+        self.pending_start |= current.is_none();
     }
 
     pub fn take_pending(&mut self) -> Option<EventRecord> {
-        self.pending.take()
+        if !self.pending_start {
+            return None;
+        }
+        let event = self.next(None)?;
+        self.pending_start = false;
+        Some(event)
     }
 
     pub fn next(&mut self, current: Option<&str>) -> Option<EventRecord> {
-        for _ in 0..self.entries.len() {
-            let i = self.next_index % self.entries.len();
-            self.next_index = (i + 1) % self.entries.len();
-            let event = &self.entries[i];
-            if Some(event.id.as_str()) != current {
-                return Some(event.clone());
+        // With a large feed, leave six other stops before revisiting a story.
+        // Smaller feeds shorten the cooldown so touring can still continue.
+        let cooldown = MAX_RECENT_STOPS.min(self.entries.len().saturating_sub(1) / 2);
+        let mut selected = None;
+        let mut best_credit = i64::MIN;
+        let mut total_weight = 0;
+        for (index, entry) in self.entries.iter_mut().enumerate() {
+            if Some(entry.event.id.as_str()) == current
+                || self
+                    .recent
+                    .iter()
+                    .rev()
+                    .take(cooldown)
+                    .any(|id| *id == entry.event.id)
+            {
+                continue;
+            }
+            // Smooth weighted round robin: all eligible stories accrue credit,
+            // including low-priority ones. The winner pays for this turn, so
+            // severity affects revisit frequency without starving the rest.
+            let weight = weight(&entry.event);
+            entry.credit += weight;
+            total_weight += weight;
+            if entry.credit > best_credit {
+                selected = Some(index);
+                best_credit = entry.credit;
             }
         }
-        None
+        let entry = &mut self.entries[selected?];
+        entry.credit -= total_weight;
+        let event = entry.event.clone();
+        self.recent.push_back(event.id.clone());
+        if self.recent.len() > MAX_RECENT_STOPS {
+            self.recent.pop_front();
+        }
+        Some(event)
     }
 
     pub fn position(&self, current: &str) -> Option<(usize, usize)> {
         self.entries
             .iter()
-            .position(|e| e.id == current)
+            .position(|entry| entry.event.id == current)
             .map(|i| (i + 1, self.entries.len()))
     }
 }
@@ -75,7 +96,8 @@ fn ranked(events: &[EventRecord]) -> Vec<EventRecord> {
     let mut ordered: Vec<_> = events
         .iter()
         .filter(|e| {
-            e.factal_brief.is_some()
+            e.id.starts_with("factal-")
+                && e.factal_brief.is_some()
                 && e.location.lat.is_finite()
                 && e.location.lon.is_finite()
                 && e.location.lat.abs() <= 90.0
@@ -92,9 +114,17 @@ fn ranked(events: &[EventRecord]) -> Vec<EventRecord> {
     ordered
         .into_iter()
         .filter(|e| unique.insert(e.id.as_str()))
-        .take(MAX_STOPS)
         .cloned()
         .collect()
+}
+
+fn weight(event: &EventRecord) -> i64 {
+    match severity(event) {
+        i64::MIN..=2 => 1,
+        3 => 3,
+        4 => 6,
+        _ => 10,
+    }
 }
 
 fn severity(event: &EventRecord) -> i64 {
@@ -118,3 +148,7 @@ fn timestamp(event: &EventRecord) -> i64 {
         .and_then(crate::event_store::parse_iso_to_unix)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+#[path = "event_tour_tests.rs"]
+mod tests;

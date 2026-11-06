@@ -1,8 +1,6 @@
 //! Camera-independent administrative geometry for the spherical Earth view.
 use super::{
-    admin_globe_pass, admin_layer,
-    contour_pass::{ContourCallback, ContourLayer, SegmentInstance},
-    globe_scene::GlobeLayout,
+    admin_globe_pass, admin_layer, contour_pass::SegmentInstance, globe_scene::GlobeLayout,
 };
 use crate::model::{ActiveBody, AppModel, GeoPoint};
 use std::sync::{
@@ -10,13 +8,17 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+// Source, selected levels, file generation and palette must agree for a handoff.
+// The camera window and LOD belong only to an individual batch.
+pub(super) type Appearance = (Arc<admin_layer::Source>, [egui::Color32; 10]);
 pub(super) struct Batch {
+    pub appearance: Appearance,
     pub version: u64,
     pub lines: Arc<Vec<SegmentInstance>>,
     pub triangles: Arc<Vec<admin_globe_pass::Triangle>>,
     _source: Arc<admin_layer::AdminData>,
 }
-type Cache = super::layer_snapshot::Snapshot<(usize, [egui::Color32; 10]), Batch>;
+type Cache = super::layer_snapshot::Snapshot<(usize, Appearance), Batch>;
 pub(super) fn draw(painter: &egui::Painter, layout: &GlobeLayout, model: &AppModel) {
     if !model.show_admin || model.active_body != ActiveBody::Earth {
         return;
@@ -24,17 +26,22 @@ pub(super) fn draw(painter: &egui::Painter, layout: &GlobeLayout, model: &AppMod
     painter
         .ctx()
         .request_repaint_after(std::time::Duration::from_secs(3));
-    let Some(data) = admin_layer::get_for(model) else {
+    let request = admin_layer::view::Request::globe(
+        layout,
+        &model.globe_view,
+        painter.clip_rect(),
+        painter.ctx().pixels_per_point(),
+        model.admin_options.shade,
+    );
+    let Some(data) = admin_layer::get_for(model, request) else {
         return;
     };
-    let colors = std::array::from_fn(|i| crate::theme::admin_color(i as u8 + 2));
+    let colors = model.map_theme.admin_palette();
     static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
-    let key = (Arc::as_ptr(&data) as usize, colors);
-    let batch = CACHE.get_or_init(Default::default).lock().unwrap().get(
-        key,
-        "admin-globe-geometry",
-        |a, b| a == b,
-        move |_| Some(prepare(data, colors)),
+    let batch = batch_for(
+        &mut CACHE.get_or_init(Default::default).lock().unwrap(),
+        data,
+        colors,
     );
     let Some(batch) = batch else {
         return;
@@ -46,41 +53,44 @@ pub(super) fn draw(painter: &egui::Painter, layout: &GlobeLayout, model: &AppMod
         &batch,
         model.admin_options.shade,
         model.admin_options.opacity,
+        model.admin_options.layer_opacity,
     );
+}
+fn batch_for(
+    cache: &mut Cache,
+    data: Arc<admin_layer::AdminData>,
+    colors: [egui::Color32; 10],
+) -> Option<Arc<Batch>> {
+    let key = (Arc::as_ptr(&data) as usize, (data.source.clone(), colors));
+    cache.get(
+        key,
+        "admin-globe-geometry",
+        |a, b| a.1 == b.1,
+        move |_| Some(prepare(data, colors)),
+    )
 }
 pub(super) fn paint(
     painter: &egui::Painter,
     layout: &GlobeLayout,
     view: &crate::model::GlobeViewState,
-    batch: &Batch,
+    batch: &Arc<Batch>,
     shade: bool,
     opacity: f32,
+    layer_opacity: f32,
 ) {
-    if shade {
-        painter.add(admin_globe_pass::Callback::callback(
-            batch.version,
-            batch.triangles.clone(),
-            layout,
-            view,
-            opacity,
-            painter.ctx().pixels_per_point(),
-            painter.clip_rect(),
-        ));
+    let layer_opacity = layer_opacity.clamp(0.0, 1.0);
+    if layer_opacity == 0.0 {
+        return;
     }
-    painter.add(
-        ContourCallback::new(
-            ContourLayer::Admin,
-            batch.version,
-            batch.lines.clone(),
-            layout,
-            view,
-            0.0,
-            1.0,
-            1.2,
-            painter.ctx().pixels_per_point(),
-        )
-        .into_paint_callback(painter.clip_rect()),
-    );
+    painter.add(admin_globe_pass::Callback::callback(
+        batch.clone(),
+        layout,
+        view,
+        shade,
+        opacity,
+        layer_opacity,
+        painter,
+    ));
 }
 pub(super) fn prepare(data: Arc<admin_layer::AdminData>, colors: [egui::Color32; 10]) -> Batch {
     static VERSION: AtomicU64 = AtomicU64::new(1);
@@ -126,6 +136,7 @@ pub(super) fn prepare(data: Arc<admin_layer::AdminData>, colors: [egui::Color32;
         }
     }
     Batch {
+        appearance: (data.source.clone(), colors),
         version: VERSION.fetch_add(1, Ordering::Relaxed),
         lines: Arc::new(lines),
         triangles: Arc::new(triangles),
@@ -161,6 +172,32 @@ fn subdivide(t: [GeoPoint; 3], emit: &mut impl FnMut([GeoPoint; 3])) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn admin_globe_retains_cpu_batch_only_for_compatible_camera_updates() {
+        let mut cache = Cache::default();
+        let source = Arc::new(admin_layer::AdminData::default());
+        let colors = crate::theme::MapTheme::Topo.admin_palette();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let first = loop {
+            if let Some(batch) = batch_for(&mut cache, source.clone(), colors) {
+                break batch;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        };
+        let next_view = Arc::new(admin_layer::AdminData::default());
+        let retained = batch_for(&mut cache, next_view.clone(), colors)
+            .expect("old batch while the next view is prepared");
+        assert!(Arc::ptr_eq(&retained, &first));
+        assert!(
+            batch_for(
+                &mut cache,
+                next_view,
+                crate::theme::MapTheme::Sodium.admin_palette()
+            )
+            .is_none()
+        );
+    }
     #[test]
     fn spherical_subdivision_preserves_area_across_dateline() {
         let p = |lon, lat| GeoPoint { lon, lat };

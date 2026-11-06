@@ -27,10 +27,15 @@ uniform slot and a typed cache namespace so roads never overwrite contour tiles.
 ### `LocalSegmentInstance`
 
 - **Does**: One polyline segment: two `(lon, lat, elevation_m)` endpoints, a
-  baked premultiplied-linear colour, and a major/minor flag. 32 bytes.
+  baked Color32 display channels, and a major/minor flag. 32 bytes.
 - **Rationale**: Endpoints are raw geography and the shader applies the whole
   transform, so a tile's instances stay valid under any camera motion — panning,
   rotating and zooming reuse resident buffers; returning after eviction reloads them.
+- Roads/custom batches use the stored color. Terrain on all bodies uses the
+  major/minor flag with live palette uniforms instead of baking theme colors.
+- Color32 bytes, palette uniforms and pass fading follow egui's display-space
+  contract. `gpu_color` converts only at the actual framebuffer boundary;
+  alpha/fade are not raised to a power. No geometry or cache format changes.
 
 ### `LocalContourCallback`
 
@@ -54,17 +59,18 @@ uniform slot and a typed cache namespace so roads never overwrite contour tiles.
 | Dependent | Expects | Breaking changes |
 |---|---|---|
 | `local_terrain_scene` | Submitting a pass never blocks on geometry building | Building instances inline in `new` or `prepare` |
-| `local_contour_lines.wgsl` | `LocalContourUniforms` field order and size are unchanged | Reordering or resizing without matching the WGSL |
+| `local_contour_lines.wgsl` | `LocalContourUniforms` field order and 160-byte size match | Reordering or resizing without matching the WGSL |
 | Scene stroke controls | Width and fade land only in uniforms | Baking either into instances, which would force a rebuild per frame |
 | `contour_asset::clear_caches` | `clear_instances` drops every cached build | Retaining instances past a cache reset |
 
 ## Notes
 
-- Earth only. Lunar and Mars merges apply exclusive midpoint ownership to
-  de-overlap their tiles, which the per-tile path would have to reproduce; they
-  keep the CPU renderer, where geometry volume is not a problem.
+- Earth, Moon and Mars share this renderer. The scene compositor supplies
+  disjoint tile pieces, including clipped lunar/Martian source overlaps.
+- Body-specific classification keys distinguish 50 m Earth majors and 1,000 m
+  lunar/Martian majors without reusing another body's cached batch.
 - The scene keeps its previous display until every replacement batch is
-  uploaded. Cold starts use the CPU merge while GPU staging completes.
+  uploaded. Cold starts wait for native uploads without drawing a CPU stack.
 - Major and minor contours carry different stroke widths, and the CPU width
   formula ends in a `max()` floor. Both widths are therefore computed host-side
   and selected per instance, rather than derived from one width by a multiplier
@@ -80,8 +86,9 @@ uniform slot and a typed cache namespace so roads never overwrite contour tiles.
 - The anti-alias fringe is `contour_pass::contour_feather_px`, shared rather
   than reimplemented, so equal widths render at equal weight in both views.
 - `version_key` folds the tile's `Arc` pointer with the palette. Contours are
-  immutable once loaded, so pointer identity is a sound cache key, and a theme
-  change invalidates the baked colours.
+  immutable once loaded, so pointer identity is a sound cache key. Terrain
+  uses a fixed classification key; `with_palette` chooses its live major/minor
+  colors in uniforms, without invalidating geometry, staging or occlusion.
 - Uploads are capped per frame so a jump into a fully-cached area spreads its
   envelope over consecutive frames instead of stalling on one.
 - The count cap is three batches per callback, with a shared 4 MiB / 2 ms
@@ -94,6 +101,10 @@ uniform slot and a typed cache namespace so roads never overwrite contour tiles.
   including hidden layers. Later road prepares cannot lose their live buffers.
 - Road/contour hardware regression in `local_line_gpu_tests.rs` checks actual
   shader pixels at joins, separate widths, and completion of deferred uploads.
+- The test-only occlusion harness is shared with the scene's lunar/Martian
+  hardware regressions, which exercise production batch building and cached data.
+- `contour_palette_gpu_tests.rs` compares baked/live native colors and pass
+  fades with egui's independent line output on Unorm and sRGB framebuffers.
 - A single tile can exceed the device's `max_buffer_size` on its own — a dense
   bucket-10 tile is ~4.3 M segments — so uploads go through
   `contour_pass::split_instance_buffers` rather than one allocation per tile.
@@ -131,5 +142,5 @@ instances, prepared by the same worker. Both buffers share the upload budget
 and publish atomically; residency and byte accounting include both.
 `local_occlusion` renders a separate cached depth target during prepare. Surface
 fragments sample it when enabled; roads/staging keep occlusion off. Uniforms
-are now 128 bytes, matched by the WGSL layout regression. No UI depth attachment
+are now 160 bytes including the live palette, matched by the WGSL layout regression. No UI depth attachment
 is introduced. The hidden frame residency callback also releases depth images.

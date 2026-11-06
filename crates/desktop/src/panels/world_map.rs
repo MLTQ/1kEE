@@ -24,6 +24,7 @@ pub(crate) mod contour_asset;
 pub(crate) mod contour_pass;
 pub(crate) mod gebco_depth_fill;
 pub(crate) mod globe_pass;
+mod gpu_color;
 pub(crate) mod local_contour_pass;
 #[path = "world_map/globe_scene/mod.rs"]
 mod globe_scene;
@@ -42,6 +43,11 @@ mod stellar_layer;
 mod terrain_field;
 mod terrain_raster;
 mod layer_snapshot;
+mod swot_layer;
+mod raster_mesh;
+mod gravity_layer;
+pub(crate) use gravity_layer::controls as gravity_controls;
+pub(crate) use swot_layer::controls as swot_controls;
 mod line_upload;
 mod tree_layer;
 mod water_layer;
@@ -157,7 +163,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
             camera::apply_interaction(ui.ctx(), &response, &mut model.globe_view);
         }
         infrastructure_hover::begin(
-            response.hover_pos().filter(|_| !response.dragged() && !model.obs_view),
+            response.hover_pos().filter(|_| !response.dragged() && !model.obs_view && !model.event_follow.enabled()),
         );
         contour_pass::begin_frame();
         painter.add(contour_pass::residency_callback(rect));
@@ -229,17 +235,16 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
                 {
                     model.selected_landing_point =
                         (model.selected_landing_point != Some(index)).then_some(index);
+                } else {
+                    crate::buildout::markers::pick(&mut model.buildout, &scene.buildout_markers, pointer);
                 }
             }
         }
 
-        if model.event_follow.enabled() {
-            let opacity = model.event_follow.event_label_opacity(ui.ctx().input(|input| input.time));
-            event_labels::draw(&painter, rect, model.map_events(), &scene.event_markers, opacity);
-        }
+        draw_event_follow_overlay(&painter, rect, model, &scene.event_markers);
 
-        // Persistent tour cards remain in Focus; transient hover/detail panels
-        // stay hidden. The app shell renders the open brief/live camera.
+        // The chyron and selected card remain in Focus. The app shell owns the
+        // open Brief/live camera; other event cards never cover the map.
         if model.obs_view {
             return;
         }
@@ -247,10 +252,8 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         if response.hover_pos().is_some_and(|pointer| scene.landing_point_markers.iter().any(|(_, p)| p.distance(pointer) <= 9.0)) {
             infrastructure_hover::prefer_landing();
         }
-        if !infrastructure_hover::show(ui.ctx()) {
-            if !model.event_follow.enabled() {
-                map_tooltips::draw_event_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
-            }
+        if !model.event_follow.enabled() && !infrastructure_hover::show(ui.ctx()) {
+            map_tooltips::draw_event_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
             map_tooltips::draw_camera_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
             map_tooltips::draw_ship_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
             map_tooltips::draw_flight_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
@@ -260,14 +263,46 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         map_detail_panels::draw_flight_detail_panel(ui.ctx(), model);
         map_detail_panels::draw_landing_detail_panel(ui.ctx(), model);
         draw_arcgis_detail_panel(ui.ctx(), model);
+        crate::buildout::view::window(ui.ctx(), &mut model.buildout);
         if let Some(hover) = response.hover_pos() {
             if !model.globe_view.local_mode {
                 if let Some(geo) = globe_scene::screen_to_latlon(rect, &model.globe_view, hover) {
-                    draw_globe_coord_overlay(ui.ctx(), geo, rect);
+                    draw_globe_coord_overlay(ui.ctx(), geo, rect, model.event_follow.enabled());
                 }
             }
         }
     });
+}
+
+fn draw_event_follow_overlay(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    model: &AppModel,
+    markers: &[marker_style::MapMarker],
+) {
+    if !model.event_follow.enabled() {
+        super::event_chyron::clear(painter.ctx());
+        return;
+    }
+    if let Some(recap) = &model.follow_recaps.active {
+        super::event_chyron::clear(painter.ctx());
+        super::event_chyron::draw_recap(painter, rect, &recap.replay);
+        super::follow_recap::draw(painter, rect, recap);
+        return;
+    }
+    let chyron = super::event_chyron::draw(
+        painter,
+        rect,
+        model.map_events(),
+        model.selected_event_id.as_deref(),
+        markers.iter().filter(|marker| rect.contains(marker.base)).map(|marker| marker.id.as_str()),
+    );
+    let card_viewport = chyron.map_or(rect, |chyron| egui::Rect::from_min_max(
+        rect.min, egui::pos2(rect.right(), chyron.top() - super::event_chyron::COORDINATE_FOOTER_HEIGHT - 8.0),
+    ));
+    let opacity = model.event_follow.event_label_opacity(painter.ctx().input(|input| input.time));
+    let selected = model.selected_event_id.as_deref().filter(|_| model.factal_brief_open);
+    event_labels::draw(painter, card_viewport, model.map_events(), markers, opacity, selected);
 }
 
 fn draw_local_footer(ui: &mut egui::Ui, model: &mut AppModel, beam_elevation_m: Option<f32>) {
@@ -335,12 +370,14 @@ fn draw_local_footer(ui: &mut egui::Ui, model: &mut AppModel, beam_elevation_m: 
         });
 }
 
-fn draw_globe_coord_overlay(ctx: &egui::Context, geo: crate::model::GeoPoint, rect: egui::Rect) {
+fn draw_globe_coord_overlay(ctx: &egui::Context, geo: crate::model::GeoPoint, rect: egui::Rect, following: bool) {
     let ns = if geo.lat >= 0.0 { 'N' } else { 'S' };
     let ew = if geo.lon >= 0.0 { 'E' } else { 'W' };
     let text = format!("{:.4}°{}  {:.4}°{}", geo.lat.abs(), ns, geo.lon.abs(), ew);
+    let bottom_offset = if following { super::event_chyron::HEIGHT + 4.0 } else { 4.0 };
     egui::Area::new("globe_coord_overlay".into())
-        .fixed_pos(egui::pos2(rect.center().x - 80.0, rect.bottom() - 28.0))
+        .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -bottom_offset))
+        .constrain_to(rect)
         .interactable(false)
         .show(ctx, |ui| {
             egui::Frame::new()
@@ -348,10 +385,9 @@ fn draw_globe_coord_overlay(ctx: &egui::Context, geo: crate::model::GeoPoint, re
                 .corner_radius(5.0)
                 .inner_margin(egui::Margin::symmetric(8, 4))
                 .show(ui, |ui| {
-                    ui.colored_label(
-                        theme::contour_color(),
-                        egui::RichText::new(text).monospace().small(),
-                    );
+                    ui.add(egui::Label::new(
+                        egui::RichText::new(text).monospace().small().color(theme::contour_color()),
+                    ).wrap_mode(egui::TextWrapMode::Extend));
                 });
         });
 }
@@ -451,3 +487,7 @@ fn draw_arcgis_detail_panel(ctx: &egui::Context, model: &mut AppModel) {
         model.selected_arcgis_feature = None;
     }
 }
+
+#[cfg(test)]
+#[path = "world_map/event_overlay_tests.rs"]
+mod event_overlay_tests;

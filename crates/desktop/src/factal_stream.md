@@ -1,44 +1,37 @@
 # factal_stream.rs
 
 ## Purpose
-Runs the live Factal event polling loop for the desktop app. This file translates the private API shape inferred from the user's historical collector into normalized `EventRecord` values that the UI can render.
+Run one non-blocking live Factal sync at a time and publish complete snapshots to
+the desktop model. Pagination, item parsing and replay history have focused
+modules under `factal_stream/`.
 
 ## Components
-
-### `tick`
-- **Does**: Advances the background polling lifecycle, joins finished work,
-  applies fresh events to the `AppModel`, spawns the next minute poll when
-  needed, and reports an inactive state when no key is configured
-- **Interacts with**: `AppModel` in `model.rs`, `fetch_latest_events`
-- **Rationale**: Keeps the network call off the UI thread while still letting the app poll on a predictable cadence
-
-### `invalidate`
-- **Does**: Forces the next app tick to treat the current Factal configuration as stale and poll again immediately
-- **Interacts with**: `settings_actions.rs`
-
-### `shutdown`
-- **Does**: Marks the poll manager as shut down so the app stops launching new Factal workers during teardown
-- **Interacts with**: `app.rs`
-
-### `fetch_latest_events`
-- **Does**: Calls Factal `GET /api/v2/item/?severity__gte=2` with `Authorization: Token ...`, parses the JSON payload, and extracts geolocated events
-- **Interacts with**: `reqwest`, `serde_json`, `parse_event`
-- **Rationale**: Uses only fields proven by the attached legacy Python collector instead of guessing undocumented API behavior
-
-### `parse_event`
-- **Does**: Maps one raw Factal item into a normalized `EventRecord` while preserving a richer Factal-only payload for brief/detail inspection
-- **Interacts with**: `EventRecord`, `EventSeverity`, `GeoPoint` in `model.rs`
+- `tick` joins finished work and launches the next eligible worker. Normal polls
+  wait 60 seconds after completion, including failures, so a slow multi-page sync
+  cannot cause back-to-back polling. Worker handles are installed under the lock.
+- `invalidate` requests an immediate refresh. An active worker finishes first;
+  its obsolete generation cannot overwrite the model or delay the queued refresh.
+- `shutdown` prevents additional live workers and invalidates in-flight results.
+- `apply_outcome` retains the previous complete snapshot on auth/rate-limit,
+  malformed-response or later-page errors.
+- `apply_snapshot` persists and replaces the Factal subset while preserving USGS
+  records. Activity reports new/updated/removed IDs, current geolocated total, raw
+  item count and page count; unchanged successful refreshes are silent.
+- Re-exports preserve the existing replay entry points from `history.rs`.
 
 ## Contracts
-
 | Dependent | Expects | Breaking changes |
-|-----------|---------|------------------|
-| `app.rs` | `tick` is cheap enough to call every frame and only mutates the model when a poll result is ready | Making `tick` blocking or removing the function |
-| `settings_actions.rs` | `invalidate` triggers a fresh poll after saving or clearing a key | Removing the invalidation hook |
-| `model.rs` | Parsed events arrive as `EventRecord` values with stable ids and valid coordinates | Changing id construction or returning ungeolocated records |
+|---|---|---|
+| `app.rs` | `tick` and `history_tick` are cheap per-frame calls | Blocking the UI thread |
+| `settings_actions.rs` | `invalidate` queues a fresh poll after configuration changes | Dropping a requested refresh |
+| `model/mod.rs` | Replay entry points retain their signatures | Changing replay integration |
+| `api.rs` | Only complete successful live snapshots reach the model | Publishing partial pages |
 
 ## Notes
-- This first pass only consumes the latest page of events because that is the lowest-risk interpretation of the private API and keeps polling lightweight.
-- The app ignores stale results when the key changes while a request is still in flight.
-- No configured key means inactive; the source never substitutes local events.
-- In addition to headline/summary/location fields, the parser now preserves the raw pretty-printed JSON item, vertical/subvertical topic tags, topic names, point WKT, and numeric severity when Factal provides them.
+- The live range is severity ≥2 over the past 24 hours, with every `next` page
+  loaded; the 50-item API page size is never treated as the feed size.
+- Log comparisons use only Factal IDs/payloads, independently of earthquake
+  counts. Same-size sets containing different events still produce an update.
+- No configured key means inactive; no synthetic events are substituted.
+- Tests cover mixed-source log deduplication, replacements/revisions, stale/error
+  preservation, one active worker and completion-based scheduling.

@@ -6,6 +6,7 @@ pub(crate) mod hillshade_layer;
 pub(super) mod markers;
 pub(crate) mod projection;
 mod lod;
+mod contours;
 pub(crate) mod composition;
 pub(crate) mod handoff;
 pub(super) mod ui_overlays;
@@ -36,7 +37,6 @@ use crate::model::{AppModel, GeoPoint, GlobeViewState};
 use crate::osm_ingest::{self, GeoBounds as OsmGeoBounds};
 use crate::terrain_assets;
 use crate::theme;
-use rayon::prelude::*;
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -45,10 +45,6 @@ use super::globe_scene::GlobeScene;
 use super::local_contour_pass;
 use super::srtm_focus_cache;
 
-#[allow(dead_code)]
-pub const LOCAL_TRANSITION_START_ZOOM: f32 = 4.0;
-#[allow(dead_code)]
-pub const LOCAL_MODE_MIN_ZOOM: f32 = 25.0;
 /// Local-only contour source reaches six rings in every direction (13×13
 /// tiles). Globe callers keep their existing smaller envelopes.
 const LOCAL_CONTOUR_PREFETCH_RADIUS: i32 = 6;
@@ -63,10 +59,6 @@ pub const LOCAL_ZOOM_MIN: f32 = 1.0;
 /// Upper end of the local zoom range. The visual scale and the contour tile
 /// spec now both run to this value.
 pub const LOCAL_ZOOM_MAX: f32 = 60.0;
-/// A contour is major every 50 m on Earth. Shared by the CPU stack and the GPU
-/// pass so both classify the same lines the same way.
-const EARTH_MAJOR_REM: i32 = 50;
-
 #[derive(Clone, Copy)]
 pub(super) struct LocalLayout {
     pub(super) center: egui::Pos2,
@@ -138,19 +130,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     }
 
     let layout = layout(rect);
-    let Some(focus) = model.terrain_focus_location() else {
-        contour_asset::leave_local_view();
-        ui_overlays::draw_empty_state(painter, rect, "No terrain focus selected");
-        return GlobeScene {
-            event_markers: Vec::new(),
-            camera_markers: Vec::new(),
-            ship_markers: Vec::new(),
-            flight_markers: Vec::new(),
-            arcgis_feature_markers: Vec::new(),
-            landing_point_markers: Vec::new(),
-            beam_elevation_m: None,
-        };
-    };
+    let focus = local_focus(model);
 
     let viewport_center = model.globe_view.local_center;
     let render_zoom = local_render_zoom(model.globe_view.local_zoom);
@@ -183,7 +163,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     };
     let viewport = contour_asset::residency::Viewport { body: model.active_body, projection, rect: clip.expand(8.0) };
     let candidate = handoff::prepare(model.selected_root.as_deref(), viewport, &contour_load, painter.ctx());
-    let candidate_batches = gpu_contour_batches(model, &candidate.tiles, painter);
+    let candidate_batches = contours::batches(model, &candidate.tiles, painter);
     if !candidate_batches.is_empty() {
         painter.add(local_contour_pass::LocalContourCallback::new(
             local_contour_pass::LocalContourPass::Surface, candidate_batches.clone(),
@@ -192,12 +172,11 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     }
     let display = handoff::select(
         viewport, candidate, candidate_batches,
-        model.active_body == crate::model::ActiveBody::Earth && model.show_contours,
+        model.show_contours,
         painter.ctx(),
     );
     let contours = display.contours;
     let gpu_contour_batches = display.batches;
-    let use_gpu_contours = !gpu_contour_batches.is_empty();
     let cache_status = match model.active_body {
         crate::model::ActiveBody::Moon | crate::model::ActiveBody::Mars => None,
         crate::model::ActiveBody::Earth => Some(contour_load.status),
@@ -279,31 +258,41 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         );
     }
 
+    if model.show_swot_gravity && model.active_body == crate::model::ActiveBody::Earth {
+        let half = visual_half_extent_for_zoom(model.globe_view.local_zoom);
+        super::swot_layer::draw_local(
+            painter,
+            &layout,
+            &model.globe_view,
+            model.selected_root.as_deref(),
+            viewport_center,
+            half,
+        );
+    }
+
+    if model.gravity.enabled && model.active_body == crate::model::ActiveBody::Earth {
+        super::gravity_layer::draw_local(
+            painter,
+            &layout,
+            &model.globe_view,
+            model.selected_root.as_deref(),
+            &model.gravity.map().id,
+            viewport_center,
+            visual_half_extent_for_zoom(model.globe_view.local_zoom),
+        );
+    }
+
     // Draw the contour layer once, followed by independent map overlays.
-    if model.show_contours && use_gpu_contours {
-        draw_gpu_contour_pass(
-            painter,
-            &layout,
-            &model.globe_view,
-            viewport_center,
-            local_contour_pass::LocalContourPass::Surface,
-            model.contour_occlusion,
-            &gpu_contour_batches,
-            1.0,
-            contour_stroke_scale,
+    if model.show_contours && !gpu_contour_batches.is_empty() {
+        contours::paint(
+            painter, &projection, &gpu_contour_batches,
+            model.contour_occlusion, contour_stroke_scale,
         );
-    } else if !contours_slice.is_empty() && model.show_contours {
-        draw_contour_stack(
-            painter,
-            &layout,
-            &model.globe_view,
-            viewport_center,
-            render_zoom,
-            contours_slice,
-            1.0,
-            model.active_body,
-            contour_stroke_scale,
-        );
+    } else if model.show_contours
+        && contours.as_ref().is_some_and(|paths| !paths.is_empty())
+        && !model.obs_view
+    {
+        ui_overlays::draw_empty_state(painter, rect, "Preparing terrain…");
     }
     if model.active_body == crate::model::ActiveBody::Earth {
         super::road_layer::draw_roads(
@@ -591,6 +580,10 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 .collect()
         };
 
+    let buildout_markers = crate::buildout::markers::draw(painter, &model.buildout, model.active_body, |point| {
+        projection::project_local(&layout, &model.globe_view, viewport_center, point, 0.0, extent_x_km, extent_y_km)
+            .map(|p| p.pos)
+    });
     draw_active_fires(
         painter,
         &layout,
@@ -724,6 +717,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         flight_markers: Vec::new(),
         arcgis_feature_markers: Vec::new(),
         landing_point_markers,
+        buildout_markers,
         beam_elevation_m: Some(beam_elevation_m),
     }
 }
@@ -955,56 +949,8 @@ fn draw_deflock_alprs(
     deflock_layer::draw_mesh(painter, mesh);
 }
 
-#[allow(dead_code)]
-pub fn paint_transition_overlay(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    model: &AppModel,
-    progress: f32,
-) {
-    if progress <= 0.0 {
-        return;
-    }
-
-    let Some(focus) = model.terrain_focus_location() else {
-        return;
-    };
-
-    let viewport_center = model.globe_view.local_center;
-    let render_zoom = local_render_zoom(model.globe_view.local_zoom);
-    let selection = lod::select(crate::model::ActiveBody::Earth, render_zoom, None);
-    let Some(contours) = contour_asset::load_srtm_lod_region(
-        model.selected_root.as_deref(),
-        focus,
-        viewport_center,
-        selection.zoom,
-        render_zoom,
-        selection.radius,
-        painter.ctx().clone(),
-    )
-    .contours
-    else {
-        return;
-    };
-
-    let layout = transition_layout(rect, progress);
-    let contour_stroke_scale =
-        model.contour_stroke_scale_for_pixels_per_point(painter.ctx().pixels_per_point());
-    draw_contour_stack(
-        painter,
-        &layout,
-        &model.globe_view,
-        viewport_center,
-        render_zoom,
-        contours.as_ref(),
-        progress,
-        model.active_body,
-        contour_stroke_scale,
-    );
-}
-
 pub fn is_active(model: &AppModel) -> bool {
-    if !model.globe_view.local_mode || model.terrain_focus_location().is_none() {
+    if !model.globe_view.local_mode {
         return false;
     }
     if model.active_body == crate::model::ActiveBody::Moon {
@@ -1013,17 +959,17 @@ pub fn is_active(model: &AppModel) -> bool {
     if model.active_body == crate::model::ActiveBody::Mars {
         return terrain_assets::find_mars_data_root(model.selected_root.as_deref()).is_some();
     }
-    terrain_assets::find_srtm_root(model.selected_root.as_deref()).is_some()
+    // Earth can render cached/streamed terrain and vector layers without a raw
+    // SRTM installation. Source readiness must not override the selected view.
+    true
 }
 
-#[allow(dead_code)]
-pub fn transition_progress(zoom: f32) -> f32 {
-    ((zoom - LOCAL_TRANSITION_START_ZOOM) / (LOCAL_MODE_MIN_ZOOM - LOCAL_TRANSITION_START_ZOOM))
-        .clamp(0.0, 1.0)
+fn local_focus(model: &AppModel) -> GeoPoint {
+    model.terrain_focus_location().unwrap_or(model.globe_view.local_center)
 }
 
 pub fn has_pending_cache(model: &AppModel) -> bool {
-    if !model.globe_view.local_mode || model.terrain_focus_location().is_none() {
+    if !model.globe_view.local_mode {
         return false;
     }
     contour_asset::local_contours_pending(model.active_body)
@@ -1084,25 +1030,6 @@ fn layout(rect: egui::Rect) -> LocalLayout {
     }
 }
 
-#[allow(dead_code)]
-fn transition_layout(rect: egui::Rect, progress: f32) -> LocalLayout {
-    let progress = progress.clamp(0.0, 1.0);
-    let target = layout(rect);
-    let scale = egui::lerp(0.52..=1.0, progress);
-    let vertical_origin = egui::lerp(
-        (rect.center().y + rect.height() * 0.1)..=(target.focus_center.y),
-        progress,
-    );
-
-    LocalLayout {
-        center: target.center,
-        focus_center: egui::pos2(target.focus_center.x, vertical_origin),
-        width: target.width * scale,
-        height: target.height * scale,
-        horizontal_scale: target.horizontal_scale * scale,
-    }
-}
-
 /// Return contours that have at least one point inside a local geographic
 /// viewport margin. The wider source cache remains intact; consumers select
 /// the margin appropriate to their own visual or sampling contract.
@@ -1126,43 +1053,6 @@ fn contours_intersecting_local_bounds<'a>(
             })
         })
         .collect()
-}
-
-/// Trim a culled contour set to a point budget, keeping the longest lines.
-///
-/// Length is a good proxy for visual importance and, unlike a positional or
-/// elevation-ordered cut, it is stable as the camera moves: a long contour
-/// stays long, so it keeps making the cut instead of flickering in and out at
-/// the budget boundary.
-///
-/// Returns the input untouched when it already fits, so the common case costs
-/// one sum and no allocation.
-fn select_contours_within_budget(
-    culled: Vec<&contour_asset::ContourPath>,
-    max_points: usize,
-) -> Vec<&contour_asset::ContourPath> {
-    let total: usize = culled.iter().map(|contour| contour.points.len()).sum();
-    if total <= max_points {
-        return culled;
-    }
-
-    let mut by_length = culled;
-    by_length.sort_unstable_by(|left, right| right.points.len().cmp(&left.points.len()));
-
-    let mut spent = 0usize;
-    let mut kept = 0usize;
-    for contour in &by_length {
-        let cost = contour.points.len();
-        if spent + cost > max_points {
-            break;
-        }
-        spent += cost;
-        kept += 1;
-    }
-    // A single contour longer than the whole budget would otherwise leave the
-    // scene empty; draw it rather than nothing.
-    by_length.truncate(kept.max(1));
-    by_length
 }
 
 #[inline]
@@ -1276,220 +1166,6 @@ fn draw_local_beam(
     painter.circle_filled(ground, 1.8, cherry);
 
     elevation_m
-}
-
-/// Build (or pick up) GPU instance batches for the visible Earth contour tiles.
-///
-/// Returns empty for Moon and Mars, which keep the CPU renderer, and while the
-/// first background instance build is still running — the scene then draws the
-/// CPU stack, so there is never a blank frame during the handover.
-fn gpu_contour_batches(
-    model: &AppModel,
-    tiles: &[contour_asset::LocalTileGeometry],
-    painter: &egui::Painter,
-) -> Vec<local_contour_pass::LocalTileBatch> {
-    if model.active_body != crate::model::ActiveBody::Earth || !model.show_contours {
-        local_contour_pass::retain_instances(&std::collections::HashSet::new());
-        return Vec::new();
-    }
-
-    let major_color = theme::hot_color();
-    let minor_color = theme::contour_color();
-    // Baked colours must be rebuilt when the palette changes, so the instance
-    // version folds in the two colours the style function can produce.
-    let palette = u64::from(major_color.to_array().iter().fold(0u32, |acc, &c| {
-        acc.wrapping_mul(31).wrapping_add(u32::from(c))
-    }))
-        ^ (u64::from(minor_color.to_array().iter().fold(0u32, |acc, &c| {
-            acc.wrapping_mul(31).wrapping_add(u32::from(c))
-        })) << 32);
-
-    let ctx = painter.ctx().clone();
-    tiles.iter()
-        .filter_map(|tile| {
-            local_contour_pass::instances_for_tile(
-                tile.id,
-                &tile.contours,
-                palette,
-                &ctx,
-                move |contour| {
-                    // Identical major/minor rule to the CPU stack.
-                    let major =
-                        (contour.elevation_m.round() as i32).rem_euclid(EARTH_MAJOR_REM) == 0;
-                    let color = if major { major_color } else { minor_color };
-                    // The pass fade is a uniform, so only the fixed major/minor
-                    // weighting is baked here.
-                    (
-                        color.gamma_multiply(if major { 1.0 } else { 0.78 }),
-                        major,
-                    )
-                },
-            )
-        })
-        .collect()
-}
-
-/// Submit one GPU contour pass for this frame.
-fn draw_gpu_contour_pass(
-    painter: &egui::Painter,
-    layout: &LocalLayout,
-    view: &GlobeViewState,
-    focus: GeoPoint,
-    pass: local_contour_pass::LocalContourPass,
-    occlusion: bool,
-    batches: &[local_contour_pass::LocalTileBatch],
-    alpha: f32,
-    contour_stroke_scale: f32,
-) {
-    let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
-    let km_per_deg_lat = 111.32f32;
-    let km_per_deg_lon = km_per_deg_lat * focus.lat.to_radians().cos().abs().max(0.2);
-    let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
-    let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
-
-    let params =
-        projection::local_projection_params(layout, view, focus, extent_x_km, extent_y_km);
-    let pixels_per_point = painter.ctx().pixels_per_point();
-
-    painter.add(
-        local_contour_pass::LocalContourCallback::new(
-            pass,
-            batches.to_vec(),
-            &params,
-            alpha,
-            // Same two widths the CPU stack derives, so the major/minor
-            // hierarchy is preserved exactly — converted to physical pixels,
-            // which is what the pass expects.
-            gpu_contour_stroke_width_px(0.7, alpha, contour_stroke_scale, pixels_per_point),
-            gpu_contour_stroke_width_px(1.35, alpha, contour_stroke_scale, pixels_per_point),
-            painter.ctx().clone(),
-        )
-        .with_occlusion(occlusion)
-        .into_paint_callback(painter.clip_rect()),
-    );
-}
-
-fn draw_contour_stack(
-    painter: &egui::Painter,
-    layout: &LocalLayout,
-    view: &GlobeViewState,
-    focus: GeoPoint,
-    _render_zoom: f32,
-    contours: &[contour_asset::ContourPath],
-    alpha: f32,
-    active_body: crate::model::ActiveBody,
-    contour_stroke_scale: f32,
-) {
-    puffin::profile_function!();
-    // Ceiling on projected points per frame for the CPU fallback path. Earth
-    // now draws through `local_contour_pass` on the GPU and is not subject to
-    // this at all; it still governs Moon and Mars, and Earth whenever the GPU
-    // pass has no geometry ready yet.
-    //
-    // This is a rendering cost budget, not a correctness limit: egui tessellates
-    // strokes on the CPU, so every point past this costs frame time.
-    //
-    // It was 300_000, sized when contours came from 30 m SRTM. A single 3DEP
-    // bucket-10 tile carries ~4.3 M points, so the old ceiling was exhausted by
-    // roughly the first tile of a 25-tile envelope — the rest of the screen
-    // stayed empty, and panning reshuffled which contours landed inside the
-    // budget, making them flicker.
-    //
-    // Raising it alone would be wasteful, because the point distribution is
-    // extremely skewed: the longest 10% of contours hold ~73% of all points,
-    // while the shortest 75% hold under 3%. `select_contours_within_budget`
-    // therefore spends this budget longest-first, so it buys the long shoreline
-    // and terrace traces that define the picture rather than a random sample.
-    const MAX_CONTOUR_RENDER_POINTS: usize = 1_000_000;
-
-    // Major contour every 2× the minor interval. SRTM minor=5-50m so major at 50m rem.
-    // Lunar minor=50-1000m so major at 1000m rem (two minor intervals up in any spec).
-    let major_rem: i32 = match active_body {
-        crate::model::ActiveBody::Moon | crate::model::ActiveBody::Mars => 1_000,
-        crate::model::ActiveBody::Earth => EARTH_MAJOR_REM,
-    };
-    let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
-    let km_per_deg_lat = 111.32f32;
-    let km_per_deg_lon = km_per_deg_lat * focus.lat.to_radians().cos().abs().max(0.2);
-    let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
-    let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
-
-    // AABB cull. The margin has to match how far the oblique camera actually
-    // sees, which is `OBLIQUE_VISIBLE_EXTENT_FACTOR` times the nominal half
-    // extent — the same distance the local marker cull and the 3DEP tile
-    // envelope are sized against. A tighter margin here culls terrain that is
-    // still on screen, which no cache or tile size can compensate for.
-    let margin_deg = half_extent_deg * srtm_focus_cache::OBLIQUE_VISIBLE_EXTENT_FACTOR;
-    let culled = contours_intersecting_local_bounds(contours, focus, margin_deg);
-    // Choose what to draw by importance, then restore elevation order so the
-    // major/minor stacking and draw order are unchanged.
-    let mut ordered = select_contours_within_budget(culled, MAX_CONTOUR_RENDER_POINTS);
-    ordered.sort_by(|left, right| left.elevation_m.total_cmp(&right.elevation_m));
-
-    // Pre-compute colors — theme functions may touch global state and must
-    // not be called from rayon worker threads.
-    let major_color = theme::hot_color();
-    let minor_color = theme::contour_color();
-    let pixels_per_point = painter.ctx().pixels_per_point();
-
-    // Parallel projection: each contour's points are fully independent.
-    // Process fixed ordered chunks instead of materializing every projected
-    // path before checking the existing point cap. The serial submission order
-    // and accepted geometry remain unchanged, while paths beyond that cap no
-    // longer allocate/project during a dense tile arrival.
-    const CONTOUR_PROJECTION_CHUNK_SIZE: usize = 64;
-    let mut remaining_points = MAX_CONTOUR_RENDER_POINTS;
-    'projection: for chunk in ordered.chunks(CONTOUR_PROJECTION_CHUNK_SIZE) {
-        let projected: Vec<Option<(Vec<egui::Pos2>, egui::Stroke)>> = chunk
-            .par_iter()
-            .map(|contour| {
-                let points: Vec<egui::Pos2> = contour
-                    .points
-                    .iter()
-                    .filter_map(|point| {
-                        projection::project_local(
-                            layout,
-                            view,
-                            focus,
-                            *point,
-                            contour.elevation_m,
-                            extent_x_km,
-                            extent_y_km,
-                        )
-                        .map(|p| p.pos)
-                    })
-                    .collect();
-
-                if points.len() < 2 {
-                    return None;
-                }
-
-                let major = (contour.elevation_m.round() as i32).rem_euclid(major_rem) == 0;
-                let stroke = egui::Stroke::new(
-                    local_contour_stroke_width(
-                        if major { 1.35 } else { 0.7 },
-                        alpha,
-                        contour_stroke_scale,
-                        pixels_per_point,
-                    ),
-                    if major { major_color } else { minor_color }
-                        .gamma_multiply((if major { 1.0 } else { 0.78 }) * alpha),
-                );
-
-                Some((points, stroke))
-            })
-            .collect();
-
-        // Painter is not Send, so only the already prepared paths are added
-        // on the UI thread. This preserves the previous elevation ordering.
-        for (points, stroke) in projected.into_iter().flatten() {
-            if remaining_points < 2 {
-                break 'projection;
-            }
-            remaining_points = remaining_points.saturating_sub(points.len());
-            painter.add(egui::Shape::line(points, stroke));
-        }
-    }
 }
 
 #[inline]
@@ -1849,75 +1525,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn requested_local_view_uses_viewport_without_an_event_or_city() {
+        let mut model = AppModel::new();
+        model.events.clear();
+        model.selected_event_id = None;
+        model.focused_city_id = None;
+        model.active_body = crate::model::ActiveBody::Earth;
+        model.globe_view.local_center = GeoPoint { lat: 48.85, lon: 2.35 };
+        model.globe_view.local_mode = false;
+        assert!(!is_active(&model));
+        model.globe_view.local_mode = true;
+        assert!(is_active(&model));
+        assert_eq!(local_focus(&model), model.globe_view.local_center);
+    }
+
+    #[test]
     fn local_contour_builds_cover_the_full_source_envelope() {
         assert_eq!(LOCAL_CONTOUR_BUILD_RADIUS, LOCAL_CONTOUR_PREFETCH_RADIUS);
-    }
-
-    fn contour_of(elevation_m: f32, points: usize) -> contour_asset::ContourPath {
-        contour_asset::ContourPath {
-            elevation_m,
-            points: (0..points)
-                .map(|i| GeoPoint {
-                    lat: 40.0 + i as f32 * 1e-5,
-                    lon: -105.0 + i as f32 * 1e-5,
-                })
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn a_set_within_the_point_budget_is_drawn_whole() {
-        let contours = vec![contour_of(1.0, 50), contour_of(2.0, 60)];
-        let culled: Vec<_> = contours.iter().collect();
-        let kept = select_contours_within_budget(culled, 1_000);
-        assert_eq!(kept.len(), 2);
-    }
-
-    #[test]
-    fn an_over_budget_set_keeps_the_longest_contours() {
-        let contours = vec![
-            contour_of(1.0, 5),
-            contour_of(2.0, 400),
-            contour_of(3.0, 8),
-            contour_of(4.0, 300),
-        ];
-        let culled: Vec<_> = contours.iter().collect();
-        let kept = select_contours_within_budget(culled, 700);
-        let lengths: Vec<usize> = kept.iter().map(|c| c.points.len()).collect();
-        assert_eq!(lengths, vec![400, 300]);
-        assert!(lengths.iter().sum::<usize>() <= 700);
-    }
-
-    /// The reason selection is length-ordered rather than positional: panning
-    /// changes which *short* contours are in view, and that must not disturb
-    /// which long ones are drawn. A positional or elevation-ordered cut let
-    /// them swap places at the budget boundary every frame, which is what made
-    /// contours flicker.
-    #[test]
-    fn adding_short_contours_does_not_evict_the_long_ones() {
-        let base = vec![contour_of(1.0, 500), contour_of(2.0, 450)];
-        let before: Vec<usize> = select_contours_within_budget(base.iter().collect(), 1_000)
-            .iter()
-            .map(|c| c.points.len())
-            .collect();
-
-        // A pan brings a crowd of small specks into view.
-        let mut panned = base.clone();
-        panned.extend((0..200).map(|i| contour_of(10.0 + i as f32, 6)));
-        let after: Vec<usize> = select_contours_within_budget(panned.iter().collect(), 1_000)
-            .iter()
-            .map(|c| c.points.len())
-            .collect();
-
-        assert!(after.contains(&500) && after.contains(&450));
-        assert_eq!(before, vec![500, 450]);
-    }
-
-    #[test]
-    fn a_contour_larger_than_the_whole_budget_still_draws() {
-        let contours = vec![contour_of(1.0, 5_000)];
-        let kept = select_contours_within_budget(contours.iter().collect(), 100);
-        assert_eq!(kept.len(), 1, "an empty scene is worse than one long line");
     }
 
     /// The GPU pass takes physical pixels; the CPU stroke helpers return

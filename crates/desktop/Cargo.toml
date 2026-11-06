@@ -15,6 +15,7 @@ rfd = "0.15"
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tempfile = "3"
 roxmltree = "0.20"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 cell-format = { path = "../cell_format" }
@@ -28,3 +29,8 @@ puffin = "0.19"
 puffin_http = "0.16"
 lyon_tessellation = "1"
 one-thousand-electric-eye-cache-builder = { path = "../cache_builder" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL", "NSError"] }
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVPlayer", "AVPlayerItem"] }

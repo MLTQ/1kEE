@@ -1,5 +1,13 @@
 # mod.rs
 
+SWOT marine gravity draws only on Earth, above bathymetry and below coastline,
+terrain and operational overlays. Its image and projected mesh are cached by
+source/view; the optional layer performs no drawing-thread disk access.
+`project_surface` exposes the existing unit-sphere projection to imagery so
+texture mesh rebuilds avoid synthetic per-vertex terrain sampling.
+SWOT receives the actual canvas rectangle for zoom-dependent native viewport
+reads; the overview remains visible while the background window is prepared.
+
 ## Purpose
 
 Owns the globe-mode scene composition: terrain and overlay passes, live markers,
@@ -127,3 +135,16 @@ Public pipelines receive the session capacity-color flag as well as source/statu
 Administrative boundaries draw through admin_globe after terrain and before user
 overlays/markers. Globe and Local use the same levels and shade options; Globe
 uses immutable spherical GPU geometry with perspective horizon clipping.
+
+Selected NCEI gravity-anomaly imagery paints above SWOT and below coastlines,
+contours and markers. Its geographic bounds/coverage come from the prepared
+map, and loading remains off-thread independently of terrain streaming.
+
+Automatic continental recaps share `active_replay` with manual Replay for flare
+painting and suppress live event markers while playback owns the globe.
+
+A recap framing regression projects Istanbul, Cairo, Tehran, Mashhad, Muscat and
+Aden through the real Middle East globe camera at 720p and 1080p. Their surface
+positions must remain visible above the chyron and outside the clock panel.
+
+The Earth surface projection supplies front-facing buildout markers for shared rendering and picking.

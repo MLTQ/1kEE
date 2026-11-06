@@ -1,15 +1,12 @@
-# admin_globe_pass.rs
+Draws a complete globe boundary generation in a single egui/wgpu callback. On each
+frame it updates the contour view uniform for outlines and the spherical fill
+uniform for shading. The displayed buffers therefore track the current camera,
+viewport and opacity even while their replacement is being prepared.
 
-GPU fill callback for administrative regions on the unit sphere. Triangle
-instances contain three sphere vertices and a linear color; the 64-byte uniform
-contains the same yaw/pitch and perspective inputs as the globe backdrop.
-
-Resources initialize lazily using the existing contour renderer's target format.
-Uploads stage under a 4 MiB / 2 ms budget with bounded individual buffers. A changed
-source/selection hides stale fills until its exact version is ready. Opacity is a
-uniform, and fills use premultiplied blending before the separate outline pass.
-
-The budget is shared with globe lines, not an additional per-pass allowance.
-Canvas lifecycle hooks release fill buffers when shading is hidden or Local is
-active. Colors use egui's linear-light premultiplication and target-format-aware
-conversion, matching Local opacity rather than applying an extra gamma fade.
+The upload state in admin_globe_upload stages both streams using the existing
+shared globe budget and publishes them together. Paint draws the displayed fill
+first and then the displayed outlines using the shared contour line pipeline.
+The fill pipeline is initialized on demand. Its premultiplied colors, target-format
+conversion and perspective horizon match the existing Local/Globe shaders.
+The frame lifecycle releases both pending and displayed geometry when the layer
+is hidden, transparent, or the map enters Local.

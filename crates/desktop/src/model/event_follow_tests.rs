@@ -48,7 +48,7 @@ fn regional_cards_fade_only_after_arrival_and_disappear_during_wide_travel() {
         assert!((follow.event_label_opacity(arrival + 0.225) - 0.5).abs() < 0.001);
         assert_eq!(follow.event_label_opacity(arrival + 1.0), 1.0);
 
-        let departure = arrival + ORBIT_SECONDS;
+        let departure = arrival + f64::from(follow.dwell_seconds());
         assert_eq!(
             follow.tick(&mut view, departure).as_deref(),
             Some("factal-b")
@@ -66,7 +66,7 @@ fn regional_cards_fade_only_after_arrival_and_disappear_during_wide_travel() {
 }
 
 #[test]
-fn event_refresh_does_not_restart_fades_and_retarget_preserves_current_opacity() {
+fn new_headlines_do_not_interrupt_arrival_fades_or_dwell() {
     let mut view = GlobeViewState::from_focus(GeoPoint { lat: 0.0, lon: 0.0 });
     let mut follow = EventFollow::default();
     let a = event("a", 30.0, 60.0, 1);
@@ -79,10 +79,16 @@ fn event_refresh_does_not_restart_fades_and_retarget_preserves_current_opacity()
     assert_eq!(follow.tick(&mut view, now), None);
     assert_eq!(follow.event_label_opacity(now), opacity);
     follow.observe(&[a, event("b", -30.0, -60.0, 2)]);
-    assert_eq!(follow.tick(&mut view, now).as_deref(), Some("factal-b"));
+    assert_eq!(follow.tick(&mut view, now), None);
     assert_eq!(follow.event_label_opacity(now), opacity);
-    assert!(follow.event_label_opacity(now + 0.125) < opacity);
-    assert_eq!(follow.event_label_opacity(now + 0.25), 0.0);
+    let departure = follow.flight.as_ref().unwrap().duration + f64::from(follow.dwell_seconds());
+    assert_eq!(
+        follow.tick(&mut view, departure).as_deref(),
+        Some("factal-b")
+    );
+    assert_eq!(follow.event_label_opacity(departure), 1.0);
+    assert!(follow.event_label_opacity(departure + 0.125) < 1.0);
+    assert_eq!(follow.event_label_opacity(departure + 0.25), 0.0);
 }
 
 #[test]
@@ -98,11 +104,13 @@ fn unchanged_refresh_preserves_the_current_stop_and_newest_breaks_severity_ties(
     let mut revised = a.clone();
     revised.title = "Revised headline".into();
     f.observe(&[c.clone(), revised.clone(), b]);
-    assert_eq!(f.tick(&mut view, 3.0).as_deref(), Some("factal-c"));
+    assert_eq!(f.tick(&mut view, 3.0), None);
+    assert_eq!(f.target().unwrap().title, "Revised headline");
     f.observe(&[]);
     f.observe(&[revised, c]);
     assert_eq!(f.tick(&mut view, 4.0), None);
-    assert_eq!(f.flight.as_ref().unwrap().started, 3.0);
+    assert_eq!(f.flight.as_ref().unwrap().started, 0.0);
+    assert_eq!(finish_stop(&mut f, &mut view), "factal-c");
 }
 
 #[test]
@@ -199,7 +207,7 @@ fn date_line_uses_short_route_and_polar_orbits_stay_bounded() {
 }
 
 #[test]
-fn retarget_preserves_position_and_velocity_during_flight_and_orbit() {
+fn queued_retarget_waits_for_dwell_and_preserves_position_and_velocity() {
     for local in [false, true] {
         for retarget_at in [4.0, 25.0] {
             let mut view = GlobeViewState::from_focus(GeoPoint {
@@ -210,10 +218,16 @@ fn retarget_preserves_position_and_velocity_during_flight_and_orbit() {
             let mut f = EventFollow::default();
             f.enable(&[event("a", -20.0, 100.0, 1)]);
             f.tick(&mut view, 0.0);
-            let (old, velocity) = f.flight.as_ref().unwrap().sample(retarget_at);
             f.observe(&[event("b", 60.0, -10.0, 2)]);
-            f.tick(&mut view, retarget_at);
-            let (new, new_velocity) = f.flight.as_ref().unwrap().sample(retarget_at);
+            let deadline = f.flight.as_ref().unwrap().duration + f64::from(f.dwell_seconds());
+            if retarget_at < deadline {
+                assert_eq!(f.tick(&mut view, retarget_at), None);
+                assert_eq!(f.target().unwrap().id, "factal-a");
+            }
+            let departure = retarget_at.max(deadline);
+            let (old, velocity) = f.flight.as_ref().unwrap().sample(departure);
+            assert_eq!(f.tick(&mut view, departure).as_deref(), Some("factal-b"));
+            let (new, new_velocity) = f.flight.as_ref().unwrap().sample(departure);
             for i in 0..5 {
                 let difference = if i == 1 {
                     wrap(old[i] - new[i])
@@ -325,7 +339,7 @@ fn follow_brief_renders_the_followed_record_to_the_right_of_map_center() {
                 time: Some(frame as f64 * 0.1),
                 ..Default::default()
             },
-            |ctx| crate::panels::render_factal_brief(ctx, &mut model),
+            |ctx| crate::panels::render_factal_brief(ctx, &mut model, &mut crate::panels::EventRadio::default()),
         );
         for shape in output.shapes {
             if let egui::Shape::Text(t) = shape.shape {
@@ -355,7 +369,7 @@ fn severity_event(id: &str, severity: i64, minute: u8) -> EventRecord {
 
 fn finish_stop(f: &mut EventFollow, view: &mut GlobeViewState) -> String {
     let flight = f.flight.as_ref().unwrap();
-    let deadline = flight.started + flight.duration + ORBIT_SECONDS;
+    let deadline = flight.started + flight.duration + f64::from(f.dwell_seconds());
     assert_eq!(
         f.tick(view, deadline - 0.001),
         None,
@@ -365,7 +379,7 @@ fn finish_stop(f: &mut EventFollow, view: &mut GlobeViewState) -> String {
 }
 
 #[test]
-fn tour_takes_six_unique_events_by_numeric_severity_then_recency_and_cycles() {
+fn follow_includes_every_ranked_event_and_preserves_progress_across_polls() {
     let mut fallback = severity_event("fallback", 4, 10);
     fallback.factal_brief.as_mut().unwrap().severity_value = None;
     let mut invalid = severity_event("invalid", 99, 50);
@@ -391,6 +405,7 @@ fn tour_takes_six_unique_events_by_numeric_severity_then_recency_and_cycles() {
         "factal-four",
         "factal-three",
         "factal-two",
+        "factal-low",
     ];
     let mut f = EventFollow::default();
     let mut view = GlobeViewState::from_focus(GeoPoint {
@@ -399,9 +414,16 @@ fn tour_takes_six_unique_events_by_numeric_severity_then_recency_and_cycles() {
     });
     f.enable(&events);
     assert_eq!(f.tick(&mut view, 0.0).as_deref(), Some(expected[0]));
-    for (i, id) in expected.iter().enumerate().skip(1) {
-        assert_eq!(finish_stop(&mut f, &mut view), *id);
-        assert_eq!(f.tour_position(), Some((i + 1, 6)));
+    let mut visited = std::collections::HashSet::from([expected[0].to_owned()]);
+    for _ in 0..100 {
+        let id = finish_stop(&mut f, &mut view);
+        let rank = expected
+            .iter()
+            .position(|expected| *expected == id)
+            .unwrap()
+            + 1;
+        assert_eq!(f.tour_position(), Some((rank, expected.len())));
+        visited.insert(id);
         // Reordered identical payloads must not reset the tour to its head.
         let reversed: Vec<_> = events.iter().rev().cloned().collect();
         f.observe(&reversed);
@@ -410,7 +432,7 @@ fn tour_takes_six_unique_events_by_numeric_severity_then_recency_and_cycles() {
             None
         );
     }
-    assert_eq!(finish_stop(&mut f, &mut view), expected[0]);
+    assert_eq!(visited.len(), expected.len());
 }
 
 #[test]
@@ -426,7 +448,8 @@ fn payload_severity_revision_reprioritizes_existing_ids_and_replaces_stale_stops
     f.enable(&[a.clone(), b, c.clone()]);
     assert_eq!(f.tick(&mut view, 0.0).as_deref(), Some("factal-a"));
     f.observe(&[a, severity_event("b", 5, 2)]);
-    assert_eq!(f.tick(&mut view, 1.0).as_deref(), Some("factal-b"));
+    assert_eq!(f.tick(&mut view, 1.0), None);
+    assert_eq!(finish_stop(&mut f, &mut view), "factal-b");
     assert_eq!(f.tour_position(), Some((1, 2)));
     assert_eq!(finish_stop(&mut f, &mut view), "factal-a");
     assert_eq!(finish_stop(&mut f, &mut view), "factal-b");
@@ -461,7 +484,7 @@ fn automatic_next_stop_reopens_brief_without_snapping_or_changing_view_mode() {
     model.toggle_event_follow();
     model.tick_event_follow(0.0);
     let flight = model.event_follow.flight.as_ref().unwrap();
-    let deadline = flight.duration + ORBIT_SECONDS;
+    let deadline = flight.duration + f64::from(model.event_follow.dwell_seconds());
     let expected = flight.sample(deadline).0;
     model.factal_brief_open = false;
     model.tick_event_follow(deadline);
@@ -470,4 +493,69 @@ fn automatic_next_stop_reopens_brief_without_snapping_or_changing_view_mode() {
     assert!(model.globe_view.local_mode);
     assert!((model.globe_view.local_center.lat as f64 - expected[0]).abs() < 1e-5);
     assert!((model.globe_view.local_yaw as f64 - expected[3]).abs() < 1e-5);
+}
+
+#[test]
+fn configurable_dwell_begins_after_arrival_in_globe_and_local_views() {
+    for local in [false, true] {
+        for seconds in [5, 30, 90, 300] {
+            let mut follow = EventFollow::with_dwell_seconds(seconds);
+            let mut view = GlobeViewState::from_focus(GeoPoint { lat: 0.0, lon: 0.0 });
+            view.local_mode = local;
+            follow.enable(&[severity_event("a", 4, 1), severity_event("b", 2, 2)]);
+            assert_eq!(follow.tick(&mut view, 100.0).as_deref(), Some("factal-a"));
+            let flight = follow.flight.as_ref().unwrap();
+            let arrival = flight.started + flight.duration;
+            let deadline = arrival + f64::from(seconds);
+            assert_eq!(follow.tick(&mut view, arrival), None);
+            assert_eq!(follow.tick(&mut view, deadline - 0.001), None);
+            assert_eq!(follow.target().unwrap().id, "factal-a");
+            assert_eq!(
+                follow.tick(&mut view, deadline).as_deref(),
+                Some("factal-b")
+            );
+        }
+    }
+}
+
+#[test]
+fn changing_dwell_updates_the_active_stop_without_restarting_it() {
+    let mut follow = EventFollow::default();
+    assert_eq!(follow.dwell_seconds(), 30);
+    let mut view = GlobeViewState::from_focus(GeoPoint { lat: 0.0, lon: 0.0 });
+    let events = [severity_event("a", 4, 1), severity_event("b", 2, 2)];
+    follow.enable(&events);
+    follow.tick(&mut view, 0.0);
+    let arrival = follow.flight.as_ref().unwrap().duration;
+    follow.tick(&mut view, arrival + 20.0);
+    let before = pose(&view);
+    follow.set_dwell_seconds(90);
+    assert_eq!(
+        pose(&view),
+        before,
+        "editing a setting cannot snap the camera"
+    );
+    assert_eq!(follow.flight.as_ref().unwrap().started, 0.0);
+    assert_eq!(
+        follow.tick(&mut view, arrival + 30.0),
+        None,
+        "lengthening a dwell must postpone departure from the same arrival time"
+    );
+    follow.set_dwell_seconds(15);
+    assert_eq!(
+        follow.tick(&mut view, arrival + 30.0).as_deref(),
+        Some("factal-b"),
+        "shortening below elapsed dwell should advance on the next tick"
+    );
+    follow.stop();
+    follow.enable(&events);
+    assert_eq!(
+        follow.dwell_seconds(),
+        15,
+        "toggling Follow Events preserves the setting"
+    );
+    follow.set_dwell_seconds(0);
+    assert_eq!(follow.dwell_seconds(), 5);
+    follow.set_dwell_seconds(u32::MAX);
+    assert_eq!(follow.dwell_seconds(), 300);
 }

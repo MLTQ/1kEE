@@ -1,5 +1,7 @@
 use std::sync::{OnceLock, RwLock};
 
+mod admin;
+
 // ── Theme enum ────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -647,18 +649,6 @@ pub fn road_minor_color() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(62, 61, 57),
         MapTheme::Mars => egui::Color32::from_rgb(72, 48, 42),
         MapTheme::MarsDark => egui::Color32::from_rgb(65, 24, 28),
-    }
-}
-
-/// Administrative boundary line color, keyed by OSM admin_level.
-/// Level 2 = country, 4 = state/province, 6 = county, 8 = municipality.
-/// Colors are theme-neutral — fixed RGBA values chosen to read on any dark palette.
-pub fn admin_color(level: u8) -> egui::Color32 {
-    match level {
-        2 => egui::Color32::from_rgba_unmultiplied(220, 200, 60, 200), // country — bright yellow
-        3..=4 => egui::Color32::from_rgba_unmultiplied(200, 160, 80, 190), // state — amber
-        5..=6 => egui::Color32::from_rgba_unmultiplied(170, 140, 80, 170), // county — muted
-        _ => egui::Color32::from_rgba_unmultiplied(140, 120, 80, 150), // local divisions
     }
 }
 

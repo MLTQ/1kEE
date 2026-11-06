@@ -11,9 +11,16 @@ Local Earth view using the same ground-plane projection as terrain overlays.
   vertices and connect unrelated survivors. Segments crossing the viewport remain.
 - Clip triangles to the canvas before submission, including polygons enclosing
   the entire viewport with all original vertices offscreen.
+- Outlines and fills share one snapshot of the selected theme's palette per frame.
 - Fill precedes every border; countries draw last. Fill colors vary deterministically
   by relation ID. Opacity/level changes affect the live view without retessellation.
 - Fill requires a loader-prepared mesh; incomplete/legacy boundaries stay outlines.
+- Master layer opacity fades outlines and multiplies shading strength at paint
+  time. At zero, neither outlines nor fills are submitted; cached data is retained.
 
 Source selection and automatic refresh are shared with Globe via
 `admin_layer::get_for`; Local retains its ground-plane projection and clipping.
+
+The oblique ground projection also selects the LOD worker's padded source window.
+The renderer receives nearby border pieces and compacted fill meshes, including
+full original coordinates at the closest scales.

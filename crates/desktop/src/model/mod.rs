@@ -1,10 +1,13 @@
 pub mod admin;
 mod arcgis;
 mod cameras;
+mod recap_regions;
 mod events;
 mod event_follow;
 mod flights;
+pub mod follow_recap;
 mod geo;
+pub mod gravity;
 mod geojson_layer;
 mod kml_layer;
 pub mod replay;
@@ -61,6 +64,7 @@ pub struct AppModel {
     pub selected_flight_icao24: Option<String>,
     pub globe_view: GlobeViewState,
     pub event_follow: event_follow::EventFollow,
+    pub follow_recaps: follow_recap::FollowRecaps,
     pub focused_city_id: Option<String>,
     /// Session-only clean window capture; content layers and open briefs stay visible.
     pub obs_view: bool,
@@ -81,6 +85,9 @@ pub struct AppModel {
     pub show_water: bool,
     pub show_beam: bool,
     pub show_bathymetry: bool,
+    /// Optional SWOT marine vertical gravity gradient, independent of depth.
+    pub show_swot_gravity: bool,
+    pub gravity: gravity::GravityState,
     /// Optional server-rendered hillshade projected into the local map.
     pub show_hillshade: bool,
     pub hillshade_source: crate::hillshade_source::Source,
@@ -145,6 +152,7 @@ pub struct AppModel {
     pub deflock_alpr_locations: Arc<Vec<DeflockAlprLocation>>,
     /// User-downloaded Flock positions, with their own provenance and filters.
     pub flock: crate::flock_source::Source,
+    pub buildout: crate::buildout::Source,
     /// Optional public ALPR overlay. It remains off until the operator enables it.
     pub show_deflock_alprs: bool,
     /// Human-readable cache/refresh state for the public ALPR source.
@@ -268,7 +276,10 @@ impl AppModel {
             selected_track_mmsi: None,
             selected_flight_icao24: None,
             globe_view: GlobeViewState::from_focus(GeoPoint { lat: 0.0, lon: 0.0 }),
-            event_follow: event_follow::EventFollow::default(),
+            event_follow: event_follow::EventFollow::with_dwell_seconds(
+                app_settings.event_follow_dwell_seconds,
+            ),
+            follow_recaps: follow_recap::FollowRecaps::default(),
             focused_city_id: None,
             obs_view: false,
             show_layer_drawer: false,
@@ -289,6 +300,8 @@ impl AppModel {
             hillshade_source: crate::hillshade_source::Source::default(),
             show_beam: false,
             show_bathymetry: true,
+            show_swot_gravity: false,
+            gravity: gravity::GravityState::default(),
             show_contours: true,
             contour_occlusion: true,
             legacy_contour_stroke_scale: app_settings.contour_stroke_scale,
@@ -334,6 +347,13 @@ impl AppModel {
             selected_arcgis_feature: None,
             deflock_alpr_locations: Arc::new(Vec::new()),
             flock: crate::flock_source::Source::default(),
+            buildout: crate::buildout::Source::new(
+                app_settings.ai_buildout_enabled,
+                crate::buildout::cache_path(
+                    app_settings.data_root.as_deref(),
+                    selected_root.as_deref(),
+                ),
+            ),
             show_deflock_alprs: false,
             deflock_status: "cache pending".into(),
             deflock_snapshot_revision: 0,
@@ -565,6 +585,7 @@ impl AppModel {
             windy_webcams_api_key: self.windy_webcams_api_key.trim().to_owned(),
             ny511_api_key: self.ny511_api_key.trim().to_owned(),
             eyes_on_enabled: self.eyes_on_enabled,
+            ai_buildout_enabled: self.buildout.enabled,
             eyes_on_country_code: settings_store::normalize_eyes_on_country_code(
                 &self.eyes_on_country_code,
             ),
@@ -583,6 +604,7 @@ impl AppModel {
             contour_stroke_scale: self.legacy_contour_stroke_scale,
             contour_stroke_width_px: self.contour_stroke_width_px,
             marker_scale: self.marker_scale,
+            event_follow_dwell_seconds: self.event_follow.dwell_seconds(),
             threedep_enabled: self.settings_threedep_enabled,
             threedep_cache_budget_gb: settings_store::normalize_threedep_cache_budget_gb(
                 self.settings_threedep_cache_budget_gb,
@@ -592,7 +614,12 @@ impl AppModel {
                     self.settings_local_contour_vram_budget_gb,
                 ),
         };
-        settings_store::save_app_settings(&settings)
+        settings_store::save_app_settings(&settings)?;
+        self.buildout.set_path(crate::buildout::cache_path(
+            settings_store::load_app_settings().data_root.as_deref(),
+            self.selected_root.as_deref(),
+        ));
+        Ok(())
     }
 
     pub fn apply_saved_settings(&mut self) {
@@ -604,6 +631,11 @@ impl AppModel {
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_default();
+        self.buildout.enabled = settings.ai_buildout_enabled;
+        self.buildout.set_path(crate::buildout::cache_path(
+            settings.data_root.as_deref(),
+            self.selected_root.as_deref(),
+        ));
         self.settings_data_root = settings.data_root.unwrap_or_default();
         self.settings_derived_root = settings.derived_root.unwrap_or_default();
         self.settings_srtm_root = settings.srtm_root.unwrap_or_default();
@@ -622,6 +654,7 @@ impl AppModel {
             settings_store::normalize_contour_stroke_scale(settings.contour_stroke_scale);
         self.contour_stroke_width_px = settings.contour_stroke_width_px;
         self.set_marker_scale(settings.marker_scale);
+        self.event_follow.set_dwell_seconds(settings.event_follow_dwell_seconds);
         self.windy_webcams_api_key = settings.windy_webcams_api_key.trim().to_owned();
         self.ny511_api_key = settings.ny511_api_key.trim().to_owned();
         self.eyes_on_enabled = settings.eyes_on_enabled;
@@ -929,6 +962,11 @@ impl AppModel {
         self.nearby_camera_snapshot(radius_km).as_ref().clone()
     }
 
+    /// Changes whenever camera registry content or connection metadata changes.
+    pub fn camera_registry_revision(&self) -> u64 {
+        self.camera_registry_revision
+    }
+
     /// Returns a shared, sorted nearby-camera snapshot for the current event.
     /// Globe and local scenes reuse this allocation across frames until either
     /// the selected event, radius, or camera registry content changes.
@@ -986,38 +1024,6 @@ impl AppModel {
     fn invalidate_nearby_camera_cache(&mut self) {
         self.camera_registry_revision = self.camera_registry_revision.wrapping_add(1);
         self.nearby_camera_cache.get_mut().take();
-    }
-
-    pub fn toggle_event_follow(&mut self) {
-        if self.event_follow.enabled() {
-            self.stop_event_follow();
-        } else if self.active_body == ActiveBody::Earth {
-            self.replay_mode = false;
-            self.replay_state = None;
-            self.globe_view.meander_mode = false;
-            self.globe_view.auto_spin = false;
-            self.event_follow.enable(&self.events);
-        }
-    }
-
-    pub fn stop_event_follow(&mut self) {
-        if self.event_follow.enabled() {
-            self.event_follow.stop();
-            self.globe_view.stop_motion();
-        }
-    }
-
-    pub fn tick_event_follow(&mut self, now: f64) {
-        if self.active_body != ActiveBody::Earth || self.replay_mode {
-            self.stop_event_follow();
-            return;
-        }
-        if let Some(id) = self.event_follow.tick(&mut self.globe_view, now) {
-            self.focused_city_id = None;
-            self.selected_event_id = Some(id);
-            self.selected_camera_id = self.nearby_cameras(250.0).first().map(|c| c.id.clone());
-            self.factal_brief_open = true;
-        }
     }
 
     /// Enter or exit replay mode.  On enter: loads history from the local

@@ -18,3 +18,11 @@ original PBF, with a durable scan checkpoint after every 32 compressed blocks.
   settings. `finish` marks completion only after feature processing succeeds.
 - Up to eight million descriptors are supported; decoded work is bounded by
   32 compressed blocks plus active decoders, independently of total planet size.
+
+Resume now separates ephemeral device numbers from persistent identity evidence.
+An optional JSON source_fingerprint upgrades existing schema-v1 databases without
+recreating tables. On first upgrade, up to 64 spread node blocks must decode with
+the saved lengths/counts/ID ranges. Future opens require the persisted sampled
+SHA-256 signature. Only verified identity fields are updated; offsets, descriptors,
+node counts, build settings, completion, and other scan databases are retained.
+Metadata/content mismatches fail before writes to an existing checkpoint.

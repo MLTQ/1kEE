@@ -210,3 +210,159 @@ fn composite(device: &wgpu::Device, queue: &wgpu::Queue, cache: &Cache) -> Vec<u
     queue.submit([encoder.finish()]);
     pixels(device, queue, &texture)
 }
+
+#[test]
+#[ignore = "requires GPU; verifies immediate resident-tile recoloring without new geometry"]
+fn resident_theme_changes_recolor_complete_and_inflight_globe_images() {
+    let (device, queue) = gpu();
+    let mut tile = super::super::tests::tile(0.0, 2_200_001);
+    for (index, point) in Arc::make_mut(&mut tile.contours)[0]
+        .points
+        .iter_mut()
+        .enumerate()
+    {
+        point.lon = index as f32 * 0.0000001;
+        point.lat *= 10.0;
+    }
+    Arc::make_mut(&mut tile.contours).push(ContourPath {
+        elevation_m: 225.0,
+        points: vec![
+            GeoPoint {
+                lat: 1.0,
+                lon: -0.2,
+            },
+            GeoPoint { lat: 1.0, lon: 0.4 },
+        ],
+    });
+    let frame = Arc::new(prepare(
+        super::super::tests::frame(vec![tile]),
+        None,
+        egui::Color32::RED,
+        egui::Color32::GREEN,
+    ));
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(256.0, 128.0));
+    let view = GlobeViewState::from_focus(GeoPoint { lat: 0.0, lon: 0.0 });
+    let layout = GlobeLayout {
+        center: rect.center(),
+        radius: 1000.0,
+        focal_length: 2.0,
+        camera_distance: 3.0,
+    };
+    let viewport = Viewport::new(&layout, &view, rect);
+    let mut gpu = Gpu::default();
+    while !gpu.stage(&device, &frame, viewport) {}
+    let buffers: Vec<_> = gpu
+        .tiles
+        .values()
+        .flatten()
+        .map(|chunk| chunk.buffer.clone())
+        .collect();
+    let res = ContourPassResources::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+    let mut uniforms = ContourCallback::new(
+        ContourLayer::SrtmGlobe,
+        0,
+        Arc::new(vec![]),
+        &layout,
+        &view,
+        0.02,
+        0.92,
+        1.0,
+        1.0,
+    )
+    .uniforms;
+    uniforms.viewport_size = [256.0, 128.0];
+    let mut image = Cache::new(&device, res.format);
+    let step = |image: &mut Cache, uniforms: &ContourUniforms| {
+        queue.write_buffer(
+            &res.uniform_buf,
+            ContourLayer::SrtmGlobe.slot() as u64 * UNIFORM_STRIDE,
+            bytemuck::bytes_of(uniforms),
+        );
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let pending = image.prepare(
+            &device,
+            &queue,
+            &mut encoder,
+            res.format,
+            &res.pipeline,
+            &res.bind_group,
+            &frame,
+            &gpu.tiles,
+            uniforms,
+            viewport,
+            1,
+        );
+        queue.submit([encoder.finish()]);
+        device.poll(wgpu::Maintain::Wait);
+        pending
+    };
+    image.set_palette(egui::Color32::RED, egui::Color32::GREEN);
+    while step(&mut image, &uniforms) {}
+    let original = composite(&device, &queue, &image);
+    assert!(original.chunks_exact(4).any(|p| p[0] > 10));
+    assert!(original.chunks_exact(4).any(|p| p[1] > 10));
+    let full = image.full.as_ref().unwrap().texture.clone();
+    let progress = image.next_chunk;
+    // Primary RGB colors hide an erroneous gamma conversion. Check the actual
+    // Topo orange/blue against the independently rendered class coverage too.
+    let major = egui::Color32::from_rgb(245, 125, 78);
+    let minor = egui::Color32::from_rgb(96, 164, 181).gamma_multiply(0.78);
+    image.set_palette(major, minor);
+    assert!(!step(&mut image, &uniforms));
+    let topo = composite(&device, &queue, &image);
+    for (coverage, actual) in original.chunks_exact(4).zip(topo.chunks_exact(4)) {
+        for channel in 0..3 {
+            let expected = (coverage[0] as f32 * major.to_array()[channel] as f32 / 255.0
+                + coverage[1] as f32 * minor.to_array()[channel] as f32 / 255.0)
+                .round().clamp(0.0, 255.0) as u8;
+            assert!(actual[channel].abs_diff(expected) <= 2,
+                "retained Topo palette changed channel {channel}: {actual:?}, coverage={coverage:?}, expected={expected}");
+        }
+    }
+    assert_eq!(image.full.as_ref().unwrap().texture, full);
+    assert_eq!(image.next_chunk, progress);
+    image.set_palette(egui::Color32::BLUE, egui::Color32::YELLOW);
+    assert!(!step(&mut image, &uniforms));
+    assert_eq!(image.full.as_ref().unwrap().texture, full);
+    assert_eq!(image.next_chunk, progress);
+    assert!(image.working.is_none());
+    let recolored = composite(&device, &queue, &image);
+    assert_ne!(original, recolored);
+    assert!(recolored.chunks_exact(4).any(|p| p[2] > 10));
+    image.set_palette(egui::Color32::RED, egui::Color32::GREEN);
+    assert!(!step(&mut image, &uniforms));
+    assert_eq!(composite(&device, &queue, &image), original);
+
+    let yaw = view.yaw + 0.002;
+    uniforms.yaw_sin = yaw.sin();
+    uniforms.yaw_cos = yaw.cos();
+    assert!(step(&mut image, &uniforms));
+    let working = image
+        .working
+        .as_ref()
+        .expect("dense frame is still refining");
+    assert!(working.next > 0);
+    let working_target = working.target.texture.clone();
+    assert_eq!(image.full.as_ref().unwrap().texture, full);
+    image.set_palette(egui::Color32::BLUE, egui::Color32::YELLOW);
+    assert!(!step(&mut image, &uniforms));
+    assert_eq!(
+        image.full.as_ref().unwrap().texture,
+        working_target,
+        "palette change must finish the existing job instead of restarting it"
+    );
+    assert!(
+        composite(&device, &queue, &image)
+            .chunks_exact(4)
+            .any(|p| p[2] > 10)
+    );
+    assert_eq!(
+        gpu.tiles
+            .values()
+            .flatten()
+            .map(|chunk| chunk.buffer.clone())
+            .collect::<Vec<_>>(),
+        buffers
+    );
+    assert!(Arc::ptr_eq(gpu.displayed.as_ref().unwrap(), &frame));
+}

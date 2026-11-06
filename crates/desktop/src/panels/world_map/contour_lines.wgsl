@@ -38,7 +38,7 @@ struct VsIn {
     @builtin(vertex_index) vidx: u32,
     @location(0) a: vec3<f32>,      // unit-sphere endpoint A
     @location(1) b: vec3<f32>,      // unit-sphere endpoint B
-    @location(2) color: vec4<f32>,  // premultiplied linear RGBA
+    @location(2) color: vec4<f32>,  // exact stored Color32 display RGBA
 }
 
 struct VsOut {
@@ -127,5 +127,5 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // than a fine one. At a pixel and above this is exactly 1.0.
     let sub_pixel = clamp(2.0 * u.stroke_half_px, 0.0, 1.0);
     // Colour is premultiplied — scale the whole vector by coverage × layer fade.
-    return in.color * (edge * u.alpha * sub_pixel);
+    return map_output_gamma(in.color * (edge * u.alpha * sub_pixel));
 }

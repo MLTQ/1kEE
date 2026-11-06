@@ -25,7 +25,22 @@ Renders the operator-facing Brief window for the currently selected live event. 
   window ID preserves ordinary brief placement across the title change.
 
 Event-follow mode uses a separate, narrower right-anchored window placement with vertical scrolling to keep the map center clear. Ordinary brief placement is preserved separately. The window can be closed during an orbit; the next new target reopens it.
+Its anchor is constrained to the remaining map rectangle after side panels,
+keeping the Brief beside the nearest-camera column instead of covering feeds.
 
-During event follow, the brief displays “Event tour · N of M” for the current
-record's rank in the latest payload's queue (up to six stops). A current record
-that has left the refreshed queue keeps its brief but omits the rank indicator.
+During event follow, the brief displays “Priority rank · N of M” for the current
+record's severity rank in the entire live pool. This is independent of the
+weighted visit order. A record that has left the refreshed pool keeps its brief
+but omits the rank indicator.
+
+The follow window reserves the five-row chyron and map footer at the bottom of
+the screen, including the compact coordinate row. Long briefs scroll inside
+that height instead of covering the crawl or readout.
+
+Automatic continental recaps suppress the live Brief without changing its open
+flag. Live touring reopens/selects the next stop through its normal path.
+
+A small drawn radio icon in the native Brief title bar passes the displayed
+event to `EventRadio`, without occupying a row in the brief body. The action uses
+the window's own layer, sits beside Close, and moves with both ordinary and
+anchored Follow windows. Radio playback stays pinned until an explicit new search.

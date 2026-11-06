@@ -1,4 +1,4 @@
-//! Persistent, non-interactive event cards for the automatic event tour.
+//! The selected event's non-interactive map card while its Brief is open.
 use super::marker_style::MapMarker;
 use crate::model::EventRecord;
 use crate::theme;
@@ -17,6 +17,7 @@ pub(super) fn draw<'a>(
     events: impl Iterator<Item = &'a EventRecord>,
     markers: &[MapMarker],
     opacity: f32,
+    selected: Option<&str>,
 ) {
     let layout_id = egui::Id::new("follow_event_card_layout");
     let mut layout = painter.ctx().data_mut(|data| {
@@ -28,6 +29,9 @@ pub(super) fn draw<'a>(
     if opacity <= 0.0 {
         return;
     }
+    let Some(selected) = selected else {
+        return;
+    };
     let bounds = viewport.shrink(PADDING);
     if bounds.width() <= PADDING * 2.0 || bounds.height() <= PADDING * 2.0 {
         return;
@@ -40,6 +44,7 @@ pub(super) fn draw<'a>(
         .map(|marker| (marker.id.as_str(), marker))
         .collect();
     let mut visible: Vec<_> = events
+        .filter(|event| event.id == selected)
         .filter_map(|event| {
             markers
                 .get(event.id.as_str())

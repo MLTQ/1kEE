@@ -408,6 +408,32 @@ impl NodeStore {
             .collect())
     }
 
+    /// Index membership once so country-first traversal does not scan all ways
+    /// for every relation. The old whole-dataset collector stays available to focused builds.
+    pub fn prepare_admin_assembly(&self) -> Result<(), String> {
+        self.connection.execute_batch(
+            "CREATE INDEX IF NOT EXISTS admin_members_by_relation ON admin_member_ways(relation_id, way_id)",
+        )
+            .map_err(|e| e.to_string())
+    }
+    pub fn admin_source_identity(&self) -> Result<String, String> {
+        self.connection
+            .query_row("SELECT value FROM build_state WHERE key='admin_source'", [], |r| r.get(0))
+            .map_err(|e| e.to_string())
+    }
+    pub fn admin_relations_at_level(&self, level: u8) -> Result<Vec<(i64, Option<String>)>, String> {
+        self.connection
+            .prepare("SELECT relation_id,name FROM admin_relations WHERE admin_level=?1 ORDER BY relation_id")
+            .and_then(|mut s| s.query_map([level], |r| Ok((r.get(0)?, r.get(1)?)))?.collect())
+            .map_err(|e| e.to_string())
+    }
+    pub fn admin_member_ids(&self, relation: i64) -> Result<Vec<i64>, String> {
+        self.connection
+            .prepare_cached("SELECT way_id FROM admin_member_ways WHERE relation_id=?1 ORDER BY way_id")
+            .and_then(|mut s| s.query_map([relation], |r| r.get(0))?.collect())
+            .map_err(|e| e.to_string())
+    }
+
     /// Invalidate only administrative scan state when the source or importer changes.
     pub fn prepare_admin_source(&mut self, source: &Path) -> Result<(), String> {
         let metadata = fs::metadata(source).map_err(|e| e.to_string())?;

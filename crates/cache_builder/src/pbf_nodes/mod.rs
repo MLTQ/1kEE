@@ -1,38 +1,18 @@
 //! Coordinate lookups in the original PBF, with no expanded planet node file.
 use osmpbf::{BlobDecode, BlobReader, Element};
-use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::os::unix::fs::{FileExt, MetadataExt};
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 mod cache;
 mod index;
+mod source;
 pub use cache::Session;
 pub use index::BuildState;
+use source::Stamp;
 
 const MAX_BLOCK_BYTES: u64 = 33 * 1024 * 1024;
 const MAX_BLOCK_NODES: usize = 2_000_000;
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-struct Stamp {
-    len: u64,
-    device: u64,
-    inode: u64,
-    seconds: i64,
-    nanos: i64,
-}
-impl Stamp {
-    fn read(path: &Path) -> Result<Self, String> {
-        let m = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        Ok(Self {
-            len: m.len(),
-            device: m.dev(),
-            inode: m.ino(),
-            seconds: m.mtime(),
-            nanos: m.mtime_nsec(),
-        })
-    }
-}
 
 #[derive(Clone, Copy, Debug)]
 struct Block {

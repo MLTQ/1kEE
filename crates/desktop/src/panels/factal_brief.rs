@@ -1,8 +1,8 @@
 use crate::model::AppModel;
 use crate::theme;
 
-pub fn render_factal_brief(ctx: &egui::Context, model: &mut AppModel) {
-    if !model.factal_brief_open {
+pub fn render_factal_brief(ctx: &egui::Context, model: &mut AppModel, radio: &mut super::EventRadio) {
+    if !model.factal_brief_open || model.follow_recaps.active.is_some() {
         return;
     }
 
@@ -24,15 +24,16 @@ pub fn render_factal_brief(ctx: &egui::Context, model: &mut AppModel) {
         .frame(egui::Frame::window(&ctx.style()));
     if model.event_follow.enabled() {
         window = window.id(egui::Id::new("event-follow-brief"))
+            .constrain_to(ctx.available_rect())
             .default_width(360.0)
             .default_height(380.0)
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-20.0, 64.0))
-            .max_height((ctx.screen_rect().height() - 100.0).max(160.0))
+            .max_height((ctx.screen_rect().height() - 100.0 - super::event_chyron::HEIGHT - super::event_chyron::COORDINATE_FOOTER_HEIGHT - 120.0).max(120.0))
             .vscroll(true);
     }
-    window.show(ctx, |ui| {
+    let shown = window.show(ctx, |ui| {
             if let Some((position, total)) = tour_position {
-                ui.small(format!("Event tour · {position} of {total}"));
+                ui.small(format!("Priority rank · {position} of {total}"));
             }
             ui.heading(event.title.as_str());
             ui.colored_label(event.severity.color(), event.severity.label());
@@ -114,4 +115,7 @@ pub fn render_factal_brief(ctx: &egui::Context, model: &mut AppModel) {
                     });
             });
         });
+    if let Some(shown) = shown {
+        radio.title_bar_button(ctx, &shown.response, &event);
+    }
 }

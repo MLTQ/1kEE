@@ -5,6 +5,9 @@ use std::sync::{Mutex, OnceLock};
 
 pub(crate) const MIN_MARKER_SCALE: f32 = 0.25;
 pub(crate) const MAX_MARKER_SCALE: f32 = 2.0;
+pub(crate) const DEFAULT_EVENT_FOLLOW_DWELL_SECONDS: u32 = 30;
+pub(crate) const MIN_EVENT_FOLLOW_DWELL_SECONDS: u32 = 5;
+pub(crate) const MAX_EVENT_FOLLOW_DWELL_SECONDS: u32 = 300;
 
 const SETTINGS_FILE: &str = ".1kee_settings.json";
 
@@ -57,6 +60,8 @@ pub struct AppSettings {
     /// requests to directory-listed feeds.
     #[serde(default)]
     pub eyes_on_enabled: bool,
+    #[serde(default)]
+    pub ai_buildout_enabled: bool,
     /// Optional ISO alpha-2 country code used to scope directory discovery.
     #[serde(default)]
     pub eyes_on_country_code: String,
@@ -98,6 +103,9 @@ pub struct AppSettings {
     /// Relative size of webcam and event markers in both map views.
     #[serde(default = "default_marker_scale")]
     pub marker_scale: f32,
+    /// Time spent orbiting each followed event after the camera arrives.
+    #[serde(default = "default_event_follow_dwell_seconds")]
+    pub event_follow_dwell_seconds: u32,
     /// Enables on-demand detailed elevation from USGS and international
     /// providers. The persisted key is retained for settings compatibility.
     #[serde(default = "default_threedep_enabled")]
@@ -117,6 +125,7 @@ impl Default for AppSettings {
             windy_webcams_api_key: String::new(),
             ny511_api_key: String::new(),
             eyes_on_enabled: false,
+            ai_buildout_enabled: false,
             eyes_on_country_code: String::new(),
             eyes_on_requests_per_minute: DEFAULT_EYES_ON_REQUESTS_PER_MINUTE,
             aisstream_api_key: String::new(),
@@ -131,6 +140,7 @@ impl Default for AppSettings {
             contour_stroke_scale: DEFAULT_CONTOUR_STROKE_SCALE,
             contour_stroke_width_px: None,
             marker_scale: default_marker_scale(),
+            event_follow_dwell_seconds: DEFAULT_EVENT_FOLLOW_DWELL_SECONDS,
             threedep_enabled: true,
             threedep_cache_budget_gb: DEFAULT_THREEDEP_CACHE_BUDGET_GB,
             local_contour_vram_budget_gb: DEFAULT_LOCAL_CONTOUR_VRAM_BUDGET_GB,
@@ -140,6 +150,14 @@ impl Default for AppSettings {
 
 fn default_marker_scale() -> f32 {
     1.0
+}
+
+fn default_event_follow_dwell_seconds() -> u32 {
+    DEFAULT_EVENT_FOLLOW_DWELL_SECONDS
+}
+
+pub(crate) fn normalize_event_follow_dwell_seconds(seconds: u32) -> u32 {
+    seconds.clamp(MIN_EVENT_FOLLOW_DWELL_SECONDS, MAX_EVENT_FOLLOW_DWELL_SECONDS)
 }
 
 pub(crate) fn normalize_marker_scale(value: f32) -> f32 {
@@ -442,6 +460,8 @@ fn normalize_settings(mut settings: AppSettings) -> AppSettings {
     settings.planet_path = normalize_optional_owned(settings.planet_path);
     settings.gdal_bin_dir = normalize_optional_owned(settings.gdal_bin_dir);
     settings.marker_scale = normalize_marker_scale(settings.marker_scale);
+    settings.event_follow_dwell_seconds =
+        normalize_event_follow_dwell_seconds(settings.event_follow_dwell_seconds);
     settings.contour_stroke_scale = normalize_contour_stroke_scale(settings.contour_stroke_scale);
     settings.contour_stroke_width_px =
         normalize_optional_contour_stroke_width_px(settings.contour_stroke_width_px);
@@ -534,6 +554,27 @@ fn path_from_optional(text: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_follow_dwell_survives_serialization_and_normalizes_legacy_and_bounds() {
+        let mut settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.event_follow_dwell_seconds, 30);
+        assert_eq!(AppSettings::default().event_follow_dwell_seconds, 30);
+        settings.event_follow_dwell_seconds = 90;
+        let json = serde_json::to_string(&settings).unwrap();
+        let restored = normalize_settings(serde_json::from_str(&json).unwrap());
+        assert_eq!(restored.event_follow_dwell_seconds, 90);
+        settings.event_follow_dwell_seconds = 0;
+        assert_eq!(
+            normalize_settings(settings.clone()).event_follow_dwell_seconds,
+            5
+        );
+        settings.event_follow_dwell_seconds = u32::MAX;
+        assert_eq!(
+            normalize_settings(settings).event_follow_dwell_seconds,
+            300
+        );
+    }
 
     #[test]
     fn marker_size_survives_serialization_and_normalizes_legacy_or_invalid_values() {

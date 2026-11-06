@@ -41,3 +41,5 @@ Parses the cache-builder CLI without pulling in a heavier argument framework yet
 
 - `platforms` builds a static offshore inventory archive from normalized source data.
 - Contour examples use `srtm_native_v1.sqlite`, the desktop's native SRTM cache.
+
+`admin-lods <admin_cells directory>` prewarms the same per-level archives used by the desktop and reports segment counts by tier.

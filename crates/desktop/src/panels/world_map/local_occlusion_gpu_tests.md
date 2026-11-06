@@ -4,12 +4,19 @@
 Private offscreen GPU tests for real contour depth visibility, camera/source
 invalidation and a repeatable synthetic visual/performance comparison.
 
+The test-only `Harness` also serves `local_terrain_scene/celestial_gpu_tests.rs`.
+Its renderer, optional palette and pixel readback stay isolated from the app;
+the celestial checks build batches through the production scene entry point.
+
 ## Coverage
 - Nearby ridges hide lower distant lines without removing foreground, ridge
   crests or higher distant terrain.
 - Unchanged frames reuse depth; moving camera, replacement geometry and toggles
   invalidate it. Hidden terrain releases resources. Road uniforms remain separate.
 - Offset callback rectangles use correct depth-texture coordinates.
+- `resident_theme_changes_recolor_local_tiles_without_reuploads` switches the
+  major/minor palette and back on the same line/curtain buffers. Pixels recolor
+  immediately, round-trip exactly, keep road colors and reuse the depth image.
 - Visual fixture emits before/after PNGs in /tmp; timings include egui preparation,
   encoding, GPU execution and synchronization, excluding readback and image saving.
 

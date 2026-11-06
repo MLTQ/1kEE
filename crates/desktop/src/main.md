@@ -12,6 +12,7 @@ application with the map-oriented window configuration.
 - `flock_source` loads the downloaded Flock TSV as a separate public position layer.
 - `elevation_sources` supplies bounded international terrain acquisition to the
   existing Earth contour and point-sampling pipelines.
+- `radio` supplies open-directory discovery, saved public streams and native audio playback.
 - **Does**: Makes source adapters, model modules, map panels, and application
   lifecycle code available inside the desktop binary.
 - **Interacts with**: all crate-local modules.
@@ -28,8 +29,8 @@ application with the map-oriented window configuration.
 
 ### `camera_feed_viewer`
 
-- **Does**: Declares the non-blocking snapshot/MJPEG reader and floating egui
-  live-feed window.
+- **Does**: Declares the floating egui live-feed window; `camera_feed_player`
+  shares its non-blocking snapshot/MJPEG playback with the event camera sidebar.
 - **Interacts with**: `app.rs` and camera selection in `model/mod.rs`.
 
 ### `main`
@@ -52,3 +53,5 @@ application with the map-oriented window configuration.
 
 - Source module registration retains fire_source alongside the packed archive
   and baked-height helpers when integrating upstream changes.
+
+The buildout module owns public campus, rule and news ingestion and its desktop browser.

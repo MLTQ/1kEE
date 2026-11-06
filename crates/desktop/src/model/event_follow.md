@@ -2,17 +2,24 @@
 
 Owns the live-event idle mode's camera trajectory and stop timing. It has no
 rendering, disk or network work. `AppModel` supplies completed Factal payloads
-and advances it with egui's absolute time; `event_tour.rs` owns ranking and cycling.
+and advances it with egui's absolute time; `event_tour.rs` owns weighted selection.
 
-- Enabling tours the current payload's six most severe geolocated Factal records,
-  or waits for the first payload. Each refresh rebuilds the ranking. A changed
-  top-ranked ID takes priority; otherwise the current flight/dwell continues and
-  the cursor advances through the refreshed order. Brief updates alone do not
-  restart motion. A single record stays in orbit; an empty payload schedules no
-  new stops. Network failures leave the last successful tour available.
-- Each stop gets its flight time plus ten seconds orbiting with its brief open.
-  After the final stop, the tour repeats while waiting for the next payload.
+- Enabling starts with the highest-priority eligible record, or waits for real
+  data. All eligible Factal records in the live window join a severity-weighted
+  rotation. Higher-severity stories get more visits, while waiting credit gives
+  other stories turns and recent-stop exclusion spaces out repeats.
+- Refreshes retain scheduling history and update metadata without interrupting
+  flight/dwell, even if a newer or more severe headline arrives. A single record
+  stays in orbit; an empty payload schedules no new stops. Network failures leave
+  the last successful tour available.
+- Each stop gets its flight time plus the configured dwell orbiting with its
+  brief open (30 seconds by default, adjustable from 5 to 300 seconds).
+  Selection continues from the current weighted rotation between payloads.
   Missed frames do not cause catch-up hops through multiple unread briefs.
+- `with_dwell_seconds` restores the saved duration. `set_dwell_seconds` updates
+  the current stop's deadline relative to its original arrival without restarting
+  the camera or tour. A shorter duration already elapsed advances on the next tick.
+  Stop/enable preserves the chosen duration; normalization matches Settings.
 - `tick` returns each newly followed ID for selection without a focus snap. It
   retains the active brief/marker if the record ages out of the live page.
   `tour_position` supplies the current severity rank/count for the brief.
@@ -24,13 +31,19 @@ and advances it with egui's absolute time; `event_tour.rs` owns ranking and cycl
 - Quintic Hermite curves preserve position/velocity on retarget and join the
   orbit velocity at arrival. Widen/approach zoom phases scale with duration;
   local heading advances at the orbit rate so nearby hops do not swivel sharply.
-- `event_label_opacity` fades regional cards in over 0.45 seconds after the
+- `event_label_opacity` fades the selected event's card in over 0.45 seconds after the
   flight reaches its arrival pose/zoom. Departure fades from the current opacity
   to zero over 0.25 seconds, then stays hidden throughout travel. Retargeting
   during either fade preserves opacity; no separate zoom threshold can drift
   from the trajectory's actual destination in Globe or Local.
-- Manual input, another idle mode, replay or leaving Earth cancels the controller
+- The separate five-row chyron remains readable throughout travel; camera
+  opacity never hides or restarts a summary crawl.
+- Manual input, another idle mode, manual Replay or leaving Earth cancels the controller
   and discards the tour. No synthetic events enter runtime state.
 
 `event_follow_tests.rs` checks ranking, queue refresh/cycling, dwell, adaptive
 travel timing, smooth joins, model selection/brief behavior, and cancellation.
+
+`release_camera` drops the active flight/velocity while retaining tour history,
+target and dwell. `follow_recap.rs` uses it to suspend movement during an
+automatic recap; the first returning tick plans a fresh live flight.

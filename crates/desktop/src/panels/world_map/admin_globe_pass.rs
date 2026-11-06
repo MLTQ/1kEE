@@ -1,8 +1,12 @@
-//! Bounded GPU uploads and perspective/horizon-correct spherical polygon fill.
+//! Atomic publication and camera-correct drawing of a complete globe boundary overlay.
+#[path = "admin_globe_upload.rs"]
+mod upload;
 use super::{
-    contour_pass::{ContourPassResources, InstanceChunk},
+    admin_globe::{Appearance, Batch},
+    contour_pass::{
+        ContourLayer, ContourPassResources, ContourUniforms, InstanceChunk, SegmentInstance,
+    },
     globe_scene::GlobeLayout,
-    line_upload::Upload,
 };
 use crate::model::{GeoPoint, GlobeViewState};
 use eframe::{egui_wgpu, wgpu};
@@ -45,16 +49,18 @@ struct Uniforms {
     _pad: [f32; 2],
 }
 const _: () = assert!(std::mem::size_of::<Uniforms>() == 64);
+#[derive(Default)]
 struct Resources {
+    used: bool,
+    geometry: upload::Geometry,
+    fill: Option<FillPass>,
+}
+struct FillPass {
     pipeline: wgpu::RenderPipeline,
     uniform: wgpu::Buffer,
     group: wgpu::BindGroup,
-    used: bool,
-    version: u64,
-    chunks: Vec<InstanceChunk>,
-    pending: Option<(u64, Upload<Triangle>)>,
 }
-impl Resources {
+impl FillPass {
     fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("admin globe fill"),
@@ -106,33 +112,43 @@ impl Resources {
             pipeline,
             uniform,
             group,
-            used: false,
-            version: 0,
-            chunks: vec![],
-            pending: None,
         }
     }
 }
 pub(super) struct Callback {
-    version: u64,
-    triangles: Arc<Vec<Triangle>>,
+    batch: Arc<Batch>,
+    shade: bool,
+    line_view: ContourUniforms,
     uniforms: Uniforms,
 }
 impl Callback {
     pub fn callback(
-        version: u64,
-        triangles: Arc<Vec<Triangle>>,
+        batch: Arc<Batch>,
         layout: &GlobeLayout,
         view: &GlobeViewState,
+        shade: bool,
         opacity: f32,
-        ppp: f32,
-        rect: egui::Rect,
+        layer_opacity: f32,
+        painter: &egui::Painter,
     ) -> egui::PaintCallback {
+        let rect = painter.clip_rect();
+        let ppp = painter.ctx().pixels_per_point();
+        let mut line_view = ContourUniforms::for_view(
+            ContourLayer::Admin,
+            layout,
+            view,
+            0.0,
+            layer_opacity,
+            1.2,
+            ppp,
+        );
+        line_view.set_viewport(rect);
         egui_wgpu::Callback::new_paint_callback(
             rect,
             Self {
-                version,
-                triangles,
+                batch,
+                shade,
+                line_view,
                 uniforms: Uniforms {
                     center: [layout.center.x * ppp, layout.center.y * ppp],
                     origin: [rect.min.x * ppp, rect.min.y * ppp],
@@ -141,7 +157,8 @@ impl Callback {
                     pitch: [view.pitch.sin(), view.pitch.cos()],
                     radius_focal: layout.radius * layout.focal_length * ppp,
                     distance: layout.camera_distance,
-                    opacity: (opacity.clamp(0., 0.5) * 255.0) as u8 as f32 / 255.0,
+                    opacity: ((opacity * layer_opacity).clamp(0., 0.5) * 255.0) as u8 as f32
+                        / 255.0,
                     linear_target: 0.,
                     _pad: [0.; 2],
                 },
@@ -158,28 +175,29 @@ impl egui_wgpu::CallbackTrait for Callback {
         _: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        if resources.get::<Resources>().is_none() {
-            let Some(contours) = resources.get::<ContourPassResources>() else {
-                return vec![];
-            };
-            let format = contours.format;
-            resources.insert(Resources::new(device, format));
-        }
-        let contours = resources.get_mut::<ContourPassResources>().unwrap();
+        let Some(contours) = resources.get_mut::<ContourPassResources>() else {
+            return vec![];
+        };
+        contours.write_view(queue, ContourLayer::Admin, &self.line_view);
+        let format = contours.format;
         let mut budget = std::mem::take(&mut contours.uploads);
-        let mut uniforms = self.uniforms;
-        uniforms.linear_target = f32::from(contours.format.is_srgb());
+        if resources.get::<Resources>().is_none() {
+            resources.insert(Resources::default());
+        }
         let res = resources.get_mut::<Resources>().unwrap();
         res.used = true;
-        queue.write_buffer(&res.uniform, 0, bytemuck::bytes_of(&uniforms));
-        if res.version != self.version || res.pending.is_some() {
-            let (version, upload) = res
-                .pending
-                .get_or_insert_with(|| (self.version, Upload::new(self.triangles.clone())));
-            if upload.advance(device, &mut budget) {
-                res.version = *version;
-                res.chunks = res.pending.take().unwrap().1.chunks;
-            }
+        if self.shade {
+            let fill = res
+                .fill
+                .get_or_insert_with(|| FillPass::new(device, format));
+            let mut uniforms = self.uniforms;
+            uniforms.linear_target = f32::from(format.is_srgb());
+            queue.write_buffer(&fill.uniform, 0, bytemuck::bytes_of(&uniforms));
+        }
+        if !res
+            .geometry
+            .stage(device, &mut budget, &self.batch, self.shade)
+        {
             crate::app::request_repaint();
         }
         resources.get_mut::<ContourPassResources>().unwrap().uploads = budget;
@@ -194,14 +212,19 @@ impl egui_wgpu::CallbackTrait for Callback {
         let Some(res) = resources.get::<Resources>() else {
             return;
         };
-        if res.version != self.version {
+        let Some(displayed) = &res.geometry.displayed else {
             return;
+        };
+        if let (Some(fill), Some(pipeline)) = (&displayed.fill, &res.fill) {
+            pass.set_pipeline(&pipeline.pipeline);
+            pass.set_bind_group(0, &pipeline.group, &[]);
+            for chunk in fill {
+                pass.set_vertex_buffer(0, chunk.buffer.slice(..));
+                pass.draw(0..3, 0..chunk.count);
+            }
         }
-        pass.set_pipeline(&res.pipeline);
-        pass.set_bind_group(0, &res.group, &[]);
-        for chunk in &res.chunks {
-            pass.set_vertex_buffer(0, chunk.buffer.slice(..));
-            pass.draw(0..3, 0..chunk.count);
+        if let Some(contours) = resources.get::<ContourPassResources>() {
+            contours.draw_chunks(pass, ContourLayer::Admin, &displayed.lines);
         }
     }
 }
@@ -216,8 +239,6 @@ pub(super) fn end_frame(resources: &mut egui_wgpu::CallbackResources) {
     if let Some(res) = resources.get_mut::<Resources>()
         && !res.used
     {
-        res.chunks.clear();
-        res.pending = None;
-        res.version = 0;
+        res.geometry = upload::Geometry::default();
     }
 }

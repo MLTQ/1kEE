@@ -1,7 +1,7 @@
 use crate::model::AppModel;
 use crate::theme;
 
-pub fn render_event_list(ctx: &egui::Context, model: &mut AppModel) {
+pub fn render_event_list(ctx: &egui::Context, model: &mut AppModel, radio: &mut super::EventRadio) {
     egui::SidePanel::left("event_list")
         .resizable(true)
         .default_width(330.0)
@@ -52,6 +52,7 @@ pub fn render_event_list(ctx: &egui::Context, model: &mut AppModel) {
                             {
                                 model.select_event(&event.id);
                             }
+                            if is_selected { radio.button(ui, &event); }
                         });
 
                     ui.add_space(8.0);

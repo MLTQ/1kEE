@@ -1,7 +1,15 @@
 # world_map.rs
 
+The optional `swot_layer` reads prepared SWOT_06 marine gravity data off the UI
+thread and renders it in both Earth scenes. Its controls are re-exported for the
+Layers drawer; it is independent of the bathymetry and terrain streaming toggles.
+
 ## Purpose
 Implements the main geographic canvas for the demo. The current version wraps an interactive 3D globe scene with drag orbit, wheel zoom, contour-heavy overlays, and preserved event/camera click flow at the panel boundary.
+
+`gpu_color` shares the native shader output boundary: contour colors/fades match
+egui's display-space rendering, while the backdrop encodes its linear shading
+for the actual framebuffer. Palette selection and terrain geometry are separate.
 
 ## Components
 
@@ -66,18 +74,26 @@ Infrastructure hover begins with the canvas response before scene paint and rend
 
 FOLLOW EVENTS sits beside MEANDER on the main rail on Earth, with no parent mode toggle. It retains the chosen Globe/Local view, requests animation repaints, and skips the manual inertia controller while active. Canvas navigation or a mode switch cancels follow; MEANDER and REPLAY are exclusive. The scene mode is read after the layer bar so a mode toggle takes effect in the same frame. Cable route cards use the shared infrastructure hover collector; landing dots retain their original hover card.
 
-The FOLLOW EVENTS tooltip describes the six-stop severity tour, travel capped at
-ten seconds with faster nearby hops, and ten-second orbit dwell.
+The FOLLOW EVENTS tooltip describes the full live pool, more frequent visits to
+severe stories and repeat spacing. Travel remains capped at ten seconds with
+faster nearby hops, followed by the configured orbit dwell (Settings → Follow
+Events; 30 seconds by default).
 
-While FOLLOW EVENTS is enabled, `event_labels` fades in persistent cards for all
-on-screen event anchors after the camera reaches its arrival zoom, in both Globe
-and Local, including Focus capture. Cards fade out on departure and stay hidden
-during wide travel; opacity comes from the actual flight timing. Cards
-show severity, headline and location, with nearby placement and leader lines.
-Card slots stay fixed during dwell while their leader lines track orbiting
-markers. New cards fit around established ones; hidden travel resets the layout.
-They do not capture input or depend on hovering; normal event hover cards resume
-when follow stops. Event-marker visibility controls apply to these cards too.
+While FOLLOW EVENTS is enabled, `event_chyron` shows five single-line crawls at
+the bottom of the map, in Globe, Local and Focus capture. Every row includes the
+full title, severity and summary, and finishes scrolling before changing stories.
+It starts with the current event plus four others, favors visible events and
+rotates through the live pool without resetting text on each camera/poll change.
+`draw_event_follow_overlay` keeps only the selected event's map card, and only
+while its Brief is open. That card retains arrival/departure fades and a stable
+slot above the chyron while its leader tracks the marker. All other event cards
+and map hover tooltips are suppressed during follow. Navigation stays available;
+ordinary hover behavior returns when follow stops. Neither overlay captures input.
+
+The chyron docks flush with the map's bottom edge with a slightly translucent
+background and independent text colors. Latitude/longitude share one non-wrapping
+row directly above it, with 24 points reserved so coordinates and the selected
+map card cannot cover summary text. Outside follow, coordinates sit at the bottom.
 
 The canvas submits local line residency cleanup on every frame. Its finish-prepare
 callback drops unused contour/road GPU buffers after all live batches are marked.
@@ -117,3 +133,13 @@ Settings entry. Long background-job notes are now in Settings → Overview.
 Administrative boundaries share source discovery, explicit in-app PBF loading and
 cache observation through admin_source. Local draws the clipped ground-plane
 polygons; admin_globe prepares spherical GPU fills and outlines for Globe.
+
+NCEI `gravity_layer` separately selects free-air, Bouguer or isostatic residual
+regional maps in mGal. It shares `raster_mesh` projection with SWOT, keeps all
+reads on a worker and exposes quantity/region controls to the layer drawer.
+
+Automatic Follow recaps take the overlay path before the OBS early return. They
+paint only the recap chyron and clock/header, suppressing the live selected card.
+The camera stays in Globe view for recap and returns to its saved view for live.
+
+A buildout marker click opens its record in the shared campus, rule and news browser. Existing event, camera and infrastructure click targets retain priority.

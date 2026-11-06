@@ -8,6 +8,12 @@ optional external overlays without owning their data pipelines.
 
 ## Components
 
+### SWOT marine gravity
+- Delegates an independent Earth-only toggle, load/error status and fixed
+  Eötvös color legend to `world_map::swot_controls`.
+- Describes gravity variation separately from bathymetric depth. No file reads
+  or downloads run inside the drawer.
+
 ### `render_layer_drawer`
 - **Does**: Draws layer controls, source-specific enablement, and imported
   layer/ArcGIS source management when the drawer is open.
@@ -104,3 +110,9 @@ Local Earth view guidance and explicit reload after building missing caches.
 Import Layer and the imported overlay list now appear together at the top of the
 sidebar, including when no layer exists yet. The picker delegates to
 layer_file_import::button and retains its asynchronous loading/disabled state.
+
+Gravity anomaly delegates an independent Earth-only quantity/region selector
+to `world_map::gravity_controls`. It describes mGal, grid spacing and regional
+coverage without reload controls, citations or file access in the drawer.
+
+Public Data includes the saved AI data center buildout toggle, refresh status, publisher attribution and browser button.
