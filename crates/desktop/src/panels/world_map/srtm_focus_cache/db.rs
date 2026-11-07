@@ -36,7 +36,15 @@ fn is_native_path(path: &Path) -> bool {
 /// files. The renderer can then keep showing existing geometry while builders
 /// wait for storage to be freed.
 pub fn open_cache_db_read_only(path: &Path) -> rusqlite::Result<Connection> {
-    let normal = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+    // Isolated recovery treats the original volume as a checkpointed read-only
+    // source: immutable avoids even SQLite shared-memory sidecar writes there.
+    let snapshot_only = super::recovery::isolated_root().is_some_and(|root| !path.starts_with(root));
+    let opened = if snapshot_only {
+        Connection::open_with_flags(immutable_read_uri(path), OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI)
+    } else {
+        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+    };
+    let normal = opened
         .and_then(configure_read_connection)
         .and_then(verify_read_connection);
     let connection = match normal {
@@ -139,6 +147,11 @@ pub fn ensure_cache_schema_with_connection(connection: &Connection) -> rusqlite:
 }
 
 pub fn tile_exists(connection: &Connection, tile: TileKey) -> rusqlite::Result<bool> {
+    if let Some(path) = connection.path() {
+        let path = Path::new(path);
+        let repaired = super::recovery::resolve(path, tile);
+        if repaired != path { return super::recovery::count(&repaired, tile).map(|c| c.is_some()); }
+    }
     connection
         .query_row(
             "SELECT 1
@@ -155,7 +168,7 @@ pub fn tile_exists(connection: &Connection, tile: TileKey) -> rusqlite::Result<b
 /// Read a rectangular manifest window with one indexed query. Region selection
 /// uses this snapshot to avoid issuing one SQLite round-trip per tile during a
 /// wide local-terrain prefetch.
-pub fn contour_manifest_window(
+fn original_contour_manifest_window(
     connection: &Connection,
     zoom_bucket: i32,
     min_lat_bucket: i32,
@@ -188,6 +201,54 @@ pub fn contour_manifest_window(
     Ok(manifest)
 }
 
+pub fn contour_manifest_window(
+    connection: &Connection, zoom_bucket: i32,
+    min_lat_bucket: i32, max_lat_bucket: i32, min_lon_bucket: i32, max_lon_bucket: i32,
+) -> rusqlite::Result<HashMap<(i32, i32), i64>> {
+    let original = original_contour_manifest_window(connection, zoom_bucket, min_lat_bucket, max_lat_bucket, min_lon_bucket, max_lon_bucket);
+    let mut manifest = match original {
+        Ok(m) => m,
+        Err(e) if super::recovery::corrupt(&e) => {
+            if let Some(path) = connection.path() {
+                super::recovery::mark_database(Path::new(path)).map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+            }
+            // A damaged manifest index must not stop every new tile in a view.
+            // Try individual keys so readable neighbours remain available.
+            let mut m = HashMap::new();
+            for lat in min_lat_bucket..=max_lat_bucket {
+                for lon in min_lon_bucket..=max_lon_bucket {
+                    if let Ok(count) = connection.query_row(
+                        "SELECT contour_count FROM contour_tile_manifest WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
+                        params![zoom_bucket, lat, lon], |r| r.get::<_, i64>(0)) {
+                        m.insert((lat, lon), count);
+                    }
+                }
+            }
+            m
+        }
+        Err(e) => return Err(e),
+    };
+    if let Some(path) = connection.path() {
+        let path = Path::new(path);
+        for lat in min_lat_bucket..=max_lat_bucket {
+            for lon in min_lon_bucket..=max_lon_bucket {
+                let tile = TileKey { zoom_bucket, lat_bucket: lat, lon_bucket: lon };
+                let repaired = super::recovery::resolve(path, tile);
+                if repaired != path {
+                    manifest.remove(&(lat, lon));
+                    match super::recovery::count(&repaired, tile) {
+                        Ok(Some(count)) => { manifest.insert((lat, lon), count); }
+                        Ok(None) => {}
+                        Err(e) if super::recovery::corrupt(&e) => super::recovery::report(&repaired, tile),
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+        }
+    }
+    Ok(manifest)
+}
+
 pub fn import_tile_into_cache(
     cache_db_path: &Path,
     tile: TileKey,
@@ -198,6 +259,25 @@ pub fn import_tile_into_cache(
 }
 
 pub fn import_tile_into_cache_clipped(
+    cache_db_path: &Path,
+    tile: TileKey,
+    gpkg_path: &Path,
+    progress: Option<&super::progress::BuildProgress>,
+    bounds: Option<tile_archive::contour_grid::Bounds>,
+) -> rusqlite::Result<()> {
+    import_tile_into_cache_clipped_inner(cache_db_path, tile, gpkg_path, progress, bounds)
+        .inspect_err(|error| {
+            eprintln!("[1kEE] Contour import into {} failed for {}/{}/{}: {error}",
+                cache_db_path.display(), tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket);
+            if super::recovery::corrupt(error) {
+                if let Err(e) = super::recovery::mark_database(cache_db_path) {
+                    eprintln!("[1kEE] Cannot mark damaged terrain database: {e}");
+                }
+            }
+        })
+}
+
+fn import_tile_into_cache_clipped_inner(
     cache_db_path: &Path,
     tile: TileKey,
     gpkg_path: &Path,

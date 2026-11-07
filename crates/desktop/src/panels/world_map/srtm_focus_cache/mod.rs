@@ -13,6 +13,7 @@ mod core_import_tests;
 pub mod db;
 pub mod gdal;
 pub mod progress;
+pub mod recovery;
 mod storage;
 pub mod timings;
 mod work_slots;
@@ -362,7 +363,18 @@ pub fn clear_contour_build_backoffs() {
 fn open_region_cache_db(path: &Path) -> rusqlite::Result<Connection> {
     match db::open_cache_db_read_only(path) {
         Ok(connection) => Ok(connection),
-        Err(_) if !path.exists() => db::open_cache_db(path),
+        Err(_) if !path.exists() && recovery::isolated_root().is_none() => db::open_cache_db(path),
+        Err(_) if !path.exists() => {
+            let connection = Connection::open_in_memory()?;
+            db::ensure_cache_schema_with_connection(&connection)?;
+            Ok(connection)
+        }
+        Err(error) if recovery::corrupt(&error) => {
+            recovery::mark_database(path).map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+            let connection = Connection::open_in_memory()?;
+            db::ensure_cache_schema_with_connection(&connection)?;
+            Ok(connection)
+        }
         Err(error) => Err(error),
     }
 }

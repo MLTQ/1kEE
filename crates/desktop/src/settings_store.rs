@@ -77,6 +77,9 @@ pub struct AppSettings {
     pub data_root: Option<String>,
     #[serde(default)]
     pub derived_root: Option<String>,
+    /// Isolated write destination when source terrain cache storage is unreliable.
+    #[serde(default)]
+    pub terrain_repair_root: Option<String>,
     #[serde(default)]
     pub srtm_root: Option<String>,
     #[serde(default)]
@@ -132,6 +135,7 @@ impl Default for AppSettings {
             asset_root: None,
             data_root: None,
             derived_root: None,
+            terrain_repair_root: None,
             srtm_root: None,
             planet_path: None,
             gdal_bin_dir: None,

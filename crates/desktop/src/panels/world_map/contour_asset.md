@@ -254,3 +254,13 @@ results; same-root contours remain available while another LOD loads.
 Moon/Mars globe manifest selection and merged-vector cloning/sorting also run
 on coalesced workers. Zoom fallback reuses a published Arc, and is not carried
 across data roots. No scene switch clones every contour synchronously.
+
+## Unreadable geometry
+
+The background tile reader now distinguishes malformed GeoPackage/WKB and nonfinite
+coordinates/elevations from valid empty geometry. A readable manifest's row count
+must match the decoded rows. Failed tiles are not published as ready; after dropping
+the SQLite snapshot, corruption/invalid-row failures invoke transactional tile
+invalidation and on-demand regeneration. Busy/I/O failures retain retry behavior.
+Good tiles in a mixed batch still publish. See
+[srtm_focus_cache/recovery.md](srtm_focus_cache/recovery.md).

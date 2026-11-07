@@ -302,7 +302,7 @@ fn row_progress_uses_manifest_count_and_reaches_the_actual_decoded_count() {
     connection
         .execute_batch(
             "WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<300)
-         INSERT INTO contour_tiles SELECT 10,0,0,x,10.0,x'00' FROM n;
+         INSERT INTO contour_tiles SELECT 10,0,0,x,10.0,x'47500001e6100000010500000000000000' FROM n;
          INSERT INTO contour_tile_manifest (zoom_bucket,lat_bucket,lon_bucket,contour_count)
          VALUES (10,0,0,300);",
         )
@@ -391,7 +391,7 @@ fn streaming_reader_can_cancel_between_tiles() {
     connection
         .execute_batch(
             "DELETE FROM contour_tiles;
-         INSERT INTO contour_tiles VALUES (10,0,0,1,10.0,x'00'),(10,0,1,1,10.0,x'00');",
+         INSERT INTO contour_tiles VALUES (10,0,0,1,10.0,x'47500001e6100000010500000000000000'),(10,0,1,1,10.0,x'47500001e6100000010500000000000000');",
         )
         .unwrap();
     drop(connection);

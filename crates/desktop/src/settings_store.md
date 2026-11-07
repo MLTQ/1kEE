@@ -63,3 +63,8 @@ The controller uses the same normalization so live edits and restored values agr
 Serialization coverage checks the saved duration, legacy/new defaults and bounds.
 
 The saved AI buildout opt-in defaults to false for new and existing configurations.
+
+`terrain_repair_root` optionally stores an absolute isolated terrain-cache write
+root. It defaults to unset and survives Settings saves even though it has no
+separate UI field. Recovery can override it with `ONEKEE_TERRAIN_REPAIR_ROOT`.
+See `panels/world_map/srtm_focus_cache/recovery.md` for source read-only semantics.

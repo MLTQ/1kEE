@@ -94,3 +94,10 @@ contracts shared by on-demand terrain builders and render-time tile lookups.
   geometry rolls back the transaction; discarded halo rows do not inflate the
   manifest. Progress counts processed source rows, including discarded ones.
   Original import wrappers retain unmodified lunar/Mars and legacy semantics.
+
+## Damaged tile recovery
+
+Manifest windows merge per-tile replacement databases and omit invalidated original
+entries. Corrupt manifest pages fall back to individual keys; missing keys can
+regenerate in isolated storage. `tile_exists` respects persistent invalidation.
+See [recovery.md](recovery.md) for deletion, structural-corruption fallback and tests.

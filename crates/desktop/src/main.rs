@@ -72,6 +72,27 @@ fn contour_buffer_wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
 }
 
 fn main() -> eframe::Result<()> {
+    let args: Vec<_> = std::env::args().collect();
+    if args.get(1).is_some_and(|arg| arg == "--repair-native-tile") {
+        let result = (|| -> Result<(), String> {
+            if args.len() != 7 {
+                return Err("Usage: --repair-native-tile <srtm_native_v1.sqlite> <SRTM directory> <bucket 0..6> <lat bucket> <lon bucket>".into());
+            }
+            let integer = |i: usize| args[i].parse::<i32>().map_err(|e| e.to_string());
+            let tile = panels::world_map::srtm_focus_cache::TileKey {
+                zoom_bucket: integer(4)?, lat_bucket: integer(5)?, lon_bucket: integer(6)?,
+            };
+            let path = panels::world_map::srtm_focus_cache::recovery::repair_native_tile(
+                std::path::Path::new(&args[2]), std::path::Path::new(&args[3]), tile)?;
+            println!("Verified terrain tile {}/{}/{}: {}", tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket, path.display());
+            Ok(())
+        })();
+        if let Err(error) = result {
+            eprintln!("[1kEE] {error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1520.0, 920.0])

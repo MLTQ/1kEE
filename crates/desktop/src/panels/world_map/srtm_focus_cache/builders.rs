@@ -339,6 +339,12 @@ pub fn ensure_bucket_asset(
         lat_bucket,
         lon_bucket,
     };
+    let repaired_path = super::recovery::build_path(cache_db_path, tile, manifest_contour_count, allow_build)?;
+    let manifest_contour_count = if repaired_path != cache_db_path {
+        super::recovery::count(&repaired_path, tile).ok().flatten()
+    } else { manifest_contour_count };
+    let cache_root = if repaired_path != cache_db_path { repaired_path.parent()? } else { cache_root };
+    let cache_db_path = repaired_path.as_path();
 
     // Region selection supplies a single-query manifest snapshot. Any cached
     // manifest row is immediately renderable, including an explicitly empty
@@ -476,6 +482,12 @@ pub fn ensure_lunar_bucket_asset(
         lat_bucket,
         lon_bucket,
     };
+    let repaired_path = super::recovery::build_path(cache_db_path, tile, manifest_contour_count, allow_build)?;
+    let manifest_contour_count = if repaired_path != cache_db_path {
+        super::recovery::count(&repaired_path, tile).ok().flatten()
+    } else { manifest_contour_count };
+    let cache_root = if repaired_path != cache_db_path { repaired_path.parent()? } else { cache_root };
+    let cache_db_path = repaired_path.as_path();
 
     if manifest_contour_count.is_some() {
         clear_failed_build(lunar_failed_builds(), tile);
@@ -574,6 +586,12 @@ pub fn ensure_mars_bucket_asset(
         lat_bucket,
         lon_bucket,
     };
+    let repaired_path = super::recovery::build_path(cache_db_path, tile, manifest_contour_count, allow_build)?;
+    let manifest_contour_count = if repaired_path != cache_db_path {
+        super::recovery::count(&repaired_path, tile).ok().flatten()
+    } else { manifest_contour_count };
+    let cache_root = if repaired_path != cache_db_path { repaired_path.parent()? } else { cache_root };
+    let cache_db_path = repaired_path.as_path();
 
     // Check the cache.  A tile with contour_count > 0 is fully built — serve it.
     // A tile with contour_count = 0 was previously marked empty (no CTX coverage);

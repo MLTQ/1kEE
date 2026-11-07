@@ -599,6 +599,7 @@ impl AppModel {
             srtm_root: optional_path_field(&self.settings_srtm_root),
             planet_path: optional_path_field(&self.settings_planet_path),
             gdal_bin_dir: optional_path_field(&self.settings_gdal_bin_dir),
+            terrain_repair_root: settings_store::load_app_settings().terrain_repair_root,
             osmium_bin_dir: optional_path_field(&self.settings_osmium_bin_dir),
             prefer_overpass: self.settings_prefer_overpass,
             contour_stroke_scale: self.legacy_contour_stroke_scale,

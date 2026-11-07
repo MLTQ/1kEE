@@ -2120,17 +2120,27 @@ fn stream_local_contours(
     on_progress: &mut dyn FnMut(&CacheKey, usize, usize),
     on_tile: &mut dyn FnMut(CacheKey, Vec<ContourPath>) -> bool,
 ) -> rusqlite::Result<()> {
-    let connection = srtm_focus_cache::db::open_cache_db_read_only(path)?;
+    let repair_error = |error: &rusqlite::Error| {
+        if srtm_focus_cache::recovery::corrupt(error) {
+            for (key, _) in requests {
+                srtm_focus_cache::recovery::report(path, srtm_focus_cache::TileKey {
+                    zoom_bucket: key.zoom_bucket, lat_bucket: key.lat_bucket, lon_bucket: key.lon_bucket,
+                });
+            }
+        }
+    };
+    let connection = srtm_focus_cache::db::open_cache_db_read_only(path).inspect_err(repair_error)?;
     let mut statement = connection.prepare(
         "SELECT geom, elevation_m
          FROM contour_tiles
          WHERE zoom_bucket = ?1 AND lat_bucket = ?2 AND lon_bucket = ?3
          ORDER BY fid",
-    )?;
+    ).inspect_err(repair_error)?;
 
     let archive = crate::world_archive::ContourArchive::open(path);
     let mut completed = 0;
     let mut first_error = None;
+    let mut damaged = Vec::new();
     for (key, asset) in requests {
         let selection = selection.tile(key, asset.simplify_step);
         let tile = srtm_focus_cache::TileKey {
@@ -2183,7 +2193,12 @@ fn stream_local_contours(
                 geometry_bytes += geometry.len() as u64;
                 let decode_start = read_timer.clock();
                 let mut decoded = Vec::new();
-                selection.append(&mut decoded, parse_gpkg_lines(geometry), elevation_m);
+                let lines = tile_archive::gpkg::try_parse_gpkg_lines(geometry, |lon, lat| GeoPoint { lat, lon })
+                    .filter(|_| elevation_m.is_finite())
+                    .ok_or_else(|| rusqlite::Error::FromSqlConversionFailure(
+                        0, rusqlite::types::Type::Blob,
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid contour geometry or elevation").into()))?;
+                selection.append(&mut decoded, lines, elevation_m);
                 if let Some(start) = decode_start {
                     decode_time += start.elapsed();
                 }
@@ -2196,6 +2211,7 @@ fn stream_local_contours(
                     "[1kEE] contour tile z{} ({},{}) query failed: {error}",
                     key.zoom_bucket, key.lat_bucket, key.lon_bucket
                 );
+                if srtm_focus_cache::recovery::invalid_geometry(&error) { damaged.push(tile); }
                 if first_error.is_none() {
                     first_error = Some(error);
                 }
@@ -2203,10 +2219,11 @@ fn stream_local_contours(
             }
         };
 
-        let total: usize = connection.query_row(
+        let expected: Option<usize> = connection.query_row(
             "SELECT contour_count FROM contour_tile_manifest WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
             params![key.zoom_bucket, key.lat_bucket, key.lon_bucket], |r| r.get(0),
-        ).unwrap_or(0);
+        ).ok();
+        let total = expected.unwrap_or(0);
         let mut decoded_rows = 0;
         let mut contours = Vec::new();
         let mut tile_failed = false;
@@ -2218,6 +2235,7 @@ fn stream_local_contours(
                         "[1kEE] contour tile z{} ({},{}) row failed: {error}",
                         key.zoom_bucket, key.lat_bucket, key.lon_bucket
                     );
+                    if srtm_focus_cache::recovery::invalid_geometry(&error) { damaged.push(tile); }
                     if first_error.is_none() {
                         first_error = Some(error);
                     }
@@ -2231,7 +2249,10 @@ fn stream_local_contours(
                 on_progress(key, decoded_rows, total);
             }
         }
-        if tile_failed {
+        if tile_failed { continue; }
+        if expected.is_some_and(|n| n != decoded_rows) {
+            damaged.push(tile);
+            first_error.get_or_insert(rusqlite::Error::InvalidQuery);
             continue;
         }
         if let Some(elapsed) = read_timer.elapsed() {
@@ -2267,6 +2288,10 @@ fn stream_local_contours(
             break;
         }
     }
+
+    drop(statement);
+    drop(connection);
+    for tile in damaged { srtm_focus_cache::recovery::report(path, tile); }
 
     // Preserve any successfully decoded tiles in a mixed batch. If every
     // request failed, surface the error so the single-flight scheduler applies
@@ -2390,6 +2415,23 @@ mod tests {
             geometry.extend_from_slice(&lat.to_le_bytes());
         }
         geometry
+    }
+
+    #[test]
+    fn reader_invalidates_malformed_geometry_instead_of_caching_empty_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cache.sqlite");
+        let c = srtm_focus_cache::db::open_cache_db(&path).unwrap();
+        c.execute("INSERT INTO contour_tiles VALUES(0,1,2,1,50,?1)", [b"broken geometry".as_slice()]).unwrap();
+        c.execute("INSERT INTO contour_tile_manifest VALUES(0,1,2,1,0)", []).unwrap();
+        drop(c);
+        let key = CacheKey { path: path.clone(), zoom_bucket: 0, lat_bucket: 1, lon_bucket: 2 };
+        let asset = srtm_focus_cache::FocusContourAsset { path: path.clone(), simplify_step: 1,
+            zoom_bucket: 0, lat_bucket: 1, lon_bucket: 2 };
+        assert!(query_local_contours_batch(&path, &[(key,asset)], 120).is_err());
+        let c = srtm_focus_cache::db::open_cache_db_read_only(&path).unwrap();
+        assert!(!srtm_focus_cache::db::tile_exists(&c, srtm_focus_cache::TileKey {
+            zoom_bucket: 0, lat_bucket: 1, lon_bucket: 2 }).unwrap());
     }
 
     #[test]

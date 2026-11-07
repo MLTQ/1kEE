@@ -1,23 +1,21 @@
-pub fn parse_gpkg_lines<T>(blob: &[u8], mut point: impl FnMut(f32, f32) -> T) -> Vec<Vec<T>> {
-    if blob.len() < 8 || &blob[0..2] != b"GP" {
-        return Vec::new();
-    }
+pub fn parse_gpkg_lines<T>(blob: &[u8], point: impl FnMut(f32, f32) -> T) -> Vec<Vec<T>> {
+    try_parse_gpkg_lines(blob, point).unwrap_or_default()
+}
 
-    let flags = blob[3];
-    let envelope_indicator = (flags >> 1) & 0b111;
-    let envelope_len = match envelope_indicator {
-        0 => 0,
-        1 => 32,
-        2 | 3 => 48,
-        4 => 64,
-        _ => 0,
+/// Preserve the difference between valid empty geometry and damaged bytes.
+pub fn try_parse_gpkg_lines<T>(blob: &[u8], mut point: impl FnMut(f32, f32) -> T) -> Option<Vec<Vec<T>>> {
+    if blob.len() < 8 || &blob[0..2] != b"GP" || blob[2] != 0 { return None; }
+    let envelope_len = match (blob[3] >> 1) & 7 {
+        0 => 0, 1 => 32, 2 | 3 => 48, 4 => 64, _ => return None,
     };
-    let header_len = 8 + envelope_len;
-    if blob.len() <= header_len {
-        return Vec::new();
-    }
-
-    parse_wkb_geometry(&blob[header_len..], &mut point).unwrap_or_default()
+    let wkb = blob.get(8 + envelope_len..)?;
+    if !matches!(wkb.first(), Some(0 | 1)) { return None; }
+    let mut finite = true;
+    let lines = parse_wkb_geometry(wkb, |x, y| {
+        finite &= x.is_finite() && y.is_finite();
+        point(x, y)
+    })?;
+    finite.then_some(lines)
 }
 
 pub fn parse_wkb_geometry<T>(
@@ -26,6 +24,7 @@ pub fn parse_wkb_geometry<T>(
 ) -> Option<Vec<Vec<T>>> {
     let mut cursor = 0usize;
     let endian = *wkb.get(cursor)?;
+    if endian > 1 { return None; }
     cursor += 1;
     let little = endian == 1;
     let geom_type = read_u32(wkb, &mut cursor, little)?;
@@ -67,6 +66,7 @@ fn parse_wkb_linestring<T>(
     point: &mut impl FnMut(f32, f32) -> T,
 ) -> Option<Vec<T>> {
     let endian = *wkb.get(*cursor)?;
+    if endian > 1 { return None; }
     *cursor += 1;
     let little = endian == 1;
     let geom_type = read_u32(wkb, cursor, little)?;
@@ -117,4 +117,20 @@ fn read_f64(bytes: &[u8], cursor: &mut usize, little: bool) -> Option<f64> {
     } else {
         f64::from_be_bytes(slice.try_into().ok()?)
     })
+}
+
+#[cfg(test)]
+mod recovery_validation_tests {
+    use super::*;
+    #[test]
+    fn checked_parser_distinguishes_empty_from_corrupt_and_nonfinite() {
+        let empty = crate::contour_clip::encode(&[]);
+        assert_eq!(try_parse_gpkg_lines(&empty, |x,y| (x,y)),Some(vec![]));
+        assert!(try_parse_gpkg_lines(b"broken", |_,_| ()).is_none());
+        let nan = crate::contour_clip::encode(&[vec![(f64::NAN,1.0),(1.0,2.0)]]);
+        assert!(try_parse_gpkg_lines(&nan, |_,_| ()).is_none());
+        let valid = crate::contour_clip::encode(&[vec![(1.0,2.0),(3.0,4.0)]]);
+        assert!(try_parse_gpkg_lines(&valid[..valid.len()-1], |_,_| ()).is_none());
+        assert_eq!(try_parse_gpkg_lines(&valid, |x,y| (x,y)),Some(vec![vec![(1.0,2.0),(3.0,4.0)]]));
+    }
 }
