@@ -11,6 +11,7 @@ mod geojson;
 mod job;
 mod lunar;
 mod marching_squares;
+pub mod gpu_terrain;
 mod mars;
 mod node_store;
 mod pbf_nodes;
@@ -64,6 +65,7 @@ pub fn run() -> Result<(), String> {
                 println!("[{:.0}%] {}: {}", p.fraction * 100.0, p.stage, p.message);
             };
             match command.engine {
+                args::ContourEngine::Gpu => gpu_terrain::build_bbox(&command, reporter),
                 args::ContourEngine::Native => contours::build_contour_tiles_native(
                     &command.srtm_root,
                     &command.cache_db_path,

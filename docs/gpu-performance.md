@@ -63,8 +63,9 @@ in its Yemen/Red Sea fixture window. Run with `ONEKEE_NATIVE_BENCH_DB` pointing 
 It reports preparation time, upload frames and offscreen render/refinement timings;
 these are not interactive pan-to-visible latency measurements.
 
-Raw PBF and terrain builds remain CPU/storage pipelines. GPU raster sampling and
-contour extraction require a separate implementation and output-parity validation.
+Raw PBF builds remain CPU/storage pipelines. SRTM raster sampling and contour
+extraction now have an opt-in compute backend (see below); other terrain sources
+continue through GDAL.
 Existing terrain preparation already uses Rayon across tiles. See
 [terrain-pipeline.md](terrain-pipeline.md), [cache-builder.md](cache-builder.md)
 and [runtime-archive.md](runtime-archive.md) for build and storage measurements.
@@ -94,3 +95,79 @@ The separate synthetic atomic-publication/pixel comparison passed at both caps,
 but required seven frames in each case: that fixture hit the time budget instead.
 The larger memory targets have not been benchmarked for interactive revisit
 latency or peak whole-app memory. The profile remains opt-in.
+
+
+## Opt-in GPU terrain generation (2026-11-07)
+
+Start the desktop with both the RTX 4090 rendering profile and GPU SRTM builds:
+
+```sh
+./scripts/run-4090-terrain.sh
+```
+
+Or set `ONEKEE_TERRAIN_GPU=1 ONEKEE_GPU='RTX 4090'` on the desktop executable.
+This affects uncached SRTM tiles, including isolated repair tiles. Existing
+caches are reused. The current internal repair-root setting remains in effect;
+source elevation files are read-only. No cache deletion or drive repair is needed.
+Unset `ONEKEE_TERRAIN_GPU` (or set it to `0`) to return to GDAL generation.
+
+GPU resampling and marching squares share a resident raster; CPU work still
+includes TIFF decoding, line stitching, clipping, and SQLite writes. Up to twelve
+source rasters stay in VRAM across builds. The compute worker follows
+`ONEKEE_GPU`, uses one adapter, and consumes up to roughly 1 GiB beyond renderer
+budgets. CPU fallback handles unsupported source formats/projections, unavailable
+GPUs, invalid source reads, and output-capacity failures. GDAL remains the default.
+
+For explicit offline builds, use `contours-bbox --engine gpu` with the usual
+SRTM root, bounding box, zoom buckets, and cache destination. This mode reports
+GPU failures instead of hiding them behind a fallback; successful tiles commit
+atomically and can be resumed using the same destination. For example:
+
+```sh
+ONEKEE_GPU='RTX 4090' target/release/one-thousand-electric-eye-cache-builder contours-bbox \
+  --engine gpu \
+  --srtm-root /run/media/m/Minkowski/Data/srtm_gl1/SRTM_GL1_srtm \
+  --cache-db /tmp/1kee-gpu-example/srtm_native_v1.sqlite \
+  --min-lat 31.18 --max-lat 31.18 --min-lon 35.39 --max-lon 35.39 \
+  --zoom-buckets 4
+```
+
+Validation uses synthetic GDAL contour fixtures (including ties, saddles and
+partial nodata), two seam-crossing source patches, and complete rasters for three
+real native tiles. Elevations agree within 0.01 m across those raster comparisons.
+Total clipped contour lengths agree within 0.002% on the three real tiles.
+This does not establish bitwise or global topology equivalence: the native
+writer uses f32 coordinates and path/vertex counts can differ from GDAL's f64
+geometry. Wider validation remains required before default enablement.
+
+Hardware checks, with `ONEKEE_SRTM_ROOT` and `ONEKEE_GPU` set:
+
+```sh
+cargo test --release -p one-thousand-electric-eye-cache-builder gpu_terrain \
+  -- --include-ignored --nocapture --test-threads=1
+# Leave ONEKEE_TERRAIN_GPU unset for the GDAL baseline in this benchmark:
+cargo test --release -p one-thousand-electric-eye-desktop gpu_srtm_end_to_end_benchmark \
+  -- --ignored --nocapture --test-threads=1
+```
+
+The benchmark writes temporary caches, alternates GDAL/GPU then GPU/GDAL order,
+and includes source loading, GPU transfers, CPU stitching, clipping and SQLite
+commits. Source OS caches may already be warm; first-use GPU timings include
+initialization and uploads, while repeated calls reuse the GPU source cache.
+These are tile-build measurements, not interactive frame-rate or disk-cold tests.
+
+Final RTX 4090/Vulkan measurements on the Ryzen 5 5600X, with compilation stopped:
+
+| Native tile | GDAL repeat | GPU first pass | GPU repeat | Repeat speedup |
+|---|---:|---:|---:|---:|
+| 4/126/143 | 334 ms | 422 ms | 106 ms | 3.2× |
+| 0/9/27 (Yemen, 5837² raster) | 3389 ms | 1536 ms | 821 ms | 4.1× |
+| 4/-98/-235 | 270 ms | 154 ms | 68 ms | 4.0× |
+
+Only the first row's GPU first pass includes initial device/pipeline setup.
+The first small tile was slower than GDAL; resident source reuse is central to
+these gains. Timing logs separate source submission, compute/readback and CPU
+stitching. The three-region benchmark is intentionally limited; follow-up
+`1kee-988` covers wider parity and interactive-load validation. Current regression
+checks passed: 394 desktop tests, 36 cache-builder unit/integration tests, six
+GPU tests, the end-to-end benchmark, and forced unavailable-adapter GDAL fallback.

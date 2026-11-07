@@ -788,7 +788,7 @@ pub fn encode_gpkg_linestring(points: &[(f32, f32)]) -> Vec<u8> {
 /// Write one tile's contours and coastlines in a single transaction.
 /// Takes a persistent `&mut Connection` — the caller holds it open across all tiles,
 /// avoiding the per-tile open/pragma/DDL overhead of opening a new connection each time.
-fn write_tile_native(
+pub(crate) fn write_tile_native(
     conn: &mut Connection,
     tile: TileKey,
     contours: &[crate::marching_squares::ContourLine],

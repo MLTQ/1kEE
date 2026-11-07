@@ -10,11 +10,11 @@ use std::path::{Path, PathBuf};
 
 // ── SRTM tile reader (NaN for nodata / missing tiles) ─────────────────────────
 
-struct SrtmTile {
-    width: u32,
-    height: u32,
+pub(crate) struct SrtmTile {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
     /// NaN for SRTM nodata (-32768); otherwise elevation in metres.
-    samples: Vec<f32>,
+    pub(crate) samples: Vec<f32>,
 }
 
 impl SrtmTile {
@@ -24,7 +24,7 @@ impl SrtmTile {
     /// Using the `tiff` crate directly rather than going through `image` avoids
     /// a silent failure mode where `image` rejects Int16 TIFFs tagged with
     /// SampleFormat=2 (SAMPLEFORMAT_INT) and `decode()` returns an error.
-    fn load(path: &Path) -> Option<Self> {
+    pub(crate) fn load(path: &Path) -> Option<Self> {
         use std::fs::File;
         use tiff::decoder::{Decoder, DecodingResult};
 
@@ -333,7 +333,7 @@ fn build_grid(
 // Bit convention:  8=TL  4=TR  2=BR  1=BL  (set = above threshold)
 // Edge names:      N=top  E=right  S=bottom  W=left
 
-fn extract_segments(
+pub(crate) fn extract_segments(
     grid: &[f32],
     n: usize,
     threshold: f32,
@@ -444,7 +444,7 @@ fn interp(v0: f32, v1: f32, threshold: f32) -> f32 {
 
 // ── Segment chaining ──────────────────────────────────────────────────────────
 
-fn chain_segments(segments: Vec<[(f32, f32); 2]>) -> Vec<Vec<(f32, f32)>> {
+pub(crate) fn chain_segments(segments: Vec<[(f32, f32); 2]>) -> Vec<Vec<(f32, f32)>> {
     // Map: bit-exact endpoint key → segment indices sharing that endpoint.
     let mut ep_map: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
     for (i, seg) in segments.iter().enumerate() {

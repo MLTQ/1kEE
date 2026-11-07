@@ -1,0 +1,43 @@
+# SRTM GPU worker
+
+`gpu_terrain::build` returns a complete in-memory tile; `TerrainTile::write`
+uses the existing transactional writer and core clipping. The desktop enables
+this through `ONEKEE_TERRAIN_GPU=1` and falls back to GDAL on compute/source
+errors. `contours-bbox --engine gpu` explicitly requires the GPU and reports
+failures instead of silently measuring a CPU fallback.
+
+The backend accepts north-up, WGS84, PixelIsPoint, signed Int16, 3601×3601 GL1
+GeoTIFFs with the canonical integer-degree origins and -32768 nodata. Other
+sources remain GDAL's job. TIFF decoding stays on the CPU. A process-wide
+worker selects `ONEKEE_GPU` (or prefers a discrete primary-backend adapter),
+serializes device submissions, and retains at most twelve source buffers,
+invalidated on file size/mtime changes. Source files are never opened for writing.
+
+The host computes local sampling coordinates in f64, avoiding global longitude
+precision loss in the shader. Resampling and contour extraction share the GPU
+raster without a raster readback or intermediate TIFF/GeoPackage. Cells scan
+only intersecting elevation levels, compact segments into a bounded buffer,
+and reject overflow rather than committing partial geometry. Native source
+posts, shared-file edges, zero-level contours, and the separate coastline layer
+are preserved. A zero-weight nodata neighbor does not invalidate a native post.
+
+Contour ties, saddle pairing, and half-cell treatment of nodata follow GDAL's
+marching-square conventions. See upstream [square.h](https://github.com/OSGeo/gdal/blob/v3.13.3/alg/marching_squares/square.h)
+and [utility.h](https://github.com/OSGeo/gdal/blob/v3.13.3/alg/marching_squares/utility.h).
+This is independently implemented compute code, not a general GDAL replacement.
+Coordinates become f32 for the existing native stitching/writer interface;
+GDAL's f64 output need not have identical vertex/path counts or byte order.
+
+The worker releases its lock before CPU sorting/stitching. Source buffers use
+about 594 MiB at capacity; raster/segments/readback add roughly 290 MiB at the
+limits of 6000² samples and four million segments. These are separate from the
+renderer residency budgets. Allocation failures disable the worker for the
+process; unsupported grids, bad inputs, and segment overflow reject that job.
+
+Tests include all marching-square cases, signed levels, all/partial nodata,
+exact-height ties against GDAL, shared-file boundary sampling, full real native
+raster comparisons against GDAL, capacity failure, and invalid-grid rejection.
+Hardware tests are ignored by default and require an explicit GPU invocation.
+The desktop's `gpu_srtm_end_to_end_benchmark` also checks cache manifests,
+finite/clipped geometry, and total contour length against GDAL in temporary
+caches, alternating execution order and reporting cold/warm worker timings.

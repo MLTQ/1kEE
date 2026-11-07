@@ -68,6 +68,7 @@ pub fn spawn_job(job: BuildJob) -> JobHandle {
                 }));
             };
             let result = match command.engine {
+                crate::args::ContourEngine::Gpu => crate::gpu_terrain::build_bbox(&command, &mut reporter),
                 crate::args::ContourEngine::Native => crate::contours::build_contour_tiles_native(
                     &command.srtm_root,
                     &command.cache_db_path,

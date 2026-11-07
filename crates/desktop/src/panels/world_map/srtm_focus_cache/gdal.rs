@@ -864,6 +864,31 @@ pub fn build_focus_contours(
     if let Some(parent) = tmp_tif_path.parent() {
         fs::create_dir_all(parent).ok()?;
     }
+    if one_thousand_electric_eye_cache_builder::gpu_terrain::enabled() {
+        match one_thousand_electric_eye_cache_builder::gpu_terrain::build(
+            srtm_root, tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket,
+        ) {
+            Ok(generated) => {
+                if shutdown_requested().load(Ordering::Relaxed) { return None; }
+                progress.source_ready();
+                progress.contours_ready();
+                let mut db = super::db::open_cache_db(cache_db_path).ok()?;
+                // Both layers commit together. Recovery already selected this destination.
+                if let Err(error) = generated.write(&mut db) {
+                    eprintln!("[terrain-gpu] Cache write failed: {error}");
+                    if super::recovery::corrupt(&error) {
+                        let _ = super::recovery::mark_database(cache_db_path);
+                    }
+                    return None;
+                }
+                progress.committed();
+                build_timer.finish(0, 0);
+                return Some(());
+            }
+            Err(error) => eprintln!("[terrain-gpu] Falling back to GDAL for {}/{}/{}: {error}",
+                tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket),
+        }
+    }
     let source_timer = StageTimer::new(tile, "local_source");
     run_gdalwarp(&tiles, &tmp_tif_path, core.source, spec).ok()?;
     source_timer.finish(0, 0);

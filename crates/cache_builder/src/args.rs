@@ -48,6 +48,8 @@ pub enum ContourEngine {
     Gdal,
     /// Pure-Rust marching squares — no GDAL required.
     Native,
+    /// Experimental SRTM compute backend.
+    Gpu,
 }
 
 #[derive(Debug, Clone)]
@@ -390,9 +392,10 @@ where
                 engine = match value.as_str() {
                     "gdal" => ContourEngine::Gdal,
                     "native" => ContourEngine::Native,
+                    "gpu" => ContourEngine::Gpu,
                     other => {
                         return Err(format!(
-                            "Unknown --engine '{other}'. Use 'gdal' or 'native'."
+                            "Unknown --engine '{other}'. Use 'gdal', 'native', or 'gpu'."
                         ));
                     }
                 };
@@ -457,7 +460,7 @@ fn usage() -> String {
   one-thousand-electric-eye-cache-builder contours-bbox \\
       --srtm-root <dir> --cache-db <Derived/terrain/srtm_native_v1.sqlite> \\
       --min-lat <f32> --max-lat <f32> --min-lon <f32> --max-lon <f32> \\
-      [--zoom-buckets 0,1,2,3,4,5,6] [--gdal-bin <dir>] [--tmp-dir <dir>]
+      [--engine gdal|native|gpu] [--zoom-buckets 0,1,2,3,4,5,6] [--gdal-bin <dir>] [--tmp-dir <dir>]
   one-thousand-electric-eye-cache-builder planet-all \\
       --planet <planet.osm.pbf> --out-dir <Derived/osm> \\
       [--tmp-dir <dir>] [--srtm-root <dir>] [--node-storage flat|indexed-pbf] \\
