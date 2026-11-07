@@ -9,7 +9,7 @@ entire terrain layer on each arrival. Reuses the common globe line pipeline.
   Each point's sphere transform is reused by the next segment in its path.
 - Half-degree spatial bins contain unchanged segments; conservative bounds
   include actual endpoints, including long legacy segments. Chunks are <1 MiB.
-- Uploads share the globe 4 MiB / 2 ms frame budget. A complete candidate replaces the
+- Uploads share the configurable globe frame budget (4 MiB / 2 ms by default). A complete candidate replaces the
   displayed generation atomically; no partial LOD can overlap the previous one.
 - Paint rejects offscreen chunk bounds before issuing GPU work. Camera changes
   only uniforms and culling, never source geometry or instance identity.

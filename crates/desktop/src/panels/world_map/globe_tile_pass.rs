@@ -11,7 +11,6 @@ mod density;
 mod texture;
 
 const CHUNK_SEGMENTS: usize = 32_768; // < 1 MiB; small individual allocations
-const UPLOAD_BYTES_PER_FRAME: usize = 4 * 1024 * 1024;
 
 pub(super) struct Chunk {
     bounds: Bounds,
@@ -293,7 +292,7 @@ impl Gpu {
             .pending
             .get_or_insert_with(|| requested.clone())
             .clone();
-        let mut remaining = UPLOAD_BYTES_PER_FRAME;
+        let mut remaining = crate::gpu_config::settings().upload_bytes;
         // Publish only complete generations: staged fragments cannot double
         // draw the old LOD, expose half a tile, or erase fallback prematurely.
         let mut ordered: Vec<_> = candidate.tiles.iter().collect();

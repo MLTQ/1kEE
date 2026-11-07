@@ -6,8 +6,8 @@ use crate::panels::world_map::{
 };
 use tile_archive::contour_grid::Bounds as Rect;
 
+#[cfg(test)]
 pub(super) const GPU_BUDGET: usize = 3 * 1024 * 1024 * 1024;
-const CPU_BUDGET: usize = 4 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Copy, Default)]
 pub(super) struct Cost {
@@ -131,10 +131,10 @@ impl Residency {
         self.window = Some(window);
         self.clock = self.clock.wrapping_add(1);
         if self.gpu_budget == 0 {
-            self.gpu_budget = GPU_BUDGET;
+            self.gpu_budget = crate::gpu_config::settings().gpu_bytes;
         }
         if self.cpu_budget == 0 {
-            self.cpu_budget = CPU_BUDGET;
+            self.cpu_budget = crate::gpu_config::settings().cpu_bytes;
         }
         self.bounds.retain(|&(lat, lon), _| {
             self.costs.contains_key(&(lat, lon))

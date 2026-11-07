@@ -6,7 +6,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const FRAME_BYTES: usize = 4 * 1024 * 1024;
 const CHUNK_BYTES: usize = 512 * 1024;
 
 pub(super) struct Budget {
@@ -16,7 +15,7 @@ pub(super) struct Budget {
 impl Default for Budget {
     fn default() -> Self {
         Self {
-            remaining: FRAME_BYTES,
+            remaining: crate::gpu_config::settings().upload_bytes,
             started: None,
         }
     }
@@ -26,7 +25,9 @@ impl Budget {
         if bytes > self.remaining
             || self
                 .started
-                .is_some_and(|t| t.elapsed() >= Duration::from_millis(2))
+                .is_some_and(|t| {
+                    t.elapsed() >= Duration::from_micros(crate::gpu_config::settings().upload_us)
+                })
         {
             return false;
         }

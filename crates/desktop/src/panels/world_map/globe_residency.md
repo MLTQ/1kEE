@@ -15,7 +15,8 @@ viewport no longer destroys geometry that may be used again on the next pan.
   4 GiB decoded CPU target is exceeded, then evicts least recently used
   offscreen sources. Returning to a tile refreshes its last use. A 4096-entry
   guard bounds empty-tile metadata. Visible coverage takes priority over these
-  targets; this is a residency policy, not the device's single-buffer limit.
+  targets. Launch-time `ONEKEE_GPU_CACHE_MIB` and `ONEKEE_CPU_CACHE_MIB`
+  override these defaults (see `docs/gpu-performance.md`); this is a residency policy, not the device's single-buffer limit.
 - `gpu_bytes` uses the actual 28-byte instance layout; composition reports
   output/fallback bytes to account for clipping expansion and reserve outgoing
   LOD. Bounds and byte measurements happen on reader/merge workers.

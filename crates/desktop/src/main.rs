@@ -17,6 +17,7 @@ mod flock_source;
 mod factal_stream;
 mod flight_tracks;
 mod gruve;
+mod gpu_config;
 mod model;
 mod moving_tracks;
 mod osm_ingest;
@@ -49,8 +50,19 @@ fn contour_buffer_wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
         // An externally supplied device is not ours to reconfigure.
         existing => return existing,
     };
+    if let Some(name) = gpu_config::adapter_name() {
+        setup.native_adapter_selector = Some(std::sync::Arc::new(move |adapters, surface| {
+            gpu_config::select_adapter(adapters, surface, &name)
+        }));
+    }
     let base = setup.device_descriptor;
     setup.device_descriptor = std::sync::Arc::new(move |adapter| {
+        let info = adapter.get_info();
+        eprintln!(
+            "[1kEE GPU] {} ({:?}, {:?}) driver={} {}",
+            info.name, info.backend, info.device_type, info.driver, info.driver_info
+        );
+        gpu_config::log_settings();
         let mut descriptor = base(adapter);
         let adapter_limits = adapter.limits();
         descriptor.required_limits.max_buffer_size = adapter_limits.max_buffer_size;

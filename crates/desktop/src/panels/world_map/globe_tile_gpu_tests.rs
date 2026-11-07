@@ -27,8 +27,13 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
 }
 pub(super) fn gpu() -> (wgpu::Device, wgpu::Queue) {
     let instance = wgpu::Instance::default();
-    let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-        .expect("working GPU");
+    let adapter = if let Some(name) = crate::gpu_config::adapter_name() {
+        crate::gpu_config::select_adapter(&instance.enumerate_adapters(wgpu::Backends::all()), None, &name)
+            .expect("requested GPU")
+    } else {
+        block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+            .expect("working GPU")
+    };
     eprintln!("Adapter: {:?}", adapter.get_info());
     block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None)).unwrap()
 }
@@ -187,7 +192,16 @@ fn bounded_uploads_publish_atomically_and_strip_matches_previous_pixels() {
         camera_distance: 3.,
     };
     let viewport = Viewport::new(&layout, &view, rect);
-    assert!(gpu.stage(&device, &small, viewport));
+    // First driver allocations can consume the time slice even for a small
+    // snapshot. Require bounded eventual publication, not a one-frame warm GPU.
+    let mut small_ready = false;
+    for _ in 0..100 {
+        if gpu.stage(&device, &small, viewport) {
+            small_ready = true;
+            break;
+        }
+    }
+    assert!(small_ready);
     let dense = super::tests::tile(-30., 800_000);
     let large = Arc::new(prepare(
         super::tests::frame(vec![super::tests::tile(100., 200), dense]),
@@ -196,11 +210,12 @@ fn bounded_uploads_publish_atomically_and_strip_matches_previous_pixels() {
         egui::Color32::BLACK,
     ));
     let mut frames = 0;
+    let staging_started = Instant::now();
     loop {
         let before: u64 = gpu.tiles.values().flatten().map(|c| c.buffer.size()).sum();
         let ready = gpu.stage(&device, &large, viewport);
         let after: u64 = gpu.tiles.values().flatten().map(|c| c.buffer.size()).sum();
-        assert!(after.saturating_sub(before) <= UPLOAD_BYTES_PER_FRAME as u64);
+        assert!(after.saturating_sub(before) <= crate::gpu_config::settings().upload_bytes as u64);
         frames += 1;
         if ready {
             break;
@@ -208,6 +223,9 @@ fn bounded_uploads_publish_atomically_and_strip_matches_previous_pixels() {
         assert!(Arc::ptr_eq(gpu.displayed.as_ref().unwrap(), &small));
         assert!(frames < 100);
     }
+    eprintln!("Atomic upload: {} MiB/frame, {frames} frames, {:.2} ms staging",
+        crate::gpu_config::settings().upload_bytes / 1048576,
+        staging_started.elapsed().as_secs_f64() * 1000.);
     assert!(frames > 1);
     assert!(Arc::ptr_eq(gpu.displayed.as_ref().unwrap(), &large));
     assert!(!gpu.tiles.contains_key(&small.tiles[0].version));

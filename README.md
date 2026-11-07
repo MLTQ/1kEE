@@ -80,6 +80,9 @@ with Metal / Vulkan / DX12 support for wgpu.
 cargo run --release -p one-thousand-electric-eye-desktop
 ```
 
+For the dual-GPU Arch workstation, `./scripts/run-4090.sh` selects the RTX 4090
+and enables larger terrain budgets; see [GPU tuning](docs/gpu-performance.md).
+
 After updating the source, rebuild the desktop app with the command above before
 opening the binary directly. Tests build a separate test executable; they do not
 update `target/release/one-thousand-electric-eye-desktop`. Close an already-running
