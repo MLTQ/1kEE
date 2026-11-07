@@ -88,3 +88,33 @@ The workstation's persistent recovery destination is
 beside `target/release/.1kee_settings.json`. The repair batch preserved at least
 10 GiB of free internal storage. Full desktop tests: 394 passed, 54 opt-in tests
 ignored; the explicit source-byte/sidecar preservation regression also passed.
+
+### Correction after drive reconnection
+
+At 23:22 the user power-cycled/reconnected Minkowski. All 29 SRTM TIFFs named by
+the earlier failed builds then passed complete GDAL checksum reads. The device
+had been offline during the previous failures; those failures do **not** establish
+permanent source-file damage or a need to redownload these 29 files. Original
+source files were not modified. The six sampled checkpointed SQLite cache queries
+still reported malformed database pages, so isolated cache regeneration remains
+appropriate. These checks do not prove equality to the Mac originals or validate
+every file on the drive.
+
+SMART after reconnection reported PASSED, critical warning 0, 26% estimated
+lifetime used, 100% spare, 0 media/data-integrity errors, 50 C, 5,088 power-on hours,
+about 379 TB written and 17 unsafe shutdowns. It also reported 52 cumulative error
+log entries, but the USB bridge truncated the detailed error/self-test log pages.
+No short/long device self-test or full surface scan was performed. Kernel logs
+showed UAS resets, read/write errors, an offline device and an actual read-only
+filesystem remount at 23:07:14 before reconnection. This suggests an intermittent
+connection/enclosure/controller problem rather than exhausted flash endurance,
+but the faulty component has not been isolated and SMART PASS does not certify
+filesystem integrity or reliable writes. Device diagnosis remains `1kee-986`.
+
+After reconnection, the bounded regeneration pass completed successfully for all
+103 logged native tile failures. All replacements passed manifest/geometry
+validation in the internal recovery store. The source device remained running,
+and the kernel recorded no new storage errors during these post-reconnect checks.
+No repairs or writes were made to the original source volume during this retry.
+The earlier 102-source-failure blocker is therefore resolved for these requests;
+`1kee-987` is closed. This is not a full database/drive integrity certification.
