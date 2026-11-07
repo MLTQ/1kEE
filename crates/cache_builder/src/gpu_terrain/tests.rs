@@ -1,4 +1,5 @@
 use super::*;
+use crate::marching_squares::SrtmTile;
 fn upload(worker: &Worker, data: &[f32]) -> wgpu::Buffer {
     worker.buffer(
         "test raster",
@@ -330,4 +331,108 @@ fn gpu_contours_match_gdal_degenerate_cells() {
         assert_eq!(normalize(gpu), normalize(gdal), "fixture {i}: {values:?}");
     }
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn windowed_strips_preserve_edges_nodata_and_skip_unneeded_rows() {
+    use tiff::encoder::{TiffEncoder, colortype::GrayI16};
+    let path = std::env::temp_dir().join(format!(
+        "1kee-source-window-{}-{}.tif",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let value = |x: u32, y: u32| {
+        if x == 3600 && y == 3600 {
+            i16::MIN
+        } else {
+            ((x % 2000 + y % 2000) as i32 - 2000) as i16
+        }
+    };
+    let samples: Vec<i16> = (0..3601u32)
+        .flat_map(|y| (0..3601u32).map(move |x| value(x, y)))
+        .collect();
+    {
+        let mut encoder = TiffEncoder::new(std::fs::File::create(&path).unwrap()).unwrap();
+        let mut image = encoder.new_image::<GrayI16>(3601, 3601).unwrap();
+        image.rows_per_strip(16).unwrap();
+        image.write_data(&samples).unwrap();
+    }
+    let size = path.metadata().unwrap().len();
+    for requested in [
+        Window {
+            x: 122,
+            y: 127,
+            width: 3,
+            height: 3,
+        },
+        Window {
+            x: 3599,
+            y: 3598,
+            width: 2,
+            height: 3,
+        },
+    ] {
+        let decoded = window::load(&path, requested).unwrap();
+        assert!(decoded.window.contains(requested));
+        assert_eq!(decoded.chunks, 2);
+        assert!(
+            decoded.bytes_read < size / 4,
+            "read {} of {size} bytes",
+            decoded.bytes_read
+        );
+        for (i, &sample) in decoded.samples.iter().enumerate() {
+            let x = decoded.window.x + i as u32 % decoded.window.width;
+            let y = decoded.window.y + i as u32 / decoded.window.width;
+            assert_eq!(sample, f32::from(value(x, y)));
+        }
+    }
+    assert!(
+        window::load(
+            &path,
+            Window {
+                x: 3600,
+                y: 0,
+                width: 2,
+                height: 1
+            }
+        )
+        .is_err()
+    );
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(size / 2)
+        .unwrap();
+    assert!(
+        window::load(
+            &path,
+            Window {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2
+            }
+        )
+        .is_err()
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn source_windows_include_bilinear_neighbors_without_crossing_the_source() {
+    assert_eq!(
+        Window::from_axes(&[122.5, 123., 3599.5, 3600.], 2),
+        Some(Window {
+            x: 122,
+            y: 3599,
+            width: 3,
+            height: 2
+        })
+    );
+    assert_eq!(Window::from_axes(&[-1., -1., 20., 21.], 2), None);
+    assert_eq!(Window::from_axes(&[1.], 2), None);
 }

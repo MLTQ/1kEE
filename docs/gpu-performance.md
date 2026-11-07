@@ -113,7 +113,7 @@ Unset `ONEKEE_TERRAIN_GPU` (or set it to `0`) to return to GDAL generation.
 
 GPU resampling and marching squares share a resident raster; CPU work still
 includes TIFF decoding, line stitching, clipping, and SQLite writes. Up to twelve
-source rasters stay in VRAM across builds. The compute worker follows
+source windows stay in VRAM across builds. The compute worker follows
 `ONEKEE_GPU`, uses one adapter, and consumes up to roughly 1 GiB beyond renderer
 budgets. CPU fallback handles unsupported source formats/projections, unavailable
 GPUs, invalid source reads, and output-capacity failures. GDAL remains the default.
@@ -156,7 +156,8 @@ commits. Source OS caches may already be warm; first-use GPU timings include
 initialization and uploads, while repeated calls reuse the GPU source cache.
 These are tile-build measurements, not interactive frame-rate or disk-cold tests.
 
-Final RTX 4090/Vulkan measurements on the Ryzen 5 5600X, with compilation stopped:
+Initial-backend (`51bc9c3`) RTX 4090/Vulkan measurements on the Ryzen 5 5600X,
+with compilation stopped; these precede the cold-source optimization below:
 
 | Native tile | GDAL repeat | GPU first pass | GPU repeat | Repeat speedup |
 |---|---:|---:|---:|---:|
@@ -171,3 +172,72 @@ stitching. The three-region benchmark is intentionally limited; follow-up
 `1kee-988` covers wider parity and interactive-load validation. Current regression
 checks passed: 394 desktop tests, 36 cache-builder unit/integration tests, six
 GPU tests, the end-to-end benchmark, and forced unavailable-adapter GDAL fallback.
+
+
+## Cold-source builds: windowed TIFF reads
+
+The SRTM compute backend already replaces both `gdalwarp` and `gdal_contour`
+for uncached tiles. Its first implementation read and uploaded complete
+3601×3601 source rasters on a residency miss. A small output tile could therefore
+pay for most of a one-degree file it did not need.
+
+It now decodes only TIFF tiles/strips intersecting the requested sample window,
+including interpolation neighbors. Uploads contain only those windows; the
+bounded GPU cache reuses a window only when it fully covers the request. The
+output raster is initialized to nodata by a compute pass, removing the CPU
+allocation/fill/upload of up to 144 MB per output grid. Normal OS readahead is
+retained because forcing random scheduling did not improve elapsed time on this
+connection. Startup/lock-wait, file I/O, decoding, upload submission, and
+compute/readback are logged separately.
+
+The cold benchmark uses a fresh process and fresh temporary destination for
+every run, requests `POSIX_FADV_DONTNEED` on the relevant source files before
+each run, and alternates GDAL/GPU ordering. This is best-effort OS data-cache
+eviction, not a controller-cache flush. It includes GPU initialization,
+source reading, processing, SQLite writes and final geometry validation. Source
+files/schema are opened read-only; generated databases/logs are under `/tmp`.
+The reported input-byte count is `ru_inblock × 512` for the process and its
+children, which can include non-source reads. The original binary was saved
+before editing and tested using the same harness.
+
+```sh
+python3 scripts/benchmark-cold-terrain.py \
+  --binary target/release/one-thousand-electric-eye-desktop \
+  --label windowed \
+  --srtm-root /run/media/m/Minkowski/Data/srtm_gl1/SRTM_GL1_srtm \
+  --schema-db /path/to/a/valid/srtm_native_v1.sqlite
+```
+
+`--schema-db` supplies only table/index definitions and the native-quality tag;
+no existing geometry is copied or replaced. The fixture source directory must
+contain the three tested regions. The harness fails on unexpected GPU fallback.
+
+
+Measured on the **current USB 2.0 connection**, two fresh-process runs per case:
+
+| Native tile | GDAL | Windowed GPU | Previous GPU input reads | Windowed GPU input reads |
+|---|---:|---:|---:|---:|
+| 4/126/143 | 0.44–0.50 s | 0.59–0.67 s | 10.71 MB | 4.78 MB |
+| 0/9/27, 5837² | 5.39–5.60 s | 3.27–3.53 s | 78.36 MB | 46.08 MB |
+| 4/-98/-235 | 0.326–0.328 s | 0.40–0.43 s | 5.28 MB | 1.45 MB |
+
+MB here is decimal; input reads include process-tree I/O, not only source bytes.
+The large tile benefits; first-use GPU setup still makes the small cases slower
+than GDAL. Each process pays roughly 0.2 s for GPU initialization. A running
+application normally pays that setup cost once, but source reads remain cold
+when visiting a new region. These numbers must not be conflated with the earlier
+warm-source 3–4× result.
+
+An independent 1kEE **global-overview** `gdalwarp -r average -tr 0.2` job was
+active during the final runs, reading the same drive and consuming CPU. Wall
+times varied across runs, so before/after time ratios are not presented as
+controlled speedups. The distinct overview path still uses GDAL; detailed
+SRTM tile acceleration does not replace it. Raw observations and protocol are
+saved in [terrain-cold-2026-11-07.json](benchmarks/terrain-cold-2026-11-07.json).
+
+Validation passed: 394 desktop tests, 38 cache-builder unit/integration tests,
+eight focused GPU/source-window checks, and the three-region full-cache parity
+benchmark. Clippy completed with existing repository warnings. The cache-builder
+suite was rerun serially after an unrelated compact-PBF lock failure; follow-up
+`1kee-990` records that failure. Wider terrain/topology and interactive validation
+remain tracked by `1kee-988`.

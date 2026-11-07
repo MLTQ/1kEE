@@ -1,7 +1,7 @@
 //! Opt-in SRTM GL1 compute backend. Sources are read-only; callers own cache writes.
-//! One serialized device and an twelve-tile VRAM LRU are shared by background jobs.
+//! One serialized device and a twelve-window VRAM LRU are shared by background jobs.
 use crate::contours::{self, TileKey};
-use crate::marching_squares::{ContourLine, SrtmTile, chain_segments};
+use crate::marching_squares::{ContourLine, chain_segments};
 use eframe::wgpu::{self, util::DeviceExt};
 use std::{
     collections::BTreeMap,
@@ -10,6 +10,9 @@ use std::{
     time::Instant,
 };
 use tile_archive::contour_grid::{Bounds, CoreTile};
+
+mod window;
+use window::Window;
 
 const NODATA: f32 = -32768.0;
 const MAX_N: u32 = 6000;
@@ -24,6 +27,7 @@ pub fn enabled() -> bool {
 /// Generate a complete tile in memory. Does not modify any files. An error must
 /// fall back or abort; it must never be committed as an empty successful tile.
 pub fn build(root: &Path, zoom: i32, lat: i32, lon: i32) -> Result<TerrainTile, String> {
+    let build_started = Instant::now();
     let spec = contours::all_specs()
         .into_iter()
         .find(|s| s.zoom_bucket == zoom)
@@ -36,6 +40,7 @@ pub fn build(root: &Path, zoom: i32, lat: i32, lon: i32) -> Result<TerrainTile, 
         .lock()
         .map_err(|_| "GPU terrain worker unavailable".to_string())?;
     let worker = state.as_mut().map_err(|e| e.clone())?;
+    let worker_wait_ms = build_started.elapsed().as_secs_f64() * 1000.0;
     let start = Instant::now();
     worker
         .device
@@ -63,9 +68,9 @@ pub fn build(root: &Path, zoom: i32, lat: i32, lon: i32) -> Result<TerrainTile, 
     let start_stitch = Instant::now();
     let (contours, coastlines) = stitch(raw, core.source, core.raster_size);
     eprintln!(
-        "[terrain-gpu] tile={zoom}/{lat}/{lon} source_ms={source_ms:.3} compute_readback_ms={compute_ms:.3} stitch_ms={:.3} total_ms={:.3} segments={segment_count}",
+        "[terrain-gpu] tile={zoom}/{lat}/{lon} worker_wait_ms={worker_wait_ms:.3} source_ms={source_ms:.3} compute_readback_ms={compute_ms:.3} stitch_ms={:.3} total_ms={:.3} segments={segment_count}",
         start_stitch.elapsed().as_secs_f64() * 1000.0,
-        start.elapsed().as_secs_f64() * 1000.0
+        build_started.elapsed().as_secs_f64() * 1000.0
     );
     Ok(TerrainTile {
         tile: TileKey {
@@ -95,11 +100,13 @@ struct Source {
     path: PathBuf,
     modified: Option<std::time::SystemTime>,
     size: u64,
+    window: Window,
     buffer: wgpu::Buffer,
 }
 struct Worker {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    initialize_pipeline: wgpu::ComputePipeline,
     sample_pipeline: wgpu::ComputePipeline,
     contour_pipeline: wgpu::ComputePipeline,
     sources: Vec<Source>,
@@ -173,19 +180,21 @@ impl Worker {
                 cache: None,
             })
         };
+        let initialize_pipeline = make(include_str!("initialize.wgsl"));
         let sample_pipeline = make(include_str!("resample.wgsl"));
         let contour_pipeline = make(include_str!("contours.wgsl"));
         if let Some(e) = block_on(device.pop_error_scope()) {
             return Err(e.to_string());
         }
         eprintln!(
-            "[terrain-gpu] adapter={} backend={:?} source_cache=12 tiles",
+            "[terrain-gpu] adapter={} backend={:?} source_cache=12 windows",
             adapter.get_info().name,
             adapter.get_info().backend
         );
         Ok(Self {
             device,
             queue,
+            initialize_pipeline,
             sample_pipeline,
             contour_pipeline,
             sources: Vec::new(),
@@ -251,39 +260,45 @@ impl Worker {
         staging.unmap();
         Ok(result)
     }
-    fn source(&mut self, path: &Path, lat: i32, lon: i32) -> Result<usize, String> {
+    fn source(&mut self, path: &Path, lat: i32, lon: i32, needed: Window) -> Result<usize, String> {
         let meta = path
             .metadata()
             .map_err(|e| format!("{}: {e}", path.display()))?;
         let modified = meta.modified().ok();
-        if let Some(i) = self
-            .sources
-            .iter()
-            .position(|s| s.path == path && s.modified == modified && s.size == meta.len())
-        {
+        if let Some(i) = self.sources.iter().position(|s| {
+            s.path == path
+                && s.modified == modified
+                && s.size == meta.len()
+                && s.window.contains(needed)
+        }) {
             let entry = self.sources.remove(i);
             self.sources.push(entry);
             return Ok(self.sources.len() - 1);
         }
         validate_source(path, lat, lon)?;
-        let mut tile =
-            SrtmTile::load(path).ok_or_else(|| format!("Unreadable SRTM {}", path.display()))?;
-        if tile.width != 3601 || tile.height != 3601 {
-            return Err("GPU terrain requires 3601×3601 GL1 tiles".into());
-        }
-        for v in &mut tile.samples {
-            if !v.is_finite() {
-                *v = NODATA;
-            } else if *v < -12000.0 || *v > 10000.0 {
-                return Err("Unexpected SRTM elevation range".into());
-            }
-        }
+        let decoded = window::load(path, needed)?;
+        let upload_start = Instant::now();
         let buffer = self.buffer(
             "resident SRTM",
-            bytemuck::cast_slice(&tile.samples),
+            bytemuck::cast_slice(&decoded.samples),
             wgpu::BufferUsages::STORAGE,
         );
-        self.sources.retain(|s| s.path != path);
+        eprintln!(
+            "[terrain-gpu-source] file={} chunks={} bytes_read={} decoded_pixels={} io_ms={:.3} decode_ms={:.3} upload_submit_ms={:.3}",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            decoded.chunks,
+            decoded.bytes_read,
+            decoded.samples.len(),
+            decoded.io_ms,
+            decoded.cpu_ms,
+            upload_start.elapsed().as_secs_f64() * 1000.0
+        );
+        self.sources.retain(|s| {
+            s.path != path
+                || (s.modified == modified
+                    && s.size == meta.len()
+                    && !decoded.window.contains(s.window))
+        });
         if self.sources.len() >= 12 {
             self.sources.remove(0);
         }
@@ -291,16 +306,16 @@ impl Worker {
             path: path.into(),
             modified,
             size: meta.len(),
+            window: decoded.window,
             buffer,
         });
         Ok(self.sources.len() - 1)
     }
     fn resample(&mut self, root: &Path, bounds: Bounds, n: u32) -> Result<wgpu::Buffer, String> {
         validate_grid(bounds, n)?;
-        let initial = vec![NODATA; n as usize * n as usize];
-        let grid = self.buffer(
+        let grid = self.empty(
             "sampled terrain",
-            bytemuck::cast_slice(&initial),
+            u64::from(n) * u64::from(n) * 4,
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         );
         let params = self.buffer(
@@ -308,6 +323,7 @@ impl Worker {
             bytemuck::cast_slice(&[n, 3601, 3601, 0]),
             wgpu::BufferUsages::UNIFORM,
         );
+        self.dispatch(&self.initialize_pipeline, &[&params, &grid], n);
         let mut found = false;
         for lat in bounds.min_lat.floor() as i32..=bounds.max_lat.floor() as i32 {
             for lon in bounds.min_lon.floor() as i32..=bounds.max_lon.floor() as i32 {
@@ -321,9 +337,28 @@ impl Worker {
                 if !path.try_exists().map_err(|e| e.to_string())? {
                     continue;
                 }
-                let i = self.source(&path, lat, lon)?;
+                let mut axes = axes(bounds, n, lat, lon);
+                let Some(needed) = Window::from_axes(&axes, n as usize) else {
+                    continue;
+                };
+                let i = self.source(&path, lat, lon, needed)?;
                 found = true;
-                let axes = axes(bounds, n, lat, lon);
+                let window = self.sources[i].window;
+                for v in &mut axes[..n as usize] {
+                    if *v >= 0.0 {
+                        *v -= window.x as f32;
+                    }
+                }
+                for v in &mut axes[n as usize..] {
+                    if *v >= 0.0 {
+                        *v -= window.y as f32;
+                    }
+                }
+                let params = self.buffer(
+                    "window sampling parameters",
+                    bytemuck::cast_slice(&[n, window.width, window.height, 0]),
+                    wgpu::BufferUsages::UNIFORM,
+                );
                 let axes = self.buffer(
                     "local pixel coordinates",
                     bytemuck::cast_slice(&axes),
@@ -464,7 +499,7 @@ fn validate_source(path: &Path, lat: i32, lon: i32) -> Result<(), String> {
         }
         let key = |id: u16, value: u16| {
             keys.get(4..)
-                .is_some_and(|k| k.as_chunks::<4>().0.iter().any(|k| *k == [id, 0, 1, value]))
+                .is_some_and(|k| k.as_chunks::<4>().0.contains(&[id, 0, 1, value]))
         };
         Ok(d.dimensions()? == (3601, 3601)
             && scale.len() >= 2

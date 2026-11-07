@@ -1,0 +1,324 @@
+{
+  "date": "2026-11-07",
+  "gpu": "RTX 4090 / Vulkan",
+  "cpu": "Ryzen 5 5600X",
+  "source": "Minkowski exFAT, USB 2.0 480 Mbps",
+  "destination": "fresh temporary cache on internal storage",
+  "baseline_commit": "51bc9c3",
+  "method": "Fresh process each run; per-source POSIX_FADV_DONTNEED request; two repetitions, GDAL/GPU then GPU/GDAL; source OS cache eviction is best effort. input_bytes = child-process-tree ru_inblock * 512.",
+  "contention": "An independent running 1kEE global-overview gdalwarp job was observed consuming CPU and reading the same drive during the final measurements. Version-to-version wall times are not a controlled speedup comparison.",
+  "results": [
+    {
+      "label": "before",
+      "tile": [
+        4,
+        126,
+        143
+      ],
+      "round": 0,
+      "gpu": false,
+      "seconds": 0.49544819598668255,
+      "input_bytes": 1773568,
+      "returncode": 0
+    },
+    {
+      "label": "before",
+      "tile": [
+        4,
+        126,
+        143
+      ],
+      "round": 0,
+      "gpu": true,
+      "seconds": 0.924240357009694,
+      "input_bytes": 10714624,
+      "returncode": 0
+    },
+    {
+      "label": "before",
+      "tile": [
+        4,
+        126,
+        143
+      ],
+      "round": 1,
+      "gpu": true,
+      "seconds": 0.9970170570013579,
+      "input_bytes": 10714624,
+      "returncode": 0
+    },
+    {
+      "label": "before",
+      "tile": [
+        4,
+        126,
+        143
+      ],
+      "round": 1,
+      "gpu": false,
+      "seconds": 0.4451216830057092,
+      "input_bytes": 1773568,
+      "returncode": 0
+    },
+    {
+      "label": "before",
+      "tile": [
+        0,
+        9,
+        27
+      ],
+      "round": 0,
+      "gpu": false,
+      "seconds": 5.341135009977734,
+      "input_bytes": 43647488,
+      "returncode": 0
+    },
+    {
+      "label": "before",
+      "tile": [
+        0,
+        9,
+        27
+      ],
+      "round": 0,
+      "gpu": true,
+      "seconds": 3.7319789999746718,
+      "input_bytes": 78355456,
+      "returncode": 0
+    },
+    {
+      "label": "before",
+      "tile": [
+        0,
+        9,
+        27
+      ],
+      "round": 1,
+      "gpu": true,
+      "seconds": 3.7034942930040415,
+      "input_bytes": 78355456,
+      "returncode": 0
+    },
+    {
+      "label": "before",
+      "tile": [
+        0,
+        9,
+        27
+      ],
+      "round": 1,
+      "gpu": false,
+      "seconds": 4.740086548001273,
+      "input_bytes": 43647488,
+      "returncode": 0
+    },
+    {
+      "label": "before",
+      "tile": [
+        4,
+        -98,
+        -235
+      ],
+      "round": 0,
+      "gpu": false,
+      "seconds": 0.32712854899000376,
+      "input_bytes": 868352,
+      "returncode": 0
+    },
+    {
+      "label": "before",
+      "tile": [
+        4,
+        -98,
+        -235
+      ],
+      "round": 0,
+      "gpu": true,
+      "seconds": 0.5431657489971258,
+      "input_bytes": 5282816,
+      "returncode": 0
+    },
+    {
+      "label": "before",
+      "tile": [
+        4,
+        -98,
+        -235
+      ],
+      "round": 1,
+      "gpu": true,
+      "seconds": 0.5446613020030782,
+      "input_bytes": 5282816,
+      "returncode": 0
+    },
+    {
+      "label": "before",
+      "tile": [
+        4,
+        -98,
+        -235
+      ],
+      "round": 1,
+      "gpu": false,
+      "seconds": 0.327606996987015,
+      "input_bytes": 868352,
+      "returncode": 0
+    },
+    {
+      "label": "windowed-final",
+      "tile": [
+        4,
+        126,
+        143
+      ],
+      "round": 0,
+      "gpu": false,
+      "seconds": 0.49821547098690644,
+      "input_bytes": 1773568,
+      "returncode": 0
+    },
+    {
+      "label": "windowed-final",
+      "tile": [
+        4,
+        126,
+        143
+      ],
+      "round": 0,
+      "gpu": true,
+      "seconds": 0.6678170809755102,
+      "input_bytes": 4780032,
+      "returncode": 0
+    },
+    {
+      "label": "windowed-final",
+      "tile": [
+        4,
+        126,
+        143
+      ],
+      "round": 1,
+      "gpu": true,
+      "seconds": 0.592211145994952,
+      "input_bytes": 4780032,
+      "returncode": 0
+    },
+    {
+      "label": "windowed-final",
+      "tile": [
+        4,
+        126,
+        143
+      ],
+      "round": 1,
+      "gpu": false,
+      "seconds": 0.4421183919766918,
+      "input_bytes": 1773568,
+      "returncode": 0
+    },
+    {
+      "label": "windowed-final",
+      "tile": [
+        0,
+        9,
+        27
+      ],
+      "round": 0,
+      "gpu": false,
+      "seconds": 5.391365516989026,
+      "input_bytes": 43647488,
+      "returncode": 0
+    },
+    {
+      "label": "windowed-final",
+      "tile": [
+        0,
+        9,
+        27
+      ],
+      "round": 0,
+      "gpu": true,
+      "seconds": 3.2681879430019762,
+      "input_bytes": 46076416,
+      "returncode": 0
+    },
+    {
+      "label": "windowed-final",
+      "tile": [
+        0,
+        9,
+        27
+      ],
+      "round": 1,
+      "gpu": true,
+      "seconds": 3.526007373002358,
+      "input_bytes": 46076416,
+      "returncode": 0
+    },
+    {
+      "label": "windowed-final",
+      "tile": [
+        0,
+        9,
+        27
+      ],
+      "round": 1,
+      "gpu": false,
+      "seconds": 5.602820019994397,
+      "input_bytes": 43647488,
+      "returncode": 0
+    },
+    {
+      "label": "windowed-final",
+      "tile": [
+        4,
+        -98,
+        -235
+      ],
+      "round": 0,
+      "gpu": false,
+      "seconds": 0.32814729600795545,
+      "input_bytes": 868352,
+      "returncode": 0
+    },
+    {
+      "label": "windowed-final",
+      "tile": [
+        4,
+        -98,
+        -235
+      ],
+      "round": 0,
+      "gpu": true,
+      "seconds": 0.40304562702658586,
+      "input_bytes": 1449984,
+      "returncode": 0
+    },
+    {
+      "label": "windowed-final",
+      "tile": [
+        4,
+        -98,
+        -235
+      ],
+      "round": 1,
+      "gpu": true,
+      "seconds": 0.4265206130221486,
+      "input_bytes": 1449984,
+      "returncode": 0
+    },
+    {
+      "label": "windowed-final",
+      "tile": [
+        4,
+        -98,
+        -235
+      ],
+      "round": 1,
+      "gpu": false,
+      "seconds": 0.32575799099868163,
+      "input_bytes": 868352,
+      "returncode": 0
+    }
+  ]
+}
