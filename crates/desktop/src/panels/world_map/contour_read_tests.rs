@@ -535,3 +535,49 @@ fn benchmark_cached_reader_concurrency() {
         );
     }
 }
+
+#[test]
+fn mixed_database_batch_reads_each_tile_and_preserves_cancellation() {
+    let root = std::env::temp_dir().join(format!("1kee-mixed-reader-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let paths = [root.join("source.sqlite"), root.join("repair.sqlite")];
+    for (i, path) in paths.iter().enumerate() {
+        let connection = srtm_focus_cache::db::open_cache_db(path).unwrap();
+        let mut blob = b"GP\0\0\0\0\0\0".to_vec();
+        blob.push(1);
+        blob.extend_from_slice(&2u32.to_le_bytes());
+        blob.extend_from_slice(&2u32.to_le_bytes());
+        for x in [0.0_f64, 1.0] {
+            blob.extend_from_slice(&x.to_le_bytes());
+            blob.extend_from_slice(&(i as f64).to_le_bytes());
+        }
+        connection.execute("INSERT INTO contour_tiles VALUES (10,0,?1,1,?2,?3)", params![i as i32, 10.0 + i as f64, blob]).unwrap();
+        connection.execute("INSERT INTO contour_tile_manifest(zoom_bucket,lat_bucket,lon_bucket,contour_count) VALUES(10,0,?1,1)", [i as i32]).unwrap();
+    }
+    let requests = [request(&paths[0], (10,0,0)), request(&paths[1], (10,0,1))];
+    let mut actual = Vec::new();
+    stream_local_contours(&paths[0], &requests, ReadSelection::WholeTile(100), &mut |_,_,_| {}, &mut |key, contours| {
+        actual.push((key, contours));
+        true
+    }).unwrap();
+    assert_eq!(actual.len(), 2);
+    for (i, (key, contours)) in actual.iter().enumerate() {
+        assert!(key == &requests[i].0);
+        assert_same(contours, &baseline(&paths[i], (10,0,i as i32), 100));
+        assert_eq!(contours.len(), 1);
+    }
+    let mut count = 0;
+    stream_local_contours(&paths[0], &requests, ReadSelection::WholeTile(100), &mut |_,_,_| {}, &mut |_,_| { count += 1; false }).unwrap();
+    assert_eq!(count, 1);
+    // A genuinely empty, manifested tile is ready; an absent tile is not.
+    let connection = srtm_focus_cache::db::open_cache_db(&paths[1]).unwrap();
+    connection.execute("INSERT INTO contour_tile_manifest(zoom_bucket,lat_bucket,lon_bucket,contour_count) VALUES(10,0,2,0)", []).unwrap();
+    drop(connection);
+    for (lon, expected_ok) in [(2, true), (3, false)] {
+        let mut published = false;
+        let result = stream_local_contours(&paths[1], &[request(&paths[1], (10,0,lon))], ReadSelection::WholeTile(100), &mut |_,_,_| {}, &mut |_, contours| { assert!(contours.is_empty()); published = true; true });
+        assert_eq!(result.is_ok(), expected_ok);
+        assert_eq!(published, expected_ok);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}

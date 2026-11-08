@@ -2113,7 +2113,44 @@ fn query_local_contours_with_progress(
     Ok(results)
 }
 
+// A batch can mix the original cache with per-tile repair databases. Keep
+// nearby requests in order while sharing a connection only within one path.
 fn stream_local_contours(
+    _path: &Path,
+    requests: &[ContourReadRequest],
+    selection: ReadSelection,
+    on_progress: &mut dyn FnMut(&CacheKey, usize, usize),
+    on_tile: &mut dyn FnMut(CacheKey, Vec<ContourPath>) -> bool,
+) -> rusqlite::Result<()> {
+    let mut published = false;
+    let mut cancelled = false;
+    let mut first_error = None;
+    for group in requests.chunk_by(|a, b| a.0.path == b.0.path) {
+        let result = stream_contours_from_database(
+            &group[0].0.path,
+            group,
+            selection,
+            on_progress,
+            &mut |key, contours| {
+                published = true;
+                cancelled = !on_tile(key, contours);
+                !cancelled
+            },
+        );
+        if let Err(error) = result {
+            first_error.get_or_insert(error);
+        }
+        if cancelled {
+            break;
+        }
+    }
+    if !published && let Some(error) = first_error {
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn stream_contours_from_database(
     path: &Path,
     requests: &[ContourReadRequest],
     selection: ReadSelection,
@@ -2250,6 +2287,10 @@ fn stream_local_contours(
             }
         }
         if tile_failed { continue; }
+        if expected.is_none() && decoded_rows == 0 {
+            first_error.get_or_insert(rusqlite::Error::QueryReturnedNoRows);
+            continue;
+        }
         if expected.is_some_and(|n| n != decoded_rows) {
             damaged.push(tile);
             first_error.get_or_insert(rusqlite::Error::InvalidQuery);

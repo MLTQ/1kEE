@@ -202,7 +202,10 @@ Its single-flight epochs reject results from workers started before the reset.
 
 - `stream_local_contours` emits successful tiles individually and can stop
   between tiles when its callback rejects a stale epoch. The collecting wrapper
-  retains existing globe/test ordering and partial-failure behavior.
+  retains existing globe/test ordering and partial-failure behavior. Batches
+  may mix original and isolated repair databases: contiguous requests share a
+  connection only when their paths match. Missing rows without a manifest are
+  retryable misses, never published as empty ready tiles.
 
 - Manifest snapshots retain the revision observed before selection. Tile or
   queue-capacity changes during a query therefore trigger another scheduling
