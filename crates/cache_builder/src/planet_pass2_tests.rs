@@ -77,6 +77,8 @@ fn unselected_way_blobs_do_not_decompress_nodes_and_still_report_progress() {
             nodes.decoded_blocks > 0,
             "selected roads still resolve coordinates"
         );
+        let (blocks, bytes, nodes) = lookup.activity();
+        assert!(blocks > 0 && bytes > 0 && nodes > 0);
         drop(session);
         drop(lookup);
         drop(_lock);

@@ -275,6 +275,8 @@ pub(super) fn open(
         return Err("PBF changed before opening lookups".into());
     }
     let nodes = PbfNodes {
+        decoded_blocks: Default::default(),
+        decoded_bytes: Default::default(),
         file,
         path: source.to_owned(),
         stamp,
@@ -296,6 +298,8 @@ pub(super) fn open(
 /// node blocks spread over the saved scan before accepting a remount/migration.
 fn verify_legacy_source(source: &Path, stamp: &Stamp, blocks: &[Block]) -> Result<(), String> {
     let probe = PbfNodes {
+        decoded_blocks: Default::default(),
+        decoded_bytes: Default::default(),
         file: File::open(source).map_err(|e| e.to_string())?,
         path: source.to_owned(),
         stamp: stamp.clone(),

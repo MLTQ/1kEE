@@ -17,6 +17,14 @@ pub struct Metrics {
     pub features: u64,
     /// Writes this run; repeated writes to a cell count again.
     pub cell_writes: u64,
+    #[serde(default)]
+    pub batch_done: u64,
+    #[serde(default)]
+    pub batch_total: u64,
+    #[serde(default)]
+    pub lookup_blocks: u64,
+    #[serde(default)]
+    pub lookup_bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -57,6 +65,7 @@ pub struct Live {
     pub tiles: u64,
     pub started: Option<Instant>,
     pub updated: Option<Instant>,
+    pub advanced: Option<Instant>,
     pub finished: Option<Instant>,
     samples: VecDeque<(Instant, u64)>,
 }
@@ -76,6 +85,16 @@ impl Live {
             self.samples.clear();
             return;
         };
+        if self.metrics.as_ref().is_none_or(|old| {
+            old.phase != metrics.phase
+                || old.scanned_bytes != metrics.scanned_bytes
+                || old.lookup_blocks != metrics.lookup_blocks
+                || old.ways != metrics.ways
+                || old.batch_done != metrics.batch_done
+                || old.cell_writes != metrics.cell_writes
+        }) {
+            self.advanced = Some(now);
+        }
         if self.metrics.as_ref().is_none_or(|old| {
             old.phase != metrics.phase || old.scanned_bytes > metrics.scanned_bytes
         }) {
@@ -190,5 +209,83 @@ mod recovery_tests {
             b"old checkpoint"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+/// Keep progress callbacks on their original thread while a bounded batch runs.
+/// Heartbeats are observational: they never advance source/checkpoint offsets.
+pub fn with_heartbeat<T: Send>(
+    work: impl FnOnce() -> T + Send,
+    mut heartbeat: impl FnMut(),
+    interval: Duration,
+) -> Result<T, String> {
+    std::thread::scope(|scope| {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let worker = scope.spawn(move || {
+            let _ = tx.send(work());
+        });
+        let result = loop {
+            match rx.recv_timeout(interval) {
+                Ok(value) => break Ok(value),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => heartbeat(),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    break Err("Way-resolution worker disconnected".to_owned());
+                }
+            }
+        };
+        worker
+            .join()
+            .map_err(|_| "Way-resolution worker panicked".to_owned())?;
+        result
+    })
+}
+
+#[cfg(test)]
+mod heartbeat_tests {
+    use super::*;
+    #[test]
+    fn progress_runs_while_work_is_incomplete_and_result_is_preserved() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut beats = 0;
+        let result = with_heartbeat(
+            move || {
+                rx.recv().unwrap();
+                42
+            },
+            || {
+                beats += 1;
+                let _ = tx.send(());
+            },
+            Duration::from_millis(1),
+        )
+        .unwrap();
+        assert_eq!(result, 42);
+        assert!(beats > 0);
+    }
+    #[test]
+    fn heartbeat_is_not_reported_as_actual_progress() {
+        let mut live = Live::default();
+        let mut metrics = Metrics {
+            phase: "Way scan".into(),
+            ..Default::default()
+        };
+        live.observe(Some(&metrics));
+        let advanced = live.advanced;
+        live.observe(Some(&metrics));
+        assert_eq!(live.advanced, advanced);
+        metrics.lookup_blocks = 1;
+        live.observe(Some(&metrics));
+        assert_eq!(live.advanced, live.updated);
+    }
+    #[test]
+    fn worker_failure_does_not_leave_heartbeat_spinning() {
+        assert!(
+            with_heartbeat(
+                || panic!("test worker failure"),
+                || {},
+                Duration::from_millis(1)
+            )
+            .is_err()
+        );
     }
 }

@@ -9,6 +9,16 @@ pub enum Session<'a> {
     Compact(pbf_nodes::Session<'a>),
 }
 impl Lookup {
+    pub fn activity(&self) -> (u64, u64, u64) {
+        match self {
+            Self::Flat(_) => (0, 0, 0),
+            Self::Compact(n) => {
+                let (blocks, bytes) = n.activity();
+                (blocks, bytes, n.node_count)
+            }
+        }
+    }
+
     pub fn session(&self) -> Session<'_> {
         match self {
             Self::Flat(n) => Session::Flat(n.session()),

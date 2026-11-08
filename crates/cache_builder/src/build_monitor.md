@@ -30,3 +30,13 @@ checkpoints or relax source identity checks. Existing feature output remains at
 the selected cache destination. Copying a PBF between filesystems can change
 inode/timestamp precision even when the sampled fingerprint matches; that sample
 is not a full-file content proof.
+
+Way batches run under a scoped worker while the coordinating thread emits a
+one-second heartbeat. Per-blob completion counts and successfully decoded
+coordinate block/byte counters update before the 64-blob barrier finishes.
+These bytes include repeated reads and OS cache hits, not physical disk traffic.
+Source/checkpoint byte positions never advance on a heartbeat. Partial batch
+feature counters are explicitly not durable. A separate last-measured-progress
+age changes only when counters change; a responsive heartbeat cannot hide an
+I/O stall. Worker disconnection/panic terminates the wait rather than leaving a
+spinner alive indefinitely. The existing single batch and Rayon limits remain.

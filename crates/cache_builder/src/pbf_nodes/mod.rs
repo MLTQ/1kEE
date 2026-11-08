@@ -71,6 +71,8 @@ pub struct IndexProgress {
 }
 
 pub struct PbfNodes {
+    decoded_blocks: std::sync::atomic::AtomicU64,
+    decoded_bytes: std::sync::atomic::AtomicU64,
     file: File,
     path: PathBuf,
     stamp: Stamp,
@@ -98,6 +100,13 @@ impl PbfNodes {
     pub fn session(&self) -> Session<'_> {
         Session::new(self)
     }
+    pub fn activity(&self) -> (u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            self.decoded_blocks.load(Relaxed),
+            self.decoded_bytes.load(Relaxed),
+        )
+    }
     pub fn block_count(&self) -> usize {
         self.blocks.len()
     }
@@ -121,6 +130,10 @@ impl PbfNodes {
         {
             return Err(format!("PBF node index mismatch at byte {}", b.offset));
         }
+        self.decoded_bytes
+            .fetch_add(b.length, std::sync::atomic::Ordering::Relaxed);
+        self.decoded_blocks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(nodes)
     }
 }

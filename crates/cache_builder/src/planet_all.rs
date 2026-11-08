@@ -664,6 +664,7 @@ fn run_pass2(
         progress(RoadBuildProgress {
             metrics: Some(crate::build_monitor::Metrics {
                 phase: "Way scan".into(),
+                nodes: node_lookup.activity().2,
                 scanned_bytes: processed_bytes,
                 total_bytes,
                 checkpoint_bytes: cp.pass2_offset,
@@ -680,14 +681,60 @@ fn run_pass2(
                 total_bytes as f64 / 1e9
             ),
         });
-        // Process blobs in parallel; each returns a BatchOutput.
-        let partials: Vec<BatchOutput> = blob_batch
-            .par_iter()
-            .map_init(
-                || node_lookup.session(),
-                |lookup, blob| process_blob(blob, lookup, cmd),
-            )
-            .collect::<Result<Vec<_>, _>>()?;
+        // Keep the coordinating thread reporting activity even when compact
+        // coordinate resolution takes minutes on a slow/random-I/O source.
+        let done = std::sync::atomic::AtomicU64::new(0);
+        let batch_ways = std::sync::atomic::AtomicU64::new(0);
+        let batch_features = std::sync::atomic::AtomicU64::new(0);
+        let mut heartbeat = || {
+            let (lookup_blocks, lookup_bytes, nodes) = node_lookup.activity();
+            let batch_done = done.load(Ordering::Relaxed);
+            progress(RoadBuildProgress {
+                metrics: Some(crate::build_monitor::Metrics {
+                    phase: "Way scan".into(),
+                    scanned_bytes: processed_bytes,
+                    total_bytes,
+                    checkpoint_bytes: cp.pass2_offset,
+                    nodes,
+                    ways: scanned_ways as u64 + batch_ways.load(Ordering::Relaxed),
+                    features: feature_count as u64 + batch_features.load(Ordering::Relaxed),
+                    cell_writes: written_cells as u64,
+                    batch_done,
+                    batch_total: blob_batch.len() as u64,
+                    lookup_blocks,
+                    lookup_bytes,
+                }),
+                stage: "Resolving selected ways".into(),
+                fraction: 0.42 + 0.4 * processed_bytes as f32 / total_bytes.max(1) as f32,
+                message: format!(
+                    "Resolving batch: {batch_done}/{} blobs complete; {lookup_blocks} coordinate blocks decoded",
+                    blob_batch.len()
+                ),
+            });
+        };
+        heartbeat();
+        let partials: Vec<BatchOutput> = crate::build_monitor::with_heartbeat(
+            || {
+                blob_batch
+                    .par_iter()
+                    .map_init(
+                        || node_lookup.session(),
+                        |lookup, blob| {
+                            let result = process_blob(blob, lookup, cmd);
+                            if let Ok(output) = &result {
+                                batch_ways.fetch_add(output.scanned_ways as u64, Ordering::Relaxed);
+                                batch_features
+                                    .fetch_add(output.feature_count as u64, Ordering::Relaxed);
+                                done.fetch_add(1, Ordering::Relaxed);
+                            }
+                            result
+                        },
+                    )
+                    .collect::<Result<Vec<_>, _>>()
+            },
+            &mut heartbeat,
+            std::time::Duration::from_secs(1),
+        )??;
 
         node_lookup.validate_source()?;
 
@@ -788,6 +835,7 @@ fn run_pass2(
         progress(RoadBuildProgress {
             metrics: Some(crate::build_monitor::Metrics {
                 phase: "Way scan".into(),
+                nodes: node_lookup.activity().2,
                 scanned_bytes: batch_end_pos,
                 total_bytes,
                 checkpoint_bytes: cp.pass2_offset,
@@ -832,6 +880,7 @@ fn run_pass2(
     progress(RoadBuildProgress {
         metrics: Some(crate::build_monitor::Metrics {
             phase: "Way scan".into(),
+            nodes: node_lookup.activity().2,
             scanned_bytes: total_bytes,
             total_bytes,
             checkpoint_bytes: total_bytes,

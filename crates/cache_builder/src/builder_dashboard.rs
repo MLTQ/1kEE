@@ -148,10 +148,17 @@ impl Dashboard {
                     .text(format!("{} · {} / {}", m.phase, bytes(m.scanned_bytes), bytes(m.total_bytes))));
                 ui.label(format!("Remaining source: {} · Saved position: {} · Since checkpoint: {}", bytes(m.total_bytes.saturating_sub(m.scanned_bytes)), bytes(m.checkpoint_bytes), bytes(m.scanned_bytes.saturating_sub(m.checkpoint_bytes))));
                 ui.label(format!("Nodes {}   ·   Ways {}   ·   Selected features {}   ·   Cell writes {}", m.nodes, m.ways, m.features, m.cell_writes));
+                if m.batch_total > 0 {
+                    ui.label(format!("Current batch: {}/{} blobs complete · Coordinate blocks decoded: {} · Compressed input: {}", m.batch_done, m.batch_total, m.lookup_blocks, bytes(m.lookup_bytes)));
+                    ui.small("Lookup counters include rereads and OS-cached input. Batch results are not checkpointed until the batch and required writes finish.");
+                }
                 ui.small("Way/feature/write counters are for this run. Cell writes can revisit existing cells. ETA covers this source scan only; later passes and writes add time.");
             }
             if self.live.tiles > 0 {
                 ui.label(format!("Terrain tiles completed this run: {} · {:.1} tiles/min", self.live.tiles, self.live.tiles as f64 / self.live.elapsed().as_secs_f64().max(1.0) * 60.0));
+            }
+            if self.live.metrics.is_some() && let Some(advanced) = self.live.advanced {
+                ui.small(format!("Last measured progress {}s ago", advanced.elapsed().as_secs()));
             }
             if let Some(updated) = self.live.updated {
                 ui.small(format!("Last worker update {}s ago{}", updated.elapsed().as_secs(), if building && updated.elapsed().as_secs()>30 { " · no new progress reported; worker may be busy or waiting on I/O" } else { "" }));
