@@ -169,6 +169,15 @@ pub struct ContourPath {
     pub points: Vec<GeoPoint>,
 }
 
+/// Outstanding source stages; read includes queued SQLite/decode work.
+#[derive(Clone, Copy, Default)]
+pub struct LocalLoadingStages {
+    pub building: usize,
+    pub reading: usize,
+    pub preparing: usize,
+    pub waiting: usize,
+}
+
 /// One local-terrain frame's decoded contours plus its ready/progress snapshot.
 /// The scene uses this for its pulse grid and progress card instead of opening
 /// SQLite again; a compatible prior manifest supplies known overlap while the
@@ -181,6 +190,7 @@ pub struct LocalContourLoad {
     pub contours: Option<Arc<Vec<ContourPath>>>,
     pub ready_buckets: HashSet<(i32, i32)>,
     pub loading_progress: HashMap<(i32, i32), f32>,
+    pub loading_stages: LocalLoadingStages,
     /// Cells deliberately excluded by the current screen footprint.
     pub culled_buckets: HashSet<(i32, i32)>,
     pub status: srtm_focus_cache::FocusContourRegionStatus,
@@ -1241,6 +1251,7 @@ fn load_earth_source_region(
         contours,
         ready_buckets: loading.ready_buckets,
         loading_progress: loading.fractions,
+        loading_stages: loading.stages,
         culled_buckets: loading.culled_buckets,
         status: loading.status,
         tiles,
@@ -1365,6 +1376,7 @@ pub fn load_lunar_region_for_view(
         contours,
         ready_buckets: loading.ready_buckets,
         loading_progress: loading.fractions,
+        loading_stages: loading.stages,
         culled_buckets: loading.culled_buckets,
         status: loading.status,
         tiles,
@@ -1488,6 +1500,7 @@ pub fn load_mars_region_for_view(
         contours,
         ready_buckets: loading.ready_buckets,
         loading_progress: loading.fractions,
+        loading_stages: loading.stages,
         culled_buckets: loading.culled_buckets,
         status: loading.status,
         tiles,

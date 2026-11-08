@@ -22,3 +22,9 @@ into the local scene's progress snapshot without filesystem work on paint.
 Viewport-culled cells are marked complete without requiring resident geometry.
 `culled_buckets` is distinct from missing/no-source coverage and passes to the
 fine-tier fallback check, preventing offscreen eviction from blocking takeover.
+
+The snapshot also reports queued/read/decode tiles and decoded tiles awaiting
+publication separately from builds. Unresolved cells outside those stages are
+reported as waiting. The terrain card combines these with composition work,
+instance preparation and candidate GPU residency; source completion alone no
+longer hides the indicator. Counts describe outstanding tiles, including queues.

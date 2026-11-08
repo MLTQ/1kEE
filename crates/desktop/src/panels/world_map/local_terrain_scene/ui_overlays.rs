@@ -34,19 +34,18 @@ pub(super) fn draw_legend(
     );
 }
 
-/// Draw the bottom-right progress overlay.  Handles SRTM cache progress,
-/// lunar GDAL build progress, and osmium cell-extraction progress as stacked
-/// cards; each card is only shown when relevant.
+/// Draw terrain pipeline and osmium extraction progress as stacked cards.
+/// Terrain remains active until source loading and display preparation finish.
 pub(super) fn draw_progress_overlay(
     painter: &egui::Painter,
     rect: egui::Rect,
-    cache_status: Option<srtm_focus_cache::FocusContourRegionStatus>,
+    status: srtm_focus_cache::FocusContourRegionStatus,
+    stages: super::super::contour_asset::LocalLoadingStages,
+    preparing_tiles: usize,
+    uploading_tiles: usize,
+    composing: bool,
     osmium_progress: Option<(u32, u32)>,
     job_note: Option<&str>,
-    offworld_tiles_building: usize,
-    offworld_tiles_ready: usize,
-    offworld_tiles_total: usize,
-    active_body: crate::model::ActiveBody,
 ) {
     const CARD_W: f32 = 200.0;
     const CARD_H: f32 = 36.0;
@@ -54,77 +53,33 @@ pub(super) fn draw_progress_overlay(
     const RIGHT_MARGIN: f32 = 12.0;
     const BOTTOM_MARGIN: f32 = 12.0;
 
-    let cache_active = cache_status
-        .map(|s| s.total_assets > 0 && s.ready_assets < s.total_assets)
-        .unwrap_or(false);
+    let preparing = stages.preparing + preparing_tiles;
+    let active = terrain_loading(status, stages, preparing_tiles, uploading_tiles, composing);
     let osmium_active = osmium_progress.is_some();
-    let offworld_active = offworld_tiles_total > 0 && offworld_tiles_ready < offworld_tiles_total;
-
-    if !cache_active && !osmium_active && !offworld_active {
+    if !active && !osmium_active {
         return;
     }
-
-    // Cards stack upward from the bottom.  Cache bar is always on bottom when both visible.
     let mut bottom_y = rect.bottom() - BOTTOM_MARGIN;
-
-    // ── SRTM cache card ────────────────────────────────────────────────────
-    if cache_active {
-        let status = cache_status.unwrap();
-        let progress = (status.ready_assets as f32 / status.total_assets as f32).clamp(0.0, 1.0);
+    if active {
         let frame = egui::Rect::from_min_size(
-            egui::pos2(rect.right() - RIGHT_MARGIN - CARD_W, bottom_y - CARD_H),
-            egui::vec2(CARD_W, CARD_H),
+            egui::pos2(rect.right() - RIGHT_MARGIN - 320.0, bottom_y - 66.0),
+            egui::vec2(320.0, 66.0),
         );
         let bar = egui::Rect::from_min_size(
             frame.left_bottom() + egui::vec2(0.0, -10.0),
             egui::vec2(frame.width(), 6.0),
         );
-        draw_progress_card(
-            painter,
-            frame,
-            bar,
-            &format!(
-                "CACHE {} / {}  ·  {} PENDING",
-                status.ready_assets, status.total_assets, status.pending_assets
-            ),
-            progress,
-            theme::topo_color(),
+        let progress = if status.total_assets > 0 {
+            status.ready_assets as f32 / status.total_assets as f32
+        } else { 0.0 };
+        let label = format!(
+            "TERRAIN · SOURCE {}/{}{}\nBUILD {} · READ/DECODE {} · WAIT {}\nPREPARE {} · GPU UPLOAD {}",
+            status.ready_assets, status.total_assets,
+            if composing { " · COMPOSING" } else { "" },
+            stages.building, stages.reading, stages.waiting,
+            preparing, uploading_tiles,
         );
-        bottom_y = frame.top() - GAP;
-    }
-
-    // ── Offworld GDAL build card ──────────────────────────────────────────────
-    if offworld_active {
-        let progress = (offworld_tiles_ready as f32 / offworld_tiles_total as f32).clamp(0.0, 1.0);
-        let frame = egui::Rect::from_min_size(
-            egui::pos2(rect.right() - RIGHT_MARGIN - CARD_W, bottom_y - CARD_H),
-            egui::vec2(CARD_W, CARD_H),
-        );
-        let bar = egui::Rect::from_min_size(
-            frame.left_bottom() + egui::vec2(0.0, -10.0),
-            egui::vec2(frame.width(), 6.0),
-        );
-        let prefix = match active_body {
-            crate::model::ActiveBody::Moon => "SLDEM",
-            crate::model::ActiveBody::Mars => "CTX",
-            crate::model::ActiveBody::Earth => "DEM",
-        };
-        let color = match active_body {
-            crate::model::ActiveBody::Moon => egui::Color32::from_rgb(155, 200, 248),
-            crate::model::ActiveBody::Mars => egui::Color32::from_rgb(255, 145, 80),
-            crate::model::ActiveBody::Earth => theme::topo_color(),
-        };
-        
-        draw_progress_card(
-            painter,
-            frame,
-            bar,
-            &format!(
-                "{prefix} {offworld_tiles_ready} / {offworld_tiles_total}  ·  {offworld_tiles_building} BUILDING"
-            ),
-            progress,
-            color, 
-        );
+        draw_progress_card(painter, frame, bar, &label, progress.clamp(0.0, 0.99), theme::topo_color());
         bottom_y = frame.top() - GAP;
     }
 
@@ -206,4 +161,34 @@ pub(super) fn draw_empty_state(painter: &egui::Painter, rect: egui::Rect, label:
         egui::FontId::proportional(18.0),
         theme::text_muted(),
     );
+}
+
+
+fn terrain_loading(
+    status: srtm_focus_cache::FocusContourRegionStatus,
+    stages: super::super::contour_asset::LocalLoadingStages,
+    preparing: usize,
+    uploading: usize,
+    composing: bool,
+) -> bool {
+    status.ready_assets < status.total_assets
+        || stages.building + stages.reading + stages.preparing + stages.waiting > 0
+        || preparing > 0 || uploading > 0 || composing
+}
+
+#[cfg(test)]
+mod loading_tests {
+    use super::*;
+    #[test]
+    fn completed_sources_do_not_hide_downstream_work() {
+        let status = srtm_focus_cache::FocusContourRegionStatus {
+            ready_assets: 9, total_assets: 9, pending_assets: 0,
+        };
+        let stages = super::super::super::contour_asset::LocalLoadingStages::default();
+        assert!(!terrain_loading(status, stages, 0, 0, false));
+        assert!(terrain_loading(status, stages, 2, 0, false));
+        assert!(terrain_loading(status, stages, 0, 2, false));
+        assert!(terrain_loading(status, stages, 0, 0, true));
+        assert!(terrain_loading(status, super::super::super::contour_asset::LocalLoadingStages { reading: 2, ..stages }, 0, 0, false));
+    }
 }

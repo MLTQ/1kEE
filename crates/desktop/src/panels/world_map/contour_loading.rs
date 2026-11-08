@@ -2,6 +2,7 @@
 use super::*;
 
 pub(super) struct Snapshot {
+    pub stages: LocalLoadingStages,
     pub ready_buckets: HashSet<(i32, i32)>,
     pub fractions: HashMap<(i32, i32), f32>,
     pub culled_buckets: HashSet<(i32, i32)>,
@@ -13,6 +14,7 @@ pub(super) fn snapshot(
     assets: &LocalManifestAssetViews,
     state: srtm_focus_cache::LocalContourRegionState,
 ) -> Snapshot {
+    let mut stages = LocalLoadingStages::default();
     let mut ready = state.ready_buckets;
     let mut status = state.status;
     let mut fractions: HashMap<_, _> = assets
@@ -92,6 +94,11 @@ pub(super) fn snapshot(
             .unwrap_or(0.75);
         fractions.insert(bucket, fraction);
         if fraction < 1.0 {
+            if guard.as_ref().is_some_and(|cache| cache.entries.contains_key(&key)) {
+                stages.preparing += 1;
+            } else {
+                stages.reading += 1;
+            }
             ready.remove(&bucket);
             status.ready_assets = status.ready_assets.saturating_sub(1);
         }
@@ -103,7 +110,10 @@ pub(super) fn snapshot(
     if let Some(cache) = guard.as_mut() {
         cache.last_status = Some(status);
     }
+    stages.building = status.pending_assets;
+    stages.waiting = status.total_assets.saturating_sub(status.ready_assets + stages.building + stages.reading + stages.preparing);
     Snapshot {
+        stages,
         ready_buckets: ready,
         fractions,
         culled_buckets,
@@ -149,6 +159,8 @@ mod tests {
             )
         };
         assert_eq!(read().fractions[&(0, 0)], 0.75);
+        assert_eq!(read().stages.reading, 1);
+        assert_eq!(read().stages.waiting, 0);
         assert_eq!(read().fractions[&(1, 1)], 1.0); // known no-source tile
         cache.lock().unwrap().read_progress.insert(key.clone(), 0.5);
         assert_eq!(read().fractions[&(0, 0)], 0.87);
@@ -161,10 +173,15 @@ mod tests {
         );
         assert_eq!(read().fractions[&(0, 0)], 0.99);
         assert_eq!(read().status.ready_assets, 0);
+        assert_eq!(read().stages.preparing, 1);
+        assert_eq!(read().stages.reading, 0);
         cache.lock().unwrap().published_tiles.insert(key.clone());
         assert_eq!(read().fractions[&(0, 0)], 1.0);
         assert_eq!(read().status.ready_assets, 1);
+        assert_eq!(read().stages.reading + read().stages.preparing, 0);
         cache.lock().unwrap().clear_entries_for_new_scene();
         assert_eq!(read().fractions[&(0, 0)], 0.75);
+        assert_eq!(read().stages.reading, 1);
+        assert_eq!(read().stages.waiting, 0);
     }
 }

@@ -40,6 +40,7 @@ fn frame(zoom: f32, radius: i32, with_lines: bool) -> LocalContourLoad {
             .map(|t| (t.id.lat_bucket, t.id.lon_bucket))
             .collect(),
         loading_progress: HashMap::new(),
+        loading_stages: Default::default(),
         culled_buckets: HashSet::new(),
         status: srtm_focus_cache::FocusContourRegionStatus {
             ready_assets: tiles.len(),

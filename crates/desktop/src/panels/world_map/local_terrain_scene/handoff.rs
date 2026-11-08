@@ -39,6 +39,11 @@ struct Handoff {
 static STATE: OnceLock<Mutex<Handoff>> = OnceLock::new();
 static TICKET: AtomicU64 = AtomicU64::new(1);
 
+pub(super) fn composing() -> bool {
+    STATE.get().and_then(|state| state.lock().ok())
+        .is_some_and(|state| state.working.is_some() || state.revision != state.built_revision)
+}
+
 pub(crate) fn reset() {
     if let Some(state) = STATE.get()
         && let Ok(mut state) = state.lock()

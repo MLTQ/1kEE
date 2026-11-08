@@ -123,6 +123,10 @@ fn choose(primary: LocalContourLoad, mut base: LocalContourLoad) -> LocalContour
     // compositor too. A missing fine edge cell must not replace the entire
     // view with SRTM or change the requested LOD's ownership priority.
     if has_geometry(&base) || !has_geometry(&primary) {
+        base.loading_stages.building += primary.loading_stages.building;
+        base.loading_stages.reading += primary.loading_stages.reading;
+        base.loading_stages.preparing += primary.loading_stages.preparing;
+        base.loading_stages.waiting += primary.loading_stages.waiting;
         base.detail = Some(LocalContourDetail {
             source_zoom: primary.source_zoom,
             tiles: primary

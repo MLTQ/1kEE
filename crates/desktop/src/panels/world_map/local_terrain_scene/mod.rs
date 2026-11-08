@@ -170,6 +170,12 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             &projection, 1.0, 1.0, 1.0, painter.ctx().clone(),
         ).upload_only().into_paint_callback(clip));
     }
+    let preparing_tiles = if model.show_contours {
+        candidate.tiles.len().saturating_sub(candidate_batches.len())
+    } else { 0 };
+    let uploading_tiles = if model.show_contours {
+        local_contour_pass::batches_pending_upload(&candidate_batches)
+    } else { 0 };
     let display = handoff::select(
         viewport, candidate, candidate_batches,
         model.show_contours,
@@ -177,10 +183,6 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     );
     let contours = display.contours;
     let gpu_contour_batches = display.batches;
-    let cache_status = match model.active_body {
-        crate::model::ActiveBody::Moon | crate::model::ActiveBody::Mars => None,
-        crate::model::ActiveBody::Earth => Some(contour_load.status),
-    };
 
     // The grid tracks build, decode, and publication; disk presence alone is not completion.
     let still_loading = contour_load.status.ready_assets < contour_load.status.total_assets;
@@ -689,24 +691,16 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             render_zoom,
             model.active_body,
         );
-        let (off_ready, off_building, off_total) = match model.active_body {
-            crate::model::ActiveBody::Moon | crate::model::ActiveBody::Mars => (
-                contour_load.status.ready_assets,
-                contour_load.status.pending_assets,
-                contour_load.status.total_assets,
-            ),
-            crate::model::ActiveBody::Earth => (0, 0, 0),
-        };
         ui_overlays::draw_progress_overlay(
             painter,
             rect,
-            cache_status,
+            contour_load.status,
+            contour_load.loading_stages,
+            preparing_tiles,
+            uploading_tiles,
+            handoff::composing(),
             osm_ingest::osmium_cell_progress(),
             osm_ingest::active_job_note().as_deref(),
-            off_building,
-            off_ready,
-            off_total,
-            model.active_body,
         );
     }
 

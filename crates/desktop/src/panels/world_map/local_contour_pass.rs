@@ -344,8 +344,12 @@ static RESIDENT_BYTES: AtomicU64 = AtomicU64::new(0);
 static GPU_READY: OnceLock<Mutex<HashSet<(LocalBatchId, u64)>>> = OnceLock::new();
 
 pub fn batches_uploaded(batches: &[LocalTileBatch]) -> bool {
-    let Ok(ready) = GPU_READY.get_or_init(Default::default).lock() else { return false; };
-    batches.iter().all(|b| b.instances.is_empty() || ready.contains(&(b.id, b.version)))
+    batches_pending_upload(batches) == 0
+}
+
+pub fn batches_pending_upload(batches: &[LocalTileBatch]) -> usize {
+    let Ok(ready) = GPU_READY.get_or_init(Default::default).lock() else { return batches.len(); };
+    batches.iter().filter(|b| !b.instances.is_empty() && !ready.contains(&(b.id, b.version))).count()
 }
 
 /// Bytes of local contour and road geometry currently resident on the GPU.
