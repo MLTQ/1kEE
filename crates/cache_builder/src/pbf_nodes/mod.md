@@ -19,3 +19,7 @@ Source stamping is now in source.rs. Strict device-aware checks still protect an
 active build. Reopening permits a remounted device only with matching inode,
 length, mtime and a sampled content fingerprint (verified descriptor migration
 for legacy checkpoints), preserving prior scans rather than rebuilding them.
+
+`Prepared` is the immutable selected-coordinate table shared by planet-way
+workers. The test-only `estimated_reads` helper audits compressed dependency
+bytes without reading or decoding node payloads.

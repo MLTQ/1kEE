@@ -34,8 +34,8 @@ parallel Pass 2 and incrementally merge feature cells.
 - Uses the `planet_lookup` adapter for grouped coordinate queries: flat sessions
   cache up to 4 MiB and compact sessions up to 16 MiB of decoded node arrays.
   Reference order and coordinate values are identical across backends.
-- Compact sessions prepare each way blob's selected dependencies together after
-  feature classification to avoid repeatedly decompressing evicted node blocks.
+- Compact sessions share selected dependencies across bounded groups of blobs
+  after classification, avoiding repeated decompression across workers.
 - **Rationale**: Resolving every reference in one grouped lookup amortizes
   positional I/O without changing vertex order, omissions, or `f32` values.
 
@@ -61,7 +61,7 @@ parallel Pass 2 and incrementally merge feature cells.
 - SRTM baking, when requested, is delegated to the cell merge layer so one
   sampler lives for the full Pass 2 run.
 - Pass 2 propagates PBF decode errors instead of silently checkpointing past
-  unreadable blobs. Its node-block cache is task-local and needs no shared lock.
+  unreadable blobs. Its prepared coordinate table is immutable and needs no shared lock.
 - A synthetic PBF regression verifies that resumed parallel Pass 1 truncates
   an uncheckpointed node tail and retains the exact original records/EOF offset.
 - Pass 2 announces node-index startup before opening it and reuses the validated
@@ -87,3 +87,32 @@ The CLI reports the same progress stages as the GUI.
 
 `planet_pass2_tests` checks zero coordinate reads for unmatched ways, genuine
 scan counts/progress and normal selected-road output against real PBF fixtures.
+
+## Shared compact passes
+Compact Pass 2 now collects up to 256 way blobs (also stopping after 256 MiB of
+compressed input), rather than resolving each blob independently. Selected
+references are grouped under a memory-aware budget: Linux MemAvailable / 384,
+clamped to 4–128 million references; other hosts default to 64 million.
+The divisor reserves headroom for coordinate tables, geometry and other apps;
+it is not a strict whole-process memory limit. Each subgroup resolves the union
+of its node dependencies once. An oversized individual blob fails explicitly
+instead of falling back to pathological per-way rereads. Flat mode keeps 64 blobs.
+All subgroups must succeed before the existing flush/checkpoint logic advances.
+This changes neither geometry nor the existing compact index/checkpoint format.
+
+Operator benchmarks are ignored tests `inspect_operator_way_batch_dependencies`
+and `benchmark_operator_shared_coordinates`; they require ONEKEE_BENCH_SOURCE,
+ONEKEE_BENCH_INDEX (a disposable copy), and ONEKEE_BENCH_OFFSET. The first estimates
+compressed dependency bytes; the second compares exact coordinates and wall time
+in old/new/new/old order without dropping the host page cache. Neither writes
+output cells. On the stopped Minkowski batch, 64 blobs independently demand
+1,164,117,748,654 bytes versus 61,407,831,570 bytes for their union. This is a
+read-amplification measurement, not an end-to-end speedup claim. 49 of those
+blobs exceeded the old prefetch cap and could reread still more data.
+
+Parallel old/new/new/old sample on 2026-11-08: four blobs, first 128 ways each,
+15,527 references. Old: 6.054/6.141 s, 674 block reads (1,227,290,733 bytes).
+Shared: 4.314/4.628 s, 649 block reads (1,182,609,238 bytes). All coordinates
+matched exactly; combined benchmark peak RSS was 425,428 KiB. These small,
+mostly warm-cache samples do not exercise the old 524,288-reference fallback
+or establish whole-planet build time. Synthetic tests cover that threshold.

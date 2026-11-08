@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 mod cache;
 mod index;
 mod source;
-pub use cache::Session;
+pub use cache::{Prepared, Session};
 pub use index::BuildState;
 use source::Stamp;
 
@@ -99,6 +99,20 @@ impl PbfNodes {
 
     pub fn session(&self) -> Session<'_> {
         Session::new(self)
+    }
+    #[cfg(test)]
+    pub fn estimated_reads(&self, ids: &[i64]) -> (usize, u64) {
+        let blocks: std::collections::HashSet<_> = ids
+            .iter()
+            .filter_map(|&id| {
+                let n = self.blocks.partition_point(|b| b.max < id);
+                self.blocks.get(n).filter(|b| b.min <= id).map(|_| n)
+            })
+            .collect();
+        (
+            blocks.len(),
+            blocks.iter().map(|&n| self.blocks[n].length).sum(),
+        )
     }
     pub fn activity(&self) -> (u64, u64) {
         use std::sync::atomic::Ordering::Relaxed;

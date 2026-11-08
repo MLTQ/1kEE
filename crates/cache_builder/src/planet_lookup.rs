@@ -9,6 +9,30 @@ pub enum Session<'a> {
     Compact(pbf_nodes::Session<'a>),
 }
 impl Lookup {
+    pub fn is_compact(&self) -> bool {
+        matches!(self, Self::Compact(_))
+    }
+    pub fn prepare_batch(
+        &self,
+        ids: Vec<i64>,
+    ) -> Result<Option<std::sync::Arc<pbf_nodes::Prepared>>, String> {
+        match self {
+            Self::Flat(_) => Ok(None),
+            Self::Compact(nodes) => nodes.prepare_batch(ids).map(Some),
+        }
+    }
+    pub fn prepared_session(
+        &self,
+        prepared: &Option<std::sync::Arc<pbf_nodes::Prepared>>,
+    ) -> Session<'_> {
+        match (self, prepared) {
+            (Self::Compact(nodes), Some(prepared)) => {
+                Session::Compact(nodes.prepared_session(prepared.clone()))
+            }
+            _ => self.session(),
+        }
+    }
+
     pub fn activity(&self) -> (u64, u64, u64) {
         match self {
             Self::Flat(_) => (0, 0, 0),

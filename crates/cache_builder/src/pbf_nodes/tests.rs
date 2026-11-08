@@ -228,3 +228,42 @@ fn corrupt_descriptor_cannot_silently_hide_nodes() {
 
 #[path = "resume_tests.rs"]
 mod resume_tests;
+
+#[test]
+fn shared_large_dependency_table_decodes_each_block_once_across_workers() {
+    let temp = Scratch::new();
+    let source = temp.source(&[header(), node_block(10), node_block(20), node_block(30)].concat());
+    let (lookup, _state) = PbfNodes::open(&source, &temp.index(), &mut |_| {}).unwrap();
+    let ids: Vec<_> = [10, 20, 30, 99, -1]
+        .into_iter()
+        .cycle()
+        .take(700_000)
+        .collect();
+    let prepared = lookup.prepare_batch(ids).unwrap();
+    assert_eq!(lookup.activity().0, 3);
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            let prepared = prepared.clone();
+            let lookup = &lookup;
+            scope.spawn(move || {
+                let mut session = lookup.prepared_session(prepared);
+                session.prefetch(std::iter::repeat_n(10, 700_000)).unwrap();
+                assert_eq!(
+                    session.lookup_many(&[30, -1, 10, 99, 20, 10]).unwrap(),
+                    vec![
+                        Some((0.0, 0.0)),
+                        None,
+                        Some((0.0, 0.0)),
+                        None,
+                        Some((0.0, 0.0)),
+                        Some((0.0, 0.0))
+                    ]
+                );
+                assert_eq!(session.decoded_blocks, 0);
+            });
+        }
+    });
+    assert_eq!(lookup.activity().0, 3);
+    fs::write(&source, b"truncated").unwrap();
+    assert!(lookup.prepare_batch(vec![10]).is_err());
+}

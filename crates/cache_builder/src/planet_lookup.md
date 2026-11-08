@@ -12,3 +12,8 @@ compact PBF lookup. Each backend supplies an independent worker session.
 - `prepare_refs` primes compact sessions with bounded, grouped way dependencies;
   flat sessions keep the existing per-way lookup. Only selected ways contribute references;
   oversized selections skip prefetch.
+
+`prepare_batch` and `prepared_session` share an immutable selected-coordinate
+table across compact planet-way workers. Flat lookup ignores preparation.
+`prepare_refs` is a no-op on these prepared sessions; legacy callers retain
+per-blob prefetch. Source validation and output coordinate semantics are unchanged.

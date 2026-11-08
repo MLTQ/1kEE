@@ -17,3 +17,11 @@ blocks in a worker-local cache. No decoded nodes are written to disk.
   references, at most 12 MiB additional retained data on 64-bit targets. Larger
   blobs fall back to LRU-only lookup. Unprefetched IDs still use normal lookup.
   Temporary request/result vectors add bounded memory during preparation.
+
+## Shared planet-way preparation
+`prepare_batch` sorts/deduplicates selected IDs across a bounded group of way
+blobs. It reads each required node block once in parallel, retaining only the
+requested coordinates in an immutable `Arc<Prepared>`. Worker sessions search
+this table without locks. Missing IDs are retained too, preventing rereads.
+Legacy callers still use the bounded LRU described above. Decode errors abort
+preparation; no partial table is published. Activity counters include these reads.

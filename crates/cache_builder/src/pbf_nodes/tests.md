@@ -18,3 +18,7 @@ data, using committed plain/dense fixtures and generated multi-block PBFs.
 
 Remount-specific regressions and opt-in read-only verification of an external
 index copy live in resume_tests.rs, reusing this module's disposable PBF helpers.
+
+Shared preparation tests use more than 524,288 references, duplicates and missing
+IDs across concurrent workers, asserting one decode per required block and exact
+lookup results. Truncation after preparation must fail a fresh preparation.

@@ -475,6 +475,98 @@ fn process_blob(
     Ok(out)
 }
 
+// Default raw dependency budget is 512 MiB. Larger batches split between
+// blobs; they never silently revert to the per-way LRU path.
+const MAX_BATCH_REFS: usize = 64 * 1024 * 1024;
+
+// Allow larger shared passes when RAM is available, while leaving room for
+// decoded geometry, output merging, and other applications. Non-Linux hosts
+// retain the conservative default. This is a snapshot, not a RAM reservation.
+fn compact_batch_budget() -> usize {
+    let available = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|text| {
+            text.lines().find_map(|line| {
+                line.strip_prefix("MemAvailable:")?
+                    .split_whitespace()
+                    .next()?
+                    .parse::<usize>()
+                    .ok()
+            })
+        })
+        .map(|kb| kb.saturating_mul(1024));
+    available
+        .map(|bytes| (bytes / 6 / 64).clamp(4 * 1024 * 1024, 128 * 1024 * 1024))
+        .unwrap_or(MAX_BATCH_REFS)
+}
+
+fn selected_refs(blob: &osmpbf::Blob, cmd: &PlanetAllCommand) -> Result<Vec<i64>, String> {
+    let BlobDecode::OsmData(block) = blob.decode().map_err(|e| e.to_string())? else {
+        return Ok(Vec::new());
+    };
+    Ok(block
+        .groups()
+        .flat_map(|g| g.ways())
+        .filter(|w| selection::classify(w, cmd).is_some())
+        .flat_map(|w| w.refs())
+        .collect())
+}
+
+fn process_batch(
+    blobs: &[osmpbf::Blob],
+    lookup: &Lookup,
+    cmd: &PlanetAllCommand,
+    completed: &(impl Fn(&BatchOutput) + Sync),
+) -> Result<Vec<BatchOutput>, String> {
+    process_batch_bounded(blobs, lookup, cmd, completed, compact_batch_budget())
+}
+
+fn process_batch_bounded(
+    blobs: &[osmpbf::Blob],
+    lookup: &Lookup,
+    cmd: &PlanetAllCommand,
+    completed: &(impl Fn(&BatchOutput) + Sync),
+    limit: usize,
+) -> Result<Vec<BatchOutput>, String> {
+    let run = |group: &[osmpbf::Blob], ids: Vec<i64>| {
+        let prepared = lookup.prepare_batch(ids)?;
+        group
+            .par_iter()
+            .map_init(
+                || lookup.prepared_session(&prepared),
+                |session, blob| {
+                    let output = process_blob(blob, session, cmd)?;
+                    completed(&output);
+                    Ok(output)
+                },
+            )
+            .collect::<Result<Vec<_>, String>>()
+    };
+    if !lookup.is_compact() {
+        return run(blobs, Vec::new());
+    }
+    let mut output = Vec::with_capacity(blobs.len());
+    let mut first = 0;
+    let mut ids = Vec::new();
+    for (i, blob) in blobs.iter().enumerate() {
+        let refs = selected_refs(blob, cmd)?;
+        if refs.len() > limit {
+            return Err(format!(
+                "One way blob exceeds the shared lookup reference budget ({limit}); source/checkpoint preserved"
+            ));
+        }
+        if i > first && ids.len() + refs.len() > limit {
+            output.extend(run(&blobs[first..i], std::mem::take(&mut ids))?);
+            first = i;
+        }
+        ids.extend(refs);
+    }
+    if first < blobs.len() {
+        output.extend(run(&blobs[first..], ids)?);
+    }
+    Ok(output)
+}
+
 fn process_way(
     way: &osmpbf::Way<'_>,
     selected: selection::WaySelection,
@@ -639,19 +731,28 @@ fn run_pass2(
     let mut srtm = cmd.srtm_root.clone().map(SrtmSampler::new);
 
     // ── Parallel batch loop ───────────────────────────────────────────────────
-    // Read BATCH_BLOBS PBF blobs sequentially (fast; sequential disk I/O), then
-    // decode + classify + node-look-up each blob in parallel with Rayon.  This
-    // saturates NVMe queue depth and all CPU cores while preserving the
-    // sequential checkpoint offset.
-    let mut blob_batch: Vec<osmpbf::Blob> = Vec::with_capacity(BATCH_BLOBS);
+    // Read bounded groups sequentially, resolve their coordinates together,
+    // then construct geometry in parallel. Checkpoints advance only after
+    // every included blob has been processed and output has been flushed.
+    let batch_blobs = if node_lookup.is_compact() {
+        256
+    } else {
+        BATCH_BLOBS
+    };
+    let mut blob_batch: Vec<osmpbf::Blob> = Vec::with_capacity(batch_blobs);
 
     let mut processed_bytes = resume;
     loop {
         // Fill the batch from the sequential reader.
         node_lookup.validate_source()?;
         blob_batch.clear();
-        for blob_result in reader.by_ref().take(BATCH_BLOBS) {
+        let batch_start = pos.load(Ordering::Relaxed);
+        for blob_result in reader.by_ref().take(batch_blobs) {
             blob_batch.push(blob_result.map_err(|e| e.to_string())?);
+            // Bound compressed input independently of reference/geometry memory.
+            if pos.load(Ordering::Relaxed).saturating_sub(batch_start) >= 256 * 1024 * 1024 {
+                break;
+            }
         }
         if blob_batch.is_empty() {
             break;
@@ -715,22 +816,11 @@ fn run_pass2(
         heartbeat();
         let partials: Vec<BatchOutput> = crate::build_monitor::with_heartbeat(
             || {
-                blob_batch
-                    .par_iter()
-                    .map_init(
-                        || node_lookup.session(),
-                        |lookup, blob| {
-                            let result = process_blob(blob, lookup, cmd);
-                            if let Ok(output) = &result {
-                                batch_ways.fetch_add(output.scanned_ways as u64, Ordering::Relaxed);
-                                batch_features
-                                    .fetch_add(output.feature_count as u64, Ordering::Relaxed);
-                                done.fetch_add(1, Ordering::Relaxed);
-                            }
-                            result
-                        },
-                    )
-                    .collect::<Result<Vec<_>, _>>()
+                process_batch(&blob_batch, node_lookup, cmd, &|output| {
+                    batch_ways.fetch_add(output.scanned_ways as u64, Ordering::Relaxed);
+                    batch_features.fetch_add(output.feature_count as u64, Ordering::Relaxed);
+                    done.fetch_add(1, Ordering::Relaxed);
+                })
             },
             &mut heartbeat,
             std::time::Duration::from_secs(1),
