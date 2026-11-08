@@ -22,3 +22,11 @@ Tests cover phase/resume rate math, generated cache parity, telemetry on success
 and failure, and preservation of durable state during rejected/no-op compact
 builds. `build-status.json` is intentionally excluded from the latter bytewise
 comparison; cache and checkpoint files remain covered.
+
+When a compact build rejects source identity or settings, the GUI offers an
+explicit fresh-working-folder action. It creates a unique empty child directory
+and selects it for the next build; it does not start scanning, overwrite old
+checkpoints or relax source identity checks. Existing feature output remains at
+the selected cache destination. Copying a PBF between filesystems can change
+inode/timestamp precision even when the sampled fingerprint matches; that sample
+is not a full-file content proof.

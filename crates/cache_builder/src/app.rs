@@ -1122,7 +1122,7 @@ impl BuilderApp {
             egui::ProgressBar::new(self.progress)
                 .animate(self.active_job.is_some())
                 .show_percentage()
-                .text(self.progress_detail.clone()),
+                .text(self.status.clone()),
         );
         ui.horizontal(|ui| {
             let building = self.active_job.is_some();
@@ -1355,7 +1355,7 @@ impl BuilderApp {
             egui::ProgressBar::new(self.progress)
                 .animate(self.active_job.is_some())
                 .show_percentage()
-                .text(self.progress_detail.clone()),
+                .text(self.status.clone()),
         );
         ui.horizontal(|ui| {
             let building = self.active_job.is_some();
@@ -1504,6 +1504,31 @@ impl eframe::App for BuilderApp {
                             .small()
                             .color(Color32::from_gray(120)),
                         );
+                    }
+                }
+
+                if self.osm_mode == OsmMode::Planet && self.form.compact_nodes
+                    && self.active_job.is_none() && self.status == "Failed"
+                    && self.progress_detail.to_ascii_lowercase().contains("new working directory")
+                {
+                    ui.add_space(6.0);
+                    ui.colored_label(Color32::from_rgb(240, 185, 105), "Saved index cannot be resumed with this source/settings.");
+                    ui.label("A fresh working folder rebuilds the index and preserves the existing cache output. This requires another source scan.");
+                    if ui.button("Use fresh working folder").clicked() {
+                        let current = if self.form.planet_tmp_dir.trim().is_empty() {
+                            PathBuf::from(self.form.cache_dir.trim()).join(".planet_build")
+                        } else { PathBuf::from(self.form.planet_tmp_dir.trim()) };
+                        match crate::build_monitor::fresh_working_folder(&current) {
+                            Ok(folder) => {
+                                self.form.planet_tmp_dir = folder.display().to_string();
+                                self.status = "Ready to rebuild index".into();
+                                self.progress = 0.0;
+                                self.progress_detail = "Fresh working folder selected. Press Build / resume planet cache to start a new index; existing cache output is preserved.".into();
+                                self.push_log(format!("Fresh working folder: {}", folder.display()));
+                                self.dashboard.refresh();
+                            }
+                            Err(error) => { self.push_log(error.clone()); self.progress_detail = error; }
+                        }
                     }
                 }
 
@@ -1764,7 +1789,7 @@ impl eframe::App for BuilderApp {
                     egui::ProgressBar::new(self.progress)
                         .animate(self.active_job.is_some())
                         .show_percentage()
-                        .text(self.progress_detail.clone()),
+                        .text(self.status.clone()),
                 );
 
                 ui.horizontal(|ui| {

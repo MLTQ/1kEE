@@ -153,3 +153,42 @@ mod tests {
         assert!(live.rate().is_none());
     }
 }
+
+/// Explicit GUI recovery: allocate isolated scratch without changing old files.
+pub fn fresh_working_folder(current: &Path) -> Result<std::path::PathBuf, String> {
+    std::fs::create_dir_all(current).map_err(|e| format!("Cannot create working folder: {e}"))?;
+    let stamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    for suffix in 0..100 {
+        let path = current.join(format!("fresh-{stamp}-{suffix}"));
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("Cannot create fresh working folder: {e}")),
+        }
+    }
+    Err("Could not allocate a unique working folder".into())
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    #[test]
+    fn fresh_workspaces_preserve_old_resume_state() {
+        let root =
+            std::env::temp_dir().join(format!("1kee-fresh-workspace-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("checkpoint.txt"), b"old checkpoint").unwrap();
+        let a = fresh_working_folder(&root).unwrap();
+        let b = fresh_working_folder(&root).unwrap();
+        assert_ne!(a, b);
+        assert_eq!(std::fs::read_dir(a).unwrap().count(), 0);
+        assert_eq!(
+            std::fs::read(root.join("checkpoint.txt")).unwrap(),
+            b"old checkpoint"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

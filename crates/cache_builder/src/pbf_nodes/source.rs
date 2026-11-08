@@ -49,7 +49,7 @@ impl Stamp {
             differences.push("modification time changed".into());
         }
         format!(
-            "The PBF source differs from this compact index ({}). Choose a new working directory; existing build files were preserved",
+            "The PBF source differs in file metadata from this compact index ({}). Copying a file or changing filesystems can cause this without changing its contents. Choose a new working directory to rebuild the index; existing cache output and build files were preserved",
             differences.join(", ")
         )
     }

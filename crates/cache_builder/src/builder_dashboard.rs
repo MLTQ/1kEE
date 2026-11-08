@@ -139,7 +139,7 @@ impl Dashboard {
             ui.add_space(8.0);
             ui.columns(3, |cols| {
                 metric(&mut cols[0], "ELAPSED · THIS RUN", &duration(self.live.elapsed()));
-                metric(&mut cols[1], "SOURCE SCAN RATE", &self.live.rate().map(|v| format!("{:.1} MB/s", v/1e6)).unwrap_or_else(|| "Measuring / inactive".into()));
+                metric(&mut cols[1], "SOURCE SCAN RATE", &self.live.rate().map(|v| format!("{:.1} MB/s", v/1e6)).unwrap_or_else(|| "—".into()));
                 metric(&mut cols[2], "EST. TO SCAN EOF", &self.live.eta().map(duration).unwrap_or_else(|| "—".into()));
             });
             if let Some(m) = &self.live.metrics {
