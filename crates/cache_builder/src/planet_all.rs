@@ -108,6 +108,87 @@ pub fn build_planet_cache_with_progress(
     cmd: PlanetAllCommand,
     progress: &mut dyn FnMut(RoadBuildProgress),
 ) -> Result<String, String> {
+    use crate::build_monitor::{Report, save, unix_now};
+    let start = std::time::Instant::now();
+    let path = cmd.tmp_dir.join("build-status.json");
+    fs::create_dir_all(&cmd.tmp_dir).map_err(|e| e.to_string())?;
+    let mut report = Report {
+        source: cmd.planet_path.display().to_string(),
+        source_bytes: fs::metadata(&cmd.planet_path).map(|m| m.len()).unwrap_or(0),
+        backend: format!("{:?}", cmd.node_storage),
+        selected_layers: [
+            ("roads", cmd.build_roads),
+            ("waterways", cmd.build_waterways),
+            ("buildings", cmd.build_buildings),
+            ("trees", cmd.build_trees),
+            ("admin", cmd.build_admin),
+            ("power", cmd.build_power),
+            ("rail", cmd.build_rail),
+            ("pipeline", cmd.build_pipeline),
+            ("aeroway", cmd.build_aeroway),
+            ("military", cmd.build_military),
+            ("comm", cmd.build_comm),
+            ("industrial", cmd.build_industrial),
+            ("port", cmd.build_port),
+            ("government", cmd.build_government),
+            ("surveillance", cmd.build_surveillance),
+        ]
+        .into_iter()
+        .filter(|(_, enabled)| *enabled)
+        .map(|(name, _)| name.to_owned())
+        .collect(),
+        output: cmd.out_dir.display().to_string(),
+        state: "running".into(),
+        stage: "Starting".into(),
+        message: String::new(),
+        updated_unix: unix_now(),
+        elapsed_secs: 0.0,
+        metrics: None,
+    };
+    let mut saved = start
+        .checked_sub(std::time::Duration::from_secs(2))
+        .unwrap_or(start);
+    let mut warned = false;
+    let result = build_planet_cache_inner(cmd, &mut |update| {
+        report.stage = update.stage.clone();
+        report.message = update.message.clone();
+        if update.metrics.is_some() {
+            report.metrics = update.metrics.clone();
+        }
+        report.updated_unix = unix_now();
+        report.elapsed_secs = start.elapsed().as_secs_f64();
+        if saved.elapsed().as_secs() >= 1 {
+            if let Err(error) = save(&path, &report)
+                && !warned
+            {
+                eprintln!("Build status could not be saved: {error}");
+                warned = true;
+            }
+            saved = std::time::Instant::now();
+        }
+        progress(update);
+    });
+    report.state = if result.is_ok() {
+        "completed"
+    } else {
+        "failed"
+    }
+    .into();
+    report.message = match &result {
+        Ok(s) | Err(s) => s.clone(),
+    };
+    report.updated_unix = unix_now();
+    report.elapsed_secs = start.elapsed().as_secs_f64();
+    if let Err(error) = save(&path, &report) {
+        eprintln!("Final build status could not be saved: {error}");
+    }
+    result
+}
+
+fn build_planet_cache_inner(
+    cmd: PlanetAllCommand,
+    progress: &mut dyn FnMut(RoadBuildProgress),
+) -> Result<String, String> {
     if !cmd.planet_path.exists() {
         return Err(format!(
             "Planet file not found: {}",
@@ -138,6 +219,7 @@ pub fn build_planet_cache_with_progress(
         )?;
 
         progress(RoadBuildProgress {
+            metrics: None,
             stage: "Sorting Nodes".to_owned(),
             fraction: 0.30,
             message: format!("Sorting {} node records…", cp.pass1_record_count),
@@ -145,6 +227,7 @@ pub fn build_planet_cache_with_progress(
 
         sort_in_place(&node_file, &sort_tmp, cp.pass1_record_count, &mut |msg| {
             progress(RoadBuildProgress {
+                metrics: None,
                 stage: "Sorting Nodes".to_owned(),
                 fraction: 0.35,
                 message: msg,
@@ -156,6 +239,7 @@ pub fn build_planet_cache_with_progress(
         cp.save(&checkpoint_path)?;
 
         progress(RoadBuildProgress {
+            metrics: None,
             stage: "Sorted Nodes".to_owned(),
             fraction: 0.40,
             message: format!(
@@ -171,6 +255,7 @@ pub fn build_planet_cache_with_progress(
                 .unwrap_or(0);
         }
         progress(RoadBuildProgress {
+            metrics: None,
             stage: "Loaded Node Store".to_owned(),
             fraction: 0.40,
             message: format!("Pass 1 already complete ({} nodes)", cp.pass1_record_count),
@@ -179,6 +264,7 @@ pub fn build_planet_cache_with_progress(
 
     // ── Pass 2: scan ways ─────────────────────────────────────────────────────
     progress(RoadBuildProgress {
+        metrics: None,
         stage: "Opening Node Index".to_owned(),
         fraction: 0.41,
         message: "Loading the reusable node index; building it once if missing or stale…"
@@ -206,6 +292,7 @@ pub fn build_planet_cache_with_progress(
         cmd.out_dir.display()
     );
     progress(RoadBuildProgress {
+        metrics: None,
         stage: "Completed".to_owned(),
         fraction: 1.0,
         message: summary.clone(),
@@ -222,12 +309,14 @@ fn run_pass1(
     checkpoint_path: &Path,
     progress: &mut dyn FnMut(RoadBuildProgress),
 ) -> Result<u64, String> {
+    let total_bytes = fs::metadata(planet_path).map_err(|e| e.to_string())?.len();
     let resume = cp.pass1_offset;
 
     let mut writer = if resume == 0 {
         NodeWriter::create(node_file)?
     } else {
         progress(RoadBuildProgress {
+            metrics: None,
             stage: "Resuming Pass 1".to_owned(),
             fraction: 0.05,
             message: format!(
@@ -272,17 +361,24 @@ fn run_pass1(
             cp.save(checkpoint_path)?;
             next_checkpoint_at = (writer.count / PASS1_CHECKPOINT_NODE_INTERVAL + 1)
                 * PASS1_CHECKPOINT_NODE_INTERVAL;
-
-            progress(RoadBuildProgress {
-                stage: "Collecting Nodes".to_owned(),
-                fraction: 0.20,
-                message: format!(
-                    "Pass 1: {} nodes written ({:.1} GB to disk)",
-                    writer.count,
-                    writer.count as f64 * RECORD_BYTES as f64 / 1e9
-                ),
-            });
         }
+        let offset = pos.load(Ordering::Relaxed);
+        progress(RoadBuildProgress {
+            metrics: Some(crate::build_monitor::Metrics {
+                phase: "Node scan".into(),
+                scanned_bytes: offset,
+                total_bytes,
+                checkpoint_bytes: cp.pass1_offset,
+                nodes: writer.count,
+                ..Default::default()
+            }),
+            stage: "Collecting Nodes".into(),
+            fraction: 0.30 * offset as f32 / total_bytes.max(1) as f32,
+            message: format!(
+                "{} nodes written; {} saved at the last checkpoint",
+                writer.count, cp.pass1_record_count
+            ),
+        });
     }
 
     let total = writer.count;
@@ -492,6 +588,7 @@ fn run_pass2(
 ) -> Result<BuildStats, String> {
     if !selection::has_way_layers(cmd) {
         progress(RoadBuildProgress {
+            metrics: None,
             stage: "Skipping general way pass".into(),
             fraction: 0.42,
             message: "No way layers selected; proceeding directly to administrative relations."
@@ -506,6 +603,7 @@ fn run_pass2(
     let resume = cp.pass2_offset;
     if resume > 0 {
         progress(RoadBuildProgress {
+            metrics: None,
             stage: "Scanning Ways".to_owned(),
             fraction: 0.42,
             message: format!(
@@ -547,6 +645,7 @@ fn run_pass2(
     // sequential checkpoint offset.
     let mut blob_batch: Vec<osmpbf::Blob> = Vec::with_capacity(BATCH_BLOBS);
 
+    let mut processed_bytes = resume;
     loop {
         // Fill the batch from the sequential reader.
         node_lookup.validate_source()?;
@@ -563,6 +662,16 @@ fn run_pass2(
         let batch_end_pos = pos.load(Ordering::Relaxed);
 
         progress(RoadBuildProgress {
+            metrics: Some(crate::build_monitor::Metrics {
+                phase: "Way scan".into(),
+                scanned_bytes: processed_bytes,
+                total_bytes,
+                checkpoint_bytes: cp.pass2_offset,
+                ways: scanned_ways as u64,
+                features: feature_count as u64,
+                cell_writes: written_cells as u64,
+                ..Default::default()
+            }),
             stage: "Resolving selected ways".into(),
             fraction: 0.42 + 0.4 * batch_end_pos as f32 / total_bytes.max(1) as f32,
             message: format!(
@@ -675,7 +784,18 @@ fn run_pass2(
             node_lookup.validate_source()?;
             cp.save(checkpoint_path)?;
         }
+        processed_bytes = batch_end_pos;
         progress(RoadBuildProgress {
+            metrics: Some(crate::build_monitor::Metrics {
+                phase: "Way scan".into(),
+                scanned_bytes: batch_end_pos,
+                total_bytes,
+                checkpoint_bytes: cp.pass2_offset,
+                ways: scanned_ways as u64,
+                features: feature_count as u64,
+                cell_writes: written_cells as u64,
+                ..Default::default()
+            }),
             stage: "Scanning Ways".into(),
             fraction: 0.42 + 0.4 * batch_end_pos as f32 / total_bytes.max(1) as f32,
             message: format!(
@@ -709,6 +829,23 @@ fn run_pass2(
     node_lookup.validate_source()?;
     cp.pass2_offset = 0; // complete — clear checkpoint
     cp.save(checkpoint_path)?;
+    progress(RoadBuildProgress {
+        metrics: Some(crate::build_monitor::Metrics {
+            phase: "Way scan".into(),
+            scanned_bytes: total_bytes,
+            total_bytes,
+            checkpoint_bytes: total_bytes,
+            ways: scanned_ways as u64,
+            features: feature_count as u64,
+            cell_writes: written_cells as u64,
+            ..Default::default()
+        }),
+        stage: "Way scan complete".into(),
+        fraction: 0.82,
+        message: format!(
+            "{feature_count} selected features; {written_cells} cell writes completed this run"
+        ),
+    });
 
     Ok(BuildStats {
         feature_count,

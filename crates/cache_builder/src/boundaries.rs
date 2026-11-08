@@ -27,6 +27,7 @@ pub fn load(
     let scratch = command.tmp_dir.join("indexed-pbf-v1");
     let (nodes, _guard) = crate::pbf_nodes::PbfNodes::open(source, &scratch, &mut |p| {
         progress(Progress {
+            metrics: None,
             stage: "Indexing PBF nodes".into(),
             fraction: 0.4 * p.bytes as f32 / p.total.max(1) as f32,
             message: format!(

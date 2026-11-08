@@ -103,21 +103,21 @@ fn compact_build_matches_flat_and_preserves_legacy_state() {
                 b"legacy state must remain untouched"
             );
         }
-        let saved = files(&tmp);
+        let saved = durable_files(&tmp);
         assert!(build(root, "indexed-pbf", "all").status.success());
-        assert_eq!(files(&tmp), saved);
+        assert_eq!(durable_files(&tmp), saved);
         assert_eq!(files(&root.join("indexed-pbf/out")), expected);
 
         let run = build(root, "indexed-pbf", "roads");
         assert!(!run.status.success());
         assert!(String::from_utf8_lossy(&run.stderr).contains("settings/output changed"));
-        assert_eq!(files(&tmp), saved);
+        assert_eq!(durable_files(&tmp), saved);
 
         fs::write(root.join("source.pbf"), [fixture, &[0]].concat()).unwrap();
         let run = build(root, "indexed-pbf", "all");
         assert!(!run.status.success());
         assert!(String::from_utf8_lossy(&run.stderr).contains("source differs"));
-        assert_eq!(files(&tmp), saved);
+        assert_eq!(durable_files(&tmp), saved);
         assert_eq!(files(&root.join("indexed-pbf/out")), expected);
     }
 }
@@ -137,4 +137,12 @@ fn corrupt_source_and_invalid_storage_do_not_create_feature_checkpoints() {
     assert!(!run.status.success());
     assert!(String::from_utf8_lossy(&run.stderr).contains("--node-storage must be"));
     assert!(!scratch.0.join("typo").exists());
+}
+
+// Monitoring timestamps/outcomes intentionally change on retries; durable build
+// state must still remain byte-for-byte identical on no-op/rejected builds.
+fn durable_files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut result = files(root);
+    result.remove(&PathBuf::from("build-status.json"));
+    result
 }

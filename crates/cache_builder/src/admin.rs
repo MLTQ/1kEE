@@ -34,6 +34,7 @@ pub fn load_or_build_admin_boundaries(
     } else {
         let count = node_store.count_admin_relations()?;
         progress(RoadBuildProgress {
+            metrics: None,
             stage: "Scanning Relations".to_owned(),
             fraction: 0.84,
             message: format!("Relation scan already complete ({count} relations cached)"),
@@ -45,6 +46,7 @@ pub fn load_or_build_admin_boundaries(
         collect_admin_way_nodes(&command.planet_path, node_store, progress)?;
     } else {
         progress(RoadBuildProgress {
+            metrics: None,
             stage: "Scanning Admin Ways".to_owned(),
             fraction: 0.90,
             message: "Admin way scan already complete".to_owned(),
@@ -74,6 +76,7 @@ fn collect_admin_relations(
     let resume_offset = node_store.get_scan_offset("relation_scan")?;
     if let Some(off) = resume_offset {
         progress(RoadBuildProgress {
+            metrics: None,
             stage: "Scanning Relations".to_owned(),
             fraction: 0.83,
             message: format!("Resuming relation scan from file offset {off}"),
@@ -91,6 +94,7 @@ fn collect_admin_relations(
     let mut total_relations = 0usize;
     let mut checkpoint = start;
     progress(RoadBuildProgress {
+        metrics: None,
         stage: "Scanning Relations".into(),
         fraction: 0.82,
         message: format!(
@@ -166,6 +170,7 @@ fn collect_admin_relations(
             node_store.save_scan_offset("relation_scan", offset)?;
             checkpoint = offset;
             progress(RoadBuildProgress {
+                metrics: None,
                 stage: "Scanning Relations".into(),
                 fraction: 0.82 + 0.06 * offset as f32 / total_bytes.max(1) as f32,
                 message: format!(
@@ -183,6 +188,7 @@ fn collect_admin_relations(
     }
 
     progress(RoadBuildProgress {
+        metrics: None,
         stage: "Scanning Relations".to_owned(),
         fraction: 0.86,
         message: format!("Relation scan complete: {total_relations} admin relations found"),
@@ -210,6 +216,7 @@ fn collect_admin_way_nodes(
     let resume_offset = node_store.get_scan_offset("admin_way_scan")?;
     if let Some(off) = resume_offset {
         progress(RoadBuildProgress {
+            metrics: None,
             stage: "Scanning Admin Ways".to_owned(),
             fraction: 0.87,
             message: format!("Resuming admin way scan from file offset {off}"),
@@ -226,6 +233,7 @@ fn collect_admin_way_nodes(
     let mut ways_found = 0usize;
     let mut checkpoint = start;
     progress(RoadBuildProgress {
+        metrics: None,
         stage: "Scanning Admin Ways".into(),
         fraction: 0.88,
         message: format!(
@@ -258,6 +266,7 @@ fn collect_admin_way_nodes(
             node_store.save_scan_offset("admin_way_scan", offset)?;
             checkpoint = offset;
             progress(RoadBuildProgress {
+                metrics: None,
                 stage: "Scanning Admin Ways".into(),
                 fraction: 0.88 + 0.06 * offset as f32 / total_bytes.max(1) as f32,
                 message: format!(
@@ -275,6 +284,7 @@ fn collect_admin_way_nodes(
     }
 
     progress(RoadBuildProgress {
+        metrics: None,
         stage: "Scanning Admin Ways".to_owned(),
         fraction: 0.90,
         message: format!("Admin way scan complete: {ways_found} ways processed"),
@@ -335,6 +345,7 @@ fn stitch_and_write(
 ) -> Result<usize, String> {
     let mut by_level: HashMap<u8, Vec<AdminRegion>> = HashMap::new();
     progress(RoadBuildProgress {
+        metrics: None,
         stage: "Assembling Admin Boundaries".into(),
         fraction: 0.94,
         message: "Loading boundary relations and resolving their member coordinates…".into(),
@@ -345,6 +356,7 @@ fn stitch_and_write(
     for (index, (relation_id, name, level, way_ids)) in relations.into_iter().enumerate() {
         if index == 0 || last_report.elapsed().as_secs_f32() >= 1.0 {
             progress(RoadBuildProgress {
+                metrics: None,
                 stage: "Assembling Admin Boundaries".into(),
                 fraction: 0.94 + 0.04 * index as f32 / count.max(1) as f32,
                 message: format!(
@@ -364,6 +376,7 @@ fn stitch_and_write(
     let mut total = 0;
     for level in 2..=11 {
         progress(RoadBuildProgress {
+            metrics: None,
             stage: "Writing Admin Boundaries".into(),
             fraction: 0.98,
             message: format!("Writing level {level}; {total} rings already written"),
@@ -376,6 +389,7 @@ fn stitch_and_write(
         )?;
     }
     progress(RoadBuildProgress {
+        metrics: None,
         stage: "Writing Admin Boundaries".into(),
         fraction: 0.98,
         message: format!(

@@ -12,10 +12,19 @@ pub(super) fn build(
     progress: &mut dyn FnMut(RoadBuildProgress),
 ) -> Result<String, String> {
     let directory = cmd.tmp_dir.join("indexed-pbf-v1");
-    progress(RoadBuildProgress { stage: "Indexing original PBF".into(), fraction: 0.0,
+    progress(RoadBuildProgress {
+            metrics: None, stage: "Indexing original PBF".into(), fraction: 0.0,
         message: "Creating/reusing a compact block index; no planet_nodes.bin will be written. Existing flat-build files are kept.".into() });
     let (nodes, mut state) = PbfNodes::open(&cmd.planet_path, &directory, &mut |p| {
         progress(RoadBuildProgress {
+            metrics: Some(crate::build_monitor::Metrics {
+                phase: "PBF index".into(),
+                scanned_bytes: p.bytes,
+                total_bytes: p.total,
+                checkpoint_bytes: p.bytes,
+                nodes: p.nodes,
+                ..Default::default()
+            }),
             stage: "Indexing original PBF".into(),
             fraction: 0.4 * p.bytes as f32 / p.total.max(1) as f32,
             message: format!(
@@ -56,6 +65,7 @@ pub(super) fn build(
     }
     cp.pass2_offset = cp.pass2_offset.max(nodes.first_way);
     progress(RoadBuildProgress {
+        metrics: None,
         stage: "Compact node index ready".into(),
         fraction: 0.4,
         message: format!(
@@ -82,6 +92,7 @@ pub(super) fn build(
         stats.feature_count, stats.written_cells,
     );
     progress(RoadBuildProgress {
+        metrics: None,
         stage: "Completed".into(),
         fraction: 1.0,
         message: summary.clone(),

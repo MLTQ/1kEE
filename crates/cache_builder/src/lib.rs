@@ -1,6 +1,8 @@
 //! Shared cache construction and the companion application entry point.
 mod admin;
 mod app;
+mod build_monitor;
+mod builder_dashboard;
 mod archive_pack;
 mod archive_space;
 mod args;

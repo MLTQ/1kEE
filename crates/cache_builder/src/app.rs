@@ -9,7 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::mpsc::TryRecvError;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 #[derive(Clone, Copy, PartialEq)]
 enum ActiveTab {
@@ -117,7 +117,7 @@ pub struct BuilderApp {
     status: String,
     progress: f32,
     progress_detail: String,
-    inspector: CacheInspector,
+    dashboard: crate::builder_dashboard::Dashboard,
     active_job: Option<JobHandle>,
     drag_start: Option<egui::Pos2>,
     osm_mode: OsmMode,
@@ -182,14 +182,6 @@ struct AssetSelection {
     surveillance: bool,
 }
 
-#[derive(Default)]
-struct CacheInspector {
-    cell_file_count: usize,
-    node_cache_count: usize,
-    total_bytes: u64,
-    latest_files: Vec<String>,
-    last_refresh_label: String,
-}
 
 fn lon_to_x(rect: egui::Rect, lon: f32) -> f32 {
     rect.left() + (lon + 180.0) / 360.0 * rect.width()
@@ -253,7 +245,7 @@ impl BuilderApp {
             status: "Idle".to_owned(),
             progress: 0.0,
             progress_detail: "No active build".to_owned(),
-            inspector: CacheInspector::default(),
+            dashboard: Default::default(),
             active_job: None,
             drag_start: None,
             osm_mode: OsmMode::Bbox,
@@ -317,6 +309,7 @@ impl BuilderApp {
         };
 
         self.status = "Building".to_owned();
+        self.dashboard.live.start();
         self.progress = 0.0;
         self.progress_detail = "Starting export…".to_owned();
         self.active_job_tab = Some(ActiveTab::OsmContours);
@@ -387,6 +380,7 @@ impl BuilderApp {
             }
         };
         self.status = "Building Contours".to_owned();
+        self.dashboard.live.start();
         self.progress = 0.0;
         self.progress_detail = "Starting contour export…".to_owned();
         self.active_job_tab = Some(ActiveTab::OsmContours);
@@ -549,6 +543,7 @@ impl BuilderApp {
             return;
         };
         self.status = "Packing vector archive".to_owned();
+        self.dashboard.live.start();
         self.progress = 0.0;
         self.progress_detail =
             "Packing existing cached geometry; completed cells appear in the log.".to_owned();
@@ -574,6 +569,7 @@ impl BuilderApp {
             }
         };
         self.status = "Building (Planet)".to_owned();
+        self.dashboard.live.start();
         self.progress = 0.0;
         self.progress_detail = "Starting planet-all export…".to_owned();
         self.active_job_tab = Some(ActiveTab::OsmContours);
@@ -606,6 +602,8 @@ impl BuilderApp {
         for event in events {
             match event {
                 BuildEvent::Progress(update) => {
+                    self.dashboard.live.observe(update.metrics.as_ref());
+                    if self.status != update.stage { self.push_log(format!("{} · {}", update.stage, update.message)); }
                     self.status = update.stage.clone();
                     self.progress = update.fraction.clamp(0.0, 1.0);
                     self.progress_detail = update.message.clone();
@@ -614,6 +612,7 @@ impl BuilderApp {
                     self.push_log(line);
                 }
                 BuildEvent::TileCompleted(min_lat, max_lat, min_lon, max_lon) => {
+                    self.dashboard.live.tiles += 1;
                     match self.active_job_tab {
                         Some(ActiveTab::Lunar) => {
                             self.lunar_live_tiles.push((min_lat, max_lat, min_lon, max_lon));
@@ -627,6 +626,7 @@ impl BuilderApp {
                     }
                 }
                 BuildEvent::Finished(result) => {
+                    self.dashboard.live.finished = Some(std::time::Instant::now());
                     match result {
                         Ok(summary) => {
                             self.status = "Completed".to_owned();
@@ -650,66 +650,7 @@ impl BuilderApp {
     }
 
     fn refresh_inspector(&mut self) {
-        let cache_dir = PathBuf::from(self.form.cache_dir.trim());
-        let mut files = Vec::new();
-        let mut total_bytes = 0u64;
-        let mut node_cache_count = 0usize;
-        // Cell files live in subdirectories (road_cells/, waterway_cells/, etc.),
-        // not directly in cache_dir — scan one level of subdirectories.
-        if let Ok(top_entries) = fs::read_dir(&cache_dir) {
-            for top_entry in top_entries.flatten() {
-                let top_path = top_entry.path();
-                if !top_path.is_dir() {
-                    continue;
-                }
-                let Ok(sub_entries) = fs::read_dir(&top_path) else {
-                    continue;
-                };
-                for entry in sub_entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|ext| ext.to_str()) != Some("geojson") {
-                        continue;
-                    }
-                    let metadata = entry.metadata().ok();
-                    let modified = metadata
-                        .as_ref()
-                        .and_then(|meta| meta.modified().ok())
-                        .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
-                        .map(|duration| duration.as_secs())
-                        .unwrap_or_default();
-                    total_bytes += metadata.as_ref().map(|meta| meta.len()).unwrap_or_default();
-                    files.push((modified, path));
-                }
-            }
-        }
-        let state_dir = cache_dir.join(".builder_state");
-        if let Ok(entries) = fs::read_dir(state_dir) {
-            node_cache_count = entries
-                .flatten()
-                .filter(|entry| {
-                    matches!(
-                        entry.path().extension().and_then(|ext| ext.to_str()),
-                        Some("jsonl" | "sqlite")
-                    )
-                })
-                .count();
-        }
-        files.sort_by(|left, right| right.0.cmp(&left.0));
-
-        self.inspector.cell_file_count = files.len();
-        self.inspector.node_cache_count = node_cache_count;
-        self.inspector.total_bytes = total_bytes;
-        self.inspector.latest_files = files
-            .into_iter()
-            .take(10)
-            .map(|(_, path)| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or_default()
-                    .to_owned()
-            })
-            .collect();
-        self.inspector.last_refresh_label = format!("{:?}", SystemTime::now());
+        self.dashboard.refresh();
     }
 
     fn scan_lunar_cache(&mut self) {
@@ -772,6 +713,7 @@ impl BuilderApp {
             }
         };
         self.status = "Building Lunar Contours".to_owned();
+        self.dashboard.live.start();
         self.progress = 0.0;
         self.progress_detail = "Starting lunar build…".to_owned();
         self.active_job_tab = Some(ActiveTab::Lunar);
@@ -889,6 +831,7 @@ impl BuilderApp {
             }
         };
         self.status = "Building Mars Contours".to_owned();
+        self.dashboard.live.start();
         self.progress = 0.0;
         self.progress_detail = "Starting Mars build…".to_owned();
         self.active_job_tab = Some(ActiveTab::Mars);
@@ -1440,6 +1383,7 @@ impl BuilderApp {
 impl eframe::App for BuilderApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_job();
+        self.dashboard.poll(&self.form.cache_dir, &self.form.planet_tmp_dir, self.form.compact_nodes, ctx);
         if self.active_job.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -1448,7 +1392,7 @@ impl eframe::App for BuilderApp {
             ui.horizontal(|ui| {
                 ui.heading("1kEE Cache Builder");
                 ui.separator();
-                ui.label("Offline planet.osm cache generation");
+                ui.label(egui::RichText::new("BUILD • INSPECT • RESUME").small().color(Color32::from_rgb(95, 210, 190)));
                 ui.separator();
                 ui.label(format!("Status: {}", self.status));
             });
@@ -1458,6 +1402,7 @@ impl eframe::App for BuilderApp {
             .resizable(true)
             .default_width(360.0)
             .show(ctx, |ui| {
+                egui::ScrollArea::vertical().id_salt("builder_controls_scroll").show(ui, |ui| {
                 // ── Tab bar ───────────────────────────────────────────────────
                 ui.horizontal(|ui| {
                     ui.selectable_value(
@@ -1839,7 +1784,7 @@ impl eframe::App for BuilderApp {
                         }
                     } else {
                         if ui
-                            .add_enabled(!building, egui::Button::new("Build Planet Cache"))
+                            .add_enabled(!building, egui::Button::new("Build / resume planet cache"))
                             .clicked()
                         {
                             self.start_planet_build();
@@ -1849,37 +1794,21 @@ impl eframe::App for BuilderApp {
                         self.refresh_inspector();
                     }
                 });
+                });
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.columns(2, |columns| {
-                columns[0].heading("Inspector");
-                columns[0].label(format!(
-                    "Cache cell files: {}",
-                    self.inspector.cell_file_count
-                ));
-                columns[0].label(format!("Node caches: {}", self.inspector.node_cache_count));
-                columns[0].label(format!(
-                    "Approx size: {:.2} MiB",
-                    self.inspector.total_bytes as f64 / (1024.0 * 1024.0)
-                ));
-                columns[0].label(format!(
-                    "Last refresh: {}",
-                    self.inspector.last_refresh_label
-                ));
-                columns[0].separator();
-                egui::ScrollArea::vertical().show(&mut columns[0], |ui| {
-                    for name in &self.inspector.latest_files {
-                        ui.monospace(name);
-                    }
-                });
-
-                columns[1].heading("Build Log");
-                egui::ScrollArea::vertical().show(&mut columns[1], |ui| {
-                    for line in &self.log_lines {
-                        ui.label(line);
-                    }
-                });
+            egui::ScrollArea::vertical().id_salt("builder_dashboard").show(ui, |ui| {
+                self.dashboard.show(ui, &self.status, &self.progress_detail, self.active_job.is_some(), &self.log_lines, &[
+                    ("road", self.assets.roads), ("waterway", self.assets.water),
+                    ("building", self.assets.buildings), ("tree", self.assets.trees),
+                    ("admin", self.assets.admin), ("power", self.assets.power),
+                    ("railway", self.assets.rail), ("pipeline", self.assets.pipeline),
+                    ("aeroway", self.assets.aeroway), ("military", self.assets.military),
+                    ("comm", self.assets.comm), ("industrial", self.assets.industrial),
+                    ("port", self.assets.port), ("government", self.assets.government),
+                    ("surveillance", self.assets.surveillance),
+                ]);
             });
         });
     }

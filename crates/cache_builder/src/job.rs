@@ -62,6 +62,7 @@ pub fn spawn_job(job: BuildJob) -> JobHandle {
                     ));
                 }
                 let _ = tx.send(BuildEvent::Progress(RoadBuildProgress {
+                    metrics: None,
                     stage: p.stage,
                     fraction: p.fraction,
                     message: p.message,
@@ -108,6 +109,7 @@ pub fn spawn_job(job: BuildJob) -> JobHandle {
                     ));
                 }
                 let _ = tx.send(BuildEvent::Progress(RoadBuildProgress {
+                    metrics: None,
                     stage: p.stage,
                     fraction: p.fraction,
                     message: p.message,
@@ -127,6 +129,7 @@ pub fn spawn_job(job: BuildJob) -> JobHandle {
                     ));
                 }
                 let _ = tx.send(BuildEvent::Progress(RoadBuildProgress {
+                    metrics: None,
                     stage: p.stage,
                     fraction: p.fraction,
                     message: p.message,

@@ -25,7 +25,8 @@ pub(super) fn run(
     validate: &dyn Fn() -> Result<(), String>,
     progress: &mut dyn FnMut(RoadBuildProgress),
 ) -> Result<usize, String> {
-    progress(RoadBuildProgress {stage:"Preparing boundary assembly".into(),fraction:0.90,
+    progress(RoadBuildProgress {
+            metrics: None,stage:"Preparing boundary assembly".into(),fraction:0.90,
         message:"Preparing resumable country-first assembly; completed regions publish while extraction continues.".into()});
     nodes.prepare_admin_assembly()?;
     let source = format!("assembly-v1:{}", nodes.admin_source_identity()?);
@@ -62,6 +63,7 @@ pub(super) fn run(
         let mut last_publish = Instant::now();
         for (id, name) in relations {
             progress(RoadBuildProgress {
+                metrics: None,
                 stage: "Assembling Admin Boundaries".into(),
                 fraction: 0.90 + 0.09 * completed as f32 / total.max(1) as f32,
                 message: format!(
@@ -85,6 +87,7 @@ pub(super) fn run(
                 status(output, &levels)?;
                 last_publish = Instant::now();
                 progress(RoadBuildProgress {
+                    metrics: None,
                     stage: "Published Admin Boundaries".into(),
                     fraction: 0.90 + 0.09 * completed as f32 / total.max(1) as f32,
                     message: format!(

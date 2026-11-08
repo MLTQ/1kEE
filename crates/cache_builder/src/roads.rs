@@ -77,6 +77,7 @@ pub fn build_bbox_cache(command: BboxCommand) -> Result<(), String> {
 
 #[derive(Clone, Debug)]
 pub struct RoadBuildProgress {
+    pub metrics: Option<crate::build_monitor::Metrics>,
     pub stage: String,
     pub fraction: f32,
     pub message: String,
@@ -104,6 +105,7 @@ pub fn build_bbox_cache_with_progress(
     let node_store_path = candidate_node_store_path(&command.cache_dir, bounds);
 
     progress(RoadBuildProgress {
+        metrics: None,
         stage: "Scanning Nodes".to_owned(),
         fraction: 0.02,
         message: format!(
@@ -119,6 +121,7 @@ pub fn build_bbox_cache_with_progress(
         progress,
     )?;
     progress(RoadBuildProgress {
+        metrics: None,
         stage: "Scanning Ways".to_owned(),
         fraction: 0.40,
         message: format!("Prepared {} candidate nodes", candidate_nodes.count()?),
@@ -136,6 +139,7 @@ pub fn build_bbox_cache_with_progress(
 
     if command.build_admin {
         progress(RoadBuildProgress {
+            metrics: None,
             stage: "Scanning Relations".to_owned(),
             fraction: 0.83,
             message: "Scanning admin boundary relations…".to_owned(),
@@ -149,6 +153,7 @@ pub fn build_bbox_cache_with_progress(
     }
 
     progress(RoadBuildProgress {
+        metrics: None,
         stage: "Writing Cache".to_owned(),
         fraction: 0.82,
         message: format!(
@@ -164,6 +169,7 @@ pub fn build_bbox_cache_with_progress(
         command.cache_dir.display()
     );
     progress(RoadBuildProgress {
+        metrics: None,
         stage: "Completed".to_owned(),
         fraction: 1.0,
         message: summary.clone(),
@@ -184,6 +190,7 @@ fn load_or_collect_candidate_nodes(
     if node_store.is_complete()? {
         let node_count = node_store.count()?;
         progress(RoadBuildProgress {
+            metrics: None,
             stage: "Loaded Node Cache".to_owned(),
             fraction: 0.32,
             message: format!(
@@ -203,6 +210,7 @@ fn load_or_collect_candidate_nodes(
         node_store.reset()?;
     } else {
         progress(RoadBuildProgress {
+            metrics: None,
             stage: "Resuming Node Scan".to_owned(),
             fraction: 0.03,
             message: format!(
@@ -224,6 +232,7 @@ fn load_or_collect_candidate_nodes(
 
     let node_count = node_store.count()?;
     progress(RoadBuildProgress {
+        metrics: None,
         stage: "Saved Node Cache".to_owned(),
         fraction: 0.35,
         message: format!(
@@ -285,6 +294,7 @@ fn collect_candidate_nodes(
 
             if scanned >= next_progress_at {
                 progress(RoadBuildProgress {
+                    metrics: None,
                     stage: "Scanning Nodes".to_owned(),
                     fraction: 0.30,
                     message: format!(
@@ -324,12 +334,14 @@ fn collect_all_features_by_cell(
     // Load all candidate nodes into RAM for O(1) lookups during the way scan,
     // avoiding millions of SQLite queries.
     progress(RoadBuildProgress {
+        metrics: None,
         stage: "Loading Node Map".to_owned(),
         fraction: 0.40,
         message: "Loading candidate nodes into memory…".to_owned(),
     });
     let node_map = candidate_nodes.load_all_nodes()?;
     progress(RoadBuildProgress {
+        metrics: None,
         stage: "Scanning Ways".to_owned(),
         fraction: 0.42,
         message: format!("Loaded {} nodes into memory", node_map.len()),
@@ -339,6 +351,7 @@ fn collect_all_features_by_cell(
     let resume_offset = candidate_nodes.get_scan_offset("way_scan")?;
     if let Some(off) = resume_offset {
         progress(RoadBuildProgress {
+            metrics: None,
             stage: "Resuming Way Scan".to_owned(),
             fraction: 0.43,
             message: format!("Resuming way scan from file offset {off}"),
@@ -932,6 +945,7 @@ fn collect_all_features_by_cell(
                 candidate_nodes.save_scan_offset("way_scan", checkpoint)?;
 
                 progress(RoadBuildProgress {
+                    metrics: None,
                     stage: "Writing Cache".to_owned(),
                     fraction: 0.76,
                     message: format!(
@@ -943,6 +957,7 @@ fn collect_all_features_by_cell(
 
             if scanned_ways % 250_000 == 0 {
                 progress(RoadBuildProgress {
+                    metrics: None,
                     stage: "Scanning Ways".to_owned(),
                     fraction: 0.75,
                     message: format!(
