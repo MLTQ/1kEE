@@ -18,7 +18,7 @@ fn parse_available(output: &str) -> Option<u64> {
     })
 }
 
-fn available(path: &Path) -> Option<u64> {
+pub(crate) fn available(path: &Path) -> Option<u64> {
     let existing = path.ancestors().find(|p| p.exists())?.canonicalize().ok()?;
     let output = std::process::Command::new("df")
         .arg("-Pk")

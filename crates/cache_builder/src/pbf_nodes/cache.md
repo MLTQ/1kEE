@@ -25,3 +25,7 @@ requested coordinates in an immutable `Arc<Prepared>`. Worker sessions search
 this table without locks. Missing IDs are retained too, preventing rereads.
 Legacy callers still use the bounded LRU described above. Decode errors abort
 preparation; no partial table is published. Activity counters include these reads.
+
+Prepared tables are exhaustive: IDs absent from a prepared table return None,
+with no LRU fallback. `Prepared::sorted` validates strict ordering for tables
+loaded from the checksummed sequential join; legacy session lookup is unchanged.

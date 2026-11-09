@@ -25,3 +25,9 @@ or resetting legacy data. Admin errors prevent new completion publication.
 
 Admin-only jobs reuse the existing completed node index and skip general way
 extraction without changing build binding or saved way checkpoints.
+
+General way builds now prepare a sequential coordinate join through planet_join.rs
+before emission. This supersedes the per-worker way dependency strategy above;
+admin-only builds and administrative assembly retain their existing paths.
+No build binding/pipeline version changes are needed because geometry is identical.
+The exact selected working folder must be retained when restarting an older run.

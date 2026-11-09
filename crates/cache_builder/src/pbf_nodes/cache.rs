@@ -8,6 +8,15 @@ type Coordinate = Option<(f32, f32)>;
 /// Selected coordinates shared by all workers in one bounded way group.
 pub struct Prepared(Vec<(i64, Coordinate)>);
 
+impl Prepared {
+    pub(crate) fn sorted(values: Vec<(i64, Option<(f32, f32)>)>) -> Result<Arc<Self>, String> {
+        if values.windows(2).any(|w| w[0].0 >= w[1].0) {
+            return Err("Joined coordinates are not strictly sorted".into());
+        }
+        Ok(Arc::new(Self(values)))
+    }
+}
+
 impl PbfNodes {
     pub fn prepare_batch(&self, mut ids: Vec<i64>) -> Result<Arc<Prepared>, String> {
         ids.sort_unstable();
@@ -116,10 +125,14 @@ impl<'a> Session<'a> {
         let mut result = vec![None; ids.len()];
         let mut groups = Vec::with_capacity(ids.len());
         for (i, &id) in ids.iter().enumerate() {
-            if let Some(shared) = &self.shared
-                && let Ok(n) = shared.0.binary_search_by_key(&id, |n| n.0)
-            {
-                result[i] = shared.0[n].1;
+            if let Some(shared) = &self.shared {
+                // Prepared tables are exhaustive for this way group. Missing
+                // IDs must never trigger another original-PBF read.
+                result[i] = shared
+                    .0
+                    .binary_search_by_key(&id, |n| n.0)
+                    .ok()
+                    .and_then(|n| shared.0[n].1);
                 continue;
             }
             if let Ok(n) = self.prefetched.binary_search_by_key(&id, |n| n.0) {

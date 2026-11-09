@@ -1480,7 +1480,7 @@ impl eframe::App for BuilderApp {
                         &mut self.form.compact_nodes,
                         "Compact node lookup (experimental — saves disk space)",
                     )
-                    .on_hover_text("Read coordinates from the original PBF using a small index. Avoids creating planet_nodes.bin. Keeps legacy files, uses separate resume state and may build more slowly.");
+                    .on_hover_text("Index the original PBF, join selected way coordinates once, then build cells. Uses temporary disk space for references and coordinates; resumes each stage from the chosen working folder. Avoids creating the full planet_nodes.bin.");
                     ui.label("Working folder (optional — stores build progress and temporary data)");
                     ui.horizontal(|ui| {
                         ui.text_edit_singleline(&mut self.form.planet_tmp_dir);

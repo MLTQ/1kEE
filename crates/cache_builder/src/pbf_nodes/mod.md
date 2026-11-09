@@ -23,3 +23,7 @@ for legacy checkpoints), preserving prior scans rather than rebuilding them.
 `Prepared` is the immutable selected-coordinate table shared by planet-way
 workers. The test-only `estimated_reads` helper audits compressed dependency
 bytes without reading or decoding node payloads.
+
+Crate-local block lookup/read and stable join identity support planet_join.rs.
+Read validation and activity accounting are shared with the legacy lookup path.
+`block_scan_position` reports traversal position, including skipped node blocks.

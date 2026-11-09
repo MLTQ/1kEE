@@ -15,3 +15,6 @@ that output volume. Captures failures before staging cleanup releases capacity.
   staging cleanup and final publication. Error snapshots precede that cleanup.
 - Tests cover volume paths with spaces, unknown results, reserve boundaries and
   capturing temporary size/destination without deleting or publishing files.
+
+The best-effort available-space probe is also used by sequential coordinate join
+headroom checks; archive-packing thresholds and behavior are unchanged.

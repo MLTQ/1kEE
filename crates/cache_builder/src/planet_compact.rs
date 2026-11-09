@@ -1,5 +1,5 @@
 //! Opt-in orchestration; legacy node files/checkpoint.txt are never opened here.
-use super::{Checkpoint, run_pass2};
+use super::{Checkpoint, join::Join, run_pass2_prepared};
 use crate::args::PlanetAllCommand;
 use crate::pbf_nodes::PbfNodes;
 use crate::planet_lookup::Lookup;
@@ -46,7 +46,7 @@ pub(super) fn build(
             cmd.build_surveillance],
         "pipeline": 1,
     }).to_string();
-    if state.bind_build(options)? {
+    if state.bind_build(options.clone())? {
         if cmd.build_admin {
             let count = crate::admin::build_planet(cmd, &Lookup::Compact(nodes), progress)?;
             return Ok(format!(
@@ -78,8 +78,16 @@ pub(super) fn build(
                 / 1e6
         ),
     });
+    let joined = Join::prepare(cmd, &nodes, cp.pass2_offset, &options, progress)?;
     let lookup = Arc::new(Lookup::Compact(nodes));
-    let stats = run_pass2(cmd, &lookup, &mut cp, &checkpoint_path, progress)?;
+    let stats = run_pass2_prepared(
+        cmd,
+        &lookup,
+        &mut cp,
+        &checkpoint_path,
+        progress,
+        joined.as_ref(),
+    )?;
     let admin_rings = if cmd.build_admin {
         crate::admin::build_planet(cmd, &lookup, progress)?
     } else {
@@ -88,7 +96,7 @@ pub(super) fn build(
     lookup.validate_source()?;
     state.finish()?;
     let summary = format!(
-        "Compact planet build: {} features; {} cache files written. No expanded planet_nodes.bin created. {admin_rings} admin rings written.",
+        "Sequential compact planet build: {} features; {} cache files written. No expanded planet_nodes.bin created. {admin_rings} admin rings written.",
         stats.feature_count, stats.written_cells,
     );
     progress(RoadBuildProgress {

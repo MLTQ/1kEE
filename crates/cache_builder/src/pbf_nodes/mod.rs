@@ -23,10 +23,10 @@ struct Block {
     count: usize,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Node {
-    id: i64,
-    lat: f32,
-    lon: f32,
+pub(crate) struct Node {
+    pub id: i64,
+    pub lat: f32,
+    pub lon: f32,
 }
 
 fn decode(blob: &osmpbf::Blob) -> Result<(Vec<Node>, bool), String> {
@@ -121,11 +121,28 @@ impl PbfNodes {
             self.decoded_bytes.load(Relaxed),
         )
     }
+    pub(crate) fn block_for(&self, id: i64) -> Option<usize> {
+        let n = self.blocks.partition_point(|b| b.max < id);
+        self.blocks.get(n).filter(|b| b.min <= id).map(|_| n)
+    }
+    pub(crate) fn join_identity(&self) -> String {
+        // Device numbers change on remount. open() already verifies the source.
+        format!(
+            "{}:{}:{}:{}",
+            self.stamp.len, self.stamp.inode, self.stamp.seconds, self.stamp.nanos
+        )
+    }
+    pub(crate) fn block_scan_position(&self, completed: usize) -> u64 {
+        self.blocks
+            .get(completed.min(self.blocks.len()).saturating_sub(1))
+            .filter(|_| completed > 0)
+            .map_or(0, |b| b.offset + b.length)
+    }
     pub fn block_count(&self) -> usize {
         self.blocks.len()
     }
 
-    fn read_block(&self, number: usize) -> Result<Vec<Node>, String> {
+    pub(crate) fn read_block(&self, number: usize) -> Result<Vec<Node>, String> {
         let b = self.blocks[number];
         let mut bytes = vec![0; b.length as usize];
         self.file

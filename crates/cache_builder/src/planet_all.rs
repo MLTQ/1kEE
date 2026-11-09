@@ -44,6 +44,9 @@ const PASS1_CHECKPOINT_NODE_INTERVAL: u64 = 5_000_000;
 // while the sequential reader refills the next batch.
 const BATCH_BLOBS: usize = 64;
 
+#[path = "planet_join.rs"]
+mod join;
+
 #[path = "planet_compact.rs"]
 mod compact;
 #[path = "planet_scan.rs"]
@@ -678,6 +681,17 @@ fn run_pass2(
     checkpoint_path: &Path,
     progress: &mut dyn FnMut(RoadBuildProgress),
 ) -> Result<BuildStats, String> {
+    run_pass2_prepared(cmd, node_lookup, cp, checkpoint_path, progress, None)
+}
+
+fn run_pass2_prepared(
+    cmd: &PlanetAllCommand,
+    node_lookup: &Arc<Lookup>,
+    cp: &mut Checkpoint,
+    checkpoint_path: &Path,
+    progress: &mut dyn FnMut(RoadBuildProgress),
+    joined: Option<&join::Join>,
+) -> Result<BuildStats, String> {
     if !selection::has_way_layers(cmd) {
         progress(RoadBuildProgress {
             metrics: None,
@@ -692,7 +706,7 @@ fn run_pass2(
     let total_bytes = fs::metadata(&cmd.planet_path)
         .map_err(|e| e.to_string())?
         .len();
-    let resume = cp.pass2_offset;
+    let resume = cp.pass2_offset.max(joined.map_or(0, join::Join::start));
     if resume > 0 {
         progress(RoadBuildProgress {
             metrics: None,
@@ -746,13 +760,36 @@ fn run_pass2(
         // Fill the batch from the sequential reader.
         node_lookup.validate_source()?;
         blob_batch.clear();
+        let prepared = joined.map(|j| j.group(processed_bytes)).transpose()?;
+        if matches!(prepared, Some(None)) {
+            break;
+        }
+        let prepared = prepared.flatten();
         let batch_start = pos.load(Ordering::Relaxed);
-        for blob_result in reader.by_ref().take(batch_blobs) {
+        let max_blobs = if prepared.is_some() {
+            usize::MAX
+        } else {
+            batch_blobs
+        };
+        for blob_result in reader.by_ref().take(max_blobs) {
             blob_batch.push(blob_result.map_err(|e| e.to_string())?);
-            // Bound compressed input independently of reference/geometry memory.
-            if pos.load(Ordering::Relaxed).saturating_sub(batch_start) >= 256 * 1024 * 1024 {
+            let position = pos.load(Ordering::Relaxed);
+            if let Some((end, _)) = &prepared {
+                if position > *end {
+                    return Err("Prepared group ends inside a PBF blob".into());
+                }
+                if position == *end {
+                    break;
+                }
+            } else if position.saturating_sub(batch_start) >= 256 * 1024 * 1024 {
                 break;
             }
+        }
+        if prepared
+            .as_ref()
+            .is_some_and(|(end, _)| pos.load(Ordering::Relaxed) != *end)
+        {
+            return Err("PBF ended before the prepared group boundary".into());
         }
         if blob_batch.is_empty() {
             break;
@@ -774,10 +811,15 @@ fn run_pass2(
                 cell_writes: written_cells as u64,
                 ..Default::default()
             }),
-            stage: "Resolving selected ways".into(),
+            stage: if joined.is_some() {
+                "Building prepared ways"
+            } else {
+                "Resolving selected ways"
+            }
+            .into(),
             fraction: 0.42 + 0.4 * batch_end_pos as f32 / total_bytes.max(1) as f32,
             message: format!(
-                "Read {:.2} / {:.2} GB; resolving this batch's selected features",
+                "Read {:.2} / {:.2} GB; building this batch's selected features",
                 batch_end_pos as f64 / 1e9,
                 total_bytes as f64 / 1e9
             ),
@@ -805,10 +847,15 @@ fn run_pass2(
                     lookup_blocks,
                     lookup_bytes,
                 }),
-                stage: "Resolving selected ways".into(),
+                stage: if joined.is_some() {
+                    "Building prepared ways"
+                } else {
+                    "Resolving selected ways"
+                }
+                .into(),
                 fraction: 0.42 + 0.4 * processed_bytes as f32 / total_bytes.max(1) as f32,
                 message: format!(
-                    "Resolving batch: {batch_done}/{} blobs complete; {lookup_blocks} coordinate blocks decoded",
+                    "Batch: {batch_done}/{} blobs complete; {lookup_blocks} coordinate blocks decoded",
                     blob_batch.len()
                 ),
             });
@@ -816,11 +863,27 @@ fn run_pass2(
         heartbeat();
         let partials: Vec<BatchOutput> = crate::build_monitor::with_heartbeat(
             || {
-                process_batch(&blob_batch, node_lookup, cmd, &|output| {
+                let completed = |output: &BatchOutput| {
                     batch_ways.fetch_add(output.scanned_ways as u64, Ordering::Relaxed);
                     batch_features.fetch_add(output.feature_count as u64, Ordering::Relaxed);
                     done.fetch_add(1, Ordering::Relaxed);
-                })
+                };
+                if let Some((_, table)) = &prepared {
+                    let table = Some(table.clone());
+                    blob_batch
+                        .par_iter()
+                        .map_init(
+                            || node_lookup.prepared_session(&table),
+                            |session, blob| {
+                                let output = process_blob(blob, session, cmd)?;
+                                completed(&output);
+                                Ok(output)
+                            },
+                        )
+                        .collect::<Result<Vec<_>, String>>()
+                } else {
+                    process_batch(&blob_batch, node_lookup, cmd, &completed)
+                }
             },
             &mut heartbeat,
             std::time::Duration::from_secs(1),
@@ -850,7 +913,8 @@ fn run_pass2(
             buffered += p.feature_count;
         }
 
-        if buffered >= FLUSH_THRESHOLD
+        if joined.is_some()
+            || buffered >= FLUSH_THRESHOLD
             || batch_end_pos.saturating_sub(cp.pass2_offset) >= 256 * 1024 * 1024
         {
             // Update cell_set from accumulated maps (used only for the final count).

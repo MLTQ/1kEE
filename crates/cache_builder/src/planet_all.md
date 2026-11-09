@@ -116,3 +116,11 @@ Shared: 4.314/4.628 s, 649 block reads (1,182,609,238 bytes). All coordinates
 matched exactly; combined benchmark peak RSS was 425,428 KiB. These small,
 mostly warm-cache samples do not exercise the old 524,288-reference fallback
 or establish whole-planet build time. Synthetic tests cover that threshold.
+
+## Sequential compact coordinate join
+Production compact way builds now use planet_join.rs; the shared compact passes
+above remain the legacy comparison/fallback implementation, not the normal way
+path. run_pass2_prepared honors the saved join's exact source group boundaries,
+loads exhaustive coordinate tables and flushes/checkpoints every completed group.
+It never reads original node blocks during joined way emission. Flat mode remains
+unchanged. See planet_join.md for stage recovery, memory and scratch contracts.
