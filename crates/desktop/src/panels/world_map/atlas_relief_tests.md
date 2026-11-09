@@ -20,3 +20,5 @@ own exact geographic bounds. This test requires explicit existing terrain data.
 The fixed-region preview above is a shading/projection check only. Runtime
 selection, desktop tool discovery and actual refined drawing are now covered by
 `atlas_runtime_tests`, including a minimal Finder-style PATH.
+
+The composed Appearance preview explicitly uses default Atlas lighting, independent of any saved user light settings.

@@ -1,98 +1,56 @@
 use super::*;
 
 #[test]
-fn missing_heights_are_transparent_and_cannot_create_cliffs() {
+fn missing_heights_are_transparent_without_affecting_neighbor_pigments() {
     let mut grid = HeightGrid {
         width: 5,
         height: 5,
-        metres: vec![200.0; 25],
+        metres: vec![200.; 25],
     };
     let flat = grid.image().unwrap();
-    grid.metres[11] = -32767.0;
+    grid.metres[11] = -32767.;
     grid.metres[13] = f32::NAN;
     let masked = grid.image().unwrap();
     assert_eq!(masked.pixels[11], Color32::TRANSPARENT);
     assert_eq!(masked.pixels[13], Color32::TRANSPARENT);
-    assert_eq!(
-        masked.pixels[12], flat.pixels[12],
-        "missing neighbours never cast a shadow"
-    );
+    assert_eq!(masked.pixels[12], flat.pixels[12]);
     grid.metres.pop();
     assert!(grid.image().is_none());
 }
 
 #[test]
-fn water_and_land_use_distinct_tints_with_directional_relief() {
+fn pigments_have_red_mid_elevations_pale_plains_and_deep_blue_water() {
     let grid = HeightGrid {
         width: 8,
         height: 4,
-        metres: vec![-4000.0, -4000.0, -200.0, -1.0, 0.0, 650.0, 2000.0, 5500.0].repeat(4),
+        metres: vec![-5000., -1500., -200., 0., 200., 1200., 2000., 5500.].repeat(4),
     };
     let image = grid.image().unwrap();
-    let ocean = image.pixels[8];
-    let land = image.pixels[12];
-    assert!(ocean.b() > ocean.r());
-    assert!(land.r() > land.b());
-    assert!(image.pixels.iter().all(|c| c.a() == 255));
-    let base = HeightGrid {
-        width: 720,
-        height: 360,
-        metres: vec![1000.0; 720 * 360],
-    };
-    let mut west_lit = HeightGrid {
-        metres: base.metres.clone(),
-        ..base
-    };
-    let center = 180 * 720 + 360;
-    west_lit.metres[center - 1] = 0.0;
-    west_lit.metres[center + 1] = 2000.0;
-    let lit = west_lit.image().unwrap().pixels[center];
-    west_lit.metres[center - 1] = 2000.0;
-    west_lit.metres[center + 1] = 0.0;
-    let shaded = west_lit.image().unwrap().pixels[center];
-    assert!(
-        lit.r() > shaded.r(),
-        "west-facing slopes receive northwest light"
-    );
+    let c = &image.pixels;
+    assert!(c[0].b() > c[0].r() * 2 && c[0].b() < c[2].b());
+    assert!(c[3].r() > 230 && c[3].g() > 220);
+    assert!(c[5].r() > c[5].g() + 60);
+    assert!(c[6].r() > c[6].g() * 2);
+    assert!(c[7].r() > 230 && c[7].b() > 190);
+    assert!(c.iter().all(|c| c.a() == 255));
 }
 
 #[test]
-fn slope_samples_wrap_at_the_dateline() {
-    let mut grid = HeightGrid {
-        width: 720,
-        height: 360,
-        metres: vec![0.0; 720 * 360],
-    };
-    let row = 180 * 720;
-    grid.metres[row] = 1000.0;
-    grid.metres[row + 1] = 2000.0;
-    grid.metres[row + 360] = 1000.0;
-    grid.metres[row + 361] = 2000.0;
-    let image = grid.image().unwrap();
-    assert_eq!(image.pixels[row], image.pixels[row + 360]);
-}
-
-#[test]
-fn measured_ridge_casts_a_shadow_at_regional_scale() {
+fn colors_have_no_baked_direction_or_scale_dependent_shadow() {
     let mut grid = HeightGrid {
         width: 48,
         height: 48,
-        metres: vec![1000.0; 48 * 48],
+        metres: vec![1000.; 48 * 48],
     };
-    let bounds = [7.0, 46.0, 7.15, 46.15];
-    let center = 24 * 48 + 24;
-    let flat = grid.image_for(bounds).unwrap().pixels[center];
-    // Only the northwest horizon changes; the central-difference normals
-    // around this valley point remain identical to the flat reference.
-    grid.metres[18 * 48 + 18] = 4000.0;
-    let shaded = grid.image_for(bounds).unwrap().pixels[center];
-    assert!(
-        shaded.r() + 30 < flat.r(),
-        "the measured northwest ridge casts a visible shadow"
+    let i = 24 * 48 + 24;
+    let original = grid.image().unwrap().pixels[i];
+    grid.metres[18 * 48 + 18] = 4000.;
+    grid.metres[i - 1] = 0.;
+    grid.metres[i + 1] = 3000.;
+    assert_eq!(grid.image().unwrap().pixels[i], original);
+    assert_eq!(
+        grid.image_for([7., 46., 7.15, 46.15]).unwrap().pixels[i],
+        original
     );
-    let world = grid.image().unwrap().pixels[center];
-    assert!(
-        world.r() > shaded.r(),
-        "regional spacing is not mistaken for a world-sized raster"
-    );
+    assert!(grid.image_for([7., 46., 7., 47.]).is_none());
 }

@@ -2,6 +2,7 @@ struct Uniforms {
     viewport:vec4<f32>, region:vec4<f32>, a:vec4<f32>, b:vec4<f32>, c:vec4<f32>, d:vec4<f32>,
     globe:vec4<f32>, sphere:vec4<f32>, style:vec4<f32>, grid:vec4<f32>, extra:vec4<f32>,
     major:vec4<f32>, minor:vec4<f32>, exclude:vec4<f32>,
+    light:vec4<f32>, appearance:vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> u:Uniforms;
 @group(1) @binding(0) var heights:texture_2d<f32>;
@@ -14,16 +15,23 @@ struct Vertex {
     @location(1) elevation:f32,
     @location(2) geo:vec2<f32>,
 }
-fn height_at(uv:vec2<f32>)->f32 {
+fn safe_height(h:f32,fallback:f32)->f32 {
+    if h>=-11000.0 && h<=9000.0 {return h;}
+    return fallback;
+}
+fn height_at_or(coordinate:vec2<f32>,fallback:f32)->f32 {
+    var uv=coordinate;
+    if u.region.z-u.region.x>359.9 {uv.x=fract(uv.x);}
     let size=vec2<i32>(textureDimensions(heights));
     let p=clamp(uv*vec2<f32>(size)-0.5,vec2<f32>(0.0),vec2<f32>(size-1));
     let cell=vec2<i32>(floor(p));let next=min(cell+1,size-1);let t=fract(p);
-    let a=textureLoad(heights,cell,0).r;let b=textureLoad(heights,vec2<i32>(next.x,cell.y),0).r;
-    let c=textureLoad(heights,vec2<i32>(cell.x,next.y),0).r;let d=textureLoad(heights,next,0).r;
-    let h=mix(mix(a,b,t.x),mix(c,d,t.x),t.y);
-    if !(h>=-11000.0 && h<=9000.0) {return 0.0;}
-    return h;
+    let a=safe_height(textureLoad(heights,cell,0).r,fallback);
+    let b=safe_height(textureLoad(heights,vec2<i32>(next.x,cell.y),0).r,fallback);
+    let c=safe_height(textureLoad(heights,vec2<i32>(cell.x,next.y),0).r,fallback);
+    let d=safe_height(textureLoad(heights,next,0).r,fallback);
+    return mix(mix(a,b,t.x),mix(c,d,t.x),t.y);
 }
+fn height_at(uv:vec2<f32>)->f32 {return height_at_or(uv,0.0);}
 @vertex
 fn vs_surface(@builtin(vertex_index) vertex:u32,@builtin(instance_index) row:u32)->Vertex {
     let cells=vec2<f32>(u.grid.xy);
@@ -67,6 +75,7 @@ fn isoline(h:f32,interval:f32)->f32 {
 }
 @fragment
 fn fs_surface(v:Vertex)->@location(0) vec4<f32> {
+    let pixel=max(vec2<f32>(1.0),fwidth(v.uv)*vec2<f32>(textureDimensions(heights)));
     let interval=select(max(200.0,u.style.x),u.style.x,v.elevation>=0.0);
     let minor=isoline(v.elevation,interval);
     let major=isoline(v.elevation,max(50.0,interval*10.0));
@@ -79,9 +88,10 @@ fn fs_surface(v:Vertex)->@location(0) vec4<f32> {
     }
     var color=textureSampleLevel(pigments,linear_sampler,v.uv,0.0);
     if color.a<0.5 {discard;}
+    color=vec4<f32>(atlas_shade(v.uv,v.geo,color.rgb,pixel),1.0);
     let enabled=select(u.style.w,u.style.z,v.elevation>=0.0);
-    color=vec4<f32>(mix(color.rgb,u.minor.rgb,minor*0.55*enabled),1.0);
-    color=vec4<f32>(mix(color.rgb,u.major.rgb,major*0.8*enabled),1.0);
-    color=vec4<f32>(mix(color.rgb,vec3<f32>(0.24,0.37,0.40),coast*0.75),1.0);
+    color=vec4<f32>(mix(color.rgb,u.minor.rgb,minor*select(0.18,0.32,v.elevation>=0.0)*enabled),1.0);
+    color=vec4<f32>(mix(color.rgb,u.major.rgb,major*select(0.35,0.60,v.elevation>=0.0)*enabled),1.0);
+    color=vec4<f32>(mix(color.rgb,vec3<f32>(0.24,0.37,0.40),coast*0.45),1.0);
     return color;
 }

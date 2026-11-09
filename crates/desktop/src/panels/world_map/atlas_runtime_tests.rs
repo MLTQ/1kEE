@@ -40,6 +40,7 @@ fn native_globe_runtime_refines_after_gui_launch() {
     crate::theme::set_theme(&ctx, crate::theme::MapTheme::Atlas);
     let mut model = crate::model::AppModel::new();
     model.map_theme = crate::theme::MapTheme::Atlas;
+    model.atlas_style = crate::atlas_style::AtlasStyle::default();
     model.selected_root = Some(root);
     model.globe_view = GlobeViewState::from_focus(crate::model::GeoPoint {
         lat: 46.0,
@@ -57,6 +58,8 @@ fn native_globe_runtime_refines_after_gui_launch() {
     clear();
     let start = Instant::now();
     let mut coarse = None;
+    let mut refined = None;
+    let mut settled = false;
     loop {
         let output = ctx.run(
             egui::RawInput {
@@ -84,6 +87,25 @@ fn native_globe_runtime_refines_after_gui_launch() {
         if let Some(detail) =
             detail.filter(|detail| super::super::atlas_surface::uploaded(&ctx, 0, detail.raster.id))
         {
+            if !settled {
+                settled = true;
+                continue;
+            }
+            if let Some((id, original)) = refined.as_ref() {
+                assert_eq!(
+                    *id, detail.raster.id,
+                    "moving light retains the native source"
+                );
+                let pixels = pixels.unwrap();
+                assert_ne!(
+                    &pixels, original,
+                    "production Globe responds to light direction"
+                );
+                if let Ok(path) = std::env::var("ONEKEE_ATLAS_MOVED_LIGHT_PREVIEW") {
+                    image::save_buffer(path, &pixels, 1280, 832, image::ColorType::Rgba8).unwrap();
+                }
+                break;
+            }
             let [west, _, east, _] = detail.raster.bounds;
             assert!(
                 detail.raster.size[0] as f32 / (east - west) > 150.,
@@ -102,7 +124,9 @@ fn native_globe_runtime_refines_after_gui_launch() {
                 !model.show_contours,
                 "rendering preserves the operator's contour choice"
             );
-            break;
+            refined = Some((detail.raster.id, pixels));
+            model.atlas_style.azimuth_deg = 135.0;
+            continue;
         }
         if overview && coarse.is_none() {
             coarse = pixels;
@@ -137,6 +161,7 @@ fn native_local_runtime_draws_solid_terrain_and_attached_contours() {
     crate::theme::set_theme(&ctx, crate::theme::MapTheme::Atlas);
     let mut model = crate::model::AppModel::new();
     model.map_theme = crate::theme::MapTheme::Atlas;
+    model.atlas_style = crate::atlas_style::AtlasStyle::default();
     model.selected_root = Some(root);
     let focus = GeoPoint {
         lat: 46.5,

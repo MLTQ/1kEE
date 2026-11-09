@@ -79,6 +79,7 @@ fn atlas_real_terrain_preview() {
     let raster = super::super::atlas_surface::Raster::new(detail.grid, region.bounds()).unwrap();
     let mut model = crate::model::AppModel::new();
     model.map_theme = crate::theme::MapTheme::Atlas;
+    model.atlas_style = crate::atlas_style::AtlasStyle::default();
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1536., 1024.));
     let focus = GeoPoint { lat: 46., lon: 7.5 };
     let mut view = GlobeViewState::from_focus(focus);

@@ -6,7 +6,7 @@ mod gpu_tests;
 fn surface_shaders_validate_and_uniform_layout_matches() {
     use wgpu::naga;
     for text in [
-        include_str!("atlas_surface.wgsl").to_string(),
+        shader_source(),
         format!(
             "{}\n{}",
             include_str!("color_output.wgsl"),
@@ -21,7 +21,7 @@ fn surface_shaders_validate_and_uniform_layout_matches() {
         .validate(&module)
         .expect("surface shader validates");
     }
-    assert_eq!(std::mem::size_of::<Uniforms>(), 224);
+    assert_eq!(std::mem::size_of::<Uniforms>(), 256);
 }
 
 #[test]

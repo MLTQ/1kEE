@@ -23,3 +23,5 @@ viewport, draws a solid elevation surface, then enables optional surface contour
 without changing terrain geometry. It waits an extra publication frame before
 comparison so removing a loading notice cannot satisfy the contour assertion.
 Separate screenshots can capture both states.
+
+Globe waits a settled publication frame, captures the default Atlas light, then moves it southeast through the production controller. Pixels must change while the native source ID stays identical. `ONEKEE_ATLAS_MOVED_LIGHT_PREVIEW` exports the second light direction. Explicit defaults keep renders independent of saved user art direction.

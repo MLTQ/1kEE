@@ -50,6 +50,8 @@ pub(crate) const MAX_THREEDEP_CACHE_BUDGET_GB: f32 = 512.0;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default)]
+    pub atlas_style: crate::atlas_style::AtlasStyle,
+    #[serde(default)]
     pub factal_api_key: String,
     #[serde(default)]
     pub windy_webcams_api_key: String,
@@ -124,6 +126,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            atlas_style: crate::atlas_style::AtlasStyle::default(),
             factal_api_key: String::new(),
             windy_webcams_api_key: String::new(),
             ny511_api_key: String::new(),
@@ -471,6 +474,7 @@ fn load_uncached() -> AppSettings {
 }
 
 fn normalize_settings(mut settings: AppSettings) -> AppSettings {
+    settings.atlas_style = settings.atlas_style.normalized();
     settings.factal_api_key = settings.factal_api_key.trim().to_owned();
     settings.windy_webcams_api_key = settings.windy_webcams_api_key.trim().to_owned();
     settings.ny511_api_key = settings.ny511_api_key.trim().to_owned();

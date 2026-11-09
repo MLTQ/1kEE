@@ -52,8 +52,10 @@ pub(super) struct Uniforms {
     major: [f32; 4],
     minor: [f32; 4],
     exclude: [f32; 4],
+    light: [f32; 4],
+    appearance: [f32; 4],
 }
-const _: () = assert!(std::mem::size_of::<Uniforms>() == 224);
+const _: () = assert!(std::mem::size_of::<Uniforms>() == 256);
 impl Uniforms {
     fn reframe(mut self, r: &Raster) -> Self {
         self.region = r.bounds;
@@ -117,6 +119,8 @@ impl Callback {
             u32::from(contours) as f32,
             u32::from(bathymetry) as f32,
         ];
+        u.light = crate::atlas_style::AtlasStyle::default().light(0.0);
+        u.appearance = [1.0, 1.0, 0.0, 0.0];
         u.major = super::gpu_color::rgba(crate::theme::hot_color());
         u.minor = super::gpu_color::rgba(crate::theme::contour_color());
         u
@@ -213,6 +217,19 @@ impl Callback {
             slot: 0,
         }
     }
+    pub fn with_style(mut self, style: crate::atlas_style::AtlasStyle, jd: f64) -> Self {
+        let style = style.normalized();
+        let light = style.light(jd);
+        for u in &mut self.uniforms {
+            u.light = light;
+            u.appearance = [style.color_richness, style.relief_strength, 0.0, 0.0];
+        }
+        if style.light_mode == crate::atlas_style::LightMode::Sun {
+            self.ctx
+                .request_repaint_after(std::time::Duration::from_secs(30));
+        }
+        self
+    }
     pub fn with_coastlines(mut self, enabled: bool) -> Self {
         for u in &mut self.uniforms {
             u.sphere[3] = u32::from(enabled) as f32;
@@ -228,6 +245,13 @@ impl Callback {
         }
         painter.add(egui_wgpu::Callback::new_paint_callback(rect, self));
     }
+}
+pub(super) fn shader_source() -> String {
+    format!(
+        "{}\n{}",
+        include_str!("atlas_surface.wgsl"),
+        include_str!("atlas_lighting.wgsl")
+    )
 }
 pub(super) fn uploaded(ctx: &egui::Context, slot: usize, id: u64) -> bool {
     ctx.data(|d| d.get_temp::<u64>(egui::Id::new(("atlas-surface-active", slot)))) == Some(id)

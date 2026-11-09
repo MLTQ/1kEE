@@ -1,4 +1,6 @@
 use super::*;
+#[path = "atlas_light_gpu_tests.rs"]
+mod lighting_tests;
 #[path = "admin_test_screen.rs"]
 mod screen;
 
@@ -25,6 +27,23 @@ fn render(
     rasters: Vec<Arc<Raster>>,
     contours: bool,
     spread: f32,
+) -> Vec<u8> {
+    render_styled(
+        gpu,
+        ctx,
+        rasters,
+        contours,
+        spread,
+        crate::atlas_style::AtlasStyle::default(),
+    )
+}
+fn render_styled(
+    gpu: &mut screen::Screen,
+    ctx: &egui::Context,
+    rasters: Vec<Arc<Raster>>,
+    contours: bool,
+    spread: f32,
+    style: crate::atlas_style::AtlasStyle,
 ) -> Vec<u8> {
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024., 768.));
     let layout = LocalLayout {
@@ -79,7 +98,9 @@ fn render(
                     callback.data.extend(next.data);
                     callback.uniforms.extend(next.uniforms);
                 }
-                callback.submit(&painter);
+                callback
+                    .with_style(style, crate::stellar_time::JD_J2000)
+                    .submit(&painter);
             },
         );
         let pixels = gpu.render(ctx, output, true).unwrap();

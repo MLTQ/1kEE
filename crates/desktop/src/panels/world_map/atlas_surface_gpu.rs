@@ -118,7 +118,7 @@ impl Resources {
         });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Atlas displaced terrain"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("atlas_surface.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(shader_source().into()),
         });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,

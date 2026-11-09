@@ -24,3 +24,5 @@ retain their existing vector pipelines. Heights and colors persist together unti
 GPU staging completes; late status notices cannot override a new request/epoch.
 Native GDAL discovery remains independent of the terminal PATH. Runtime tests
 exercise source selection, staging, real drawing and contour toggles.
+
+Height fields now retain unlit pigments. Both scene controllers pass saved art-direction controls and the app clock into the surface callback; light changes never invalidate source requests.

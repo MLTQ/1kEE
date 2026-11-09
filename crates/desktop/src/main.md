@@ -55,3 +55,5 @@ application with the map-oriented window configuration.
   and baked-height helpers when integrating upstream changes.
 
 The buildout module owns public campus, rule and news ingestion and its desktop browser.
+
+`atlas_style` owns the saved light and pigment controls shared by settings and terrain rendering.

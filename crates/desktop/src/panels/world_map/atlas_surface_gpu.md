@@ -13,3 +13,5 @@ sampled in the vertex shader. No CPU view-dependent mesh build is required.
 Stationary camera/source/style combinations reuse the completed color/depth image.
 Local depth uses the same monotonic ground-distance rule as native contour
 occlusion. Globe uses perspective distance to the actual displaced sphere.
+
+The surface shader is composed with runtime measured-height lighting. Light/style uniforms participate in the cached render key, so moving light redraws the retained height field without source reads or re-upload.

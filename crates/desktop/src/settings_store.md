@@ -74,3 +74,6 @@ See `panels/world_map/srtm_focus_cache/recovery.md` for source read-only semanti
 Tool-discovery fixtures pin configured/PATH precedence and missing-tool fallback.
 Atlas's full runtime GPU test runs under a Finder-style PATH to verify actual
 source decoding, viewport selection, texture publication and refined drawing.
+
+### Atlas lighting and pigments
+`atlas_style` stores studio/Sun mode, geographic light direction/elevation, a Sun time offset, color richness and relief contrast. Missing/partial settings restore the northwest/35-degree default; values normalize before save/load. Explicit Settings save remains the persistence boundary.

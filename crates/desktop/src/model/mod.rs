@@ -72,6 +72,7 @@ pub struct AppModel {
     pub show_event_list: bool,
     pub active_body: ActiveBody,
     pub map_theme: crate::theme::MapTheme,
+    pub atlas_style: crate::atlas_style::AtlasStyle,
     pub show_event_markers: bool,
     pub show_camera_markers: bool,
     /// Optional proximity overlay, not evidence of a camera recording an event.
@@ -286,6 +287,7 @@ impl AppModel {
             show_event_list: false,
             active_body: ActiveBody::Earth,
             map_theme: crate::theme::MapTheme::Topo,
+            atlas_style: app_settings.atlas_style,
             show_event_markers: true,
             show_camera_markers: true,
             show_camera_links: false,
@@ -605,6 +607,7 @@ impl AppModel {
             contour_stroke_scale: self.legacy_contour_stroke_scale,
             contour_stroke_width_px: self.contour_stroke_width_px,
             marker_scale: self.marker_scale,
+            atlas_style: self.atlas_style.normalized(),
             event_follow_dwell_seconds: self.event_follow.dwell_seconds(),
             threedep_enabled: self.settings_threedep_enabled,
             threedep_cache_budget_gb: settings_store::normalize_threedep_cache_budget_gb(
@@ -655,6 +658,7 @@ impl AppModel {
             settings_store::normalize_contour_stroke_scale(settings.contour_stroke_scale);
         self.contour_stroke_width_px = settings.contour_stroke_width_px;
         self.set_marker_scale(settings.marker_scale);
+        self.atlas_style = settings.atlas_style;
         self.event_follow.set_dwell_seconds(settings.event_follow_dwell_seconds);
         self.windy_webcams_api_key = settings.windy_webcams_api_key.trim().to_owned();
         self.ny511_api_key = settings.ny511_api_key.trim().to_owned();
