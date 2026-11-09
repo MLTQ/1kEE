@@ -12,3 +12,8 @@ are checksummed too. Reconstructible sort directories can be removed on retry;
 source request spools are kept until their join partition commits. Merge output
 emits activity callbacks during long passes. This layer never mutates the PBF,
 existing node index, feature checkpoint or published cell files.
+
+Merge reads report temporary-run failures with file context and check monotonic
+record order. This catches damaged IDs before a large segment's final checksum
+may be reached. The join coordinator can distinguish these reconstructible-run
+errors from committed request-spool errors and perform one bounded retry.

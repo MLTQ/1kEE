@@ -25,3 +25,13 @@ join: 649 reads, 1,182,609,238 bytes. Request and coordinate spools were each
 989,952 bytes; combined process peak RSS 488,708 KiB. All coordinates matched.
 The repeated sample models reuse across batches; cache warmth, concurrent I/O,
 output cell writing, elevation and admin assembly limit extrapolation.
+
+Fault injection now covers a damaged temporary sort with an uncommitted coordinate
+tail, successful regeneration, a persistent fault stopping after exactly one retry,
+and committed request corruption never being treated as disposable scratch.
+An internal merge test rejects out-of-order records with a valid checksum.
+The ignored `audit_operator_join_partition_sort` takes ONEKEE_JOIN_AUDIT_ROOT,
+ONEKEE_BENCH_SOURCE and a disposable ONEKEE_BENCH_INDEX. It rebuilds the next saved
+partition exclusively in /tmp, verifies hashes, all node/group ranges and sort
+order, and confirms zero node-payload reads. Partition 232 passed all 22,966,241
+records on 2026-11-09; existing build files remained unchanged.

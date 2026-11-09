@@ -10,6 +10,14 @@ use std::{
 };
 
 pub(super) type Result<T> = std::result::Result<T, String>;
+const SORT_ERROR: &str = "Temporary coordinate sort failed: ";
+pub(super) fn sort_error(message: impl std::fmt::Display) -> String {
+    format!("{SORT_ERROR}{message}")
+}
+pub(super) fn is_sort_error(error: &str) -> bool {
+    error.starts_with(SORT_ERROR)
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -216,19 +224,24 @@ struct Run {
 pub(super) struct Merge {
     readers: Vec<Records>,
     heap: BinaryHeap<Reverse<(Record, usize)>>,
+    paths: Vec<PathBuf>,
 }
 impl Merge {
     fn new(runs: &[Run]) -> Result<Self> {
         let mut result = Self {
             readers: Vec::new(),
             heap: BinaryHeap::new(),
+            paths: Vec::new(),
         };
         for (i, run) in runs.iter().enumerate() {
-            let mut reader = Records::open(&Sinks::path(&run.dir, 0), &run.spool)?;
-            if let Some(record) = reader.next()? {
+            let path = Sinks::path(&run.dir, 0);
+            let contextualize = |e| sort_error(format!("{}: {e}", path.display()));
+            let mut reader = Records::open(&path, &run.spool).map_err(contextualize)?;
+            if let Some(record) = reader.next().map_err(contextualize)? {
                 result.heap.push(Reverse((record, i)));
             }
             result.readers.push(reader);
+            result.paths.push(path);
         }
         Ok(result)
     }
@@ -236,7 +249,16 @@ impl Merge {
         let Some(Reverse((record, i))) = self.heap.pop() else {
             return Ok(None);
         };
-        if let Some(next) = self.readers[i].next()? {
+        if let Some(next) = self.readers[i]
+            .next()
+            .map_err(|e| sort_error(format!("{}: {e}", self.paths[i].display())))?
+        {
+            if next < record {
+                return Err(sort_error(format!(
+                    "{}: records are out of order",
+                    self.paths[i].display()
+                )));
+            }
             self.heap.push(Reverse((next, i)));
         }
         Ok(Some(record))
@@ -315,4 +337,35 @@ pub(super) fn sorted(
         runs = merged;
     }
     Merge::new(&runs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn merge_rejects_out_of_order_records_even_with_valid_checksum() {
+        let path = std::env::temp_dir().join(format!(
+            "1kee-sort-order-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut sink = Sinks::new(&path, 1).unwrap();
+        sink.push(0, Record { id: 2, value: 0 }).unwrap();
+        sink.push(0, Record { id: 1, value: 0 }).unwrap();
+        let mut spools = vec![Spool::default()];
+        sink.finish(&mut spools).unwrap();
+        let mut merge = Merge::new(&[Run {
+            dir: path.clone(),
+            spool: spools.remove(0),
+        }])
+        .unwrap();
+        let error = merge.next().err().unwrap();
+        assert!(is_sort_error(&error));
+        assert!(error.contains("out of order"));
+        drop(merge);
+        fs::remove_dir_all(path).unwrap();
+    }
 }

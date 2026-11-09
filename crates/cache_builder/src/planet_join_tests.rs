@@ -476,3 +476,134 @@ fn parallel_decode_windows_and_partitions_never_reread_blocks() {
     join.resolve(&nodes, &mut |_| {}).unwrap();
     assert_eq!(nodes.activity(), before);
 }
+
+#[test]
+fn damaged_temporary_sort_rebuilds_once_and_discards_uncommitted_output() {
+    for persistent in [false, true] {
+        let temp = Temp::new();
+        let cmd = fixture(&temp.0, 4);
+        let (nodes, _guard) = PbfNodes::open(
+            &cmd.planet_path,
+            &cmd.tmp_dir.join("indexed-pbf-v1"),
+            &mut |_| {},
+        )
+        .unwrap();
+        let mut join = empty(&cmd, &nodes, nodes.first_way);
+        join.collect(&cmd, &nodes, &mut |_| {}, 1).unwrap();
+        let root = join.root.clone();
+        let mut injections = 0;
+        let mut retries = 0;
+        let result = join.resolve(&nodes, &mut |p| {
+            if p.message.contains("Rebuilding temporary sort") {
+                retries += 1;
+            }
+            if p.message.contains("GB sorted") && (persistent || injections == 0) {
+                injections += 1;
+                let path = root.join("sort/0/000000.bin");
+                let mut bytes = fs::read(&path).unwrap();
+                bytes[0] ^= 1;
+                fs::write(path, bytes).unwrap();
+                // A failure may be detected after some coordinates were appended.
+                let dir = root.join("coordinates");
+                fs::create_dir_all(&dir).unwrap();
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(Sinks::path(&dir, 0))
+                    .unwrap()
+                    .write_all(b"uncommitted tail")
+                    .unwrap();
+            }
+        });
+        assert_eq!(retries, 1);
+        if persistent {
+            assert_eq!(injections, 2);
+            let error = result.err().unwrap();
+            assert!(error.contains("failed again"));
+            assert!(error.contains("same working folder"));
+            let state: State =
+                serde_json::from_slice(&fs::read(root.join("state.json")).unwrap()).unwrap();
+            assert_eq!(state.joined, 0);
+            assert!(Sinks::path(&root.join("requests"), 0).exists());
+        } else {
+            result.unwrap();
+            assert_eq!(injections, 1);
+            assert_eq!(join.state.joined, 1);
+            let (_, table) = join.group(join.start()).unwrap().unwrap();
+            let ids = [10, 20, 30, 40];
+            assert_eq!(
+                nodes.prepared_session(table).lookup_many(&ids).unwrap(),
+                nodes.session().lookup_many(&ids).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn damaged_committed_requests_are_not_retried_as_temporary_sort_failures() {
+    let temp = Temp::new();
+    let cmd = fixture(&temp.0, 1);
+    let (nodes, _guard) = PbfNodes::open(
+        &cmd.planet_path,
+        &cmd.tmp_dir.join("indexed-pbf-v1"),
+        &mut |_| {},
+    )
+    .unwrap();
+    let mut join = empty(&cmd, &nodes, nodes.first_way);
+    join.collect(&cmd, &nodes, &mut |_| {}, 1).unwrap();
+    let path = Sinks::path(&join.root.join("requests"), 0);
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[0] ^= 1;
+    fs::write(&path, bytes).unwrap();
+    let mut retries = 0;
+    let error = join
+        .resolve(&nodes, &mut |p| {
+            if p.message.contains("Rebuilding temporary sort") {
+                retries += 1;
+            }
+        })
+        .err()
+        .unwrap();
+    assert!(error.contains("checksum"));
+    assert_eq!(retries, 0);
+    assert_eq!(join.state.joined, 0);
+    assert!(path.exists());
+}
+
+#[test]
+#[ignore = "operator audit: reads committed requests, recreates sort only in /tmp"]
+fn audit_operator_join_partition_sort() {
+    let root = PathBuf::from(std::env::var("ONEKEE_JOIN_AUDIT_ROOT").unwrap());
+    let source = PathBuf::from(std::env::var("ONEKEE_BENCH_SOURCE").unwrap());
+    let index = PathBuf::from(std::env::var("ONEKEE_BENCH_INDEX").unwrap());
+    let state: State = serde_json::from_slice(&fs::read(root.join("state.json")).unwrap()).unwrap();
+    let (nodes, _guard) = PbfNodes::open(&source, &index, &mut |_| {}).unwrap();
+    let shard = state.joined;
+    let temp = Temp::new();
+    let mut records = io::sorted(
+        &Sinks::path(&root.join("requests"), shard),
+        &state.requests[shard],
+        &temp.0.join("sort"),
+        SORT_RECORDS,
+        &mut |_| {},
+    )
+    .unwrap();
+    let mut count = 0u64;
+    let mut last = None;
+    while let Some(record) = records.next().unwrap() {
+        assert_eq!(
+            nodes.block_for(record.id).unwrap() / BLOCKS_PER_SHARD,
+            shard
+        );
+        assert!(record.value < state.groups.len() as u64);
+        assert!(last.is_none_or(|r| r <= record));
+        last = Some(record);
+        count += 1;
+    }
+    assert_eq!(count, state.requests[shard].len() / 16);
+    assert_eq!(nodes.activity().0, 0);
+    println!(
+        "Partition {} regenerated and verified: {count} sorted records; original index, source, output and join files unchanged",
+        shard + 1
+    );
+}

@@ -53,3 +53,19 @@ Progress reports separate stages, source traversal, scratch volume, partitions
 and node reads. These are work counters, not geographic coverage or an overall
 ETA. Node-position traversal includes skipped source ranges; physical reads can
 be smaller. The running older executable is never switched or stopped by a build.
+
+## Temporary sort recovery
+Temporary-run read, checksum, ordering, and request-range failures are classified
+separately from committed request-spool failures. A failed temporary sort retries
+its partition once: restore every coordinate spool to its last committed length,
+recreate sort runs from the original verified request spool, then repeat the join.
+Only a successful attempt advances the manifest. A second failure stops with the
+partition number and same-folder resume guidance. Committed request corruption,
+source identity failures and output-write errors are not silently retried or skipped.
+
+Operator incident 2026-11-09: partition 232 had 22,966,241 valid request records
+with all segment hashes matching. Sort run 0 differed from a canonical reconstruction
+in three 512-byte sectors (offsets 50855936, 50856448, 50987008), producing 96
+invalid records. The complete partition re-sorted and verified successfully in
+/tmp; no source/index/cell/checkpoint files were modified during diagnosis.
+The origin of the temporary-file damage is not established by this evidence.

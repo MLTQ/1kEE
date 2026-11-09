@@ -297,152 +297,35 @@ impl Join {
         let count = self.state.requests.len();
         let total = nodes.block_scan_position(nodes.block_count());
         for shard in self.state.joined..count {
-            require_space(
-                &self.root,
-                self.state.requests[shard].len().saturating_mul(3),
-            )?;
-            let done = nodes.block_scan_position(shard * BLOCKS_PER_SHARD);
-            nodes.validate_source()?;
-            report(
-                progress,
-                nodes,
-                "Join coordinates",
-                done,
-                total,
-                format!(
-                    "Sorting coordinate partition {}/{}; original node blocks are read once",
-                    shard + 1,
-                    count
-                ),
-            );
-            let request_path = Sinks::path(&self.root.join("requests"), shard);
-            let sort = self.root.join("sort");
-            let mut input = io::sorted(
-                &request_path,
-                &self.state.requests[shard],
-                &sort,
-                SORT_RECORDS,
-                &mut |bytes| {
+            let spools = match self.resolve_partition(nodes, progress, window, shard) {
+                Ok(spools) => spools,
+                Err(error) if io::is_sort_error(&error) => {
                     report(
                         progress,
                         nodes,
                         "Join coordinates",
-                        done,
+                        nodes.block_scan_position(shard * BLOCKS_PER_SHARD),
                         total,
                         format!(
-                            "Sorting partition {}/{}: {:.2} GB sorted",
+                            "Rebuilding temporary sort for partition {}/{} (retry 1/1): {error}. Completed partitions are preserved.",
                             shard + 1,
-                            count,
-                            bytes as f64 / 1e9
+                            count
                         ),
                     );
-                },
-            )?;
-            let mut sinks = Sinks::new(&self.root.join("coordinates"), self.state.groups.len())?;
-            let mut carry: Option<(usize, Vec<crate::pbf_nodes::Node>)> = None;
-            let mut pending = None;
-            let mut previous = None;
-            let mut last_report = Instant::now();
-            let mut joined = 0u64;
-            loop {
-                let mut requests = Vec::new();
-                let mut blocks = Vec::new();
-                while requests.len() < window {
-                    let next = if let Some(request) = pending.take() {
-                        Some(request)
-                    } else {
-                        input.next()?
-                    };
-                    let Some(request) = next else {
-                        break;
-                    };
-                    if previous == Some(request) {
-                        continue;
+                    // A failed merge can have appended coordinates before it
+                    // detects corruption. Restore all files to the last commit
+                    // before rebuilding this partition from verified requests.
+                    for (n, group) in self.state.groups.iter().enumerate() {
+                        group
+                            .spool
+                            .restore(&Sinks::path(&self.root.join("coordinates"), n))?;
                     }
-                    let block = nodes
-                        .block_for(request.id)
-                        .ok_or("Invalid node ID in join request")?;
-                    if block / BLOCKS_PER_SHARD != shard {
-                        return Err("Join request belongs to the wrong partition".into());
-                    }
-                    if blocks.last() != Some(&block) {
-                        if blocks.len() == 16 {
-                            pending = Some(request);
-                            break;
-                        }
-                        blocks.push(block);
-                    }
-                    previous = Some(request);
-                    requests.push((block, request));
+                    self.resolve_partition(nodes, progress, window, shard).map_err(|e| {
+                        format!("Coordinate partition {} failed again after rebuilding temporary sort: {e}. Completed partitions and request files are preserved; resume using the same working folder.", shard + 1)
+                    })?
                 }
-                if requests.is_empty() {
-                    break;
-                }
-                // Decode a bounded window in parallel; retain its last block if
-                // another window continues that block's requests. Never reread it.
-                let cached = carry.take();
-                let mut decoded = Vec::new();
-                let mut first = 0;
-                if let Some((block, values)) = cached
-                    && blocks.first() == Some(&block)
-                {
-                    decoded.push((block, values));
-                    first = 1;
-                }
-                decoded.extend(
-                    blocks[first..]
-                        .par_iter()
-                        .map(|&b| nodes.read_block(b).map(|values| (b, values)))
-                        .collect::<Result<Vec<_>>>()?,
-                );
-                let mut block_cursor = 0;
-                let mut node_cursor = 0;
-                for (block, request) in requests {
-                    if decoded[block_cursor].0 != block {
-                        block_cursor += 1;
-                        node_cursor = 0;
-                    }
-                    let values = &decoded[block_cursor].1;
-                    while node_cursor < values.len() && values[node_cursor].id < request.id {
-                        node_cursor += 1;
-                    }
-                    if let Some(node) = values
-                        .get(node_cursor)
-                        .filter(|n| n.id == request.id)
-                        .copied()
-                    {
-                        let group = usize::try_from(request.value).map_err(|e| e.to_string())?;
-                        sinks.push(
-                            group,
-                            Record {
-                                id: node.id,
-                                value: node.lat.to_bits() as u64
-                                    | ((node.lon.to_bits() as u64) << 32),
-                            },
-                        )?;
-                        joined += 1;
-                    }
-                }
-                carry = decoded.pop();
-                if last_report.elapsed() >= Duration::from_secs(1) {
-                    report(
-                        progress,
-                        nodes,
-                        "Join coordinates",
-                        done,
-                        total,
-                        format!(
-                            "Partition {}/{}: {joined} coordinates joined; {} node blocks decoded",
-                            shard + 1,
-                            count,
-                            nodes.activity().0
-                        ),
-                    );
-                    last_report = Instant::now();
-                }
-            }
-            let mut spools: Vec<_> = self.state.groups.iter().map(|g| g.spool.clone()).collect();
-            sinks.finish(&mut spools)?;
+                Err(error) => return Err(error),
+            };
             for (group, spool) in self.state.groups.iter_mut().zip(spools) {
                 group.spool = spool;
             }
@@ -450,7 +333,8 @@ impl Join {
             self.state.joined = shard + 1;
             save(&self.root, &self.state)?;
             // Commit first; interrupted cleanup is harmless and retried below.
-            drop(input);
+            let sort = self.root.join("sort");
+            let request_path = Sinks::path(&self.root.join("requests"), shard);
             if sort.exists() {
                 fs::remove_dir_all(&sort).map_err(|e| e.to_string())?;
             }
@@ -478,6 +362,178 @@ impl Join {
             ),
         );
         Ok(())
+    }
+    fn resolve_partition(
+        &self,
+        nodes: &PbfNodes,
+        progress: &mut dyn FnMut(RoadBuildProgress),
+        window: usize,
+        shard: usize,
+    ) -> Result<Vec<Spool>> {
+        let count = self.state.requests.len();
+        let total = nodes.block_scan_position(nodes.block_count());
+        require_space(
+            &self.root,
+            self.state.requests[shard].len().saturating_mul(3),
+        )?;
+        let done = nodes.block_scan_position(shard * BLOCKS_PER_SHARD);
+        nodes.validate_source()?;
+        report(
+            progress,
+            nodes,
+            "Join coordinates",
+            done,
+            total,
+            format!(
+                "Sorting coordinate partition {}/{}; original node blocks are read once",
+                shard + 1,
+                count
+            ),
+        );
+        let request_path = Sinks::path(&self.root.join("requests"), shard);
+        let sort = self.root.join("sort");
+        let mut input = io::sorted(
+            &request_path,
+            &self.state.requests[shard],
+            &sort,
+            SORT_RECORDS,
+            &mut |bytes| {
+                report(
+                    progress,
+                    nodes,
+                    "Join coordinates",
+                    done,
+                    total,
+                    format!(
+                        "Sorting partition {}/{}: {:.2} GB sorted",
+                        shard + 1,
+                        count,
+                        bytes as f64 / 1e9
+                    ),
+                );
+            },
+        )?;
+        let mut sinks = Sinks::new(&self.root.join("coordinates"), self.state.groups.len())?;
+        let mut carry: Option<(usize, Vec<crate::pbf_nodes::Node>)> = None;
+        let mut pending = None;
+        let mut previous = None;
+        let mut last_report = Instant::now();
+        let mut joined = 0u64;
+        loop {
+            let mut requests = Vec::new();
+            let mut blocks = Vec::new();
+            while requests.len() < window {
+                let next = if let Some(request) = pending.take() {
+                    Some(request)
+                } else {
+                    input.next()?
+                };
+                let Some(request) = next else {
+                    break;
+                };
+                if previous == Some(request) {
+                    continue;
+                }
+                let block = nodes.block_for(request.id).ok_or_else(|| {
+                    io::sort_error(format!(
+                        "node ID {} in partition {} has no indexed block",
+                        request.id,
+                        shard + 1
+                    ))
+                })?;
+                if request.value >= self.state.groups.len() as u64 {
+                    return Err(io::sort_error(format!(
+                        "way group {} in partition {} is out of range",
+                        request.value,
+                        shard + 1
+                    )));
+                }
+                if block / BLOCKS_PER_SHARD != shard {
+                    return Err(io::sort_error(format!(
+                        "node ID {} belongs to partition {}, expected {}",
+                        request.id,
+                        block / BLOCKS_PER_SHARD + 1,
+                        shard + 1
+                    )));
+                }
+                if blocks.last() != Some(&block) {
+                    if blocks.len() == 16 {
+                        pending = Some(request);
+                        break;
+                    }
+                    blocks.push(block);
+                }
+                previous = Some(request);
+                requests.push((block, request));
+            }
+            if requests.is_empty() {
+                break;
+            }
+            // Decode a bounded window in parallel; retain its last block if
+            // another window continues that block's requests. Never reread it.
+            let cached = carry.take();
+            let mut decoded = Vec::new();
+            let mut first = 0;
+            if let Some((block, values)) = cached
+                && blocks.first() == Some(&block)
+            {
+                decoded.push((block, values));
+                first = 1;
+            }
+            decoded.extend(
+                blocks[first..]
+                    .par_iter()
+                    .map(|&b| nodes.read_block(b).map(|values| (b, values)))
+                    .collect::<Result<Vec<_>>>()?,
+            );
+            let mut block_cursor = 0;
+            let mut node_cursor = 0;
+            for (block, request) in requests {
+                if decoded[block_cursor].0 != block {
+                    block_cursor += 1;
+                    node_cursor = 0;
+                }
+                let values = &decoded[block_cursor].1;
+                while node_cursor < values.len() && values[node_cursor].id < request.id {
+                    node_cursor += 1;
+                }
+                if let Some(node) = values
+                    .get(node_cursor)
+                    .filter(|n| n.id == request.id)
+                    .copied()
+                {
+                    let group = usize::try_from(request.value).map_err(|e| e.to_string())?;
+                    sinks.push(
+                        group,
+                        Record {
+                            id: node.id,
+                            value: node.lat.to_bits() as u64 | ((node.lon.to_bits() as u64) << 32),
+                        },
+                    )?;
+                    joined += 1;
+                }
+            }
+            carry = decoded.pop();
+            if last_report.elapsed() >= Duration::from_secs(1) {
+                report(
+                    progress,
+                    nodes,
+                    "Join coordinates",
+                    done,
+                    total,
+                    format!(
+                        "Partition {}/{}: {joined} coordinates joined; {} node blocks decoded",
+                        shard + 1,
+                        count,
+                        nodes.activity().0
+                    ),
+                );
+                last_report = Instant::now();
+            }
+        }
+        let mut spools: Vec<_> = self.state.groups.iter().map(|g| g.spool.clone()).collect();
+        sinks.finish(&mut spools)?;
+        Ok(spools)
     }
     pub fn start(&self) -> u64 {
         self.state.start
