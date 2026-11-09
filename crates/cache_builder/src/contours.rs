@@ -298,7 +298,7 @@ fn import_coastline(cache_db_path: &Path, tile: TileKey, gpkg_path: &Path) -> ru
 
 // ── GDAL helpers (mirrors desktop gdal.rs) ────────────────────────────────────
 
-fn run_gdal(mut cmd: Command, label: &str) -> std::io::Result<()> {
+pub(crate) fn run_gdal(mut cmd: Command, label: &str) -> std::io::Result<()> {
     let start = Instant::now();
     let timeout = Duration::from_secs(120);
     let mut child = cmd.spawn()?;

@@ -134,6 +134,13 @@ fn texture(ctx: &egui::Context, root: Option<&Path>) -> Option<Arc<super::atlas_
 /// All discovery, file reads, decoding and lighting run on the snapshot worker.
 fn load_grid(root: Option<&Path>) -> Option<HeightGrid> {
     let directory = terrain_assets::find_derived_root(root)?.join("terrain");
+    if let Ok(mut cache) = tile_archive::atlas::Reader::open(
+        &directory.join(tile_archive::atlas::FILE_NAME),
+    ) && let Ok(Some(metres)) = cache.sample(
+        [-180., -90., 180., 90.], [4096, 2048], tile_archive::atlas::Tier::Overview,
+    ) {
+        return Some(HeightGrid { width: 4096, height: 2048, metres });
+    }
     for (name, signed) in [
         ("gebco_2025_preview_4096.tif", true),
         ("gebco_2025_preview_4096.png", false),

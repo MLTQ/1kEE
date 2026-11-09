@@ -14,15 +14,9 @@ pub(super) struct Detail {
 }
 
 pub(super) fn load(root: Option<&Path>, region: Region, max_edge: usize) -> Result<Detail, String> {
-    let data =
-        terrain_assets::find_data_root(root).ok_or("No terrain data folder is configured.")?;
-    let base = gdal::find_gebco_topography_tiles(&data);
-    if base.is_empty() {
-        return Err(format!(
-            "Original GEBCO terrain files were not found in {}.",
-            data.display()
-        ));
-    }
+    let base = terrain_assets::find_data_root(root)
+        .map(|data| gdal::find_gebco_topography_tiles(&data))
+        .unwrap_or_default();
     let span = region.span();
     let bounds = region.bounds();
     let srtm = if span[0] <= 8.0 && span[1] <= 8.0 {
@@ -39,6 +33,17 @@ pub(super) fn load(root: Option<&Path>, region: Region, max_edge: usize) -> Resu
     } else {
         Vec::new()
     };
+    let mut cache_error = None;
+    if fine.is_empty() {
+        match cached(root, region, max_edge, !srtm.is_empty()) {
+            Ok(Some(detail)) => return Ok(detail),
+            Ok(None) => {}
+            Err(error) => cache_error = Some(error),
+        }
+    }
+    if base.is_empty() {
+        return Err(cache_error.unwrap_or_else(|| "Atlas cache does not cover this view and original GEBCO terrain files were not found. Build Atlas tiles or configure the terrain data folder.".into()));
+    }
     let (spacing, source) = if !fine.is_empty() {
         (1.0 / 30.0, "cached fine elevation")
     } else if !srtm.is_empty() {
@@ -67,6 +72,62 @@ pub(super) fn load(root: Option<&Path>, region: Region, max_edge: usize) -> Resu
         region,
         source,
     })
+}
+
+fn cached(
+    root: Option<&Path>,
+    region: Region,
+    max_edge: usize,
+    has_srtm: bool,
+) -> Result<Option<Detail>, String> {
+    use tile_archive::atlas::FILE_NAME;
+    let Some(derived) = terrain_assets::find_derived_root(root) else {
+        return Ok(None);
+    };
+    let path = derived.join("terrain").join(FILE_NAME);
+    if !path.exists() {
+        return Ok(None);
+    }
+    cached_file(&path, region, max_edge, has_srtm)
+}
+
+fn cached_file(
+    path: &Path,
+    region: Region,
+    max_edge: usize,
+    has_srtm: bool,
+) -> Result<Option<Detail>, String> {
+    use tile_archive::atlas::{Reader, Tier};
+    let mut cache = Reader::open(path)?;
+    let span = region.span();
+    let land = span[0] <= 8.0 && span[1] <= 8.0 && (has_srtm || cache.has_tier(Tier::Land)?);
+    let mut tiers = vec![if land { Tier::Land } else { Tier::Terrain }];
+    // Keep the original SRTM path when detail is available but has not been
+    // built. Cache-only installations can still use their terrain tier.
+    if land && !has_srtm {
+        tiers.push(Tier::Terrain);
+    }
+    let [w, s, e, n] = region.bounds().map(f64::from);
+    let west = (w + 180.0).rem_euclid(360.0) - 180.0;
+    for tier in tiers {
+        let size = region.size(tier.spacing() as f32, max_edge);
+        if let Some(metres) = cache.sample([west, s, west + (e - w), n], size, tier)? {
+            return Ok(Some(Detail {
+                grid: HeightGrid {
+                    width: size[0],
+                    height: size[1],
+                    metres,
+                },
+                region,
+                source: if tier == Tier::Land {
+                    "Atlas cache · 1 arcsecond land"
+                } else {
+                    "Atlas cache · 15 arcsecond terrain"
+                },
+            }));
+        }
+    }
+    Ok(None)
 }
 
 fn merge_land(base: &mut [f32], land: &[f32]) {

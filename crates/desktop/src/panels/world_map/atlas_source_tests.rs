@@ -87,3 +87,50 @@ fn native_warp_preserves_dateline_pixel_centres() {
         assert!(row[0] > 450. && row[7] < 110.);
     }
 }
+
+#[test]
+fn atlas_consumes_prebuilt_heights_without_gdal_or_original_sources() {
+    use tile_archive::atlas::{FILE_NAME, Key, Tier, Writer};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(FILE_NAME);
+    let key = Key::at(Tier::Terrain, 0.5, 0.5);
+    let writer = Writer::open(&path).unwrap();
+    writer
+        .put(key, "fixture", &vec![1234.; Tier::Terrain.side().pow(2)])
+        .unwrap();
+    let region = Region([360, 360, 3240, 3240]);
+    let detail = cached_file(&path, region, 512, false).unwrap().unwrap();
+    assert!(detail.source.starts_with("Atlas cache"));
+    assert_eq!(detail.region, region);
+    assert!(
+        detail
+            .grid
+            .metres
+            .iter()
+            .all(|h| (*h - 1234.).abs() < 0.001)
+    );
+    // Original SRTM keeps its detail when the fine tier has not been built.
+    assert!(cached_file(&path, region, 512, true).unwrap().is_none());
+    let close = Region([360, 360, 720, 720]);
+    writer
+        .put(
+            Key::at(Tier::Land, 0.15, 0.15),
+            "fixture",
+            &vec![2345.; Tier::Land.side().pow(2)],
+        )
+        .unwrap();
+    for has_original_srtm in [true, false] {
+        let detail = cached_file(&path, close, 512, has_original_srtm)
+            .unwrap()
+            .unwrap();
+        assert_eq!(detail.source, "Atlas cache · 1 arcsecond land");
+        assert_eq!(detail.grid.width, 360);
+        assert!(
+            detail
+                .grid
+                .metres
+                .iter()
+                .all(|h| (*h - 2345.).abs() < 0.001)
+        );
+    }
+}

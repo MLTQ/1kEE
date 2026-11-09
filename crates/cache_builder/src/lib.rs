@@ -1,5 +1,6 @@
 //! Shared cache construction and the companion application entry point.
 mod admin;
+mod atlas;
 mod app;
 mod build_monitor;
 mod builder_dashboard;
@@ -28,6 +29,9 @@ mod util;
 pub fn run() -> Result<(), String> {
     match args::parse(std::env::args().skip(1))? {
         args::Command::Gui => launch_gui(),
+        args::Command::Atlas(command) => atlas::run(command, &mut |p| {
+            println!("[{:.1}%] {}: {}", p.fraction() * 100.0, p.state, p.message);
+        }).map(|summary| println!("{summary}")),
         args::Command::AdminLods(dir) => {
             let mut found = false;
             for level in 2..=11 {

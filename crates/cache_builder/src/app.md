@@ -60,3 +60,7 @@ Provides the minimal egui desktop shell for the offline cache-builder. It is the
 The compact-node tooltip now describes staged sequential way joining and its
 request/coordinate scratch files. The selected working folder remains the resume
 key; stage status comes from the shared progress channel.
+
+The Atlas tab delegates to `atlas_panel.rs` for persistent measured-height builds
+and its own live counters. OSM inventory polling and post-job inspection are
+skipped for Atlas. Tab labels wrap in narrow windows.

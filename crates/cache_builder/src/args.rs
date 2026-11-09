@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 pub enum Command {
     Gui,
+    Atlas(crate::atlas::Command),
     AdminLods(PathBuf),
     PackArchive(crate::archive_pack::Command),
     Pipelines(crate::pipelines::Command),
@@ -107,6 +108,7 @@ where
 
     match command.as_str() {
         "gui" => Ok(Command::Gui),
+        "atlas" => crate::atlas::parse(args).map(Command::Atlas),
         "admin-lods" => {
             let dir = args.next().ok_or("Expected admin-lods <admin_cells directory>")?;
             if args.next().is_some() {
@@ -442,6 +444,10 @@ fn usage() -> String {
     "Usage:
   one-thousand-electric-eye-cache-builder
   one-thousand-electric-eye-cache-builder gui
+  one-thousand-electric-eye-cache-builder atlas --data-root <Data folder>
+      --out <Derived/terrain/atlas_heights_v1.sqlite> [--srtm-root <folder>]
+      [--tiers overview,terrain,land] [--gdal-bin-dir <folder>]
+      [--min-lon W --min-lat S --max-lon E --max-lat N]
   one-thousand-electric-eye-cache-builder admin-lods <Derived/osm/admin_cells>
   one-thousand-electric-eye-cache-builder pack-archive --out <Derived/world.1ka>
       [--osm-cache-dir <Derived/osm>] [--earth-contours <database>]

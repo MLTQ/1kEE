@@ -1,3 +1,6 @@
+#[path = "atlas_panel.rs"]
+mod atlas_panel;
+
 use crate::args::{BboxCommand, ContoursBboxCommand, PlanetAllCommand};
 use crate::job::{BuildEvent, BuildJob, JobHandle, spawn_job};
 use crate::lunar::{LunarBuildCommand, all_lunar_specs};
@@ -13,6 +16,7 @@ use std::time::Duration;
 
 #[derive(Clone, Copy, PartialEq)]
 enum ActiveTab {
+    Atlas,
     OsmContours,
     Lunar,
     Mars,
@@ -127,6 +131,7 @@ pub struct BuilderApp {
     live_tiles: Vec<(f32, f32, f32, f32)>,
     // ── Lunar tab ─────────────────────────────────────────────────────────────
     active_tab: ActiveTab,
+    atlas_form: atlas_panel::Form,
     lunar_form: LunarForm,
     lunar_drag_start: Option<egui::Pos2>,
     /// Lunar tiles already in lunar_focus_cache.sqlite
@@ -252,6 +257,7 @@ impl BuilderApp {
             cached_tiles: Vec::new(),
             live_tiles: Vec::new(),
             active_tab: ActiveTab::OsmContours,
+            atlas_form: Default::default(),
             lunar_form: LunarForm {
                 jp2_path: String::new(),
                 lunar_db: std::env::current_dir()
@@ -601,6 +607,7 @@ impl BuilderApp {
 
         for event in events {
             match event {
+                BuildEvent::AtlasProgress(p) => self.atlas_form.progress = Some(p),
                 BuildEvent::Progress(update) => {
                     self.dashboard.live.observe(update.metrics.as_ref());
                     if self.status != update.stage { self.push_log(format!("{} · {}", update.stage, update.message)); }
@@ -641,8 +648,10 @@ impl BuilderApp {
                         }
                     }
                     self.active_job = None;
+                    if self.active_job_tab != Some(ActiveTab::Atlas) {
+                        self.refresh_inspector();
+                    }
                     self.active_job_tab = None;
-                    self.refresh_inspector();
                     break;
                 }
             }
@@ -1383,7 +1392,7 @@ impl BuilderApp {
 impl eframe::App for BuilderApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_job();
-        self.dashboard.poll(&self.form.cache_dir, &self.form.planet_tmp_dir, self.form.compact_nodes, ctx);
+        if self.active_tab != ActiveTab::Atlas { self.dashboard.poll(&self.form.cache_dir, &self.form.planet_tmp_dir, self.form.compact_nodes, ctx); }
         if self.active_job.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -1404,17 +1413,19 @@ impl eframe::App for BuilderApp {
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().id_salt("builder_controls_scroll").show(ui, |ui| {
                 // ── Tab bar ───────────────────────────────────────────────────
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.selectable_value(
                         &mut self.active_tab,
                         ActiveTab::OsmContours,
                         "OSM / Contours",
                     );
+                    ui.selectable_value(&mut self.active_tab, ActiveTab::Atlas, "Atlas");
                     ui.selectable_value(&mut self.active_tab, ActiveTab::Lunar, "Lunar (SLDEM)");
                     ui.selectable_value(&mut self.active_tab, ActiveTab::Mars, "Mars");
                 });
                 ui.separator();
 
+                if self.active_tab == ActiveTab::Atlas { self.show_atlas_panel(ui); return; }
                 if self.active_tab == ActiveTab::Lunar {
                     self.show_lunar_panel(ui);
                     return;
@@ -1824,6 +1835,7 @@ impl eframe::App for BuilderApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().id_salt("builder_dashboard").show(ui, |ui| {
+                if self.active_tab == ActiveTab::Atlas { self.show_atlas_dashboard(ui); return; }
                 self.dashboard.show(ui, &self.status, &self.progress_detail, self.active_job.is_some(), &self.log_lines, &[
                     ("road", self.assets.roads), ("waterway", self.assets.water),
                     ("building", self.assets.buildings), ("tree", self.assets.trees),

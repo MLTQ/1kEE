@@ -27,3 +27,8 @@ Runs cache-builder work off the UI thread and streams progress back to the egui 
 - Vector, planetary terrain, and archive jobs share this event stream.
 
 - `PackArchive` streams completed-cell log entries and one Finished result. Packing is a background snapshot job; the UI does not invent a percentage while enumerating source files.
+
+`Atlas` emits generic stage progress and `AtlasProgress` counters, followed by a
+single `Finished`. GDAL generation and checksum verification stay on the worker.
+Atlas UI updates are capped at ten per second (plus terminal state) so a fast
+verification pass cannot flood the event queue.

@@ -30,3 +30,7 @@ Height fields now retain unlit pigments. Both scene controllers pass saved art-d
 Local Trees requests exact-height-field coverage through `atlas_forest`; its material is applied by the actual terrain shader. Coverage never changes source elevations or light controls.
 
 Hiding Local Trees suspends pending coverage work without discarding a reusable completed mask.
+
+The global overview first reads the Overview tier in atlas_heights_v1.sqlite.
+Existing GEBCO previews remain the fallback for incomplete/missing caches.
+Detailed windows use the corresponding cache-first path in atlas_source.rs.

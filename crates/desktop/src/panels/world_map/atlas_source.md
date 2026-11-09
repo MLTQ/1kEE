@@ -27,3 +27,9 @@ fixture and real-data tests exercise the actual GDAL output rather than mocks.
 `load`/`warp` return descriptive errors rather than erasing GDAL launch, read or
 output-dimension failures into None. Atlas displays those errors while retaining
 the last valid image; the GDAL path is resolved independently of a terminal PATH.
+
+Before GDAL, detailed windows try the shared read-only Atlas height cache at
+Derived/terrain/atlas_heights_v1.sqlite. Matching Land or Terrain tiles supply
+measured heights directly. Missing/corrupt coverage falls back to original
+sources; available raw SRTM and cached fine-provider terrain retain their higher
+resolution when the matching Atlas tier has not been built.

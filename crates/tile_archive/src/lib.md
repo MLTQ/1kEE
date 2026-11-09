@@ -34,3 +34,7 @@ read-only connections, never a shared connection mutex.
 - `platforms`: small validated offshore inventories in the independent RIGS/grid-4 namespace, copyable into world archives.
 
 `admin_lod` builds and queries spatial boundary LOD sidecars from existing ADMN files.
+
+`atlas` provides the separate versioned height-tile database shared by Atlas
+rendering and its offline cache-builder job; it is not part of the vector .1ka
+schema or archive packing command.

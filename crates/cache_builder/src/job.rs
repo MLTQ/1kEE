@@ -8,6 +8,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 pub enum BuildJob {
+    Atlas(crate::atlas::Command),
     PackArchive(crate::archive_pack::Command),
     Bbox(BboxCommand),
     ContoursBbox(ContoursBboxCommand),
@@ -22,6 +23,7 @@ pub struct JobHandle {
 
 #[derive(Debug)]
 pub enum BuildEvent {
+    AtlasProgress(crate::atlas::Progress),
     Progress(RoadBuildProgress),
     Log(String),
     Finished(Result<String, String>),
@@ -32,6 +34,19 @@ pub enum BuildEvent {
 pub fn spawn_job(job: BuildJob) -> JobHandle {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || match job {
+        BuildJob::Atlas(command) => {
+            let mut last_update: Option<std::time::Instant> = None;
+            let result = crate::atlas::run(command, &mut |p| {
+                if last_update.is_some_and(|last| last.elapsed() < std::time::Duration::from_millis(100))
+                    && p.state != "Completed" && p.state != "Failed" {
+                    return;
+                }
+                last_update = Some(std::time::Instant::now());
+                let _ = tx.send(BuildEvent::Progress(crate::atlas::road_progress(&p)));
+                let _ = tx.send(BuildEvent::AtlasProgress(p));
+            });
+            let _ = tx.send(BuildEvent::Finished(result));
+        }
         BuildJob::PackArchive(command) => {
             let result = crate::archive_pack::run_with_progress(command, &mut |message| {
                 let _ = tx.send(BuildEvent::Log(message));

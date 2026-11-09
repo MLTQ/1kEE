@@ -43,3 +43,6 @@ Parses the cache-builder CLI without pulling in a heavier argument framework yet
 - Contour examples use `srtm_native_v1.sqlite`, the desktop's native SRTM cache.
 
 `admin-lods <admin_cells directory>` prewarms the same per-level archives used by the desktop and reports segment counts by tier.
+
+`atlas` delegates its source, output, bounds and tier options to `atlas::parse`.
+Global coverage and overview/terrain tiers are the defaults. See docs/atlas-cache.md.
