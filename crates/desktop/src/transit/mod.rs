@@ -74,6 +74,7 @@ struct Lookup {
     stops: HashMap<String, Station>,
     routes: HashMap<String, gtfs::Route>,
     trips: HashMap<String, gtfs::Trip>,
+    stop_sequences: HashMap<String, HashMap<u32, String>>,
 }
 
 type CachedLookup = (Instant, Arc<Lookup>);

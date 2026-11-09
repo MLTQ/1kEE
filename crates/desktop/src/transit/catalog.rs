@@ -4,6 +4,7 @@ pub(super) enum Feed {
     Gtfs {
         schedule: &'static str,
         vehicles: &'static str,
+        lookup_stop_sequences: bool,
     },
     NewYork,
     London,
@@ -30,6 +31,7 @@ pub(crate) const AGENCIES: &[Agency] = &[
         feed: Feed::Gtfs {
             schedule: "https://www.soundtransit.org/GTFS-rail/40_gtfs.zip",
             vehicles: "https://feeds.sound-transit.continuousgtfs.io/vehicle_positions.pb",
+            lookup_stop_sequences: false,
         },
     },
     Agency {
@@ -43,6 +45,7 @@ pub(crate) const AGENCIES: &[Agency] = &[
         feed: Feed::Gtfs {
             schedule: "https://cdn.mbta.com/MBTA_GTFS.zip",
             vehicles: "https://cdn.mbta.com/realtime/VehiclePositions.pb",
+            lookup_stop_sequences: false,
         },
     },
     Agency {
@@ -76,6 +79,7 @@ pub(crate) const AGENCIES: &[Agency] = &[
         feed: Feed::Gtfs {
             schedule: "https://api-public.odpt.org/api/v4/files/Toei/data/Toei-Train-GTFS.zip",
             vehicles: "https://api-public.odpt.org/api/v4/gtfs/realtime/toei_odpt_train_vehicle",
+            lookup_stop_sequences: true,
         },
     },
     Agency {
@@ -99,6 +103,7 @@ pub(crate) const AGENCIES: &[Agency] = &[
         feed: Feed::Gtfs {
             schedule: "https://api.data.gov.my/gtfs-static/ktmb",
             vehicles: "https://api.data.gov.my/gtfs-realtime/vehicle-position/ktmb",
+            lookup_stop_sequences: false,
         },
     },
 ];

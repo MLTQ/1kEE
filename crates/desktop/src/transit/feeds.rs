@@ -91,8 +91,15 @@ fn ny_pages(client: &Client, resource: &str, mut visit: impl FnMut(&Value)) -> R
 fn load(client: &Client, feed: &Feed) -> Result<Lookup> {
     let mut lookup = Lookup::default();
     match feed {
-        Feed::Gtfs { schedule, .. } => {
-            return gtfs::schedule(bytes(client.get(*schedule), 64 << 20)?);
+        Feed::Gtfs {
+            schedule,
+            lookup_stop_sequences,
+            ..
+        } => {
+            return gtfs::schedule(
+                bytes(client.get(*schedule), 64 << 20)?,
+                *lookup_stop_sequences,
+            );
         }
         Feed::NewYork => {
             ny_pages(client, "stops", |s| {

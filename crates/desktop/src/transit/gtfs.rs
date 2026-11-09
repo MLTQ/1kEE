@@ -62,7 +62,14 @@ struct Translation {
     translation: String,
 }
 
-pub(super) fn schedule(bytes: Vec<u8>) -> Result<Lookup> {
+#[derive(Deserialize)]
+struct StopTime {
+    trip_id: String,
+    stop_sequence: u32,
+    stop_id: String,
+}
+
+pub(super) fn schedule(bytes: Vec<u8>, lookup_stop_sequences: bool) -> Result<Lookup> {
     let mut zip = ZipArchive::new(Cursor::new(bytes))?;
     let mut english: HashMap<String, HashMap<String, String>> = HashMap::new();
     if zip.file_names().any(|name| name == "translations.txt") {
@@ -106,6 +113,15 @@ pub(super) fn schedule(bytes: Vec<u8>) -> Result<Lookup> {
             );
         }
     })?;
+    if lookup_stop_sequences {
+        rows(&mut zip, "stop_times.txt", |s: StopTime| {
+            lookup
+                .stop_sequences
+                .entry(s.trip_id)
+                .or_default()
+                .insert(s.stop_sequence, s.stop_id);
+        })?;
+    }
     Ok(lookup)
 }
 
@@ -140,7 +156,18 @@ pub(super) fn vehicles(bytes: &[u8], lookup: &Lookup) -> Result<Vec<Report>> {
                 None if rail_only => false,
                 _ => return None,
             };
-            let stop = lookup.stops.get(v.get_stop_id());
+            let stop_id = if v.has_stop_id() {
+                Some(v.get_stop_id())
+            } else if v.has_current_stop_sequence() {
+                lookup
+                    .stop_sequences
+                    .get(trip.get_trip_id())
+                    .and_then(|stops| stops.get(&v.get_current_stop_sequence()))
+                    .map(String::as_str)
+            } else {
+                None
+            };
+            let stop = stop_id.and_then(|id| lookup.stops.get(id));
             let pos = v.get_position();
             let (location, p) = if pos.has_latitude() && pos.has_longitude() {
                 (
@@ -234,6 +261,9 @@ mod tests {
                 trip_headsign: "Park".into(),
             },
         );
+        lookup
+            .stop_sequences
+            .insert("trip".into(), HashMap::from([(4, "A".into())]));
         let mut feed = FeedMessage::new();
         feed.mut_header().set_gtfs_realtime_version("2.0".into());
         feed.mut_header().set_timestamp(300);
@@ -242,13 +272,13 @@ mod tests {
             entity.set_id(i.to_string());
             let mut vehicle = VehiclePosition::new();
             vehicle.mut_trip().set_trip_id("trip".into());
-            if i != 2 {
-                vehicle.set_stop_id("A".into());
-            }
             if i == 0 {
+                vehicle.set_stop_id("A".into());
                 vehicle.mut_position().set_latitude(51.25);
                 vehicle.mut_position().set_longitude(1.125);
                 vehicle.set_timestamp(290);
+            } else if i == 1 {
+                vehicle.set_current_stop_sequence(4);
             }
             entity.set_vehicle(vehicle);
             feed.mut_entity().push(entity);
