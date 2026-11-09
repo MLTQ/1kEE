@@ -78,3 +78,7 @@ the same radio window, rendered after map interaction, including OBS view. Drop
 releases its player and cancels directory work; no radio network work runs at startup.
 
 The buildout source drains its background worker and checks its daily deadline before the map renders.
+
+Atlas Sunlight also advances the shared stellar clock while Earth/Atlas/Sun is
+active, independently of star-layer visibility. Live/paused/animated clock
+semantics remain shared; studio lighting does not activate that clock path.

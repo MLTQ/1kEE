@@ -143,3 +143,25 @@ paint only the recap chyron and clock/header, suppressing the live selected card
 The camera stays in Globe view for recap and returns to its saved view for live.
 
 A buildout marker click opens its record in the shared campus, rule and news browser. Existing event, camera and infrastructure click targets retain priority.
+
+`atlas_image` converts measured heights into unlit paper/mineral/blue surface colors.
+`atlas_relief` loads heights and colors asynchronously
+for Earth with the Atlas appearance.
+
+Atlas now refines from original GEBCO/SRTM and existing fine-elevation chunks via
+`atlas_source`. `atlas_viewport` chooses padded native windows for both camera
+projections. Globe retains its overview and both views retain prior ready terrain
+during background refinement. Independent contour/layer choices are unchanged.
+`atlas_lighting` applies measured multi-scale lighting and terrain shadows at
+render time. Movable geographic studio light, optional Sunlight, richness and
+contrast controls never regenerate source heights or pigments.
+
+`atlas_surface` and `atlas_surface_gpu` retain native metre heights, generate an
+elevation-displaced triangle grid and render a private color/depth target. Local
+uses the shared contour projector; Globe uses real Earth-radius displacement.
+Atlas isolines lie on the surface and self-occlude. Visibility callbacks release
+inactive Atlas GPU sources/targets. The flat Local relief-image path is removed.
+
+`atlas_forest` prepares native geographic forest coverage on a worker. Local Atlas uses it as terrain material, sharing elevation, lighting and depth; other local themes keep worker-triangulated tree geometry.
+
+Inactive Atlas Trees cancels pending coverage reads between cells; one cell is held at a time while preparing the bounded native mask.

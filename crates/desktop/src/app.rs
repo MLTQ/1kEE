@@ -136,8 +136,11 @@ impl eframe::App for DashboardApp {
         self.model.buildout.tick();
         self.model.tick_event_follow(ctx.input(|i| i.time));
 
-        // Advance stellar time.
-        if self.model.show_stellar_correspondence {
+        // Atlas sunlight shares the app clock even when star overlays are hidden.
+        let atlas_sun = self.model.map_theme == theme::MapTheme::Atlas
+            && self.model.active_body == crate::model::ActiveBody::Earth
+            && self.model.atlas_style.light_mode == crate::atlas_style::LightMode::Sun;
+        if self.model.show_stellar_correspondence || atlas_sun {
             if self.model.stellar_live {
                 let now_unix = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

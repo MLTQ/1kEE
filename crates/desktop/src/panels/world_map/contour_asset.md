@@ -267,3 +267,8 @@ the SQLite snapshot, corruption/invalid-row failures invoke transactional tile
 invalidation and on-demand regeneration. Busy/I/O failures retain retry behavior.
 Good tiles in a mixed batch still publish. See
 [srtm_focus_cache/recovery.md](srtm_focus_cache/recovery.md).
+
+## Atlas relief reset
+
+Terrain reset also clears Atlas relief images/projected meshes and rejects
+late background-image publication through its snapshot epoch.

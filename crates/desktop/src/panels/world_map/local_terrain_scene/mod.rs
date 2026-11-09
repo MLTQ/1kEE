@@ -120,6 +120,8 @@ struct DeflockLocalMeshKey {
 
 pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: f64) -> GlobeScene {
     puffin::profile_function!();
+    let atlas_terrain = model.map_theme == theme::MapTheme::Atlas
+        && model.active_body == crate::model::ActiveBody::Earth;
     painter.rect_filled(
         rect,
         if model.obs_view { 0.0 } else { 12.0 },
@@ -135,6 +137,9 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let viewport_center = model.globe_view.local_center;
     let render_zoom = local_render_zoom(model.globe_view.local_zoom);
     let half = visual_half_extent_for_zoom(model.globe_view.local_zoom);
+    if atlas_terrain {
+        super::atlas_relief::draw_local(painter, &layout, model, viewport_center, half);
+    }
     let extent_x = (half * 111.32 * viewport_center.lat.to_radians().cos().abs().max(0.2)).max(1.0);
     let extent_y = (half * 111.32).max(1.0);
     let projection = projection::local_projection_params(&layout, &model.globe_view, viewport_center, extent_x, extent_y);
@@ -163,29 +168,35 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     };
     let viewport = contour_asset::residency::Viewport { body: model.active_body, projection, rect: clip.expand(8.0) };
     let candidate = handoff::prepare(model.selected_root.as_deref(), viewport, &contour_load, painter.ctx());
-    let candidate_batches = contours::batches(model, &candidate.tiles, painter);
+    let vector_contours = model.show_contours && !atlas_terrain;
+    let candidate_batches = if vector_contours {
+        contours::batches(model, &candidate.tiles, painter)
+    } else {
+        local_contour_pass::retain_instances(&std::collections::HashSet::new());
+        Vec::new()
+    };
     if !candidate_batches.is_empty() {
         painter.add(local_contour_pass::LocalContourCallback::new(
             local_contour_pass::LocalContourPass::Surface, candidate_batches.clone(),
             &projection, 1.0, 1.0, 1.0, painter.ctx().clone(),
         ).upload_only().into_paint_callback(clip));
     }
-    let preparing_tiles = if model.show_contours {
+    let preparing_tiles = if vector_contours {
         candidate.tiles.len().saturating_sub(candidate_batches.len())
     } else { 0 };
-    let uploading_tiles = if model.show_contours {
+    let uploading_tiles = if vector_contours {
         local_contour_pass::batches_pending_upload(&candidate_batches)
     } else { 0 };
     let display = handoff::select(
         viewport, candidate, candidate_batches,
-        model.show_contours,
+        vector_contours,
         painter.ctx(),
     );
     let contours = display.contours;
     let gpu_contour_batches = display.batches;
 
     // The grid tracks build, decode, and publication; disk presence alone is not completion.
-    let still_loading = contour_load.status.ready_assets < contour_load.status.total_assets;
+    let still_loading = !atlas_terrain && contour_load.status.ready_assets < contour_load.status.total_assets;
     if still_loading && !model.obs_view {
         match model.active_body {
             crate::model::ActiveBody::Moon => {
@@ -285,12 +296,12 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     }
 
     // Draw the contour layer once, followed by independent map overlays.
-    if model.show_contours && !gpu_contour_batches.is_empty() {
+    if !atlas_terrain && model.show_contours && !gpu_contour_batches.is_empty() {
         contours::paint(
             painter, &projection, &gpu_contour_batches,
             model.contour_occlusion, contour_stroke_scale,
         );
-    } else if model.show_contours
+    } else if !atlas_terrain && model.show_contours
         && contours.as_ref().is_some_and(|paths| !paths.is_empty())
         && !model.obs_view
     {
@@ -334,7 +345,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             model.selected_root.as_deref(),
             viewport_center,
             render_zoom,
-            model.show_trees,
+            model.show_trees && !atlas_terrain,
         );
         super::building_layer::draw_buildings(
             painter,
@@ -620,7 +631,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     if model.show_camera_links {
         markers::draw_camera_links(painter, anchor, &nearby_markers);
     }
-    if model.show_coastlines && model.active_body == crate::model::ActiveBody::Earth {
+    if model.show_coastlines && model.active_body == crate::model::ActiveBody::Earth && !atlas_terrain {
         geography::draw_coastlines_local(
             painter,
             &layout,
@@ -631,7 +642,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             contour_stroke_scale,
         );
     }
-    if model.show_bathymetry && model.active_body == crate::model::ActiveBody::Earth {
+    if model.show_bathymetry && model.active_body == crate::model::ActiveBody::Earth && !atlas_terrain {
         geography::draw_bathymetry_local(
             painter,
             &layout,
@@ -691,14 +702,22 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             render_zoom,
             model.active_body,
         );
+        let (terrain_status, terrain_stages) = if atlas_terrain {
+            // Atlas has its own source/upload notice; keep independent OSM jobs visible.
+            (srtm_focus_cache::FocusContourRegionStatus {
+                ready_assets: 0, pending_assets: 0, total_assets: 0,
+            }, contour_asset::LocalLoadingStages::default())
+        } else {
+            (contour_load.status, contour_load.loading_stages)
+        };
         ui_overlays::draw_progress_overlay(
             painter,
             rect,
-            contour_load.status,
-            contour_load.loading_stages,
+            terrain_status,
+            terrain_stages,
             preparing_tiles,
             uploading_tiles,
-            handoff::composing(),
+            !atlas_terrain && handoff::composing(),
             osm_ingest::osmium_cell_progress(),
             osm_ingest::active_job_note().as_deref(),
         );

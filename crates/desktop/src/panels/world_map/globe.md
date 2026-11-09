@@ -14,3 +14,7 @@ Build the desktop camera rays and intersect the globe in screen space. The deskt
 - Rim brightening uses ascending smoothstep edges over the final 8% of the
   view-angle rim factor. It must not wash the whole visible surface with the
   brighter wireframe color, as the old reversed transition did.
+
+Atlas consumes the former padding word at byte 120 as an explicit flag. On
+Earth it returns an unlit plain ocean base and omits the halo, leaving all
+relief to the measured GEBCO image. Existing themes/body exposure is unchanged.

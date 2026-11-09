@@ -54,6 +54,20 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
   locations, rings mark approximate locations, and purple squares mark rules with
   coordinates. Click a marker for details. **Browse buildout** opens
   all campuses, jurisdictional rules and dated news with source links.
+- **Atlas appearance** — choose **Settings → Appearance → ATLAS** for cream-paper
+  controls, richer red/ochre elevation tints, deep blue bathymetry and lit GEBCO
+  3D terrain in Earth Globe and Local views. Heights displace the actual surface;
+  optional contours lie on it and disappear behind nearer ridges. Automatically
+  refines from original GEBCO terrain, SRTM land elevations and finer cached
+  surveys as you zoom. Appearance controls move the light direction/height,
+  adjust color richness and relief contrast, or use the Sun with a time offset.
+  Warm highlights, cool shadows and broad valley shading follow measured heights;
+  moving the light reuses terrain already on the GPU. Save Settings retains these
+  choices. The Globe overview remains visible while native detail loads. Local Layer Spread
+  controls the surface and contours together. Contours and other layers
+  remain independently selectable. Colors represent height/depth, not geology.
+  In Local Atlas, Trees applies cached forest coverage directly to the relief,
+  sharing its elevations, lighting and occlusion.
 - **Terrain & bodies** — GEBCO / SRTM / Natural Earth elevation, the Yale Bright
   Star Catalogue and planetary ephemeris, and a replay timeline.
 - **Washington LiDAR** — optional DNR bare-earth and top-surface hillshade in

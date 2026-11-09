@@ -21,7 +21,7 @@ struct Uniforms {
     // Flags  (bytes 112..127)
     show_graticule: u32,
     active_body:    u32,
-    _pad0: u32,
+    atlas: u32,
     _pad1: u32,
 }
 
@@ -70,7 +70,7 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let disc = b*b - 4.0*a*c;
 
     if disc < 0.0 {
-        if u.active_body != 0u {
+        if u.active_body != 0u || u.atlas != 0u {
             // Moon and Mars have extremely thin/no atmosphere: pure black beyond the limb.
             return vec4<f32>(0.0, 0.0, 0.0, 0.0);
         }
@@ -83,6 +83,12 @@ fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     // Front-face hit (smaller t).
     let t   = (-b - sqrt(disc)) / (2.0 * a);
     let hit = vec3<f32>(rx * t, ry * t, u.camera_distance - t); // rz*t = –t
+
+    // Atlas imagery supplies measured relief above this plain paper/ocean base.
+    // Missing data must never turn the synthetic backdrop into an atlas.
+    if u.atlas != 0u && u.active_body == 0u {
+        return map_output_linear(vec4<f32>(u.ocean_col.rgb, 1.0));
+    }
 
     // ── Un-rotate hit to canonical (geographic) sphere coords ─────────────
     // Forward rotations applied in globe_scene::project_geo:

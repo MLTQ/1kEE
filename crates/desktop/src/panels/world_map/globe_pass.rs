@@ -33,7 +33,8 @@ use eframe::wgpu;
 //   96      16   hot_col             vec4<f32>
 //  112       4   show_graticule      u32
 //  116       4   active_body         u32
-//  120       8   _pad                [u32; 2]
+//  120       4   atlas               u32
+//  124       4   _pad                u32
 //  128 bytes total
 //
 #[repr(C)]
@@ -56,7 +57,8 @@ pub struct GlobeUniforms {
     // ── Flags ──────────────────────────────────────────────────────────────
     pub show_graticule: u32,
     pub active_body: u32,
-    pub _pad: [u32; 2],
+    pub atlas: u32,
+    pub _pad: u32,
 }
 
 // The WGSL `Uniforms` struct in `globe.wgsl` is hand-aligned to this exact 128-byte
@@ -222,7 +224,8 @@ impl GlobeCallback {
                     crate::model::ActiveBody::Moon => 1,
                     crate::model::ActiveBody::Mars => 2,
                 },
-                _pad: [0; 2],
+                atlas: crate::theme::is_atlas() as u32,
+                _pad: 0,
             },
         }
     }
@@ -268,7 +271,7 @@ impl egui_wgpu::CallbackTrait for GlobeCallback {
 // syntax highlighting and validation). Its `Uniforms` struct must stay
 // byte-for-byte in sync with `GlobeUniforms` above — see the offset table and the
 // `size_of` assertion near the struct definition.
-const GLOBE_WGSL: &str = concat!(
+pub(super) const GLOBE_WGSL: &str = concat!(
     include_str!("globe_surface.wgsl"),
     "\n",
     include_str!("globe.wgsl")

@@ -185,3 +185,6 @@ Follow remains enabled, so live replacements cannot refocus historical playback.
 framing targets, including the Middle East. It replaces the continent-only enum.
 
 The buildout source owns one immutable snapshot for both Earth scenes and the record browser. It follows saved data paths and restores the layer opt-in at startup.
+
+### Atlas art direction
+`atlas_style` restores, edits and saves normalized lighting/pigment controls independently of camera, source data and layer toggles. The existing stellar clock also drives optional Atlas sunlight.

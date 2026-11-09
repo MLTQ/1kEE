@@ -29,6 +29,10 @@ pub(super) struct Screen {
     target: wgpu::Texture,
 }
 impl Screen {
+    #[allow(dead_code)]
+    pub fn max_texture_side(&self) -> usize {
+        self.device.limits().max_texture_dimension_2d as usize
+    }
     pub fn new(size: [u32; 2]) -> Self {
         let adapter = block_on(wgpu::Instance::default().request_adapter(&Default::default()))
             .expect("GPU adapter");
@@ -63,6 +67,15 @@ impl Screen {
             screen,
             target,
         }
+    }
+    #[allow(dead_code)]
+    pub fn install_globe(&mut self) {
+        self.renderer.callback_resources.insert(
+            crate::panels::world_map::globe_pass::GlobePassResources::new(
+                &self.device,
+                wgpu::TextureFormat::Rgba8Unorm,
+            ),
+        );
     }
     pub fn render(
         &mut self,

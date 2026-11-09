@@ -148,3 +148,14 @@ Aden through the real Middle East globe camera at 720p and 1080p. Their surface
 positions must remain visible above the chyron and outside the clock panel.
 
 The Earth surface projection supplies front-facing buildout markers for shared rendering and picking.
+
+Earth + Atlas passes the real scene rectangle to native detail selection and
+paints refined measured relief before bathymetry contours and other
+overlays. The layer is independent of contour visibility. Existing event,
+camera and scientific layers retain their ordering and interaction.
+
+### Atlas 3D surface
+Atlas submits measured height fields to `atlas_surface`: elevations displace the
+sphere by metres/Earth radius. Optional contours, coastlines and bathymetry are
+isolines on that depth-tested surface, bypassing the legacy constant-radius shells.
+Other map themes retain those vector pipelines and their existing behavior.
