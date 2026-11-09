@@ -27,6 +27,8 @@ struct Slot {
     active: Vec<u64>,
     target: Option<Target>,
     key: Vec<u8>,
+    coverage: Option<wgpu::Texture>,
+    coverage_bytes: Vec<u8>,
 }
 pub(super) struct Resources {
     format: Option<wgpu::TextureFormat>,
@@ -126,16 +128,28 @@ impl Resources {
     pub fn new(device: &wgpu::Device) -> Self {
         let uniforms_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Uint,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
         });
         let source_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: None,
@@ -387,9 +401,7 @@ impl Resources {
             .filter(|r| state.sources[&r.id].row == r.size[1])
             .map(|r| r.id)
             .collect();
-        if ready.len() == callback.data.len() {
-            state.active = ready;
-        } else if state.active.is_empty() {
+        if slot == 0 || ready.len() == callback.data.len() || state.active.is_empty() {
             state.active = ready;
         }
         let keep: HashSet<_> = callback
@@ -402,6 +414,18 @@ impl Resources {
             keep.contains(id)
                 || (slot == 0 && self.keep_globe && source.row == source.raster.size[1])
         });
+        if slot == 0 {
+            let uploading = callback.data.len() - state.active.len();
+            let changed = callback.ctx.data_mut(|d| {
+                let id = egui::Id::new("atlas-globe-uploading");
+                let changed = d.get_temp::<usize>(id) != Some(uploading);
+                d.insert_temp(id, uploading);
+                changed
+            });
+            if changed {
+                callback.ctx.request_repaint();
+            }
+        }
         let active = state.active.last().copied();
         let old = callback
             .ctx
@@ -452,14 +476,65 @@ impl Resources {
             self.slots[slot].key.clear();
         }
         let state = &mut self.slots[slot];
+        use crate::panels::world_map::atlas_globe_tiles::{COLS, ROWS};
+        let tiled = slot == 0 && callback.data.iter().any(|r| r.core.is_some());
+        let mut coverage = vec![0u8; COLS * ROWS];
+        for id in &state.active {
+            if let Some(core) = state.sources[id].raster.core {
+                let col = ((core[0] + 180.) / 5.).round() as usize;
+                let row = ((core[1] + 90.) / 5.).round() as usize;
+                if col < COLS && row < ROWS {
+                    coverage[row * COLS + col] = 1;
+                }
+            }
+        }
+        if state.coverage.is_none() {
+            state.coverage = Some(texture(
+                device,
+                [COLS as u32, ROWS as u32],
+                wgpu::TextureFormat::R8Uint,
+                wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            ));
+        }
+        if state.coverage_bytes != coverage {
+            queue.write_texture(
+                state.coverage.as_ref().unwrap().as_image_copy(),
+                &coverage,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(COLS as u32),
+                    rows_per_image: Some(ROWS as u32),
+                },
+                wgpu::Extent3d {
+                    width: COLS as u32,
+                    height: ROWS as u32,
+                    depth_or_array_layers: 1,
+                },
+            );
+            state.coverage_bytes = coverage;
+        }
+        let coverage_view = state
+            .coverage
+            .as_ref()
+            .unwrap()
+            .create_view(&Default::default());
         let mut draws = Vec::new();
-        let mut key = Vec::new();
+        let mut key = state.coverage_bytes.clone();
         for (index, id) in state.active.iter().enumerate() {
             let raster = &state.sources[id].raster;
             let mut u = callback.uniforms[index.min(callback.uniforms.len() - 1)].reframe(raster);
-            if callback.slot == 0 && index == 0 && state.active.len() > 1 {
+            if tiled && raster.core.is_none() {
+                u.extra[2] = 2.0;
+            } else if !tiled && callback.slot == 0 && index == 0 && state.active.len() > 1 {
                 u.extra[2] = 1.0;
                 u.exclude = state.sources[state.active.last().unwrap()].raster.bounds;
+            }
+            if slot == 0 && raster.core.is_some() {
+                for axis in 0..2 {
+                    u.grid[axis] = (u.grid[axis] * ppp)
+                        .ceil()
+                        .min((raster.size[axis] - 1) as f32);
+                }
             }
             let forest_id = callback
                 .forest
@@ -478,10 +553,16 @@ impl Resources {
             let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
                 layout: &self.uniforms_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buffer.as_entire_binding(),
-                }],
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&coverage_view),
+                    },
+                ],
             });
             draws.push((*id, u, buffer, bind));
         }
@@ -517,10 +598,16 @@ impl Resources {
                 *bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: None,
                     layout: &self.uniforms_layout,
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: buffer.as_entire_binding(),
-                    }],
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&coverage_view),
+                        },
+                    ],
                 });
             }
         }

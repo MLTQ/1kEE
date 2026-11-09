@@ -20,12 +20,19 @@ pub(super) struct Detail {
 }
 impl Detail {
     pub(super) fn into_raster(self) -> Option<std::sync::Arc<super::atlas_surface::Raster>> {
-        let raster = match self.colors {
+        self.into_raster_with_core(None)
+    }
+    pub(super) fn into_raster_with_core(
+        self,
+        core: Option<[f32; 4]>,
+    ) -> Option<std::sync::Arc<super::atlas_surface::Raster>> {
+        let mut raster = match self.colors {
             Some(colors) => {
                 super::atlas_surface::Raster::prepared(self.grid, self.region.bounds(), colors)
             }
             None => super::atlas_surface::Raster::new(self.grid, self.region.bounds()),
         }?;
+        std::sync::Arc::get_mut(&mut raster)?.core = core;
         if let Some(ticket) = self.save {
             view_cache::persist(ticket, raster.clone());
         }
@@ -34,19 +41,37 @@ impl Detail {
 }
 
 pub(super) fn load(root: Option<&Path>, region: Region, max_edge: usize) -> Result<Detail, String> {
+    load_with_mode(root, region, max_edge, false)
+}
+
+/// Globe tiles have a fixed native GEBCO resolution, independent of camera zoom.
+pub(super) fn load_globe(
+    root: Option<&Path>,
+    region: Region,
+    max_edge: usize,
+) -> Result<Detail, String> {
+    load_with_mode(root, region, max_edge, true)
+}
+
+fn load_with_mode(
+    root: Option<&Path>,
+    region: Region,
+    max_edge: usize,
+    terrain_only: bool,
+) -> Result<Detail, String> {
     let base = terrain_assets::find_data_root(root)
         .map(|data| gdal::find_gebco_topography_tiles(&data))
         .unwrap_or_default();
     let span = region.span();
     let bounds = region.bounds();
-    let srtm = if span[0] <= 8.0 && span[1] <= 8.0 {
+    let srtm = if !terrain_only && span[0] <= 8.0 && span[1] <= 8.0 {
         terrain_assets::find_srtm_root(root)
             .map(|root| srtm_files(&root, bounds))
             .unwrap_or_default()
     } else {
         Vec::new()
     };
-    let fine = if span[0] <= 0.15 && span[1] <= 0.15 {
+    let fine = if !terrain_only && span[0] <= 0.15 && span[1] <= 0.15 {
         terrain_assets::find_derived_root(root)
             .map(|root| fine_files(&root, bounds))
             .unwrap_or_default()
@@ -55,7 +80,7 @@ pub(super) fn load(root: Option<&Path>, region: Region, max_edge: usize) -> Resu
     };
     let mut cache_error = None;
     if fine.is_empty() {
-        match cached(root, region, max_edge, !srtm.is_empty()) {
+        match cached(root, region, max_edge, !srtm.is_empty(), terrain_only) {
             Ok(Some(detail)) => return Ok(detail),
             Ok(None) => {}
             Err(error) => cache_error = Some(error),
@@ -130,6 +155,7 @@ fn cached(
     region: Region,
     max_edge: usize,
     has_srtm: bool,
+    terrain_only: bool,
 ) -> Result<Option<Detail>, String> {
     use tile_archive::atlas::FILE_NAME;
     let Some(derived) = terrain_assets::find_derived_root(root) else {
@@ -139,19 +165,33 @@ fn cached(
     if !path.exists() {
         return Ok(None);
     }
-    cached_file(&path, region, max_edge, has_srtm)
+    cached_file_mode(&path, region, max_edge, has_srtm, terrain_only)
 }
 
+#[cfg(test)]
 fn cached_file(
     path: &Path,
     region: Region,
     max_edge: usize,
     has_srtm: bool,
 ) -> Result<Option<Detail>, String> {
+    cached_file_mode(path, region, max_edge, has_srtm, false)
+}
+
+fn cached_file_mode(
+    path: &Path,
+    region: Region,
+    max_edge: usize,
+    has_srtm: bool,
+    terrain_only: bool,
+) -> Result<Option<Detail>, String> {
     use tile_archive::atlas::{Reader, Tier};
     let mut cache = Reader::open(path)?;
     let span = region.span();
-    let land = span[0] <= 8.0 && span[1] <= 8.0 && (has_srtm || cache.has_tier(Tier::Land)?);
+    let land = !terrain_only
+        && span[0] <= 8.0
+        && span[1] <= 8.0
+        && (has_srtm || cache.has_tier(Tier::Land)?);
     let mut tiers = vec![if land { Tier::Land } else { Tier::Terrain }];
     // Keep the original SRTM path when detail is available but has not been
     // built. Cache-only installations can still use their terrain tier.

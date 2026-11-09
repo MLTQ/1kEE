@@ -207,3 +207,151 @@ fn atlas_gpu_globe_regions_stay_resident_but_local_still_evicts() {
         assert!(res.slots.iter().all(|slot| slot.sources.is_empty()));
     }
 }
+
+#[test]
+#[ignore = "requires GPU; actual America/Rockies/Appalachians camera selection and incremental tile publication"]
+fn atlas_gpu_camera_tiles_revisit_without_build_or_upload() {
+    use crate::panels::world_map::{
+        atlas_globe_tiles::{self as tiles, Key, State},
+        globe_scene::globe_layout,
+    };
+    use std::{
+        collections::HashMap,
+        sync::Mutex,
+        time::{Duration, Instant},
+    };
+    let (device, queue) = gpu();
+    let mut res = Resources::new(&device);
+    res.keep_globe = true;
+    let ctx = egui::Context::default();
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280., 832.));
+    let painter = ctx
+        .layer_painter(egui::LayerId::background())
+        .with_clip_rect(rect);
+    let mut state = State::default();
+    let builds = Arc::new(Mutex::new(HashMap::<Key, usize>::new()));
+    let overview = Raster::new(
+        HeightGrid {
+            width: 129,
+            height: 65,
+            metres: vec![1000.; 129 * 65],
+        },
+        [-180., -90., 180., 90.],
+    )
+    .unwrap();
+    let make_tile = |key: Key, side: usize| {
+        let mut raster = Raster::new(
+            HeightGrid {
+                width: side,
+                height: side,
+                metres: vec![1500.; side * side],
+            },
+            key.region().bounds(),
+        )
+        .unwrap();
+        Arc::get_mut(&mut raster).unwrap().core = Some(key.bounds());
+        raster
+    };
+    let prepare = |res: &mut Resources, cb: &Callback| {
+        let mut encoder = device.create_command_encoder(&Default::default());
+        res.prepare(&device, &queue, &mut encoder, cb, 1.);
+        queue.submit([encoder.finish()]);
+        device.poll(wgpu::Maintain::Wait);
+    };
+    let mut retained_bytes = 0;
+    for round in 0..2 {
+        for (lat, lon, zoom) in [(39., -98., 3.), (40., -110., 32.), (38., -79., 38.)] {
+            let start = Instant::now();
+            let mut view = GlobeViewState::from_focus(GeoPoint { lat, lon });
+            view.zoom = zoom;
+            let layout = globe_layout(rect, &view);
+            let wanted = tiles::selection(rect, &layout, &view);
+            let frame = loop {
+                let builds = builds.clone();
+                let frame = state.frame(
+                    &ctx,
+                    None,
+                    8192,
+                    &wanted,
+                    true,
+                    true,
+                    1,
+                    move |key, _, _| {
+                        *builds.lock().unwrap().entry(key).or_default() += 1;
+                        Ok(make_tile(key, 65))
+                    },
+                );
+                if frame.missing == 0 {
+                    break frame;
+                }
+                assert_eq!(
+                    round, 0,
+                    "warm camera path must return all tiles immediately"
+                );
+                assert!(start.elapsed() < Duration::from_secs(10));
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            let ids: Vec<_> = frame.rasters.iter().map(|r| r.id).collect();
+            let mut data = vec![overview.clone()];
+            data.extend(frame.rasters);
+            let cb = Callback::globe(&painter, rect, &layout, &view, data, false, false, 1.);
+            prepare(&mut res, &cb);
+            assert!(
+                ids.iter().all(|id| res.slots[0].active.contains(id)),
+                "all previously seen tiles draw on first frame"
+            );
+            for key in &wanted {
+                assert_eq!(res.slots[0].coverage_bytes[key.1 * tiles::COLS + key.0], 1);
+            }
+            if round > 0 {
+                assert_eq!(
+                    res.uploaded_bytes, retained_bytes,
+                    "camera revisit uploads zero bytes"
+                );
+            }
+            eprintln!(
+                "Atlas camera round={round} ({lat},{lon},{zoom}): {} active tiles, {:.2} ms",
+                ids.len(),
+                start.elapsed().as_secs_f64() * 1000.
+            );
+        }
+        retained_bytes = res.uploaded_bytes;
+    }
+    assert!(builds.lock().unwrap().values().all(|&count| count == 1));
+    // A slow new upload must not block a ready neighbor, or cut a hole in the overview.
+    let ready = make_tile(Key(12, 24), 65);
+    let partial = make_tile(Key(13, 24), 2048);
+    let view = GlobeViewState::from_focus(GeoPoint {
+        lat: 32.,
+        lon: -114.,
+    });
+    let cb = Callback::globe(
+        &painter,
+        rect,
+        &globe_layout(rect, &view),
+        &view,
+        vec![overview.clone(), ready.clone(), partial.clone()],
+        false,
+        false,
+        1.,
+    );
+    prepare(&mut res, &cb);
+    assert!(res.slots[0].active.contains(&ready.id));
+    assert!(!res.slots[0].active.contains(&partial.id));
+    assert_eq!(res.slots[0].coverage_bytes[24 * tiles::COLS + 12], 1);
+    assert_eq!(res.slots[0].coverage_bytes[24 * tiles::COLS + 13], 0);
+    let cb = Callback::globe(
+        &painter,
+        rect,
+        &globe_layout(rect, &view),
+        &view,
+        vec![overview, ready],
+        false,
+        false,
+        1.,
+    );
+    let before = res.uploaded_bytes;
+    prepare(&mut res, &cb);
+    assert_eq!(res.uploaded_bytes, before);
+    assert!(!res.slots[0].sources.contains_key(&partial.id));
+}

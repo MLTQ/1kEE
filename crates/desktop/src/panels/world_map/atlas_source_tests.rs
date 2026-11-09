@@ -134,3 +134,34 @@ fn atlas_consumes_prebuilt_heights_without_gdal_or_original_sources() {
         );
     }
 }
+
+#[test]
+fn globe_tiles_keep_terrain_resolution_independent_of_window_size() {
+    use tile_archive::atlas::{Key, Tier, Writer};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("atlas.sqlite");
+    let writer = Writer::open(&path).unwrap();
+    writer
+        .put(
+            Key::at(Tier::Terrain, 0.1, 0.1),
+            "terrain",
+            &vec![1234.; Tier::Terrain.side().pow(2)],
+        )
+        .unwrap();
+    writer
+        .put(
+            Key::at(Tier::Land, 0.1, 0.1),
+            "land",
+            &vec![5678.; Tier::Land.side().pow(2)],
+        )
+        .unwrap();
+    let region = Region([100, 100, 300, 300]);
+    let globe = cached_file_mode(&path, region, 8192, true, true)
+        .unwrap()
+        .unwrap();
+    assert!(globe.grid.metres.iter().all(|h| (*h - 1234.).abs() < 0.01));
+    let local = cached_file_mode(&path, region, 8192, true, false)
+        .unwrap()
+        .unwrap();
+    assert!(local.grid.metres.iter().all(|h| (*h - 5678.).abs() < 0.01));
+}

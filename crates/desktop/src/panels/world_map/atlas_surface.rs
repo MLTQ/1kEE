@@ -18,6 +18,8 @@ pub(super) struct Raster {
     pub id: u64,
     pub size: [usize; 2],
     pub bounds: [f32; 4],
+    /// Geographic core of a Globe tile; heights include a shared one-post halo.
+    pub core: Option<[f32; 4]>,
     pub heights: Vec<f32>,
     pub colors: Vec<u8>,
 }
@@ -47,6 +49,7 @@ impl Raster {
             id: NEXT.fetch_add(1, Ordering::Relaxed),
             size: [grid.width, grid.height],
             bounds,
+            core: None,
             heights: grid.metres,
             colors,
         }))
@@ -85,6 +88,19 @@ impl Uniforms {
         self.grid[0] = (r.size[0] - 1).min(limit) as f32;
         self.grid[1] = (r.size[1] - 1).min(limit) as f32;
         self.extra[2] = 0.0;
+        self.extra[3] = 0.0;
+        if self.extra[0] < 0.5
+            && let Some(core) = r.core
+        {
+            self.extra[3] = 1.0;
+            self.exclude = core;
+            // Bound geometry by screen density, while retaining native height/color textures.
+            let pixels_per_degree =
+                self.globe[2] / (self.globe[3] - 1.0) * std::f32::consts::PI / 180.0;
+            for (axis, span) in [(0, core[2] - core[0]), (1, core[3] - core[1])] {
+                self.grid[axis] = self.grid[axis].min((span * pixels_per_degree).ceil().max(16.0));
+            }
+        }
         if self.extra[0] > 0.5 {
             self.extra[1] =
                 ((self.a[0] - (r.bounds[0] + r.bounds[2]) * 0.5) / 360.0).round() * 360.0;

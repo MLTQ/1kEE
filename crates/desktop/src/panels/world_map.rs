@@ -49,6 +49,7 @@ pub(crate) mod satellite_layer;
 pub(crate) mod global_weather;
 mod atlas_image;
 mod atlas_relief;
+mod atlas_globe_tiles;
 mod atlas_viewport;
 mod atlas_source;
 mod atlas_surface;

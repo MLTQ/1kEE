@@ -75,13 +75,21 @@ fn native_globe_runtime_refines_after_gui_launch() {
             },
         );
         let overview = IMAGE.get().unwrap().lock().unwrap().current().is_some();
-        let detail = GLOBE_DETAIL
-            .get()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .current()
-            .map(|(_, d)| d.clone());
+        let tiles = super::super::atlas_globe_tiles::frame(
+            &ctx,
+            model.selected_root.as_deref(),
+            rect,
+            &super::super::globe_scene::globe_layout(rect, &model.globe_view),
+            &model.globe_view,
+        );
+        let detail = if tiles.missing == 0 {
+            tiles
+                .rasters
+                .last()
+                .map(|r| LoadedDetail { raster: r.clone() })
+        } else {
+            None
+        };
         let capture = detail.is_some() || (overview && coarse.is_none());
         let pixels = gpu.render(&ctx, output, capture);
         if let Some(detail) =
@@ -131,15 +139,11 @@ fn native_globe_runtime_refines_after_gui_launch() {
         if overview && coarse.is_none() {
             coarse = pixels;
         }
-        let notice =
-            ctx.data(|d| d.get_temp::<DetailNotice>(egui::Id::new(("atlas-notice", false))));
-        if let Some(notice) = notice {
-            assert!(
-                notice.message.is_none(),
-                "runtime detail failed: {:?}",
-                notice.message
-            );
-        }
+        assert!(
+            tiles.error.is_none(),
+            "runtime detail failed: {:?}",
+            tiles.error
+        );
         assert!(
             start.elapsed() < Duration::from_secs(90),
             "runtime detail never published"

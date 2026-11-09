@@ -277,6 +277,10 @@ fn paint_detail_notice(painter: &egui::Painter, rect: egui::Rect, local: bool) {
     let Some(message) = message else {
         return;
     };
+    paint_notice(painter, rect, message);
+}
+
+fn paint_notice(painter: &egui::Painter, rect: egui::Rect, message: String) {
     let width = (rect.width() - 40.0).clamp(80.0, 440.0);
     let galley = painter.layout(
         message,
@@ -391,14 +395,8 @@ pub(super) fn draw_globe(
     if let Some(overview) = texture(painter.ctx(), root) {
         rasters.push(overview);
     }
-    let visible =
-        super::atlas_viewport::globe_visible(rect, layout, view, painter.ctx().pixels_per_point());
-    let region = visible.and_then(super::atlas_viewport::Region::padded);
-    if let (Some(region), Some(visible)) = (region, visible)
-        && let Some(detail) = detail_texture_visible(painter.ctx(), root, region, visible, false)
-    {
-        rasters.push(detail.raster.clone());
-    }
+    let tiles = super::atlas_globe_tiles::frame(painter.ctx(), root, rect, layout, view);
+    rasters.extend(tiles.rasters.iter().cloned());
     if !rasters.is_empty() {
         super::atlas_surface::Callback::globe(
             painter,
@@ -414,8 +412,28 @@ pub(super) fn draw_globe(
         .with_coastlines(model.show_coastlines)
         .submit(painter);
     }
-    if region.is_some() {
-        paint_detail_notice(painter, rect, false);
+    let uploading = painter.ctx().data(|d| {
+        d.get_temp::<usize>(egui::Id::new("atlas-globe-uploading"))
+            .unwrap_or(0)
+    });
+    let message = if let Some(error) = tiles.error {
+        Some(format!(
+            "Atlas: {} / {} tiles ready · {error}",
+            tiles.wanted - tiles.missing,
+            tiles.wanted
+        ))
+    } else if tiles.missing > 0 || uploading > 0 {
+        Some(format!(
+            "Atlas: {} / {} tiles ready · {} loading · {uploading} uploading",
+            tiles.wanted - tiles.missing,
+            tiles.wanted,
+            tiles.missing
+        ))
+    } else {
+        None
+    };
+    if let Some(message) = message {
+        paint_notice(painter, rect, message);
     }
 }
 
@@ -461,6 +479,7 @@ pub(super) fn draw_local(
 }
 
 pub(super) fn clear() {
+    super::atlas_globe_tiles::clear();
     super::atlas_surface::clear();
     super::atlas_forest::clear();
     for recent in [&RECENT, &GLOBE_RESIDENT] {

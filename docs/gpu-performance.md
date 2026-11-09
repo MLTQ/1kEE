@@ -33,7 +33,7 @@ budgets too: the script's memory profile is intended for the 24 GiB card.
 
 The Atlas settings govern prepared height/color RAM and compressed disk caches
 separately from contour memory. With `ONEKEE_ATLAS_KEEP_GLOBE=1`, completed Globe
-windows bypass RAM eviction and their GPU textures stay resident until Cache
+geographic tiles bypass RAM eviction and their GPU textures stay resident until Cache
 Blast or exit; Local remains bounded. Use `0` for a bounded-residency comparison.
 See [Atlas reuse](atlas-cache.md#interactive-map-reuse).
 

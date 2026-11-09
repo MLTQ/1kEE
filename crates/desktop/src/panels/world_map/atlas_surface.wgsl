@@ -5,6 +5,7 @@ struct Uniforms {
     light:vec4<f32>, appearance:vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> u:Uniforms;
+@group(0) @binding(1) var tile_coverage:texture_2d<u32>;
 @group(1) @binding(0) var heights:texture_2d<f32>;
 @group(1) @binding(1) var pigments:texture_2d<f32>;
 @group(1) @binding(2) var linear_sampler:sampler;
@@ -38,8 +39,12 @@ fn vs_surface(@builtin(vertex_index) vertex:u32,@builtin(instance_index) row:u32
     let cells=vec2<f32>(u.grid.xy);
     let coordinate=vec2<f32>(f32(vertex/2u),f32(row+vertex%2u))/cells;
     let size=vec2<f32>(textureDimensions(heights));
-    let uv=(coordinate*(size-1.0)+0.5)/size;
-    let geo=vec2<f32>(mix(u.region.x,u.region.z,uv.x),mix(u.region.w,u.region.y,uv.y));
+    var uv=(coordinate*(size-1.0)+0.5)/size;
+    var geo=vec2<f32>(mix(u.region.x,u.region.z,uv.x),mix(u.region.w,u.region.y,uv.y));
+    if u.extra.w>0.5 {
+        geo=vec2<f32>(mix(u.exclude.x,u.exclude.z,coordinate.x),mix(u.exclude.w,u.exclude.y,coordinate.y));
+        uv=vec2<f32>((geo.x-u.region.x)/(u.region.z-u.region.x),(u.region.w-geo.y)/(u.region.w-u.region.y));
+    }
     let h=height_at(uv);
     var logical:vec2<f32>;var depth:f32;var w=1.0;
     if u.extra.x>0.5 {
@@ -82,7 +87,11 @@ fn fs_surface(v:Vertex)->@location(0) vec4<f32> {
     let major=isoline(v.elevation,max(50.0,interval*10.0));
     let dh=fwidth(v.elevation);
     let coast=(1.0-smoothstep(max(dh*0.2,0.001),max(dh,0.002),abs(v.elevation)))*step(0.001,dh)*u.sphere.w;
-    if u.extra.z>0.5 {
+    if u.extra.z>1.5 {
+        let lon=((v.geo.x+540.0)%360.0);
+        let cell=clamp(vec2<i32>(floor(vec2<f32>(lon,v.geo.y+90.0)/5.0)),vec2<i32>(0),vec2<i32>(71,35));
+        if textureLoad(tile_coverage,cell,0).r>0u {discard;}
+    } else if u.extra.z>0.5 {
         let center=(u.exclude.x+u.exclude.z)*0.5;
         let lon=center+((v.geo.x-center+540.0)%360.0)-180.0;
         if lon>=u.exclude.x && lon<=u.exclude.z && v.geo.y>=u.exclude.y && v.geo.y<=u.exclude.w {discard;}

@@ -77,6 +77,15 @@ pub(super) fn globe_visible(
     if scale * std::f32::consts::TAU / 4096.0 * ppp < 0.7 {
         return None;
     }
+    globe_bounds(rect, layout, view)
+}
+
+/// Visible coverage even when the overview is sufficient: retained tiles still draw.
+pub(super) fn globe_bounds(
+    rect: egui::Rect,
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+) -> Option<[f32; 4]> {
     let center = view.globe_center_latlon();
     let mut bounds = [
         f32::INFINITY,
@@ -132,7 +141,7 @@ pub(super) fn globe_visible(
             }
         }
     }
-    Some(bounds)
+    bounds.iter().all(|v| v.is_finite()).then_some(bounds)
 }
 
 pub(super) fn local_visible(

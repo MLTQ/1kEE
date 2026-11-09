@@ -34,8 +34,18 @@ impl Screen {
         self.device.limits().max_texture_dimension_2d as usize
     }
     pub fn new(size: [u32; 2]) -> Self {
-        let adapter = block_on(wgpu::Instance::default().request_adapter(&Default::default()))
-            .expect("GPU adapter");
+        let instance = wgpu::Instance::default();
+        let adapter = if let Some(name) = crate::gpu_config::adapter_name() {
+            crate::gpu_config::select_adapter(
+                &instance.enumerate_adapters(wgpu::Backends::all()),
+                None,
+                &name,
+            )
+            .expect("requested GPU adapter")
+        } else {
+            block_on(instance.request_adapter(&Default::default())).expect("GPU adapter")
+        };
+        eprintln!("Atlas QA adapter: {:?}", adapter.get_info());
         let (device, queue) = block_on(adapter.request_device(&Default::default(), None)).unwrap();
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let mut renderer = egui_wgpu::Renderer::new(&device, format, None, 1, false);
