@@ -1,8 +1,7 @@
 # globe.wgsl
 
 ## Purpose
-Shade the globe backdrop, body-specific terrain and graticule from per-pixel
-ray/sphere intersections. Color mixing and lighting use linear inputs.
+Build the desktop camera rays and intersect the globe in screen space. The desktop and VR passes share globe surface lighting, body-specific terrain and graticules in `globe_surface.wgsl`.
 
 ## Contracts
 - Camera/uniform layout matches `GlobeUniforms` in `globe_pass.rs`.

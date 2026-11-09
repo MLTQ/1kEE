@@ -1,0 +1,22 @@
+[package]
+name = "one-thousand-electric-eye-vr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+anyhow = "1"
+ash = "0.38"
+bytemuck = { version = "1", features = ["derive"] }
+egui = "0.31"
+egui-wgpu = "0.31"
+glam = "0.30"
+image = { version = "0.25", default-features = false, features = ["png"] }
+openxr = "0.22"
+rusqlite = { version = "0.31", features = ["bundled"] }
+tile-archive = { path = "../tile_archive" }
+wgpu = "24"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+pollster = "0.4"
+tempfile = "3"

@@ -268,4 +268,8 @@ impl egui_wgpu::CallbackTrait for GlobeCallback {
 // syntax highlighting and validation). Its `Uniforms` struct must stay
 // byte-for-byte in sync with `GlobeUniforms` above — see the offset table and the
 // `size_of` assertion near the struct definition.
-const GLOBE_WGSL: &str = include_str!("globe.wgsl");
+const GLOBE_WGSL: &str = concat!(
+    include_str!("globe_surface.wgsl"),
+    "\n",
+    include_str!("globe.wgsl")
+);

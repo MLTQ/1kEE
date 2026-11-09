@@ -92,6 +92,16 @@ The app launches with no configuration: the globe, graticules, and any keyless l
 work out of the box. Live feeds and terrain detail are enabled by configuration below —
 everything is optional and independent.
 
+### Native VR on Linux
+
+Start SteamVR, wake the Valve Index, and check that the headset is tracking. Then run the third workspace executable.
+
+```sh
+cargo run --release -p one-thousand-electric-eye-vr
+```
+
+A seated globe opens in front of you. Rotate it with the left Index thumbstick and zoom with the right stick. Point at the Mount Rainier marker with the right controller and squeeze the trigger to open its brief. The included SRTM contour tile loads while the globe is running. See the [VR guide](docs/native-vr.md) for desktop event data and frame timings.
+
 ### API keys
 
 All keys are entered in-app under **Settings → APIs** and saved locally to
