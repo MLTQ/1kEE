@@ -1,8 +1,10 @@
 //! Automatically refreshed global weather imagery for the desktop Earth scenes.
 mod cache;
+mod detail;
 mod provider;
 #[cfg(test)]
 mod tests;
+mod window;
 
 use super::satellite_layer::SatelliteLayer;
 use crate::{
@@ -11,6 +13,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    cell::RefCell,
     path::{Path, PathBuf},
     sync::mpsc,
     time::{Duration, Instant},
@@ -85,6 +88,7 @@ struct Feed {
     options: LayerOptions,
     stamp: Option<String>,
     image: Option<SatelliteLayer>,
+    detail: RefCell<detail::Detail>,
     status: String,
     cache_warning: Option<String>,
     worker: Option<mpsc::Receiver<Message>>,
@@ -98,6 +102,7 @@ impl Feed {
             options,
             stamp: None,
             image: None,
+            detail: RefCell::default(),
             status: String::new(),
             cache_warning: None,
             worker: None,
@@ -128,6 +133,9 @@ impl Feed {
                     image,
                     cache_warning,
                 }) => {
+                    if self.stamp.as_ref() != Some(&stamp) {
+                        *self.detail.get_mut() = detail::Detail::default();
+                    }
                     self.image = Some(SatelliteLayer::new(ctx, self.product.label().into(), image));
                     self.stamp = Some(stamp);
                     self.cache_warning = cache_warning;
@@ -248,11 +256,43 @@ impl GlobalWeather {
             feed.tick(ctx, body == ActiveBody::Earth, &self.cache_path);
         }
     }
-    pub(super) fn images(&self) -> impl Iterator<Item = &SatelliteLayer> {
+    #[cfg(test)]
+    fn images(&self) -> impl Iterator<Item = &SatelliteLayer> {
         self.feeds
             .iter()
             .filter(|f| f.options.enabled)
             .filter_map(|f| f.image.as_ref())
+    }
+
+    pub(super) fn draw(
+        &self,
+        ctx: &egui::Context,
+        display_pixels: f32,
+        visible: impl FnOnce() -> Option<[f32; 4]>,
+        mut paint: impl FnMut(&SatelliteLayer),
+    ) {
+        if !self
+            .feeds
+            .iter()
+            .any(|f| f.options.enabled && f.options.opacity > 0 && f.image.is_some())
+        {
+            return;
+        }
+        let bounds = visible();
+        for feed in &self.feeds {
+            if !feed.options.enabled || feed.options.opacity == 0 {
+                continue;
+            }
+            if let Some(image) = &feed.image {
+                // Each product paints once, including at partial opacity and over no-data.
+                let mut detail = feed.detail.borrow_mut();
+                paint(
+                    detail
+                        .select(ctx, feed, &self.cache_path, bounds, display_pixels)
+                        .unwrap_or(image),
+                );
+            }
+        }
     }
 }
 
@@ -283,6 +323,10 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
                 }
                 if !feed.status.is_empty() {
                     ui.small(&feed.status);
+                }
+                let detail = feed.detail.borrow();
+                if !detail.status.is_empty() {
+                    ui.small(&detail.status);
                 }
                 let slider = ui.add(
                     egui::Slider::new(&mut feed.options.opacity, 0..=100)
