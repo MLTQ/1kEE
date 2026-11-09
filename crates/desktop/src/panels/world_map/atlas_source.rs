@@ -13,11 +13,15 @@ pub(super) struct Detail {
     pub source: &'static str,
 }
 
-pub(super) fn load(root: Option<&Path>, region: Region, max_edge: usize) -> Option<Detail> {
-    let data = terrain_assets::find_data_root(root)?;
+pub(super) fn load(root: Option<&Path>, region: Region, max_edge: usize) -> Result<Detail, String> {
+    let data =
+        terrain_assets::find_data_root(root).ok_or("No terrain data folder is configured.")?;
     let base = gdal::find_gebco_topography_tiles(&data);
     if base.is_empty() {
-        return None;
+        return Err(format!(
+            "Original GEBCO terrain files were not found in {}.",
+            data.display()
+        ));
     }
     let span = region.span();
     let bounds = region.bounds();
@@ -43,7 +47,8 @@ pub(super) fn load(root: Option<&Path>, region: Region, max_edge: usize) -> Opti
         (15.0, "GEBCO · 15 arcsecond terrain")
     };
     let size = region.size(spacing, max_edge);
-    let scratch = tempfile::tempdir().ok()?;
+    let scratch =
+        tempfile::tempdir().map_err(|e| format!("Cannot create Atlas working folder: {e}"))?;
     let metres = warp(&base, bounds, size, scratch.path(), "ocean")?;
     let mut grid = HeightGrid {
         width: size[0],
@@ -52,12 +57,12 @@ pub(super) fn load(root: Option<&Path>, region: Region, max_edge: usize) -> Opti
     };
     for (name, files) in [("land", srtm), ("fine", fine)] {
         if !files.is_empty()
-            && let Some(land) = warp(&files, bounds, size, scratch.path(), name)
+            && let Ok(land) = warp(&files, bounds, size, scratch.path(), name)
         {
             merge_land(&mut grid.metres, &land);
         }
     }
-    Some(Detail {
+    Ok(Detail {
         grid,
         region,
         source,
@@ -120,7 +125,7 @@ fn warp(
     size: [usize; 2],
     scratch: &Path,
     name: &str,
-) -> Option<Vec<f32>> {
+) -> Result<Vec<f32>, String> {
     let mut out = vec![f32::NAN; size[0] * size[1]];
     let dx = (b[2] as f64 - b[0] as f64) / size[0] as f64;
     let mut start = 0;
@@ -132,7 +137,8 @@ fn warp(
         let west = b[0] as f64 + start as f64 * dx - zone * 360.0;
         let east = b[0] as f64 + end as f64 * dx - zone * 360.0;
         let output = scratch.join(format!("{name}-{start}.bil"));
-        let mut command = Command::new(gdal::gdal_tool_path("gdalwarp"));
+        let tool = gdal::gdal_tool_path("gdalwarp");
+        let mut command = Command::new(&tool);
         command
             .args([
                 "-q",
@@ -175,18 +181,19 @@ fn warp(
             .arg(&output)
             .stdout(Stdio::null());
         gdal::run_command_with_timeout(command, "Atlas native elevation", Duration::from_secs(120))
-            .ok()?;
-        let bytes = std::fs::read(&output).ok()?;
+            .map_err(|e| format!("Cannot refine Atlas with {}: {e}. Check the GDAL folder in Settings → Files & Cache.", tool.display()))?;
+        let bytes = std::fs::read(&output)
+            .map_err(|e| format!("Cannot read refined Atlas terrain: {e}"))?;
         if bytes.len() != (end - start) * size[1] * 4 {
-            return None;
+            return Err("Refined Atlas terrain has invalid dimensions.".into());
         }
         for (i, bytes) in bytes.chunks_exact(4).enumerate() {
             out[(i / (end - start)) * size[0] + start + i % (end - start)] =
-                f32::from_le_bytes(bytes.try_into().ok()?);
+                f32::from_le_bytes(bytes.try_into().unwrap());
         }
         start = end;
     }
-    Some(out)
+    Ok(out)
 }
 
 #[cfg(test)]

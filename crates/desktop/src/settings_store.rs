@@ -161,7 +161,10 @@ fn default_event_follow_dwell_seconds() -> u32 {
 }
 
 pub(crate) fn normalize_event_follow_dwell_seconds(seconds: u32) -> u32 {
-    seconds.clamp(MIN_EVENT_FOLLOW_DWELL_SECONDS, MAX_EVENT_FOLLOW_DWELL_SECONDS)
+    seconds.clamp(
+        MIN_EVENT_FOLLOW_DWELL_SECONDS,
+        MAX_EVENT_FOLLOW_DWELL_SECONDS,
+    )
 }
 
 pub(crate) fn normalize_marker_scale(value: f32) -> f32 {
@@ -362,14 +365,37 @@ pub fn configured_gdal_bin_dir() -> Option<PathBuf> {
 }
 
 pub fn resolve_gdal_tool(tool: &str) -> PathBuf {
-    if let Some(bin_dir) = configured_gdal_bin_dir() {
-        let candidate = bin_dir.join(tool);
-        if candidate.exists() {
-            return candidate;
-        }
-    }
+    discover_gdal_tool(
+        tool,
+        configured_gdal_bin_dir().as_deref(),
+        std::env::var_os("PATH").as_deref(),
+    )
+}
 
-    PathBuf::from(tool)
+fn discover_gdal_tool(
+    tool: &str,
+    configured: Option<&Path>,
+    search: Option<&std::ffi::OsStr>,
+) -> PathBuf {
+    let mut directories = Vec::new();
+    if let Some(configured) = configured {
+        directories.push(configured.to_path_buf());
+    }
+    if let Some(search) = search {
+        directories.extend(std::env::split_paths(search));
+    }
+    // Finder/LaunchServices do not inherit a terminal's Homebrew PATH.
+    #[cfg(target_os = "macos")]
+    directories.extend([
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/Applications/Postgres.app/Contents/Versions/latest/bin"),
+    ]);
+    directories
+        .into_iter()
+        .map(|dir| dir.join(tool))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from(tool))
 }
 
 pub fn configured_osmium_bin_dir() -> Option<PathBuf> {
@@ -557,6 +583,30 @@ fn path_from_optional(text: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gdal_discovery_keeps_configured_and_path_precedence() {
+        let scratch = tempfile::tempdir().unwrap();
+        let configured = scratch.path().join("configured");
+        let on_path = scratch.path().join("path");
+        std::fs::create_dir_all(&configured).unwrap();
+        std::fs::create_dir_all(&on_path).unwrap();
+        let tool = "gdal-private-fixture";
+        std::fs::write(on_path.join(tool), []).unwrap();
+        let search = std::env::join_paths([&on_path]).unwrap();
+        assert_eq!(
+            super::discover_gdal_tool(tool, Some(&configured), Some(&search)),
+            on_path.join(tool)
+        );
+        std::fs::write(configured.join(tool), []).unwrap();
+        assert_eq!(
+            super::discover_gdal_tool(tool, Some(&configured), Some(&search)),
+            configured.join(tool)
+        );
+        assert_eq!(
+            super::discover_gdal_tool("missing-private-tool", None, Some(&search)),
+            std::path::PathBuf::from("missing-private-tool")
+        );
+    }
     use super::*;
 
     #[test]
@@ -574,10 +624,7 @@ mod tests {
             5
         );
         settings.event_follow_dwell_seconds = u32::MAX;
-        assert_eq!(
-            normalize_settings(settings).event_follow_dwell_seconds,
-            300
-        );
+        assert_eq!(normalize_settings(settings).event_follow_dwell_seconds, 300);
     }
 
     #[test]
@@ -592,7 +639,10 @@ mod tests {
         settings.marker_scale = f32::NAN;
         assert_eq!(normalize_settings(settings.clone()).marker_scale, 1.0);
         settings.marker_scale = 100.0;
-        assert_eq!(normalize_settings(settings.clone()).marker_scale, MAX_MARKER_SCALE);
+        assert_eq!(
+            normalize_settings(settings.clone()).marker_scale,
+            MAX_MARKER_SCALE
+        );
         settings.marker_scale = -1.0;
         assert_eq!(normalize_settings(settings).marker_scale, MIN_MARKER_SCALE);
     }

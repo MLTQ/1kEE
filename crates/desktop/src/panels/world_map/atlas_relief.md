@@ -24,3 +24,11 @@ independent visibility controls; no theme selection changes layer choices.
 Scientific images, optional contours and operational markers draw above relief.
 No overview file is required for the original-data detail path to start.
 Missing sources leave the existing image visible and retry with snapshot backoff.
+
+### Runtime diagnostics
+Native requests keep a request/epoch-scoped notice in the egui context. The map
+shows a small refining notice while loading, and a concrete tool/data error if
+refinement fails. Success removes the notice. Late results from another viewport
+or a cleared epoch cannot supply a misleading ready state. Errors keep the last
+valid georeferenced image through the existing single-flight retry/backoff.
+`atlas_runtime_tests` exercises the production scene rather than a fixed crop.

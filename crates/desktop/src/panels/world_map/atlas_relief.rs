@@ -19,7 +19,14 @@ struct DetailRequest {
     root: Option<PathBuf>,
     region: super::atlas_viewport::Region,
     max_edge: usize,
+    epoch: u64,
 }
+#[derive(Clone)]
+struct DetailNotice {
+    request: DetailRequest,
+    message: Option<String>,
+}
+
 struct LoadedDetail {
     texture: egui::TextureHandle,
     region: super::atlas_viewport::Region,
@@ -34,34 +41,80 @@ fn detail_texture(
     region: super::atlas_viewport::Region,
     local: bool,
 ) -> Option<Arc<LoadedDetail>> {
+    let wake = ctx.clone();
+    let state = if local { &LOCAL_DETAIL } else { &GLOBE_DETAIL };
+    let mut cache = state.get_or_init(Default::default).lock().ok()?;
     let request = DetailRequest {
         root: root.map(Path::to_path_buf),
         region,
         max_edge: ctx.input(|i| i.max_texture_side).clamp(16, 8192),
+        epoch: cache.epoch(),
     };
-    let wake = ctx.clone();
-    let cache = if local { &LOCAL_DETAIL } else { &GLOBE_DETAIL };
-    let result = cache.get_or_init(Default::default).lock().ok()?.get(
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new(("atlas-wanted", local)), request.clone()));
+    let result = cache.get(
         request,
         "atlas-native-detail",
         |a, b| a.root == b.root,
         move |request| {
-            let detail = super::atlas_source::load(
-                request.root.as_deref(),
-                request.region,
-                request.max_edge,
-            )?;
-            let image = detail.grid.image_for(detail.region.bounds())?;
-            Some(LoadedDetail {
-                texture: wake.load_texture(detail.source, image, egui::TextureOptions::LINEAR),
-                region: detail.region,
-            })
+            let result = load_detail(&wake, &request);
+            let message = result.as_ref().err().cloned();
+            wake.data_mut(|d| {
+                d.insert_temp(
+                    egui::Id::new(("atlas-notice", local)),
+                    DetailNotice { request, message },
+                )
+            });
+            wake.request_repaint();
+            result.ok()
         },
     );
     if result.is_none() {
         ctx.request_repaint_after(std::time::Duration::from_millis(250));
     }
     result
+}
+
+fn load_detail(ctx: &egui::Context, request: &DetailRequest) -> Result<LoadedDetail, String> {
+    let detail =
+        super::atlas_source::load(request.root.as_deref(), request.region, request.max_edge)?;
+    let image = detail
+        .grid
+        .image_for(detail.region.bounds())
+        .ok_or("Atlas terrain cannot be shaded: invalid image bounds.")?;
+    Ok(LoadedDetail {
+        texture: ctx.load_texture(detail.source, image, egui::TextureOptions::LINEAR),
+        region: detail.region,
+    })
+}
+
+fn paint_detail_notice(painter: &egui::Painter, rect: egui::Rect, local: bool) {
+    let message = painter.ctx().data(|d| {
+        let wanted = d.get_temp::<DetailRequest>(egui::Id::new(("atlas-wanted", local)))?;
+        match d.get_temp::<DetailNotice>(egui::Id::new(("atlas-notice", local))) {
+            Some(notice) if notice.request == wanted => notice
+                .message
+                .map(|m| format!("Atlas detail unavailable: {m}")),
+            _ => Some("Atlas: refining terrain…".into()),
+        }
+    });
+    let Some(message) = message else {
+        return;
+    };
+    let width = (rect.width() - 40.0).clamp(80.0, 440.0);
+    let galley = painter.layout(
+        message,
+        egui::FontId::proportional(11.0),
+        crate::theme::text_muted(),
+        width,
+    );
+    let pos = rect.left_top() + egui::vec2(12.0, 12.0);
+    let panel = egui::Rect::from_min_size(pos, galley.size() + egui::vec2(16.0, 12.0));
+    painter.rect_filled(panel, 3.0, crate::theme::panel_fill(240));
+    painter.galley(
+        pos + egui::vec2(8.0, 6.0),
+        galley,
+        crate::theme::text_muted(),
+    );
 }
 
 const WORLD: [f32; 4] = [-180.0, -90.0, 180.0, 90.0];
@@ -185,12 +238,14 @@ pub(super) fn draw_globe(
     }
     if let Some(region) =
         super::atlas_viewport::globe(rect, layout, view, painter.ctx().pixels_per_point())
-        && let Some(detail) = detail_texture(painter.ctx(), root, region, false)
     {
-        let texture = detail.texture.id();
-        paint_cached(painter, texture, 1, key, || {
-            super::raster_mesh::globe(layout, view, texture, detail.region.bounds(), true)
-        });
+        if let Some(detail) = detail_texture(painter.ctx(), root, region, false) {
+            let texture = detail.texture.id();
+            paint_cached(painter, texture, 1, key, || {
+                super::raster_mesh::globe(layout, view, texture, detail.region.bounds(), true)
+            });
+        }
+        paint_detail_notice(painter, rect, false);
     }
 }
 
@@ -226,21 +281,22 @@ pub(super) fn draw_local(
             local_mesh(layout, view, texture, focus, half, clip)
         });
     }
-    if let Some(region) = super::atlas_viewport::local(clip, layout, view, focus, half)
-        && let Some(detail) = detail_texture(painter.ctx(), root, region, true)
-    {
-        let texture = detail.texture.id();
-        paint_cached(painter, texture, 3, key, || {
-            super::raster_mesh::local(
-                layout,
-                view,
-                texture,
-                detail.region.bounds(),
-                focus,
-                half,
-                clip,
-            )
-        });
+    if let Some(region) = super::atlas_viewport::local(clip, layout, view, focus, half) {
+        if let Some(detail) = detail_texture(painter.ctx(), root, region, true) {
+            let texture = detail.texture.id();
+            paint_cached(painter, texture, 3, key, || {
+                super::raster_mesh::local(
+                    layout,
+                    view,
+                    texture,
+                    detail.region.bounds(),
+                    focus,
+                    half,
+                    clip,
+                )
+            });
+        }
+        paint_detail_notice(painter, clip, true);
     }
 }
 
@@ -290,3 +346,7 @@ pub(super) fn clear() {
 #[cfg(test)]
 #[path = "atlas_relief_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "atlas_runtime_tests.rs"]
+mod runtime_tests;

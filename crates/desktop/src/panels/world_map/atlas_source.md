@@ -23,3 +23,7 @@ All intermediate files disappear with the private temporary directory.
 EHdr outputs require their sibling .hdr metadata: do not hide directory siblings
 with GDAL_DISABLE_READDIR_ON_OPEN=EMPTY_DIR for this operation. The dateline
 fixture and real-data tests exercise the actual GDAL output rather than mocks.
+
+`load`/`warp` return descriptive errors rather than erasing GDAL launch, read or
+output-dimension failures into None. Atlas displays those errors while retaining
+the last valid image; the GDAL path is resolved independently of a terminal PATH.

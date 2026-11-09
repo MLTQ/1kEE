@@ -20,3 +20,7 @@ It optionally exports `ONEKEE_ATLAS_PREVIEW`; no application window is opened.
 background request caches for Globe and Local with a 900×900 SRTM window. The
 initial calls must return promptly and both asynchronous images must retain their
 own exact geographic bounds. This test requires explicit existing terrain data.
+
+The fixed-region preview above is a shading/projection check only. Runtime
+selection, desktop tool discovery and actual refined drawing are now covered by
+`atlas_runtime_tests`, including a minimal Finder-style PATH.

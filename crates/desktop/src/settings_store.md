@@ -24,7 +24,7 @@ Persists the desktop app's local configuration so it survives restarts. That now
 - **Interacts with**: `model.rs`
 
 ### `resolve_gdal_tool`
-- **Does**: Resolves `ogr2ogr`, `gdalwarp`, and `gdal_contour` from the configured GDAL bin directory or leaves them on `PATH`
+- **Does**: Resolves `ogr2ogr`, `gdalwarp`, and `gdal_contour` from the configured directory, then `PATH`, then common macOS installations
 - **Interacts with**: `osm_ingest.rs`, `srtm_focus_cache.rs`
 
 ## Contracts
@@ -39,7 +39,9 @@ Persists the desktop app's local configuration so it survives restarts. That now
 ## Notes
 - The settings file now lives beside the executable so moving the app bundle/worktree to another machine keeps the local path model coherent by default.
 - The Factal key and camera-source keys are still stored as plain text because this is a local demo, not a hardened credential store.
-- GDAL discovery now prefers the app-configured bin directory and otherwise relies on `PATH`; it no longer assumes Postgres.app.
+- GDAL discovery preserves configured-directory and PATH precedence. On macOS,
+  Homebrew (Apple Silicon/Intel) and Postgres.app are fallback candidates when a
+  Finder launch lacks the terminal PATH. No installation is assumed to exist.
 - Path settings are now normalized on save/load so operators can point at a parent folder like `/Volumes/BigDisk/Data` and still have the app infer nested `Data/`, `Derived/`, or `srtm_gl1/SRTM_GL1_srtm` subpaths when those exist.
 - If `Asset Root` is accidentally pointed at a `Data/` or `Derived/` folder, it is normalized back to the parent asset root to avoid silently creating `Data/Data` or `Data/Derived` layouts.
 - `contour_stroke_scale` remains as a compatibility field for older files.
@@ -68,3 +70,7 @@ The saved AI buildout opt-in defaults to false for new and existing configuratio
 root. It defaults to unset and survives Settings saves even though it has no
 separate UI field. Recovery can override it with `ONEKEE_TERRAIN_REPAIR_ROOT`.
 See `panels/world_map/srtm_focus_cache/recovery.md` for source read-only semantics.
+
+Tool-discovery fixtures pin configured/PATH precedence and missing-tool fallback.
+Atlas's full runtime GPU test runs under a Finder-style PATH to verify actual
+source decoding, viewport selection, texture publication and refined drawing.
