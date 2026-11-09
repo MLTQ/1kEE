@@ -291,3 +291,157 @@ fn measure_resident_and_streaming_stereo_gpu_time() {
         );
     }
 }
+
+#[test]
+#[ignore = "measures the native Local table and wrist on a Vulkan GPU"]
+fn local_relief_and_wrist_remain_registered_while_native_map_uploads() {
+    use crate::operator::{MAP_SIZE, MapImage, WRIST_SIZE};
+    use glam::{Mat4, Quat};
+    use one_thousand_electric_eye_desktop::vr_operator::{HEIGHT_EDGE, MapFrame};
+    let (device, queue) = device();
+    let marker = Marker::load(None).unwrap();
+    let globe = Globe::place(&stereo(0.), &marker);
+    let size = [2468, 2740];
+    let textures = [target(&device, size), target(&device, size)];
+    let views = textures
+        .each_ref()
+        .map(|t| t.create_view(&Default::default()));
+    let mut renderer = Renderer::new(
+        &device,
+        &queue,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        &marker,
+    )
+    .unwrap();
+    let hand = Mat4::from_scale_rotation_translation(
+        Vec3::new(0.24, 0.2, 1.),
+        Quat::IDENTITY,
+        Vec3::new(-0.30, 0.16, -0.72),
+    );
+    renderer.cartography.wrist_pose = Some(hand);
+    let at = |u: f32| 0.08 + u * 0.14;
+    let frame = MapFrame {
+        local: true,
+        heights: (0..HEIGHT_EDGE * HEIGHT_EDGE)
+            .map(|i| at((i % HEIGHT_EDGE) as f32 / (HEIGHT_EDGE - 1) as f32))
+            .collect(),
+        ..Default::default()
+    };
+    let mut map = Vec::new();
+    for y in 0..MAP_SIZE[1] {
+        for x in 0..MAP_SIZE[0] {
+            map.extend_from_slice(&[
+                (x * 255 / (MAP_SIZE[0] - 1)) as u8,
+                (y * 255 / (MAP_SIZE[1] - 1)) as u8,
+                20,
+                255,
+            ]);
+        }
+    }
+    let wrist = [19u8, 211, 140, 255].repeat((WRIST_SIZE[0] * WRIST_SIZE[1]) as usize);
+    let mut timer = GpuTimer::new(&device).expect("GPU timestamps");
+    let mut gpu = vec![];
+    let mut cpu = vec![];
+    for i in 0..140 {
+        let start = std::time::Instant::now();
+        renderer.cartography.advance(
+            &queue,
+            (i % 14 == 0).then(|| MapImage {
+                pixels: map.clone(),
+                frame: frame.clone(),
+            }),
+            (i == 0).then(|| wrist.clone()),
+        );
+        if i < 7 {
+            assert!(renderer.cartography.frame.is_none());
+        }
+        let mut encoder = device.create_command_encoder(&Default::default());
+        for (eye, v) in stereo(0.06).into_iter().enumerate() {
+            renderer.draw(
+                &queue,
+                &mut encoder,
+                eye,
+                &views[eye],
+                size,
+                v,
+                &globe,
+                &marker,
+                false,
+                None,
+                timer.writes(eye),
+            );
+        }
+        timer.resolve(&mut encoder);
+        queue.submit([encoder.finish()]);
+        timer.submitted();
+        device.poll(wgpu::Maintain::Wait);
+        let ms = timer.sample(queue.get_timestamp_period()).unwrap();
+        if i >= 20 {
+            gpu.push(ms);
+            cpu.push(start.elapsed().as_secs_f64() * 1000.);
+        }
+    }
+    for (eye, tex) in stereo(0.06).into_iter().zip(textures) {
+        let vp = projection(eye.fov) * pose(eye.pose).inverse();
+        for (p, expected) in [
+            (
+                globe
+                    .table_transform()
+                    .transform_point3(Vec3::new(0.2, 0.16, at(0.7))),
+                [179, 87, 20],
+            ),
+            (hand.w_axis.truncate(), [19, 211, 140]),
+        ] {
+            let n = vp.project_point3(p);
+            let origin = wgpu::Origin3d {
+                x: ((1. + n.x) * 0.5 * size[0] as f32) as u32,
+                y: ((1. - n.y) * 0.5 * size[1] as f32) as u32,
+                z: 0,
+            };
+            let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: 4,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut e = device.create_command_encoder(&Default::default());
+            e.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    origin,
+                    ..tex.as_image_copy()
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buf,
+                    layout: Default::default(),
+                },
+                wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            );
+            queue.submit([e.finish()]);
+            let (tx, rx) = mpsc::channel();
+            buf.slice(..)
+                .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+            device.poll(wgpu::Maintain::Wait);
+            rx.recv().unwrap().unwrap();
+            let mapped = buf.slice(..).get_mapped_range();
+            assert!(
+                mapped[..3]
+                    .iter()
+                    .zip(expected)
+                    .all(|(&got, want)| got.abs_diff(want) < 5),
+                "surface pixel {:?}, expected {expected:?}",
+                &mapped[..3]
+            );
+        }
+    }
+    gpu.sort_by(f64::total_cmp);
+    cpu.sort_by(f64::total_cmp);
+    let n = (gpu.len() * 95).div_ceil(100) - 1;
+    eprintln!(
+        "Local relief with wrist and streamed map at 2468 × 2740 per eye: {:.2} ms stereo GPU p95, {:.2} ms CPU through GPU completion p95",
+        gpu[n], cpu[n]
+    );
+}

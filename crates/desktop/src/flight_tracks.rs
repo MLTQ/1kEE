@@ -20,7 +20,7 @@
 ///
 /// # OpenSky API
 ///
-/// ```
+/// ```text
 /// GET https://opensky-network.org/api/states/all
 ///     ?lamin={min_lat}&lomin={min_lon}&lamax={max_lat}&lomax={max_lon}
 /// ```

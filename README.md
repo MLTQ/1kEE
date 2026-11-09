@@ -120,7 +120,7 @@ Start SteamVR, wake the Valve Index, and check that the headset is tracking. The
 cargo run --release -p one-thousand-electric-eye-vr
 ```
 
-A seated globe opens in front of you. Rotate it with the left Index thumbstick and zoom with the right stick. Point at the Mount Rainier marker with the right controller and squeeze the trigger to open its brief. The included SRTM contour tile loads while the globe is running. See the [VR guide](docs/native-vr.md) for desktop event data and frame timings.
+Raise the left controller to open the wrist controls. Aim with the right controller, click its trigger to select, and use the right stick to scroll. Switch between the stereo globe and the Local terrain table, select Atlas or satellite imagery, browse events, or start Follow Events. Selecting an event opens its brief and a nearby webcam above the map. The VR operator reads the desktop settings and loads geographic tiles as you navigate. See the [VR guide](docs/native-vr.md) for controls, data sources, and timing checks.
 
 ### API keys
 

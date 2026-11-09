@@ -2593,6 +2593,7 @@ dependencies = [
  "egui-wgpu",
  "glam",
  "image",
+ "one-thousand-electric-eye-desktop",
  "openxr",
  "pollster",
  "rusqlite",

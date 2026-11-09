@@ -26,440 +26,442 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
             ui.add_space(4.0);
             ui.separator();
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                section_label(ui, "GLOBAL SATELLITE WEATHER");
-                world_map::global_weather::controls(ui, model);
-                ui.separator();
-                section_label(ui, "IMPORTED LAYERS");
-                super::layer_file_import::button(ui, model);
-                if model.geojson_layers.is_empty() && model.satellite_layers.is_empty() { ui.small("GeoJSON, KML, KMZ or GeoTIFF"); }
-                world_map::satellite_layer::controls(ui, model);
-                if !model.geojson_layers.is_empty() {
-                    let mut remove_idx: Option<usize> = None;
-                    for (idx, layer) in model.geojson_layers.iter_mut().enumerate() {
-                        let [r, g, b, _] = layer.color;
-                        let dot_color = egui::Color32::from_rgb(r, g, b);
-                        ui.horizontal(|ui| {
-                            let (rect, _) =
-                                ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                            ui.painter().circle_filled(rect.center(), 4.0, dot_color);
-                            ui.checkbox(&mut layer.visible, &layer.name);
-                            if ui.small_button("×").on_hover_text("Remove").clicked() {
-                                remove_idx = Some(idx);
-                            }
-                        });
-                    }
-                    if let Some(idx) = remove_idx {
-                        model.geojson_layers.remove(idx);
-                    }
-                    ui.add_space(6.0);
+            egui::ScrollArea::vertical().show(ui, |ui| controls(ui, model));
+        });
+}
+
+pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
+    section_label(ui, "GLOBAL SATELLITE WEATHER");
+    world_map::global_weather::controls(ui, model);
+    ui.separator();
+    section_label(ui, "IMPORTED LAYERS");
+    super::layer_file_import::button(ui, model);
+    if model.geojson_layers.is_empty() && model.satellite_layers.is_empty() { ui.small("GeoJSON, KML, KMZ or GeoTIFF"); }
+    world_map::satellite_layer::controls(ui, model);
+    if !model.geojson_layers.is_empty() {
+        let mut remove_idx: Option<usize> = None;
+        for (idx, layer) in model.geojson_layers.iter_mut().enumerate() {
+            let [r, g, b, _] = layer.color;
+            let dot_color = egui::Color32::from_rgb(r, g, b);
+            ui.horizontal(|ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                ui.painter().circle_filled(rect.center(), 4.0, dot_color);
+                ui.checkbox(&mut layer.visible, &layer.name);
+                if ui.small_button("×").on_hover_text("Remove").clicked() {
+                    remove_idx = Some(idx);
                 }
+            });
+        }
+        if let Some(idx) = remove_idx {
+            model.geojson_layers.remove(idx);
+        }
+        ui.add_space(6.0);
+    }
 
-                ui.separator();
-                ui.add_space(6.0);
+    ui.separator();
+    ui.add_space(6.0);
 
-                // ── BASE ─────────────────────────────────────────────────────
-                section_label(ui, "BASE");
-                ui.checkbox(&mut model.show_event_markers, "Events");
-                ui.checkbox(&mut model.show_camera_markers, "Webcams");
-                ui.indent("webcam_proximity", |ui| {
-                    ui.add_enabled(model.show_camera_markers,
-                        egui::Checkbox::new(&mut model.show_camera_links, "Nearby camera links"))
-                        .on_hover_text("Connects the selected event to webcams within 250 km. Proximity only: it does not indicate a camera's viewing direction or that it recorded the event.");
+    // ── BASE ─────────────────────────────────────────────────────
+    section_label(ui, "BASE");
+    ui.checkbox(&mut model.show_event_markers, "Events");
+    ui.checkbox(&mut model.show_camera_markers, "Webcams");
+    ui.indent("webcam_proximity", |ui| {
+        ui.add_enabled(model.show_camera_markers,
+            egui::Checkbox::new(&mut model.show_camera_links, "Nearby camera links"))
+            .on_hover_text("Connects the selected event to webcams within 250 km. Proximity only: it does not indicate a camera's viewing direction or that it recorded the event.");
+    });
+    ui.label("Marker size");
+    let mut marker_percent = model.marker_scale() * 100.0;
+    let response = ui.add(
+        egui::Slider::new(&mut marker_percent,
+            settings_store::MIN_MARKER_SCALE * 100.0..=settings_store::MAX_MARKER_SCALE * 100.0)
+            .step_by(5.0).suffix("%").max_decimals(0)
+    ).on_hover_text("Sizes webcam and event markers in both views, including light-spire height and glow. Saved between launches.");
+    if response.changed() {
+        model.set_marker_scale(marker_percent / 100.0);
+    }
+    if (response.drag_stopped() || (response.changed() && !response.dragged()))
+        && let Err(error) = model.save_settings()
+    {
+        model.push_log(format!("Marker size save failed: {error}"));
+    }
+    ui.checkbox(&mut model.show_coastlines, "Coastline");
+    ui.checkbox(&mut model.show_bathymetry, "Bathymetry");
+    world_map::swot_controls(ui, model);
+    world_map::gravity_controls(ui, model);
+    ui.checkbox(&mut model.show_graticule, "Graticule");
+    ui.checkbox(&mut model.show_reticle, "Reticle");
+    {
+        // Public hillshade imagery is a local Earth scene layer.
+        let hillshade_available = model.globe_view.local_mode
+            && model.active_body == crate::model::ActiveBody::Earth
+            && model.settings_threedep_enabled;
+        ui.add_enabled(
+            hillshade_available,
+            egui::Checkbox::new(&mut model.show_hillshade, "Hillshade"),
+        )
+        .on_disabled_hover_text(
+            "Local Earth view with Stream detailed terrain enabled in Settings → Files & Cache",
+        );
+        ui.indent("hillshade_source", |ui| {
+            egui::ComboBox::from_id_salt("hillshade_source")
+                .width(185.0)
+                .selected_text(model.hillshade_source.label())
+                .show_ui(ui, |ui| {
+                    for source in crate::hillshade_source::Source::ALL {
+                        ui.selectable_value(&mut model.hillshade_source, source, source.label())
+                            .on_hover_text(source.description());
+                    }
                 });
-                ui.label("Marker size");
-                let mut marker_percent = model.marker_scale() * 100.0;
-                let response = ui.add(
-                    egui::Slider::new(&mut marker_percent,
-                        settings_store::MIN_MARKER_SCALE * 100.0..=settings_store::MAX_MARKER_SCALE * 100.0)
-                        .step_by(5.0).suffix("%").max_decimals(0)
-                ).on_hover_text("Sizes webcam and event markers in both views, including light-spire height and glow. Saved between launches.");
-                if response.changed() {
-                    model.set_marker_scale(marker_percent / 100.0);
-                }
-                if (response.drag_stopped() || (response.changed() && !response.dragged()))
-                    && let Err(error) = model.save_settings()
-                {
-                    model.push_log(format!("Marker size save failed: {error}"));
-                }
-                ui.checkbox(&mut model.show_coastlines, "Coastline");
-                ui.checkbox(&mut model.show_bathymetry, "Bathymetry");
-                world_map::swot_controls(ui, model);
-                world_map::gravity_controls(ui, model);
-                ui.checkbox(&mut model.show_graticule, "Graticule");
-                ui.checkbox(&mut model.show_reticle, "Reticle");
-                {
-                    // Public hillshade imagery is a local Earth scene layer.
-                    let hillshade_available = model.globe_view.local_mode
-                        && model.active_body == crate::model::ActiveBody::Earth
-                        && model.settings_threedep_enabled;
-                    ui.add_enabled(
-                        hillshade_available,
-                        egui::Checkbox::new(&mut model.show_hillshade, "Hillshade"),
+            if model.hillshade_source != crate::hillshade_source::Source::Usgs {
+                ui.small("Washington coverage only");
+                ui.hyperlink_to("Washington Geological Survey (DNR)",
+                    "https://dnr.wa.gov/washington-geological-survey/publications-and-data/lidar");
+                ui.hyperlink_to("Open Washington LiDAR Portal",
+                    "https://lidarportal.dnr.wa.gov/")
+                    .on_hover_text("Explore surveys and download DEMs, surface models and point clouds.");
+            }
+        });
+    }
+    {
+        let ships_enabled = !model.aisstream_api_key.is_empty();
+        ui.add_enabled(
+            ships_enabled,
+            egui::Checkbox::new(&mut model.show_ships, "Ships"),
+        )
+        .on_disabled_hover_text("Configure AISStream key in Settings");
+    }
+    ui.checkbox(&mut model.show_flights, "Flights");
+    crate::transit::controls(ui, model);
+    ui.checkbox(&mut model.show_stellar_correspondence, "Stars");
+    if model.show_stellar_correspondence && !model.globe_view.local_mode {
+        let obs_active = model.stellar_observatory_open;
+        let fill = if obs_active {
+            theme::chrome_active_fill()
+        } else {
+            egui::Color32::TRANSPARENT
+        };
+        let col = if obs_active {
+            theme::chrome_active_text()
+        } else {
+            theme::text_muted()
+        };
+        ui.indent("obs_indent", |ui| {
+            if ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("Observatory").small().color(col),
                     )
-                    .on_disabled_hover_text(
-                        "Local Earth view with Stream detailed terrain enabled in Settings → Files & Cache",
-                    );
-                    ui.indent("hillshade_source", |ui| {
-                        egui::ComboBox::from_id_salt("hillshade_source")
-                            .width(185.0)
-                            .selected_text(model.hillshade_source.label())
-                            .show_ui(ui, |ui| {
-                                for source in crate::hillshade_source::Source::ALL {
-                                    ui.selectable_value(&mut model.hillshade_source, source, source.label())
-                                        .on_hover_text(source.description());
-                                }
-                            });
-                        if model.hillshade_source != crate::hillshade_source::Source::Usgs {
-                            ui.small("Washington coverage only");
-                            ui.hyperlink_to("Washington Geological Survey (DNR)",
-                                "https://dnr.wa.gov/washington-geological-survey/publications-and-data/lidar");
-                            ui.hyperlink_to("Open Washington LiDAR Portal",
-                                "https://lidarportal.dnr.wa.gov/")
-                                .on_hover_text("Explore surveys and download DEMs, surface models and point clouds.");
-                        }
-                    });
-                }
-                {
-                    let ships_enabled = !model.aisstream_api_key.is_empty();
-                    ui.add_enabled(
-                        ships_enabled,
-                        egui::Checkbox::new(&mut model.show_ships, "Ships"),
-                    )
-                    .on_disabled_hover_text("Configure AISStream key in Settings");
-                }
-                ui.checkbox(&mut model.show_flights, "Flights");
-                crate::transit::controls(ui, model);
-                ui.checkbox(&mut model.show_stellar_correspondence, "Stars");
-                if model.show_stellar_correspondence && !model.globe_view.local_mode {
-                    let obs_active = model.stellar_observatory_open;
-                    let fill = if obs_active {
-                        theme::chrome_active_fill()
-                    } else {
-                        egui::Color32::TRANSPARENT
-                    };
-                    let col = if obs_active {
-                        theme::chrome_active_text()
-                    } else {
-                        theme::text_muted()
-                    };
-                    ui.indent("obs_indent", |ui| {
-                        if ui
-                            .add(
-                                egui::Button::new(
-                                    egui::RichText::new("Observatory").small().color(col),
-                                )
-                                .fill(fill)
-                                .corner_radius(4.0),
-                            )
-                            .clicked()
-                        {
-                            model.stellar_observatory_open = !model.stellar_observatory_open;
-                        }
-                    });
-                }
-                ui.add_space(6.0);
+                    .fill(fill)
+                    .corner_radius(4.0),
+                )
+                .clicked()
+            {
+                model.stellar_observatory_open = !model.stellar_observatory_open;
+            }
+        });
+    }
+    ui.add_space(6.0);
 
-                // ── TRANSPORT ────────────────────────────────────────────────
-                section_label(ui, "TRANSPORT");
-                ui.checkbox(&mut model.show_major_roads, "Major roads");
-                ui.checkbox(&mut model.show_minor_roads, "Minor roads");
-                ui.checkbox(&mut model.show_rail, "Railways");
-                ui.checkbox(&mut model.show_aeroway, "Airports");
-                ui.add_space(6.0);
+    // ── TRANSPORT ────────────────────────────────────────────────
+    section_label(ui, "TRANSPORT");
+    ui.checkbox(&mut model.show_major_roads, "Major roads");
+    ui.checkbox(&mut model.show_minor_roads, "Minor roads");
+    ui.checkbox(&mut model.show_rail, "Railways");
+    ui.checkbox(&mut model.show_aeroway, "Airports");
+    ui.add_space(6.0);
 
-                // ── NATURAL ──────────────────────────────────────────────────
-                section_label(ui, "NATURAL");
-                let water_changed = ui.checkbox(&mut model.show_water, "Water").changed();
-                if water_changed && !model.show_water {
-                    world_map::invalidate_water_cache_pub();
-                }
-                ui.checkbox(&mut model.show_contours, "Contours");
-                ui.indent("contour_thickness", |ui| {
-                    if model.map_theme == crate::theme::MapTheme::Atlas
-                        && model.active_body == crate::model::ActiveBody::Earth
-                    {
-                        ui.small("Atlas contours follow the solid 3D terrain.");
-                    } else {
-                        ui.add_enabled(
-                            model.show_contours && model.globe_view.local_mode
-                                && model.active_body == crate::model::ActiveBody::Earth,
-                            egui::Checkbox::new(&mut model.contour_occlusion, "Hide distant contours"),
-                        ).on_hover_text("Hide contour lines behind nearer ridges in Local Earth view. Turn off to compare the transparent view.");
-                    }
-                    let pixels_per_point = ui.ctx().pixels_per_point();
-                    let mut stroke_width_px = model.contour_stroke_width_px(pixels_per_point);
-                    // Keep any unusually wide legacy setting visible without
-                    // changing its appearance merely because this new control
-                    // has a normal operator-facing upper range.
-                    let slider_max_px = settings_store::MAX_CONTOUR_STROKE_WIDTH_PX
-                        .max(stroke_width_px);
-                    let response = ui
-                        .add(
-                            egui::Slider::new(
-                                &mut stroke_width_px,
-                                settings_store::MIN_CONTOUR_STROKE_WIDTH_PX..=slider_max_px,
-                            )
-                            .step_by(0.25)
-                            .max_decimals(2)
-                            .text("Contour width")
-                            .suffix(" px"),
-                        )
-                        .on_hover_text(
-                            "Sets the primary contour width in screen pixels. Every contour-derived stroke stays at least 1 px; local major/minor, coastline, and bathymetry relationships are preserved above that floor.",
-                        );
-                    if response.changed() {
-                        model.set_contour_stroke_width_px(stroke_width_px);
-                    }
-                    // Persist a click/keyboard adjustment immediately, but
-                    // defer continuous slider drags until the pointer releases.
-                    if response.drag_stopped() || (response.changed() && !response.dragged()) {
-                        if let Err(error) = model.save_settings() {
-                            model.push_log(format!("Contour thickness save failed: {error}"));
-                        }
-                    }
-                });
-                ui.checkbox(&mut model.show_trees, "Trees");
-                ui.add_space(6.0);
+    // ── NATURAL ──────────────────────────────────────────────────
+    section_label(ui, "NATURAL");
+    let water_changed = ui.checkbox(&mut model.show_water, "Water").changed();
+    if water_changed && !model.show_water {
+        world_map::invalidate_water_cache_pub();
+    }
+    ui.checkbox(&mut model.show_contours, "Contours");
+    ui.indent("contour_thickness", |ui| {
+        if model.map_theme == crate::theme::MapTheme::Atlas
+            && model.active_body == crate::model::ActiveBody::Earth
+        {
+            ui.small("Atlas contours follow the solid 3D terrain.");
+        } else {
+            ui.add_enabled(
+                model.show_contours && model.globe_view.local_mode
+                    && model.active_body == crate::model::ActiveBody::Earth,
+                egui::Checkbox::new(&mut model.contour_occlusion, "Hide distant contours"),
+            ).on_hover_text("Hide contour lines behind nearer ridges in Local Earth view. Turn off to compare the transparent view.");
+        }
+        let pixels_per_point = ui.ctx().pixels_per_point();
+        let mut stroke_width_px = model.contour_stroke_width_px(pixels_per_point);
+        // Keep any unusually wide legacy setting visible without
+        // changing its appearance merely because this new control
+        // has a normal operator-facing upper range.
+        let slider_max_px = settings_store::MAX_CONTOUR_STROKE_WIDTH_PX
+            .max(stroke_width_px);
+        let response = ui
+            .add(
+                egui::Slider::new(
+                    &mut stroke_width_px,
+                    settings_store::MIN_CONTOUR_STROKE_WIDTH_PX..=slider_max_px,
+                )
+                .step_by(0.25)
+                .max_decimals(2)
+                .text("Contour width")
+                .suffix(" px"),
+            )
+            .on_hover_text(
+                "Sets the primary contour width in screen pixels. Every contour-derived stroke stays at least 1 px; local major/minor, coastline, and bathymetry relationships are preserved above that floor.",
+            );
+        if response.changed() {
+            model.set_contour_stroke_width_px(stroke_width_px);
+        }
+        // Persist a click/keyboard adjustment immediately, but
+        // defer continuous slider drags until the pointer releases.
+        if response.drag_stopped() || (response.changed() && !response.dragged()) {
+            if let Err(error) = model.save_settings() {
+                model.push_log(format!("Contour thickness save failed: {error}"));
+            }
+        }
+    });
+    ui.checkbox(&mut model.show_trees, "Trees");
+    ui.add_space(6.0);
 
-                // ── URBAN ────────────────────────────────────────────────────
-                section_label(ui, "URBAN");
-                ui.checkbox(&mut model.show_buildings, "Buildings");
-                ui.checkbox(&mut model.show_admin, "Admin Boundaries");
-                world_map::admin_controls(ui, model);
-                ui.checkbox(&mut model.show_military, "Military");
-                ui.checkbox(&mut model.show_industrial, "Industrial");
-                ui.checkbox(&mut model.show_port, "Ports");
-                ui.checkbox(&mut model.show_government, "Government");
-                ui.add_space(6.0);
+    // ── URBAN ────────────────────────────────────────────────────
+    section_label(ui, "URBAN");
+    ui.checkbox(&mut model.show_buildings, "Buildings");
+    ui.checkbox(&mut model.show_admin, "Admin Boundaries");
+    world_map::admin_controls(ui, model);
+    ui.checkbox(&mut model.show_military, "Military");
+    ui.checkbox(&mut model.show_industrial, "Industrial");
+    ui.checkbox(&mut model.show_port, "Ports");
+    ui.checkbox(&mut model.show_government, "Government");
+    ui.add_space(6.0);
 
-                // ── INFRASTRUCTURE ───────────────────────────────────────────
-                section_label(ui, "INFRASTRUCTURE");
-                ui.checkbox(&mut model.show_power, "Power lines");
-                ui.checkbox(&mut model.show_pipeline, "Pipelines");
-                if model.show_pipeline {
-                    ui.indent("pipeline-options", |ui| {
-                        super::world_map::pipeline_controls(ui, &mut model.pipeline_filters, &mut model.pipeline_capacity);
-                        ui.checkbox(&mut model.pipeline_osm, "OSM pipelines (local view)");
-                    });
-                }
-                ui.checkbox(&mut model.show_platforms, "Oil & gas platforms");
-                if model.show_platforms {
-                    ui.indent("platform-options", |ui| {
-                        super::world_map::platform_controls(ui, &mut model.platform_filters);
-                    });
-                }
-                ui.checkbox(&mut model.show_comm, "Comms towers");
-                ui.checkbox(&mut model.show_surveillance, "Surveillance");
-                ui.add_space(6.0);
+    // ── INFRASTRUCTURE ───────────────────────────────────────────
+    section_label(ui, "INFRASTRUCTURE");
+    ui.checkbox(&mut model.show_power, "Power lines");
+    ui.checkbox(&mut model.show_pipeline, "Pipelines");
+    if model.show_pipeline {
+        ui.indent("pipeline-options", |ui| {
+            super::world_map::pipeline_controls(ui, &mut model.pipeline_filters, &mut model.pipeline_capacity);
+            ui.checkbox(&mut model.pipeline_osm, "OSM pipelines (local view)");
+        });
+    }
+    ui.checkbox(&mut model.show_platforms, "Oil & gas platforms");
+    if model.show_platforms {
+        ui.indent("platform-options", |ui| {
+            super::world_map::platform_controls(ui, &mut model.platform_filters);
+        });
+    }
+    ui.checkbox(&mut model.show_comm, "Comms towers");
+    ui.checkbox(&mut model.show_surveillance, "Surveillance");
+    ui.add_space(6.0);
 
-                // ── PUBLIC DATA ────────────────────────────────────────────
-                section_label(ui, "PUBLIC DATA");
-                ui.checkbox(&mut model.flock.show, "Flock cameras & devices")
-                    .on_hover_text("Downloaded position inventory. Shows records marked active and in service; includes some non-camera equipment. These are map locations, not live feeds.");
-                ui.small(egui::RichText::new(&model.flock.status).color(theme::text_muted()));
-                if model.flock.show {
-                    ui.checkbox(&mut model.flock.include_other_statuses, "Include planned / inactive records");
-                }
-                ui.horizontal(|ui| {
-                    ui.hyperlink_to("Flock Surveillance dataset", crate::flock_source::SOURCE_URL);
-                    if ui.small_button("Reload file").clicked() {
-                        model.flock.reload();
+    // ── PUBLIC DATA ────────────────────────────────────────────
+    section_label(ui, "PUBLIC DATA");
+    ui.checkbox(&mut model.flock.show, "Flock cameras & devices")
+        .on_hover_text("Downloaded position inventory. Shows records marked active and in service; includes some non-camera equipment. These are map locations, not live feeds.");
+    ui.small(egui::RichText::new(&model.flock.status).color(theme::text_muted()));
+    if model.flock.show {
+        ui.checkbox(&mut model.flock.include_other_statuses, "Include planned / inactive records");
+    }
+    ui.horizontal(|ui| {
+        ui.hyperlink_to("Flock Surveillance dataset", crate::flock_source::SOURCE_URL);
+        if ui.small_button("Reload file").clicked() {
+            model.flock.reload();
+        }
+    });
+    ui.add_space(4.0);
+    ui.checkbox(&mut model.show_deflock_alprs, "DeFlock / OSM ALPR");
+    ui.small(egui::RichText::new(&model.deflock_status).color(theme::text_muted()));
+    ui.horizontal_wrapped(|ui| {
+        ui.hyperlink_to("DeFlock map", crate::deflock_source::DEFLOCK_PROJECT_URL);
+        ui.label(egui::RichText::new("·").color(theme::text_muted()));
+        ui.hyperlink_to(
+            "OpenStreetMap attribution",
+            crate::deflock_source::OPENSTREETMAP_ATTRIBUTION_URL,
+        );
+    });
+    ui.add_space(4.0);
+
+    crate::buildout::view::controls(ui, model);
+    ui.add_space(4.0);
+
+    ui.checkbox(&mut model.show_submarine_cables, "Submarine cables")
+        .on_hover_text(
+            "Cable routes and landing points from a bundled TeleGeography \
+             snapshot. Works offline; no network access.",
+        );
+    ui.small(
+        egui::RichText::new(&model.submarine_cable_status).color(theme::text_muted()),
+    );
+    if model.show_submarine_cables && !model.submarine_cable_layers.is_empty() {
+        use crate::submarine_cables::{CABLE_LAYER_INDEX, LANDING_LAYER_INDEX};
+        ui.indent("submarine_cable_options", |ui| {
+            let mut show_landings = model
+                .submarine_cable_layers
+                .get(LANDING_LAYER_INDEX)
+                .is_some_and(|layer| layer.visible);
+            if ui
+                .checkbox(&mut show_landings, "Landing points")
+                .on_hover_text(
+                    "Coastal stations where cables come ashore. Hover for the \
+                     station, click for every cable that lands there.",
+                )
+                .changed()
+            {
+                model.update_submarine_cable_layers(|layers| {
+                    if let Some(layer) = layers.get_mut(LANDING_LAYER_INDEX) {
+                        layer.visible = show_landings;
                     }
                 });
-                ui.add_space(4.0);
-                ui.checkbox(&mut model.show_deflock_alprs, "DeFlock / OSM ALPR");
-                ui.small(egui::RichText::new(&model.deflock_status).color(theme::text_muted()));
-                ui.horizontal_wrapped(|ui| {
-                    ui.hyperlink_to("DeFlock map", crate::deflock_source::DEFLOCK_PROJECT_URL);
-                    ui.label(egui::RichText::new("·").color(theme::text_muted()));
-                    ui.hyperlink_to(
-                        "OpenStreetMap attribution",
-                        crate::deflock_source::OPENSTREETMAP_ATTRIBUTION_URL,
-                    );
+                if !show_landings {
+                    model.selected_landing_point = None;
+                }
+            }
+
+            // Names live on the features either way; this only
+            // controls whether the globe draws ~2,600 of them at once.
+            let mut show_labels = model
+                .submarine_cable_layers
+                .get(CABLE_LAYER_INDEX)
+                .is_some_and(|layer| layer.show_labels);
+            if ui
+                .checkbox(&mut show_labels, "Labels")
+                .on_hover_text(
+                    "Draws every cable and landing name. Dense at world zoom.",
+                )
+                .changed()
+            {
+                model.update_submarine_cable_layers(|layers| {
+                    for layer in layers {
+                        layer.show_labels = show_labels;
+                    }
                 });
-                ui.add_space(4.0);
+            }
+        });
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.hyperlink_to("Submarine Cable Map", crate::submarine_cables::PROJECT_URL);
+        ui.label(egui::RichText::new("·").color(theme::text_muted()));
+        ui.small(
+            egui::RichText::new(crate::submarine_cables::ATTRIBUTION)
+                .color(theme::text_muted()),
+        );
+    });
+    ui.add_space(4.0);
 
-                crate::buildout::view::controls(ui, model);
-                ui.add_space(4.0);
+    ui.checkbox(&mut model.show_active_fires, "Active fires (24h)")
+        .on_hover_text(
+            "VIIRS thermal anomalies from NASA FIRMS, refreshed hourly while on. \
+             Marker size and colour track fire radiative power; low-confidence \
+             detections are filtered out.",
+        );
+    ui.small(egui::RichText::new(&model.fire_status).color(theme::text_muted()));
+    ui.horizontal_wrapped(|ui| {
+        ui.hyperlink_to("NASA FIRMS", crate::fire_source::PROJECT_URL);
+        ui.label(egui::RichText::new("·").color(theme::text_muted()));
+        ui.small(
+            egui::RichText::new(crate::fire_source::ATTRIBUTION)
+                .color(theme::text_muted()),
+        );
+    });
+    ui.add_space(6.0);
 
-                ui.checkbox(&mut model.show_submarine_cables, "Submarine cables")
-                    .on_hover_text(
-                        "Cable routes and landing points from a bundled TeleGeography \
-                         snapshot. Works offline; no network access.",
-                    );
-                ui.small(
-                    egui::RichText::new(&model.submarine_cable_status).color(theme::text_muted()),
+    // ── ARCGIS SOURCES ───────────────────────────────────────────
+    section_label(ui, "ARCGIS SOURCES");
+    let url_id = ui.id().with("arcgis_url_input");
+    let mut url_buf: String = ui.data(|d| d.get_temp(url_id).unwrap_or_default());
+    ui.horizontal(|ui| {
+        let te = ui.add(
+            egui::TextEdit::singleline(&mut url_buf)
+                .hint_text("FeatureServer URL…")
+                .desired_width(ui.available_width() - 52.0),
+        );
+        let add = ui.small_button("Add").clicked();
+        if (add || (te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))))
+            && !url_buf.trim().is_empty()
+        {
+            let canonical = arcgis_source::normalize_url(&url_buf);
+            if !model
+                .arcgis_sources
+                .iter()
+                .any(|s| arcgis_source::normalize_url(&s.url) == canonical)
+            {
+                let color_offset = model.arcgis_sources.len() * 2;
+                arcgis_source::add_source(
+                    canonical.clone(),
+                    color_offset,
+                    ui.ctx().clone(),
                 );
-                if model.show_submarine_cables && !model.submarine_cable_layers.is_empty() {
-                    use crate::submarine_cables::{CABLE_LAYER_INDEX, LANDING_LAYER_INDEX};
-                    ui.indent("submarine_cable_options", |ui| {
-                        let mut show_landings = model
-                            .submarine_cable_layers
-                            .get(LANDING_LAYER_INDEX)
-                            .is_some_and(|layer| layer.visible);
-                        if ui
-                            .checkbox(&mut show_landings, "Landing points")
-                            .on_hover_text(
-                                "Coastal stations where cables come ashore. Hover for the \
-                                 station, click for every cable that lands there.",
-                            )
-                            .changed()
-                        {
-                            model.update_submarine_cable_layers(|layers| {
-                                if let Some(layer) = layers.get_mut(LANDING_LAYER_INDEX) {
-                                    layer.visible = show_landings;
-                                }
-                            });
-                            if !show_landings {
-                                model.selected_landing_point = None;
-                            }
-                        }
+                model.arcgis_sources.push(crate::model::ArcGisSourceRef {
+                    url: canonical,
+                    enabled_layer_ids: std::collections::HashSet::new(),
+                });
+                url_buf.clear();
+            }
+        }
+        ui.data_mut(|d| d.insert_temp(url_id, url_buf));
+    });
 
-                        // Names live on the features either way; this only
-                        // controls whether the globe draws ~2,600 of them at once.
-                        let mut show_labels = model
-                            .submarine_cable_layers
-                            .get(CABLE_LAYER_INDEX)
-                            .is_some_and(|layer| layer.show_labels);
-                        if ui
-                            .checkbox(&mut show_labels, "Labels")
-                            .on_hover_text(
-                                "Draws every cable and landing name. Dense at world zoom.",
-                            )
-                            .changed()
-                        {
-                            model.update_submarine_cable_layers(|layers| {
-                                for layer in layers {
-                                    layer.show_labels = show_labels;
-                                }
-                            });
-                        }
-                    });
+    ui.add_space(4.0);
+
+    let mut to_remove: Option<usize> = None;
+    for (si, src_ref) in model.arcgis_sources.iter_mut().enumerate() {
+        let snap = arcgis_source::source_snapshot(&src_ref.url);
+        let title = snap.as_ref().map_or_else(
+            || src_ref.url.clone(),
+            |s| {
+                if s.discovering {
+                    "Discovering…".into()
+                } else if let Some(ref e) = s.discover_error {
+                    format!("Error: {e}")
+                } else {
+                    s.display_name.clone()
                 }
-                ui.horizontal_wrapped(|ui| {
-                    ui.hyperlink_to("Submarine Cable Map", crate::submarine_cables::PROJECT_URL);
-                    ui.label(egui::RichText::new("·").color(theme::text_muted()));
-                    ui.small(
-                        egui::RichText::new(crate::submarine_cables::ATTRIBUTION)
-                            .color(theme::text_muted()),
-                    );
-                });
-                ui.add_space(4.0);
-
-                ui.checkbox(&mut model.show_active_fires, "Active fires (24h)")
-                    .on_hover_text(
-                        "VIIRS thermal anomalies from NASA FIRMS, refreshed hourly while on. \
-                         Marker size and colour track fire radiative power; low-confidence \
-                         detections are filtered out.",
-                    );
-                ui.small(egui::RichText::new(&model.fire_status).color(theme::text_muted()));
-                ui.horizontal_wrapped(|ui| {
-                    ui.hyperlink_to("NASA FIRMS", crate::fire_source::PROJECT_URL);
-                    ui.label(egui::RichText::new("·").color(theme::text_muted()));
-                    ui.small(
-                        egui::RichText::new(crate::fire_source::ATTRIBUTION)
-                            .color(theme::text_muted()),
-                    );
-                });
-                ui.add_space(6.0);
-
-                // ── ARCGIS SOURCES ───────────────────────────────────────────
-                section_label(ui, "ARCGIS SOURCES");
-                let url_id = ui.id().with("arcgis_url_input");
-                let mut url_buf: String = ui.data(|d| d.get_temp(url_id).unwrap_or_default());
-                ui.horizontal(|ui| {
-                    let te = ui.add(
-                        egui::TextEdit::singleline(&mut url_buf)
-                            .hint_text("FeatureServer URL…")
-                            .desired_width(ui.available_width() - 52.0),
-                    );
-                    let add = ui.small_button("Add").clicked();
-                    if (add || (te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))))
-                        && !url_buf.trim().is_empty()
-                    {
-                        let canonical = arcgis_source::normalize_url(&url_buf);
-                        if !model
-                            .arcgis_sources
-                            .iter()
-                            .any(|s| arcgis_source::normalize_url(&s.url) == canonical)
-                        {
-                            let color_offset = model.arcgis_sources.len() * 2;
-                            arcgis_source::add_source(
-                                canonical.clone(),
-                                color_offset,
-                                ui.ctx().clone(),
-                            );
-                            model.arcgis_sources.push(crate::model::ArcGisSourceRef {
-                                url: canonical,
-                                enabled_layer_ids: std::collections::HashSet::new(),
-                            });
-                            url_buf.clear();
-                        }
-                    }
-                    ui.data_mut(|d| d.insert_temp(url_id, url_buf));
-                });
-
-                ui.add_space(4.0);
-
-                let mut to_remove: Option<usize> = None;
-                for (si, src_ref) in model.arcgis_sources.iter_mut().enumerate() {
-                    let snap = arcgis_source::source_snapshot(&src_ref.url);
-                    let title = snap.as_ref().map_or_else(
-                        || src_ref.url.clone(),
-                        |s| {
-                            if s.discovering {
-                                "Discovering…".into()
-                            } else if let Some(ref e) = s.discover_error {
-                                format!("Error: {e}")
-                            } else {
-                                s.display_name.clone()
-                            }
-                        },
-                    );
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(&title)
-                                .small()
-                                .color(theme::text_muted()),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.small_button("×").clicked() {
-                                to_remove = Some(si);
-                            }
-                        });
-                    });
-                    if let Some(ref s) = snap {
-                        if let Some(ref layers) = s.layers {
-                            for layer in layers {
-                                let mut enabled = src_ref.enabled_layer_ids.contains(&layer.id);
-                                ui.horizontal(|ui| {
-                                    ui.add_space(8.0);
-                                    let (rect, _) = ui.allocate_exact_size(
-                                        egui::vec2(6.0, 6.0),
-                                        egui::Sense::hover(),
-                                    );
-                                    ui.painter().circle_filled(rect.center(), 3.0, layer.color);
-                                    if ui.checkbox(&mut enabled, &layer.name).changed() {
-                                        if enabled {
-                                            src_ref.enabled_layer_ids.insert(layer.id);
-                                        } else {
-                                            src_ref.enabled_layer_ids.remove(&layer.id);
-                                        }
-                                    }
-                                });
-                            }
-                        }
-                    }
-                    ui.add_space(2.0);
-                }
-                if let Some(i) = to_remove {
-                    let url = model.arcgis_sources[i].url.clone();
-                    arcgis_source::remove_source(&url);
-                    model.arcgis_sources.remove(i);
+            },
+        );
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(&title)
+                    .small()
+                    .color(theme::text_muted()),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("×").clicked() {
+                    to_remove = Some(si);
                 }
             });
         });
+        if let Some(ref s) = snap {
+            if let Some(ref layers) = s.layers {
+                for layer in layers {
+                    let mut enabled = src_ref.enabled_layer_ids.contains(&layer.id);
+                    ui.horizontal(|ui| {
+                        ui.add_space(8.0);
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(6.0, 6.0),
+                            egui::Sense::hover(),
+                        );
+                        ui.painter().circle_filled(rect.center(), 3.0, layer.color);
+                        if ui.checkbox(&mut enabled, &layer.name).changed() {
+                            if enabled {
+                                src_ref.enabled_layer_ids.insert(layer.id);
+                            } else {
+                                src_ref.enabled_layer_ids.remove(&layer.id);
+                            }
+                        }
+                    });
+                }
+            }
+        }
+        ui.add_space(2.0);
+    }
+    if let Some(i) = to_remove {
+        let url = model.arcgis_sources[i].url.clone();
+        arcgis_source::remove_source(&url);
+        model.arcgis_sources.remove(i);
+    }
 }
 
 fn section_label(ui: &mut egui::Ui, label: &str) {

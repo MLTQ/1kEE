@@ -32,7 +32,7 @@ pub fn request_repaint() {
 }
 
 pub struct DashboardApp {
-    model: AppModel,
+    pub(crate) model: AppModel,
     camera_feed_viewer: CameraFeedViewer,
     event_camera_sidebar: panels::EventCameraSidebar,
     event_radio: panels::EventRadio,
@@ -44,33 +44,40 @@ pub struct DashboardApp {
 
 impl DashboardApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        theme::install(&cc.egui_ctx);
-        register_repaint_ctx(&cc.egui_ctx);
-
-        // Initialise GPU pass resources for the globe view.
-        if let Some(wgpu_state) = cc.wgpu_render_state.as_ref() {
-            let globe_res =
-                globe_pass::GlobePassResources::new(&wgpu_state.device, wgpu_state.target_format);
-            let contour_res = contour_pass::ContourPassResources::new(
-                &wgpu_state.device,
-                wgpu_state.target_format,
+        if let Some(state) = &cc.wgpu_render_state {
+            Self::register_passes(
+                &state.device,
+                state.target_format,
+                &mut state.renderer.write(),
             );
-            let local_contour_res =
-                panels::world_map::local_contour_pass::LocalContourPassResources::new(
-                    &wgpu_state.device,
-                    wgpu_state.target_format,
-                );
-            let mut renderer = wgpu_state.renderer.write();
-            renderer.callback_resources.insert(globe_res);
-            renderer.callback_resources.insert(contour_res);
-            renderer.callback_resources.insert(local_contour_res);
         }
+        Self::initialize(&cc.egui_ctx, true)
+    }
 
-        // Open the event history store (creates DB if not present).
+    pub(crate) fn register_passes(
+        device: &eframe::wgpu::Device,
+        format: eframe::wgpu::TextureFormat,
+        renderer: &mut eframe::egui_wgpu::Renderer,
+    ) {
+        renderer
+            .callback_resources
+            .insert(globe_pass::GlobePassResources::new(device, format));
+        renderer
+            .callback_resources
+            .insert(contour_pass::ContourPassResources::new(device, format));
+        renderer.callback_resources.insert(
+            panels::world_map::local_contour_pass::LocalContourPassResources::new(device, format),
+        );
+    }
+
+    pub(crate) fn initialize(ctx: &egui::Context, announce: bool) -> Self {
+        theme::install(ctx);
+        register_repaint_ctx(ctx);
         crate::event_store::open();
-
         let model = AppModel::new();
-        let gruve = crate::gruve::GruveBridge::start(&model);
+        let gruve = announce
+            .then(|| crate::gruve::GruveBridge::start(&model))
+            .flatten();
         Self {
             last_theme: model.map_theme,
             model,
@@ -82,37 +89,9 @@ impl DashboardApp {
     }
 }
 
-impl Drop for DashboardApp {
-    fn drop(&mut self) {
-        factal_stream::shutdown();
-        usgs_stream::shutdown();
-        camera_registry::shutdown();
-        deflock_source::shutdown();
-        fire_source::shutdown();
-        panels::world_map::srtm_focus_cache::terminate_active_gdal_jobs();
-    }
-}
-
-impl eframe::App for DashboardApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Handle escape before hidden panels can consume it. Presentation mode
-        // changes only visibility, so returning restores the operator's layout.
-        ctx.input_mut(|input| {
-            if self.model.obs_view && input.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
-                self.model.obs_view = false;
-            } else if input.consume_key(egui::Modifiers::NONE, egui::Key::F10) {
-                self.model.obs_view = !self.model.obs_view;
-            }
-        });
-
-        // Apply any commands web viewers sent (steer globe / select event) before
-        // the panels read the model this frame.
-        if let Some(bridge) = &self.gruve {
-            bridge.drain_commands(&mut self.model);
-        }
-
+impl DashboardApp {
+    pub(crate) fn tick(&mut self, ctx: &egui::Context) {
         self.model.poll_asset_inventory(ctx);
-        panels::layer_file_import::poll(ctx, &mut self.model);
         self.model.global_weather.tick(ctx, self.model.active_body);
         panels::terrain_library::tick(ctx, &mut self.model);
         factal_stream::tick(&mut self.model);
@@ -159,6 +138,40 @@ impl eframe::App for DashboardApp {
         // The USGS quake feed polls with no key configured, so the frame loop
         // must keep ticking even when no API keys are present.
         ctx.request_repaint_after(Duration::from_secs(1));
+    }
+}
+
+impl Drop for DashboardApp {
+    fn drop(&mut self) {
+        factal_stream::shutdown();
+        usgs_stream::shutdown();
+        camera_registry::shutdown();
+        deflock_source::shutdown();
+        fire_source::shutdown();
+        panels::world_map::srtm_focus_cache::terminate_active_gdal_jobs();
+    }
+}
+
+impl eframe::App for DashboardApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Handle escape before hidden panels can consume it. Presentation mode
+        // changes only visibility, so returning restores the operator's layout.
+        ctx.input_mut(|input| {
+            if self.model.obs_view && input.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                self.model.obs_view = false;
+            } else if input.consume_key(egui::Modifiers::NONE, egui::Key::F10) {
+                self.model.obs_view = !self.model.obs_view;
+            }
+        });
+
+        // Apply any commands web viewers sent (steer globe / select event) before
+        // the panels read the model this frame.
+        if let Some(bridge) = &self.gruve {
+            bridge.drain_commands(&mut self.model);
+        }
+
+        panels::layer_file_import::poll(ctx, &mut self.model);
+        self.tick(ctx);
 
         self.event_camera_sidebar.render(ctx, &mut self.model);
 

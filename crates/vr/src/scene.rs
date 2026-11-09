@@ -113,6 +113,18 @@ impl Globe {
         self.lon = (self.lon + dead(x) * dt * 65. / self.scale).rem_euclid(360.);
         self.lat = (self.lat + dead(y) * dt * 50. / self.scale).clamp(-89.9, 89.9);
     }
+    pub fn recenter(&mut self, views: &[xr::View], marker: &Marker) {
+        let placed = Self::place(views, marker);
+        self.heading = placed.heading;
+        self.center = placed.center;
+    }
+    pub fn table_transform(&self) -> Mat4 {
+        Mat4::from_scale_rotation_translation(
+            Vec3::splat(0.85),
+            self.heading * Quat::from_rotation_x(-0.85),
+            self.center,
+        )
+    }
     pub fn brief_transform(&self) -> Mat4 {
         Mat4::from_scale_rotation_translation(
             Vec3::new(0.80, 0.32, 1.),

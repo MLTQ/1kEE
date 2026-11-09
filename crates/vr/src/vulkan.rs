@@ -6,6 +6,7 @@ use std::ffi::{CStr, CString};
 use wgpu::hal::{self, api::Vulkan};
 
 pub struct Graphics {
+    pub adapter_name: String,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub binding: xr::vulkan::SessionCreateInfo,
@@ -123,6 +124,7 @@ impl Graphics {
                 0,
             )?;
             eprintln!("OpenXR GPU: {} (Vulkan {selected})", adapter.info.name);
+            let adapter_name = adapter.info.name.clone();
             let instance = wgpu::Instance::from_hal::<Vulkan>(instance);
             let adapter = instance.create_adapter_from_hal::<Vulkan>(adapter);
             let (device, queue) = adapter.create_device_from_hal::<Vulkan>(
@@ -137,6 +139,7 @@ impl Graphics {
                 None,
             )?;
             Ok(Self {
+                adapter_name,
                 device,
                 queue,
                 binding,

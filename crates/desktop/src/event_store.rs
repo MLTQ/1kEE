@@ -97,53 +97,88 @@ pub fn upsert_events(events: &[EventRecord]) {
 
 /// Load all events in `[from_unix, to_unix]`, sorted oldest-first.
 pub fn load_events_in_range(from_unix: i64, to_unix: i64) -> Vec<(i64, EventRecord)> {
-    with_conn(|conn| {
-        let mut stmt = conn.prepare(
-            "SELECT factal_id, title, summary, severity_value, lat, lon, location_name, occurred_unix
-             FROM stored_events
-             WHERE occurred_unix BETWEEN ?1 AND ?2
-             ORDER BY occurred_unix ASC",
-        )?;
-        let rows = stmt.query_map(params![from_unix, to_unix], |row| {
-            let factal_id: String = row.get(0)?;
-            let title: String = row.get(1)?;
-            let summary: String = row.get(2)?;
-            let severity_value: i64 = row.get(3)?;
-            let lat: f64 = row.get(4)?;
-            let lon: f64 = row.get(5)?;
-            let location_name: String = row.get(6)?;
-            let occurred_unix: i64 = row.get(7)?;
-            Ok((
-                occurred_unix,
-                EventRecord {
-                    id: format!("hist-{factal_id}"),
-                    title,
-                    summary,
-                    severity: severity_from_value(severity_value),
-                    location_name,
-                    location: GeoPoint {
-                        lat: lat as f32,
-                        lon: lon as f32,
-                    },
-                    source: "History".into(),
-                    occurred_at: unix_to_date_str(occurred_unix),
-                    factal_brief: Some(FactalBrief {
-                        factal_id,
-                        severity_value: Some(severity_value),
-                        occurred_at_raw: None,
-                        point_wkt: None,
-                        vertical: None,
-                        subvertical: None,
-                        topics: Vec::new(),
-                        content: None,
-                        raw_json_pretty: String::new(),
-                    }),
+    with_conn(|conn| read_range(conn, from_unix, to_unix)).unwrap_or_default()
+}
+
+pub(crate) fn read_recent_from(path: &std::path::Path) -> Result<Vec<(i64, EventRecord)>, String> {
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| e.to_string())?;
+    let latest: Option<i64> = conn
+        .query_row("SELECT MAX(occurred_unix) FROM stored_events", [], |r| {
+            r.get(0)
+        })
+        .map_err(|e| e.to_string())?;
+    let end = latest.unwrap_or(0);
+    read_range(&conn, end - 86400, end).map_err(|e| e.to_string())
+}
+
+pub(crate) fn raw_brief(path: Option<&std::path::Path>, id: &str) -> Option<String> {
+    let query = |conn: &Connection| {
+        conn.query_row(
+            "SELECT raw_json FROM stored_events WHERE factal_id=?1",
+            [id],
+            |r| r.get::<_, String>(0),
+        )
+    };
+    if let Some(path) = path {
+        let conn =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+        query(&conn).ok()
+    } else {
+        with_conn(|conn| query(conn)).ok()
+    }
+    .filter(|v| !v.is_empty())
+}
+
+fn read_range(
+    conn: &Connection,
+    from_unix: i64,
+    to_unix: i64,
+) -> rusqlite::Result<Vec<(i64, EventRecord)>> {
+    let mut stmt = conn.prepare(
+        "SELECT factal_id, title, summary, severity_value, lat, lon, location_name, occurred_unix
+         FROM stored_events
+         WHERE occurred_unix BETWEEN ?1 AND ?2
+         ORDER BY occurred_unix ASC",
+    )?;
+    let rows = stmt.query_map(params![from_unix, to_unix], |row| {
+        let factal_id: String = row.get(0)?;
+        let title: String = row.get(1)?;
+        let summary: String = row.get(2)?;
+        let severity_value: i64 = row.get(3)?;
+        let lat: f64 = row.get(4)?;
+        let lon: f64 = row.get(5)?;
+        let location_name: String = row.get(6)?;
+        let occurred_unix: i64 = row.get(7)?;
+        Ok((
+            occurred_unix,
+            EventRecord {
+                id: format!("hist-{factal_id}"),
+                title,
+                summary,
+                severity: severity_from_value(severity_value),
+                location_name,
+                location: GeoPoint {
+                    lat: lat as f32,
+                    lon: lon as f32,
                 },
-            ))
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-    })
-    .unwrap_or_default()
+                source: "History".into(),
+                occurred_at: unix_to_date_str(occurred_unix),
+                factal_brief: Some(FactalBrief {
+                    factal_id,
+                    severity_value: Some(severity_value),
+                    occurred_at_raw: None,
+                    point_wkt: None,
+                    vertical: None,
+                    subvertical: None,
+                    topics: Vec::new(),
+                    content: None,
+                    raw_json_pretty: String::new(),
+                }),
+            },
+        ))
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
 }
 
 /// Unix timestamp of the oldest stored event, or `None` if the store is empty.

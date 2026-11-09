@@ -209,3 +209,7 @@ fn manager() -> &'static Mutex<PollManager> {
 #[cfg(test)]
 #[path = "factal_stream/tests.rs"]
 mod tests;
+
+pub(crate) fn stored_brief(raw:&str)->Option<crate::model::FactalBrief>{
+    parse::parse_event(&serde_json::from_str(raw).ok()?)?.factal_brief
+}

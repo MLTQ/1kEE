@@ -155,19 +155,27 @@ fn nearest_feeds(cameras: &[CameraFeed], focus: GeoPoint) -> Vec<RankedCamera> {
         .collect()
 }
 
-fn supports_preview(camera: &CameraFeed) -> bool {
-    if camera.status == CameraConnectionState::Unreachable
-        || !camera.location.lat.is_finite()
-        || !camera.location.lon.is_finite()
-        || camera.location.lat.abs() > 90.0
-        || camera.location.lon.abs() > 180.0
+fn supports_preview(camera:&CameraFeed)->bool {
+    preview_source(camera.status,camera.location,&camera.kind,&camera.stream_url)
+}
+
+pub(crate) fn nearby_preview(camera:&crate::model::NearbyCamera)->bool {
+    preview_source(camera.status,camera.location,&camera.kind,&camera.stream_url)
+}
+
+fn preview_source(status:CameraConnectionState,location:GeoPoint,kind:&str,url:&str)->bool {
+    if status == CameraConnectionState::Unreachable
+        || !location.lat.is_finite()
+        || !location.lon.is_finite()
+        || location.lat.abs() > 90.0
+        || location.lon.abs() > 180.0
     {
         return false;
     }
-    let Ok(url) = reqwest::Url::parse(&camera.stream_url) else {
+    let Ok(url) = reqwest::Url::parse(url) else {
         return false;
     };
-    let kind = camera.kind.to_ascii_lowercase();
+    let kind = kind.to_ascii_lowercase();
     let path = url.path().to_ascii_lowercase();
     matches!(url.scheme(), "http" | "https")
         && url.username().is_empty()

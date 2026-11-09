@@ -281,6 +281,10 @@ fn paint_detail_notice(painter: &egui::Painter, rect: egui::Rect, local: bool) {
 }
 
 fn paint_notice(painter: &egui::Painter, rect: egui::Rect, message: String) {
+    if painter.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("vr-local-capture")).unwrap_or(false)) {
+        painter.ctx().data_mut(|d|d.insert_temp(egui::Id::new("vr-terrain-status"),message));
+        return;
+    }
     let width = (rect.width() - 40.0).clamp(80.0, 440.0);
     let galley = painter.layout(
         message,
@@ -454,6 +458,11 @@ pub(super) fn draw_local(
         && let Some(region) = super::atlas_viewport::Region::padded(visible)
     {
         if let Some(detail) = detail_texture_visible(painter.ctx(), root, region, visible, true) {
+            // Capture height only once the native pass has published this same raster.
+            if painter.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("vr-local-capture")).unwrap_or(false))
+                && super::atlas_surface::uploaded(painter.ctx(),1,detail.raster.id) {
+                painter.ctx().data_mut(|d| d.insert_temp(egui::Id::new("vr-local-raster"), detail.raster.clone()));
+            }
             super::atlas_surface::Callback::local(
                 painter,
                 layout,

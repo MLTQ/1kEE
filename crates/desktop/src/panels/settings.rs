@@ -124,3 +124,5 @@ pub fn render_settings(ctx: &egui::Context, model: &mut AppModel) {
 #[cfg(test)]
 #[path = "chrome_tests.rs"]
 mod tests;
+
+pub(crate) use appearance::atlas_controls as vr_atlas_controls;

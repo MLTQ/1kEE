@@ -1042,7 +1042,7 @@ pub fn visual_half_extent_for_zoom(view_zoom: f32) -> f32 {
     KNOTS.last().map(|(_, extent)| *extent).unwrap_or(0.17)
 }
 
-fn layout(rect: egui::Rect) -> LocalLayout {
+pub(super) fn layout(rect: egui::Rect) -> LocalLayout {
     let width = rect.width() * 0.82;
     let height = rect.height() * 0.74;
     LocalLayout {

@@ -14,6 +14,9 @@ const STEREO: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STE
 #[derive(Default)]
 struct Options {
     frames: Option<u64>,
+    reference: bool,
+    root: Option<PathBuf>,
+    import: Option<PathBuf>,
     tile: Option<TileSource>,
     stream_after: u64,
     display_test: bool,
@@ -31,20 +34,30 @@ fn options() -> Result<Option<Options>> {
         match arg.as_str() {
             "-h" | "--help" => {
                 println!(
-                    "1kEE native OpenXR globe\n\nStart SteamVR with the Index tracking, then run this binary.\n\n  --frames N          Exit after N rendered stereo frames\n  --stream-after N    Start reading the contour tile after N rendered frames (default 120)\n  --display-test      Use head-relative stereo for display diagnostics only\n  --no-terrain        Baseline without contour work\n  --tile DB Z Y X     Use a tile from a native 1kEE contour SQLite cache\n  --events DB         Focus the latest geolocated event in a desktop event database\n\nLeft stick rotates. Right stick up/down zooms the surface. Point the right controller at the marker and click the trigger to select."
+                    "1kEE native OpenXR globe\n\nStart SteamVR with the Index tracking, then run this binary.\n\n  --import FILE       Open a georeferenced GeoTIFF, GeoJSON, KML or KMZ layer\n  --asset-root PATH   Override the desktop asset root for native map tiles\n  --demo              Run the original single-tile stereo diagnostic\n  --frames N          Exit after N rendered stereo frames\n  --stream-after N    Start reading the contour tile after N rendered frames (default 120)\n  --display-test      Use head-relative stereo for display diagnostics only\n  --no-terrain        Baseline without contour work\n  --tile DB Z Y X     Use a tile from a native 1kEE contour SQLite cache\n  --events DB         Focus the latest geolocated event in a desktop event database\n\nLeft A hides/shows wrist controls. Aim and trigger with the right hand. Right stick scrolls over menus and zooms over the map."
                 );
                 return Ok(None);
             }
+            "--demo" => o.reference = true,
+            "--import" => o.import = Some(value()?.into()),
+            "--asset-root" => o.root = Some(value()?.into()),
             "--display-test" => o.display_test = true,
             "--frames" => {
                 let n = value()?.parse()?;
                 ensure!(n > 0, "--frames must be positive");
                 o.frames = Some(n);
             }
-            "--stream-after" => o.stream_after = value()?.parse()?,
+            "--stream-after" => {
+                o.reference = true;
+                o.stream_after = value()?.parse()?;
+            }
             "--events" => o.events = Some(value()?.into()),
-            "--no-terrain" => o.tile = None,
+            "--no-terrain" => {
+                o.reference = true;
+                o.tile = None;
+            }
             "--tile" => {
+                o.reference = true;
                 o.tile = Some(TileSource::Native {
                     path: value()?.into(),
                     key: [value()?.parse()?, value()?.parse()?, value()?.parse()?],
@@ -140,10 +153,17 @@ impl Timing {
 
 fn run(o: Options) -> Result<()> {
     let marker = Marker::load(o.events.as_deref())?;
-    eprintln!(
-        "Marker: {} ({:.4}, {:.4})",
-        marker.title, marker.lat, marker.lon
-    );
+    if o.reference {
+        eprintln!(
+            "Marker: {} ({:.4}, {:.4})",
+            marker.title, marker.lat, marker.lon
+        );
+    } else {
+        eprintln!(
+            "Native operator starting at {:.4}°, {:.4}°",
+            marker.lat, marker.lon
+        );
+    }
     // The loader, Vulkan device and session all outlive their dependent objects.
     let entry = unsafe { xr::Entry::load(&()) }
         .context("load libopenxr_loader; install the OpenXR loader")?;
@@ -212,6 +232,28 @@ fn run(o: Options) -> Result<()> {
         eyes.push(Eye::new(&gpu.device, &session, size, raw, format)?);
     }
     let mut renderer = render::Renderer::new(&gpu.device, &gpu.queue, format, &marker)?;
+    let mut cockpit = if o.reference {
+        None
+    } else {
+        let link = crate::operator::Link::start(
+            gpu.adapter_name.clone(),
+            marker.lat,
+            marker.lon,
+            o.root,
+            o.events,
+            o.import,
+        )?;
+        Some(crate::cockpit::Cockpit::new(
+            link,
+            one_thousand_electric_eye_desktop::vr_operator::View {
+                lat: marker.lat,
+                lon: marker.lon,
+                scale: 1.,
+                local: false,
+                local_zoom: 25.,
+            },
+        ))
+    };
     let mut timer = render::GpuTimer::new(&gpu.device);
     let mut terrain = Terrain {
         source: o.tile,
@@ -309,22 +351,42 @@ fn run(o: Options) -> Result<()> {
             recenter_at = None;
         }
         let globe = globe.get_or_insert_with(|| Globe::place(&views, &marker));
-        if focused {
-            controls.update(
-                &session,
-                &space,
-                time,
-                globe,
-                &marker,
-                frame.predicted_display_period.as_nanos() as f32 / 1e9,
-            )?;
-        }
-        if count >= o.stream_after
-            && let Err(error) = terrain.advance(&mut renderer, &gpu.queue)
-        {
-            eprintln!("Contour tile unavailable: {error:#}");
-            terrain.receiver = None;
-            terrain.upload = None;
+        let hands = if focused {
+            controls.sample(&session, &space, time)?
+        } else {
+            Default::default()
+        };
+        let dt = (frame.predicted_display_period.as_nanos() as f32 / 1e9).clamp(0., 0.1);
+        if let Some(operator) = &mut cockpit {
+            let head = (crate::scene::pose(views[0].pose).w_axis
+                + crate::scene::pose(views[1].pose).w_axis)
+                .truncate()
+                * 0.5;
+            let (reset, exit) =
+                operator.tick(&mut renderer, &gpu.queue, globe, &hands, head, dt)?;
+            controls.cursor = operator.cursor;
+            if reset {
+                globe.recenter(&views, &marker);
+            }
+            if exit {
+                session.request_exit()?;
+            }
+        } else {
+            globe.rotate(hands.rotate.x, hands.rotate.y, dt);
+            globe.zoom(hands.zoom, dt);
+            controls.cursor = hands.right.and_then(|a| globe.aim_point(a));
+            if hands.click {
+                controls.selected = controls.cursor.is_some_and(|p| {
+                    p.distance(crate::scene::surface(marker.lat, marker.lon)) * globe.scale < 0.045
+                });
+            }
+            if count >= o.stream_after
+                && let Err(e) = terrain.advance(&mut renderer, &gpu.queue)
+            {
+                eprintln!("Contour tile unavailable: {e:#}");
+                terrain.receiver = None;
+                terrain.upload = None;
+            }
         }
         gpu.device.poll(wgpu::Maintain::Poll);
         let measured = timer

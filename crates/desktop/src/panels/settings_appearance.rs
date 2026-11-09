@@ -43,7 +43,7 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
     }
 }
 
-fn atlas_controls(ui: &mut egui::Ui, style: &mut crate::atlas_style::AtlasStyle) {
+pub(crate) fn atlas_controls(ui: &mut egui::Ui, style: &mut crate::atlas_style::AtlasStyle) {
     use crate::atlas_style::{AtlasStyle, LightMode};
     ui.add_space(10.0);
     ui.strong("Terrain lighting");

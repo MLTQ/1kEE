@@ -11,6 +11,13 @@ struct Uniforms {
     vp: [[f32; 4]; 4],
     inv_vp: [[f32; 4]; 4],
     brief_vp: [[f32; 4]; 4],
+    wrist_vp: [[f32; 4]; 4],
+    table_inverse: [[f32; 4]; 4],
+    table_eye: [f32; 4],
+    source_projection: [f32; 4],
+    source_rotation: [f32; 4],
+    layers: [f32; 4],
+    wrist_cursor: [f32; 4],
     eye: [f32; 4],
     viewport: [f32; 4],
     marker: [f32; 4],
@@ -23,6 +30,8 @@ struct Uniforms {
 }
 
 pub struct Renderer {
+    pub cartography: crate::cartography::Cartography,
+    wrist: wgpu::RenderPipeline,
     globe: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
     brief: wgpu::RenderPipeline,
@@ -78,6 +87,12 @@ impl Renderer {
             ..Default::default()
         });
         let brief_view = crate::brief::texture(device, queue, marker);
+        let cartography = crate::cartography::Cartography::new(device);
+        let array = |filterable| wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable },
+            view_dimension: wgpu::TextureViewDimension::D2Array,
+            multisampled: false,
+        };
         let entries = [
             wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
@@ -95,6 +110,10 @@ impl Renderer {
                 view_dimension: wgpu::TextureViewDimension::D2,
                 multisampled: false,
             },
+            array(true),
+            array(true),
+            array(false),
+            array(true),
         ];
         let bindings = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("stereo bindings"),
@@ -136,6 +155,22 @@ impl Renderer {
                         wgpu::BindGroupEntry {
                             binding: 3,
                             resource: wgpu::BindingResource::TextureView(&brief_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(cartography.map_view()),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::TextureView(cartography.wrist_view()),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::TextureView(&cartography.height_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::TextureView(cartography.room_view()),
                         },
                     ],
                 });
@@ -199,6 +234,12 @@ impl Renderer {
             wgpu::PrimitiveTopology::TriangleStrip,
             &[],
         );
+        let wrist = pipeline(
+            "vs_wrist",
+            "fs_wrist",
+            wgpu::PrimitiveTopology::TriangleStrip,
+            &[],
+        );
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("resident contour tile"),
             size: (MAX_VERTICES * 12) as _,
@@ -206,6 +247,8 @@ impl Renderer {
             mapped_at_creation: false,
         });
         Ok(Self {
+            wrist,
+            cartography,
             globe,
             lines,
             brief,
@@ -251,7 +294,25 @@ impl Renderer {
         let modelview = pose(view.pose).inverse() * globe.transform();
         let vp = projection(view.fov) * modelview;
         let eye = modelview.inverse().w_axis;
+        let world_eye = pose(view.pose);
+        let camera = projection(view.fov) * world_eye.inverse();
+        let table = globe.table_transform();
+        let native = &self.cartography;
+        let f = native.frame.as_ref();
+        let [yaw, pitch] = f.map_or([0.; 2], |f| f.angles);
         let data = Uniforms {
+            wrist_vp: (camera * native.wrist_pose.unwrap_or(glam::Mat4::IDENTITY))
+                .to_cols_array_2d(),
+            table_inverse: (camera * table).inverse().to_cols_array_2d(),
+            table_eye: (table.inverse() * world_eye.w_axis).to_array(),
+            source_projection: f.map_or([0.; 4], |f| f.projection),
+            source_rotation: [yaw.cos(), yaw.sin(), pitch.cos(), pitch.sin()],
+            layers: native.layers(),
+            wrist_cursor: native
+                .pointer
+                .map_or([-1., -1., 0., native.room_layer()], |p| {
+                    [p.x, p.y, 1., native.room_layer()]
+                }),
             vp: vp.to_cols_array_2d(),
             inv_vp: vp.inverse().to_cols_array_2d(),
             brief_vp: (projection(view.fov) * pose(view.pose).inverse() * globe.brief_transform())
@@ -293,13 +354,19 @@ impl Renderer {
         pass.set_pipeline(&self.globe);
         pass.set_bind_group(0, bind, &[]);
         pass.draw(0..3, 0..1);
-        if self.published > 0 {
+        if self.published > 0 && self.cartography.frame.is_none() {
             pass.set_pipeline(&self.lines);
             pass.set_vertex_buffer(0, self.vertices.slice(..));
             pass.draw(0..self.published, 0..1);
         }
-        if selected {
+        if (selected && native.frame.is_none())
+            || (native.show_room && native.room_ready && native.frame.is_some())
+        {
             pass.set_pipeline(&self.brief);
+            pass.draw(0..4, 0..1);
+        }
+        if native.wrist_ready && native.wrist_pose.is_some() {
+            pass.set_pipeline(&self.wrist);
             pass.draw(0..4, 0..1);
         }
     }

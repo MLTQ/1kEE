@@ -101,53 +101,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
                 .request_repaint_after(std::time::Duration::from_millis(180));
         }
 
-        // Refresh AIS vessel cache (non-blocking — spawns background thread
-        // if interval elapsed; returns immediately with cached data).
-        if model.show_ships && !model.globe_view.local_mode {
-            model.tracks = moving_tracks::poll(
-                &model.aisstream_api_key,
-                model.globe_view.globe_center_latlon(),
-                ui.ctx().clone(),
-            );
-        }
-
-        // Refresh ADS-B flight cache (OpenSky Network, no key required).
-        if model.show_flights && !model.globe_view.local_mode {
-            model.flights =
-                flight_tracks::poll(model.globe_view.globe_center_latlon(), ui.ctx().clone());
-        }
-
-        if model.active_body == crate::model::ActiveBody::Earth {
-            model.transit.poll(ui.ctx());
-        }
-
-        // Poll ArcGIS sources (non-blocking)
-        {
-            let source_refs: Vec<(String, std::collections::HashSet<u32>)> = model
-                .arcgis_sources
-                .iter()
-                .map(|s| (s.url.clone(), s.enabled_layer_ids.clone()))
-                .collect();
-            model.arcgis_features = arcgis_source::poll(&source_refs, ui.ctx().clone());
-        }
-
-        // Trigger background SLDEM preview + contour builds when Moon Mode is active.
-        if model.active_body == crate::model::ActiveBody::Moon {
-            srtm_focus_cache::ensure_lunar_preview(model.selected_root.as_deref());
-            if srtm_focus_cache::is_lunar_preview_building()
-                || srtm_focus_cache::is_lunar_contour_building()
-            {
-                ui.ctx()
-                    .request_repaint_after(std::time::Duration::from_millis(250));
-            }
-        }
-        // Keep repainting while Mars contour tiles are being built.
-        if model.active_body == crate::model::ActiveBody::Mars
-            && srtm_focus_cache::is_mars_contour_building()
-        {
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(250));
-        }
+        poll_map_sources(ui, model);
 
         if !model.obs_view {
             super::map_rail::render(ui, model);
@@ -294,6 +248,61 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         }
     });
 }
+
+fn poll_map_sources(ui: &egui::Ui, model:&mut AppModel) {
+        // Refresh AIS vessel cache (non-blocking — spawns background thread
+    // if interval elapsed; returns immediately with cached data).
+    if model.show_ships && !model.globe_view.local_mode {
+        model.tracks = moving_tracks::poll(
+            &model.aisstream_api_key,
+            model.globe_view.globe_center_latlon(),
+            ui.ctx().clone(),
+        );
+    }
+
+    // Refresh ADS-B flight cache (OpenSky Network, no key required).
+    if model.show_flights && !model.globe_view.local_mode {
+        model.flights =
+            flight_tracks::poll(model.globe_view.globe_center_latlon(), ui.ctx().clone());
+    }
+
+    if model.active_body == crate::model::ActiveBody::Earth {
+        model.transit.poll(ui.ctx());
+    }
+
+    // Poll ArcGIS sources (non-blocking)
+    {
+        let source_refs: Vec<(String, std::collections::HashSet<u32>)> = model
+            .arcgis_sources
+            .iter()
+            .map(|s| (s.url.clone(), s.enabled_layer_ids.clone()))
+            .collect();
+        model.arcgis_features = arcgis_source::poll(&source_refs, ui.ctx().clone());
+    }
+
+    // Trigger background SLDEM preview + contour builds when Moon Mode is active.
+    if model.active_body == crate::model::ActiveBody::Moon {
+        srtm_focus_cache::ensure_lunar_preview(model.selected_root.as_deref());
+        if srtm_focus_cache::is_lunar_preview_building()
+            || srtm_focus_cache::is_lunar_contour_building()
+        {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(250));
+        }
+    }
+    // Keep repainting while Mars contour tiles are being built.
+    if model.active_body == crate::model::ActiveBody::Mars
+        && srtm_focus_cache::is_mars_contour_building()
+    {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(250));
+    }
+
+}
+
+mod vr_map;
+pub(crate) use vr_map::paint as paint_vr;
+pub(crate) use local_terrain_scene::visual_half_extent_for_zoom as vr_local_extent;
 
 fn draw_event_follow_overlay(
     painter: &egui::Painter,

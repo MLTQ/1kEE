@@ -15,10 +15,10 @@ static PENDING: OnceLock<Mutex<Option<mpsc::Receiver<ResultMessage>>>> = OnceLoc
 fn pending() -> &'static Mutex<Option<mpsc::Receiver<ResultMessage>>> {
     PENDING.get_or_init(Default::default)
 }
-pub(super) fn busy() -> bool {
+pub(crate) fn busy() -> bool {
     pending().lock().unwrap().is_some()
 }
-pub(super) fn queue(path: PathBuf, model: &mut AppModel, max_texture_side: usize) {
+pub(crate) fn queue(path: PathBuf, model: &mut AppModel, max_texture_side: usize) {
     let mut guard = pending().lock().unwrap();
     if guard.is_some() {
         return;
@@ -86,7 +86,7 @@ fn read(path: PathBuf, max_texture_side: usize) -> ResultMessage {
 }
 
 /// Explicit file-picker action, displayed in the Layers sidebar.
-pub(super) fn button(ui: &mut egui::Ui, model: &mut AppModel) {
+pub(crate) fn button(ui: &mut egui::Ui, model: &mut AppModel) {
     let importing = busy();
     if ui
         .add_enabled(
