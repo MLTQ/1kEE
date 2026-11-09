@@ -298,6 +298,142 @@ fn paint(
             } else {
                 super::super::globe_scene::paint(&painter, rect, model, 0.0);
             }
+            model.global_weather.draw_time(&painter, rect);
         },
     )
+}
+
+#[test]
+#[ignore = "plays published historical imagery from both providers through the GPU renderer"]
+fn live_satellite_playback() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut gpu = screen::Screen::new([960, 600]);
+    gpu.install_globe();
+    let mut model = AppModel::new();
+    model.map_theme = crate::theme::MapTheme::Topo;
+    model.obs_view = true;
+    model.selected_root = None;
+    model.show_contours = false;
+    model.show_bathymetry = false;
+    model.show_beam = false;
+    model.globe_view.focus_on(crate::model::GeoPoint {
+        lat: 18.,
+        lon: -49.,
+    });
+    model.globe_view.zoom = 1.;
+    model.globe_view.local_zoom = 1.;
+    model.globe_view.local_pitch = 0.35;
+    let path = dir.path().join("weather.sqlite");
+    model.global_weather = GlobalWeather::new(Default::default(), path.clone());
+    for feed in &mut model.global_weather.feeds {
+        feed.options.enabled = true;
+    }
+    let deadline = Instant::now() + Duration::from_secs(300);
+    loop {
+        model.global_weather.tick(&ctx, ActiveBody::Earth);
+        if model
+            .global_weather
+            .feeds
+            .iter()
+            .all(|f| f.worker.is_none())
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    for feed in &model.global_weather.feeds {
+        assert!(
+            feed.catalog.len() >= 8 && feed.image.is_some(),
+            "{}: {}",
+            feed.product.label(),
+            feed.status
+        );
+    }
+    model.global_weather.player = Some(playback::Player::new(&model.global_weather.feeds));
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960., 600.));
+    let mut times = Vec::new();
+    let mut previous: [Option<Vec<u8>>; 2] = Default::default();
+    let mut changes = [0; 2];
+    while times.len() < 9 {
+        model.global_weather.tick(&ctx, ActiveBody::Earth);
+        let player = model.global_weather.player.as_ref().unwrap();
+        assert!(
+            player.playing,
+            "playback stopped on an unavailable observation"
+        );
+        if let Some(time) = player.shown_time()
+            && times.last().is_none_or(|old| old != time)
+        {
+            assert!(times.last().is_none_or(|old: &String| old.as_str() < time));
+            assert_eq!(model.global_weather.displayed(0).unwrap().0, &time[..10]);
+            assert_eq!(model.global_weather.displayed(1).unwrap().0, time);
+            for (i, prior) in previous.iter_mut().enumerate() {
+                model.globe_view.local_mode = i == 1;
+                let out = paint(&ctx, &gpu, rect, &model);
+                let pixels = gpu.render(&ctx, out, true).unwrap();
+                // Exclude the clock and compare only the map.
+                let scene = &pixels[960 * 4 * 60..];
+                if prior.as_ref().is_some_and(|old| scene != old.as_slice()) {
+                    changes[i] += 1;
+                }
+                *prior = Some(scene.to_vec());
+                if i == 0
+                    && let Some(dir) = std::env::var_os("ONEKEE_WEATHER_PREVIEWS")
+                {
+                    image::save_buffer(
+                        PathBuf::from(dir).join(format!("playback-{:02}.png", times.len())),
+                        &pixels,
+                        960,
+                        600,
+                        image::ColorType::Rgba8,
+                    )
+                    .unwrap();
+                }
+            }
+            println!("Rendered globe and local at {time}");
+            times.push(time.to_owned());
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out after {} frames",
+            times.len()
+        );
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    assert_ne!(&times[0][..10], &times[8][..10]);
+    // A regional crop can legitimately repeat between two three-hour mosaics.
+    assert!(
+        changes.iter().all(|&n| n >= 2),
+        "changes per view: {changes:?}"
+    );
+    model.global_weather.player.as_mut().unwrap().playing = false;
+    model.globe_view.local_zoom = 4.5;
+    loop {
+        let out = paint(&ctx, &gpu, rect, &model);
+        gpu.render(&ctx, out, false);
+        let ir = &model.global_weather.feeds[1];
+        let detail = ir.detail.borrow();
+        if detail.status.starts_with("Detail ·") {
+            break;
+        }
+        assert!(
+            !detail.status.contains("unavailable") && Instant::now() < deadline,
+            "{}",
+            detail.status
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(
+        model.global_weather.displayed(1).unwrap().0,
+        times.last().unwrap()
+    );
+    model.global_weather.stop_playback();
+    for (i, feed) in model.global_weather.feeds.iter().enumerate() {
+        assert_eq!(
+            model.global_weather.displayed(i).unwrap().0,
+            feed.stamp.as_deref().unwrap()
+        );
+    }
 }

@@ -216,6 +216,9 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         }
 
         draw_event_follow_overlay(&painter, rect, model, &scene.event_markers);
+        if model.active_body == crate::model::ActiveBody::Earth {
+            model.global_weather.draw_time(&painter, rect);
+        }
 
         // The chyron and selected card remain in Focus. The app shell owns the
         // open Brief/live camera; other event cards never cover the map.

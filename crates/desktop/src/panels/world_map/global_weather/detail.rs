@@ -40,10 +40,15 @@ pub(super) fn fetch(
     })
 }
 
-type Worker = (Window, mpsc::Receiver<Result<SatelliteImage, String>>);
+type Worker = (
+    String,
+    Window,
+    mpsc::Receiver<Result<SatelliteImage, String>>,
+);
 
 #[derive(Default)]
 pub(super) struct Detail {
+    stamp: Option<String>,
     loaded: VecDeque<(Window, SatelliteLayer)>,
     target: Option<(Window, Instant)>,
     worker: Option<Worker>,
@@ -53,7 +58,7 @@ pub(super) struct Detail {
 
 impl Detail {
     fn poll(&mut self, ctx: &egui::Context, product: Product) {
-        let Some((window, rx)) = &self.worker else {
+        let Some((stamp, window, rx)) = &self.worker else {
             return;
         };
         let result = match rx.try_recv() {
@@ -61,6 +66,10 @@ impl Detail {
             Err(mpsc::TryRecvError::Empty) => return,
             Err(mpsc::TryRecvError::Disconnected) => Err("Detail worker stopped".into()),
         };
+        if self.stamp.as_ref() != Some(stamp) {
+            self.worker = None;
+            return;
+        }
         match result {
             Ok(image) => {
                 self.loaded.push_front((
@@ -79,12 +88,18 @@ impl Detail {
         &mut self,
         ctx: &egui::Context,
         feed: &Feed,
+        stamp: &str,
         cache_path: &Path,
         visible: Option<[f32; 4]>,
         display_pixels: f32,
     ) -> Option<&SatelliteLayer> {
         let product = feed.product;
-        let stamp = feed.stamp.as_deref()?;
+        if self.stamp.as_deref() != Some(stamp) {
+            self.stamp = Some(stamp.to_owned());
+            self.loaded.clear();
+            self.target = None;
+            self.failure = None;
+        }
         self.poll(ctx, product);
         self.status.clear();
         let Some((visible, planned)) = visible.and_then(|b| {
@@ -156,15 +171,15 @@ impl Detail {
         }
         let (tx, rx) = mpsc::channel();
         let wake = ctx.clone();
-        let stamp = stamp.to_owned();
+        let requested = stamp.to_owned();
         let path = cache_path.to_owned();
         match std::thread::Builder::new()
             .name("weather-detail".into())
             .spawn(move || {
-                let _ = tx.send(fetch(product, &stamp, wanted, &path));
+                let _ = tx.send(fetch(product, &requested, wanted, &path));
                 wake.request_repaint();
             }) {
-            Ok(_) => self.worker = Some((wanted, rx)),
+            Ok(_) => self.worker = Some((stamp.to_owned(), wanted, rx)),
             Err(e) => self.failure = Some((wanted, now + Duration::from_secs(60), e.to_string())),
         }
     }
