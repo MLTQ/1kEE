@@ -1,5 +1,6 @@
 pub mod admin;
 mod arcgis;
+mod asset_inventory;
 mod cameras;
 mod recap_regions;
 mod events;
@@ -25,11 +26,11 @@ pub use replay::{ActiveFlare, ReplayState};
 pub use vessels::*;
 
 use crate::city_catalog;
-use crate::osm_ingest::{self, OsmInventory};
+use crate::osm_ingest::OsmInventory;
 use crate::panels::world_map::global_weather;
 use crate::settings_store;
 use crate::stellar_time;
-use crate::terrain_assets::{self, TerrainInventory};
+use crate::terrain_assets::TerrainInventory;
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -239,6 +240,7 @@ pub struct AppModel {
     pub replay_history_status: String,
     pub terrain_inventory: TerrainInventory,
     pub osm_inventory: OsmInventory,
+    asset_scan: asset_inventory::Scan,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -255,12 +257,17 @@ struct NearbyCameraCache {
 
 impl AppModel {
     pub fn new() -> Self {
-        let _ = settings_store::ensure_default_asset_layout();
         let app_settings = settings_store::load_app_settings();
         let selected_root = settings_store::effective_asset_root();
-        let terrain_inventory = TerrainInventory::detect_from(selected_root.as_deref());
-        let osm_runtime_store = osm_ingest::ensure_runtime_store(selected_root.as_deref());
-        let osm_inventory = OsmInventory::detect_from(selected_root.as_deref());
+        let asset_scan = asset_inventory::Scan::new(selected_root.clone());
+        let terrain_inventory = TerrainInventory {
+            primary_runtime_source: "Scanning terrain assets…",
+            ..Default::default()
+        };
+        let osm_inventory = OsmInventory {
+            primary_runtime_source: "Scanning OSM assets…",
+            ..Default::default()
+        };
         let factal_api_key = app_settings.factal_api_key.trim().to_owned();
         let windy_webcams_api_key = app_settings.windy_webcams_api_key.trim().to_owned();
         let ny511_api_key = app_settings.ny511_api_key.trim().to_owned();
@@ -422,14 +429,7 @@ impl AppModel {
                         "Camera registry keys loaded; live camera sync is ready.".into()
                     },
                 ];
-                lines.extend(terrain_inventory.status_lines());
-                lines.extend(osm_inventory.status_lines());
-                if let Ok(runtime_store) = &osm_runtime_store {
-                    lines.push(format!(
-                        "OSM runtime store ready: {}",
-                        runtime_store.display()
-                    ));
-                }
+                lines.push("Scanning terrain and OSM assets in the background…".into());
                 lines
             },
             replay_mode: false,
@@ -463,6 +463,7 @@ impl AppModel {
             camera_registry_progress_label: String::new(),
             terrain_inventory,
             osm_inventory,
+            asset_scan,
         }
     }
 
@@ -556,31 +557,8 @@ impl AppModel {
         self.selected_root = Some(root.clone());
         self.settings_asset_root = root.display().to_string();
         let _ = self.save_settings();
-        let _ = settings_store::ensure_default_asset_layout();
-        self.terrain_inventory = TerrainInventory::detect_from(Some(root.as_path()));
-        let osm_runtime_store = osm_ingest::ensure_runtime_store(Some(root.as_path()));
-        self.osm_inventory = OsmInventory::detect_from(Some(root.as_path()));
+        self.request_asset_inventory();
         self.push_log(format!("Asset root selected: {}", root.display()));
-        if let Some(srtm_root) = terrain_assets::find_srtm_root(Some(root.as_path())) {
-            self.push_log(format!("Detected SRTM root: {}", srtm_root.display()));
-        }
-        self.push_log(format!(
-            "Terrain refresh: {}",
-            self.terrain_inventory.status_summary()
-        ));
-        if let Some(planet) = &self.osm_inventory.planet_path {
-            self.push_log(format!("Detected OSM planet source: {}", planet.display()));
-        }
-        if let Ok(runtime_store) = osm_runtime_store {
-            self.push_log(format!(
-                "OSM runtime store ready: {}",
-                runtime_store.display()
-            ));
-        }
-        self.push_log(format!(
-            "OSM refresh: {}",
-            self.osm_inventory.status_summary()
-        ));
     }
 
     pub fn marker_scale(&self) -> f32 {
@@ -642,7 +620,6 @@ impl AppModel {
     }
 
     pub fn apply_saved_settings(&mut self) {
-        let _ = settings_store::ensure_default_asset_layout();
         let settings = settings_store::load_app_settings();
         self.selected_root = settings_store::effective_asset_root();
         self.settings_asset_root = self
@@ -686,9 +663,7 @@ impl AppModel {
         self.eyes_on_requests_per_minute = settings.eyes_on_requests_per_minute;
         self.aisstream_api_key = settings.aisstream_api_key.trim().to_owned();
 
-        self.terrain_inventory = TerrainInventory::detect_from(self.selected_root.as_deref());
-        let osm_runtime_store = osm_ingest::ensure_runtime_store(self.selected_root.as_deref());
-        self.osm_inventory = OsmInventory::detect_from(self.selected_root.as_deref());
+        self.request_asset_inventory();
         self.camera_registry_status = if self.has_enabled_camera_sources() {
             "configured".into()
         } else {
@@ -700,27 +675,7 @@ impl AppModel {
                 "Settings applied with asset root: {}",
                 root.display()
             ));
-            if let Some(srtm_root) = terrain_assets::find_srtm_root(Some(root.as_path())) {
-                self.push_log(format!("Detected SRTM root: {}", srtm_root.display()));
-            }
         }
-        if let Some(planet) = &self.osm_inventory.planet_path {
-            self.push_log(format!("Detected OSM planet source: {}", planet.display()));
-        }
-        if let Ok(runtime_store) = osm_runtime_store {
-            self.push_log(format!(
-                "OSM runtime store ready: {}",
-                runtime_store.display()
-            ));
-        }
-        self.push_log(format!(
-            "Terrain refresh: {}",
-            self.terrain_inventory.status_summary()
-        ));
-        self.push_log(format!(
-            "OSM refresh: {}",
-            self.osm_inventory.status_summary()
-        ));
     }
 
     pub fn selected_event(&self) -> Option<&EventRecord> {

@@ -23,7 +23,9 @@ pub(crate) fn tick(ctx: &egui::Context, model: &mut AppModel) {
 
 pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
     // The inventory opens SQLite; only inspect it while this section is visible.
-    model.osm_inventory = osm_ingest::OsmInventory::detect_from(model.selected_root.as_deref());
+    if !model.asset_inventory_pending() {
+        model.osm_inventory = osm_ingest::OsmInventory::detect_from(model.selected_root.as_deref());
+    }
     ui.colored_label(
         theme::text_muted(),
         "Search cities, focus terrain, and queue background contour precompute.",

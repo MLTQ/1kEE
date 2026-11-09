@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
+#[derive(Default)]
 pub struct TerrainInventory {
     pub gebco_topography_tiles: usize,
     pub gebco_tid_tiles: usize,

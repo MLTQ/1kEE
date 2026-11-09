@@ -9,3 +9,7 @@ focus information and camera-discovery progress available in Settings → Overvi
 - Enable live cameras reuses the former explicit header action.
 - Background OSM notes and camera progress live here so arbitrary status strings
   cannot expand the main rail. Opening this section does not run a source poll.
+
+Terrain/OSM status displays scanning while the background inventory is pending.
+Planet paths come from the ready inventory; SRTM path discovery waits for that
+scan, avoiding another competing startup scan on the UI thread.

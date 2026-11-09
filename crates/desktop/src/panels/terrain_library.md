@@ -16,3 +16,6 @@ Settings → Terrain Library. Keep background job advancement independent of UI.
 - OSM worker gating still requires an enabled road/water layer.
 - Library visibility cannot stall jobs; rendering cannot open a second window.
 - SQLite inventory refresh stays confined to visible library content.
+
+The visible-section OSM inventory refresh is suppressed while the model has a
+background asset scan in progress, so opening Settings cannot duplicate that scan.

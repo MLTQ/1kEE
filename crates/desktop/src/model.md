@@ -88,3 +88,8 @@ Defines the shared domain and UI state for the 1kEE desktop application. This fi
 - Local terrain now defaults `local_layer_spread` to `1.0`, which is the neutral baseline after the projection fix; operators can still push exaggeration far beyond that from the footer control, now up to `100.0`.
 - Path settings now persist through the shared settings store and default to the executable directory rather than the process working directory.
 - Globe pitch now clamps near the poles instead of around `±63°`, so focus and drag behavior can reach the high Arctic and Antarctic without flipping through the poles.
+
+Startup and root/settings refresh queue `model/asset_inventory.rs`. Terrain and
+OSM fields initially hold scanning placeholders and are replaced asynchronously.
+`poll_asset_inventory` runs before panel rendering; stale scan generations cannot
+overwrite a newer root/settings selection.

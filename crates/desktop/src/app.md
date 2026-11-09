@@ -82,3 +82,6 @@ The buildout source drains its background worker and checks its daily deadline b
 Atlas Sunlight also advances the shared stellar clock while Earth/Atlas/Sun is
 active, independently of star-layer visibility. Live/paused/animated clock
 semantics remain shared; studio lighting does not activate that clock path.
+
+The frame loop polls `AppModel::poll_asset_inventory` before rendering. Heavy
+terrain/OSM startup discovery no longer delays window creation in AppModel::new.

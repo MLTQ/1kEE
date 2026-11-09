@@ -12,8 +12,22 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
                 ("Factal stream", model.factal_stream_status.as_str()),
                 ("USGS quakes", model.usgs_stream_status.as_str()),
                 ("Camera registry", model.camera_registry_status.as_str()),
-                ("Terrain", model.terrain_inventory.status_label()),
-                ("OSM", model.osm_inventory.status_label()),
+                (
+                    "Terrain",
+                    if model.asset_inventory_pending() {
+                        "scanning"
+                    } else {
+                        model.terrain_inventory.status_label()
+                    },
+                ),
+                (
+                    "OSM",
+                    if model.asset_inventory_pending() {
+                        "scanning"
+                    } else {
+                        model.osm_inventory.status_label()
+                    },
+                ),
             ] {
                 ui.colored_label(theme::text_muted(), name);
                 ui.label(value);
@@ -63,10 +77,12 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
     if let Some(root) = &model.selected_root {
         ui.label(format!("Asset folder: {}", root.display()));
     }
-    if let Some(root) = terrain_assets::find_srtm_root(model.selected_root.as_deref()) {
+    if !model.asset_inventory_pending()
+        && let Some(root) = terrain_assets::find_srtm_root(model.selected_root.as_deref())
+    {
         ui.label(format!("SRTM: {}", root.display()));
     }
-    if let Some(path) = osm_ingest::find_planet_pbf(model.selected_root.as_deref()) {
+    if let Some(path) = &model.osm_inventory.planet_path {
         ui.label(format!("Planet PBF: {}", path.display()));
     }
 }

@@ -61,6 +61,7 @@ pub struct GeoBounds {
     pub max_lon: f32,
 }
 
+#[derive(Default)]
 pub struct OsmInventory {
     pub planet_path: Option<PathBuf>,
     pub planet_size_bytes: u64,
