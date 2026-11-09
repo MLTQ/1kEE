@@ -149,6 +149,7 @@ positions must remain visible above the chyron and outside the clock panel.
 
 The Earth surface projection supplies front-facing buildout markers for shared rendering and picking.
 
-Earth + Atlas paints measured GEBCO relief before bathymetry contours and other
+Earth + Atlas passes the real scene rectangle to native detail selection and
+paints refined measured relief before bathymetry contours and other
 overlays. The layer is independent of contour visibility. Existing event,
 camera and scientific layers retain their ordering and interaction.

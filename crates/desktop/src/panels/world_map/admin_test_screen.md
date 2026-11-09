@@ -4,3 +4,6 @@ painting and GPU completion before comparing pixels, including residency cleanup
 
 `install_globe` optionally registers the production globe backdrop pipeline for
 the Atlas shader/relief preview, without changing the boundary tests.
+
+`max_texture_side` exposes the private test device's actual limit so native Atlas
+previews initialize egui with the same texture constraint as the real backend.

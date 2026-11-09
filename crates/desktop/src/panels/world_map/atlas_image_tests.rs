@@ -71,3 +71,28 @@ fn slope_samples_wrap_at_the_dateline() {
     let image = grid.image().unwrap();
     assert_eq!(image.pixels[row], image.pixels[row + 360]);
 }
+
+#[test]
+fn measured_ridge_casts_a_shadow_at_regional_scale() {
+    let mut grid = HeightGrid {
+        width: 48,
+        height: 48,
+        metres: vec![1000.0; 48 * 48],
+    };
+    let bounds = [7.0, 46.0, 7.15, 46.15];
+    let center = 24 * 48 + 24;
+    let flat = grid.image_for(bounds).unwrap().pixels[center];
+    // Only the northwest horizon changes; the central-difference normals
+    // around this valley point remain identical to the flat reference.
+    grid.metres[18 * 48 + 18] = 4000.0;
+    let shaded = grid.image_for(bounds).unwrap().pixels[center];
+    assert!(
+        shaded.r() + 30 < flat.r(),
+        "the measured northwest ridge casts a visible shadow"
+    );
+    let world = grid.image().unwrap().pixels[center];
+    assert!(
+        world.r() > shaded.r(),
+        "regional spacing is not mistaken for a world-sized raster"
+    );
+}

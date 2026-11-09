@@ -1,7 +1,6 @@
 # settings_appearance.rs
 
-Render the existing map palette controls inside Settings → Appearance. Selecting
-a palette updates AppModel immediately; app theme synchronization remains unchanged.
-
-Atlas appears in the same picker. Its help text explains measured GEBCO shaded
-relief, prepared overview resolution and that elevation colors are not geology.
+Render map palette controls in Settings → Appearance. Selection changes the map
+palette immediately. Atlas help describes automatic native GEBCO/SRTM/fine-cache
+refinement and explicitly preserves independent contour/other-layer controls.
+Theme selection never enables/disables contours or changes other layer choices.

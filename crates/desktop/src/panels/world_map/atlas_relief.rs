@@ -12,7 +12,58 @@ use std::{
 type Images = super::layer_snapshot::Snapshot<Option<PathBuf>, egui::TextureHandle>;
 static IMAGE: OnceLock<Mutex<Images>> = OnceLock::new();
 type MeshCache = Option<(Vec<u32>, egui::TextureId, Arc<egui::Mesh>)>;
-static MESH: OnceLock<Mutex<MeshCache>> = OnceLock::new();
+static MESH: OnceLock<Mutex<[MeshCache; 4]>> = OnceLock::new();
+
+#[derive(Clone, PartialEq, Eq)]
+struct DetailRequest {
+    root: Option<PathBuf>,
+    region: super::atlas_viewport::Region,
+    max_edge: usize,
+}
+struct LoadedDetail {
+    texture: egui::TextureHandle,
+    region: super::atlas_viewport::Region,
+}
+type Details = super::layer_snapshot::Snapshot<DetailRequest, LoadedDetail>;
+static GLOBE_DETAIL: OnceLock<Mutex<Details>> = OnceLock::new();
+static LOCAL_DETAIL: OnceLock<Mutex<Details>> = OnceLock::new();
+
+fn detail_texture(
+    ctx: &egui::Context,
+    root: Option<&Path>,
+    region: super::atlas_viewport::Region,
+    local: bool,
+) -> Option<Arc<LoadedDetail>> {
+    let request = DetailRequest {
+        root: root.map(Path::to_path_buf),
+        region,
+        max_edge: ctx.input(|i| i.max_texture_side).clamp(16, 8192),
+    };
+    let wake = ctx.clone();
+    let cache = if local { &LOCAL_DETAIL } else { &GLOBE_DETAIL };
+    let result = cache.get_or_init(Default::default).lock().ok()?.get(
+        request,
+        "atlas-native-detail",
+        |a, b| a.root == b.root,
+        move |request| {
+            let detail = super::atlas_source::load(
+                request.root.as_deref(),
+                request.region,
+                request.max_edge,
+            )?;
+            let image = detail.grid.image_for(detail.region.bounds())?;
+            Some(LoadedDetail {
+                texture: wake.load_texture(detail.source, image, egui::TextureOptions::LINEAR),
+                region: detail.region,
+            })
+        },
+    );
+    if result.is_none() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+    }
+    result
+}
+
 const WORLD: [f32; 4] = [-180.0, -90.0, 180.0, 90.0];
 
 fn texture(ctx: &egui::Context, root: Option<&Path>) -> Option<egui::TextureId> {
@@ -91,12 +142,14 @@ fn read_preview(path: &Path, signed: bool) -> Option<HeightGrid> {
 fn paint_cached(
     painter: &egui::Painter,
     texture: egui::TextureId,
+    index: usize,
     key: Vec<u32>,
     build: impl FnOnce() -> egui::Mesh,
 ) {
-    let Ok(mut cache) = MESH.get_or_init(Default::default).lock() else {
+    let Ok(mut caches) = MESH.get_or_init(Default::default).lock() else {
         return;
     };
+    let cache = &mut caches[index];
     if cache
         .as_ref()
         .is_none_or(|(old, id, _)| old != &key || *id != texture)
@@ -110,13 +163,11 @@ fn paint_cached(
 
 pub(super) fn draw_globe(
     painter: &egui::Painter,
+    rect: egui::Rect,
     layout: &GlobeLayout,
     view: &GlobeViewState,
     root: Option<&Path>,
 ) {
-    let Some(texture) = texture(painter.ctx(), root) else {
-        return;
-    };
     let key = vec![
         0,
         view.yaw.to_bits(),
@@ -127,9 +178,20 @@ pub(super) fn draw_globe(
         layout.focal_length.to_bits(),
         layout.camera_distance.to_bits(),
     ];
-    paint_cached(painter, texture, key, || {
-        super::raster_mesh::globe(layout, view, texture, WORLD, false)
-    });
+    if let Some(texture) = texture(painter.ctx(), root) {
+        paint_cached(painter, texture, 0, key.clone(), || {
+            super::raster_mesh::globe(layout, view, texture, WORLD, false)
+        });
+    }
+    if let Some(region) =
+        super::atlas_viewport::globe(rect, layout, view, painter.ctx().pixels_per_point())
+        && let Some(detail) = detail_texture(painter.ctx(), root, region, false)
+    {
+        let texture = detail.texture.id();
+        paint_cached(painter, texture, 1, key, || {
+            super::raster_mesh::globe(layout, view, texture, detail.region.bounds(), true)
+        });
+    }
 }
 
 pub(super) fn draw_local(
@@ -140,9 +202,6 @@ pub(super) fn draw_local(
     focus: GeoPoint,
     half: f32,
 ) {
-    let Some(texture) = texture(painter.ctx(), root) else {
-        return;
-    };
     let clip = painter.clip_rect();
     let key = vec![
         1,
@@ -162,9 +221,27 @@ pub(super) fn draw_local(
         clip.max.x.to_bits(),
         clip.max.y.to_bits(),
     ];
-    paint_cached(painter, texture, key, || {
-        local_mesh(layout, view, texture, focus, half, clip)
-    });
+    if let Some(texture) = texture(painter.ctx(), root) {
+        paint_cached(painter, texture, 2, key.clone(), || {
+            local_mesh(layout, view, texture, focus, half, clip)
+        });
+    }
+    if let Some(region) = super::atlas_viewport::local(clip, layout, view, focus, half)
+        && let Some(detail) = detail_texture(painter.ctx(), root, region, true)
+    {
+        let texture = detail.texture.id();
+        paint_cached(painter, texture, 3, key, || {
+            super::raster_mesh::local(
+                layout,
+                view,
+                texture,
+                detail.region.bounds(),
+                focus,
+                half,
+                clip,
+            )
+        });
+    }
 }
 
 fn local_mesh(
@@ -200,8 +277,13 @@ pub(super) fn clear() {
     if let Some(cache) = IMAGE.get() {
         cache.lock().unwrap().clear();
     }
+    for cache in [&GLOBE_DETAIL, &LOCAL_DETAIL] {
+        if let Some(cache) = cache.get() {
+            cache.lock().unwrap().clear();
+        }
+    }
     if let Some(cache) = MESH.get() {
-        *cache.lock().unwrap() = None;
+        *cache.lock().unwrap() = Default::default();
     }
 }
 

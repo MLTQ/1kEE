@@ -34,7 +34,10 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
     if model.map_theme == theme::MapTheme::Atlas {
         ui.add_space(8.0);
         ui.label("Vintage shaded relief · northwest light · elevation and ocean-depth tints");
-        ui.small("Earth relief uses your prepared GEBCO overview in Derived/terrain. \
-            Detail follows that overview's resolution. Colors describe height and depth, not geology.");
+        ui.small(
+            "Relief refines automatically as you zoom: native seafloor terrain, \
+            detailed land elevations, and finer cached surveys where available.",
+        );
+        ui.small("Contours and other layers stay independently selectable. Colors describe height and depth, not geology.");
     }
 }

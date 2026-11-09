@@ -29,6 +29,10 @@ pub(super) struct Screen {
     target: wgpu::Texture,
 }
 impl Screen {
+    #[allow(dead_code)]
+    pub fn max_texture_side(&self) -> usize {
+        self.device.limits().max_texture_dimension_2d as usize
+    }
     pub fn new(size: [u32; 2]) -> Self {
         let adapter = block_on(wgpu::Instance::default().request_adapter(&Default::default()))
             .expect("GPU adapter");

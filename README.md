@@ -56,9 +56,10 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
   all campuses, jurisdictional rules and dated news with source links.
 - **Atlas appearance** — choose **Settings → Appearance → ATLAS** for cream-paper
   controls, mineral elevation tints, blue bathymetry and northwest-lit GEBCO
-  shaded relief in Earth Globe and Local views. Uses an existing GEBCO preview
-  TIFF/PNG or depth BIL in `Derived/terrain`; the overview determines relief
-  detail. Colors represent height and depth, not geological formations.
+  shaded relief in Earth Globe and Local views. Automatically refines from original
+  GEBCO terrain, SRTM land elevations and finer cached surveys as you zoom. The
+  overview remains visible while native detail loads. Contours and other layers
+  remain independently selectable. Colors represent height/depth, not geology.
 - **Terrain & bodies** — GEBCO / SRTM / Natural Earth elevation, the Yale Bright
   Star Catalogue and planetary ephemeris, and a replay timeline.
 - **Washington LiDAR** — optional DNR bare-earth and top-surface hillshade in

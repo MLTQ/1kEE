@@ -47,6 +47,8 @@ mod swot_layer;
 mod raster_mesh;
 mod atlas_image;
 mod atlas_relief;
+mod atlas_viewport;
+mod atlas_source;
 mod gravity_layer;
 pub(crate) use gravity_layer::controls as gravity_controls;
 pub(crate) use swot_layer::controls as swot_controls;

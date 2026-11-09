@@ -147,3 +147,9 @@ A buildout marker click opens its record in the shared campus, rule and news bro
 `atlas_image` converts measured global GEBCO heights into a paper/mineral/blue
 shaded-relief image. `atlas_relief` loads it asynchronously and shares cached
 Globe/Local projections, active only for Earth with the Atlas appearance.
+
+Atlas now refines from original GEBCO/SRTM and existing fine-elevation chunks via
+`atlas_source`. `atlas_viewport` chooses padded native windows for both camera
+projections. The overview remains visible during background work; independent
+contour/layer choices are unchanged. Regional imagery uses measured multi-scale
+lighting and terrain shadows rather than a stretched global height preview.

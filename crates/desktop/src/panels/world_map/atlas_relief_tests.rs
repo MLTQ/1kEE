@@ -112,28 +112,41 @@ fn local_dateline_quarters_keep_coverage_and_source_uvs() {
 #[ignore = "requires a GPU and an explicit existing GEBCO terrain root"]
 fn atlas_real_terrain_preview() {
     let root = PathBuf::from(std::env::var("ONEKEE_ATLAS_ROOT").expect("GEBCO asset root"));
-    let grid = load_grid(Some(&root)).expect("prepared real GEBCO overview");
-    let ctx = egui::Context::default();
-    crate::theme::set_theme(&ctx, crate::theme::MapTheme::Atlas);
-    let image = grid.image().unwrap();
-    let texture = ctx.load_texture("atlas-preview", image, egui::TextureOptions::LINEAR);
     let mut gpu = screen::Screen::new([1536, 1024]);
     gpu.install_globe();
+    let maximum = gpu.max_texture_side().min(8192);
+    let region = super::super::atlas_viewport::Region([-8 * 3600, 37 * 3600, 24 * 3600, 56 * 3600]);
+    let detail = super::super::atlas_source::load(Some(&root), region, maximum)
+        .expect("native Europe terrain");
+    let ctx = egui::Context::default();
+    let initial = ctx.run(
+        egui::RawInput {
+            max_texture_side: Some(maximum),
+            ..Default::default()
+        },
+        |_| {},
+    );
+    gpu.render(&ctx, initial, false);
+    crate::theme::set_theme(&ctx, crate::theme::MapTheme::Atlas);
+    let image = detail.grid.image_for(region.bounds()).unwrap();
+    let texture = ctx.load_texture("atlas-preview", image, egui::TextureOptions::LINEAR);
     let mut model = crate::model::AppModel::new();
     model.map_theme = crate::theme::MapTheme::Atlas;
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1536., 1024.));
-    let focus = GeoPoint { lat: 48., lon: 18. };
-    let view = GlobeViewState::from_focus(focus);
+    let focus = GeoPoint { lat: 46., lon: 7.5 };
+    let mut view = GlobeViewState::from_focus(focus);
+    view.zoom = 17.;
     let layout = GlobeLayout {
         center: egui::pos2(975., 515.),
-        radius: 440.,
-        focal_length: 2.2,
-        camera_distance: 1.7,
+        radius: 1950.,
+        focal_length: 2.8,
+        camera_distance: 2.0,
     };
     for frame in 0..3 {
         let output = ctx.run(
             egui::RawInput {
                 screen_rect: Some(rect),
+                max_texture_side: Some(maximum),
                 ..Default::default()
             },
             |ctx| {
@@ -172,8 +185,8 @@ fn atlas_real_terrain_preview() {
                             &layout,
                             &view,
                             texture.id(),
-                            WORLD,
-                            false,
+                            region.bounds(),
+                            true,
                         );
                         painter.add(egui::Shape::mesh(mesh));
                     });
@@ -194,4 +207,40 @@ fn atlas_real_terrain_preview() {
         }
     }
     crate::theme::set_theme(&ctx, crate::theme::MapTheme::Topo);
+}
+
+#[test]
+#[ignore = "requires installed GDAL and original GEBCO/SRTM terrain files"]
+fn native_detail_publishes_in_both_scenes_without_blocking_draw() {
+    use std::time::{Duration, Instant};
+    let root = PathBuf::from(std::env::var("ONEKEE_ATLAS_ROOT").expect("existing terrain root"));
+    let ctx = egui::Context::default();
+    let region = super::super::atlas_viewport::Region([
+        7 * 3600,
+        46 * 3600,
+        7 * 3600 + 900,
+        46 * 3600 + 900,
+    ]);
+    clear();
+    let start = Instant::now();
+    assert!(detail_texture(&ctx, Some(&root), region, false).is_none());
+    assert!(detail_texture(&ctx, Some(&root), region, true).is_none());
+    assert!(
+        start.elapsed() < Duration::from_millis(150),
+        "first draw never waits for source I/O"
+    );
+    loop {
+        let globe = detail_texture(&ctx, Some(&root), region, false);
+        let local = detail_texture(&ctx, Some(&root), region, true);
+        if let (Some(globe), Some(local)) = (globe, local) {
+            assert_eq!(globe.texture.size(), [900, 900]);
+            assert_eq!(local.texture.size(), [900, 900]);
+            assert_eq!(globe.region, region);
+            assert_eq!(local.region, region);
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(40));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    clear();
 }

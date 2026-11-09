@@ -11,8 +11,12 @@ The local dateline regression checks both ±179.9° focuses: source UVs on both
 sides of the image seam, valid UV ranges, and triangle coverage at the real
 viewport corners and centre.
 
-The ignored `atlas_real_terrain_preview` reads the existing GEBCO overview from
-`ONEKEE_ATLAS_ROOT`, shades it with production `HeightGrid::image`, and renders
-the production globe shader/raster projection plus Appearance controls on a
-private GPU target. It verifies visible blue ocean and optionally exports
-`ONEKEE_ATLAS_PREVIEW`. No application window is opened.
+The ignored `atlas_real_terrain_preview` now reads a native Europe window with
+GDAL, shades actual pixel-edge bounds and renders the production globe shader,
+regional raster projection and Appearance controls on a private GPU target.
+It optionally exports `ONEKEE_ATLAS_PREVIEW`; no application window is opened.
+
+`native_detail_publishes_in_both_scenes_without_blocking_draw` drives the actual
+background request caches for Globe and Local with a 900×900 SRTM window. The
+initial calls must return promptly and both asynchronous images must retain their
+own exact geographic bounds. This test requires explicit existing terrain data.
