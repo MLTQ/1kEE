@@ -26,6 +26,7 @@ pub use vessels::*;
 
 use crate::city_catalog;
 use crate::osm_ingest::{self, OsmInventory};
+use crate::panels::world_map::global_weather;
 use crate::settings_store;
 use crate::stellar_time;
 use crate::terrain_assets::{self, TerrainInventory};
@@ -143,6 +144,7 @@ pub struct AppModel {
     /// User-uploaded vector overlay layers (GeoJSON, KML, or KMZ).
     pub geojson_layers: Vec<GeoJsonLayer>,
     pub satellite_layers: Vec<crate::panels::world_map::satellite_layer::SatelliteLayer>,
+    pub global_weather: global_weather::GlobalWeather,
     /// ArcGIS FeatureServer sources added by the user.
     pub arcgis_sources: Vec<ArcGisSourceRef>,
     /// Merged features from all enabled source/layer combos (refreshed each frame).
@@ -346,6 +348,12 @@ impl AppModel {
             planet_trail_years: 0.0,
             geojson_layers: Vec::new(),
             satellite_layers: Vec::new(),
+            global_weather: global_weather::GlobalWeather::new(
+                app_settings.global_weather,
+                global_weather::cache_path(
+                    app_settings.data_root.as_deref(), selected_root.as_deref(),
+                ),
+            ),
             arcgis_sources: Vec::new(),
             arcgis_features: Arc::new(Vec::new()),
             selected_arcgis_feature: None,
@@ -590,6 +598,7 @@ impl AppModel {
             ny511_api_key: self.ny511_api_key.trim().to_owned(),
             eyes_on_enabled: self.eyes_on_enabled,
             ai_buildout_enabled: self.buildout.enabled,
+            global_weather: self.global_weather.settings(),
             eyes_on_country_code: settings_store::normalize_eyes_on_country_code(
                 &self.eyes_on_country_code,
             ),
@@ -621,8 +630,12 @@ impl AppModel {
                 ),
         };
         settings_store::save_app_settings(&settings)?;
+        let data_root = settings_store::load_app_settings().data_root;
+        self.global_weather.set_cache_path(global_weather::cache_path(
+            data_root.as_deref(), self.selected_root.as_deref(),
+        ));
         self.buildout.set_path(crate::buildout::cache_path(
-            settings_store::load_app_settings().data_root.as_deref(),
+            data_root.as_deref(),
             self.selected_root.as_deref(),
         ));
         Ok(())
@@ -638,6 +651,10 @@ impl AppModel {
             .map(|path| path.display().to_string())
             .unwrap_or_default();
         self.buildout.enabled = settings.ai_buildout_enabled;
+        self.global_weather.set_settings(settings.global_weather);
+        self.global_weather.set_cache_path(global_weather::cache_path(
+            settings.data_root.as_deref(), self.selected_root.as_deref(),
+        ));
         self.buildout.set_path(crate::buildout::cache_path(
             settings.data_root.as_deref(),
             self.selected_root.as_deref(),

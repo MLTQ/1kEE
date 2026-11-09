@@ -1,4 +1,15 @@
-# Receive a weather satellite pass and display it in 1kEE
+# Satellite imagery on the 1kEE globe
+
+## Global satellite weather
+
+On **Earth**, open **Layers → Global Satellite Weather**. Select either layer, or turn on both and adjust their opacity to follow clouds over the true-color image. Both layers work in Globe and Local. Your choices persist across restarts.
+
+- **Daily true color** uses NASA GIBS corrected reflectance from NOAA-20 VIIRS. 1kEE requests the most recent available date through yesterday UTC. A day's mosaic combines many passes taken at different times. Polar night and missing observations can appear black. The global image is 4096 × 2048 pixels. [NASA Worldview](https://worldview.earthdata.nasa.gov/?l=VIIRS_NOAA20_CorrectedReflectance_TrueColor) · [GIBS access and time dimensions](https://nasa-gibs.github.io/gibs-api-docs/access-basics/)
+- **Three-hourly infrared** uses EUMETSAT's 10.8 µm geostationary ring mosaic. It shows cloud and surface emission by day and night. The most recent published frame may lag the current three-hour interval. At high latitudes the view is oblique, and areas beyond coverage are transparent. The global image is 2048 × 1024 pixels. [EUMETSAT infrared product](https://view.eumetsat.int/productviewer/productDetails/mumi%3Aworldcloudmap_ir108)
+
+The time below each checkbox identifies the displayed image in UTC. While enabled on Earth, 1kEE checks published dates hourly for true color and every 15 minutes for infrared. **Check now** checks the provider immediately. If a request fails, the current image stays visible with its original date and 1kEE retries in five minutes. The last good PNG for each source is cached in `satellite/global-weather.sqlite` within the selected Data folder. These are online layers and require no radio, account, or GDAL installation.
+
+## Receive your own Meteor pass
 
 Use SatDump to receive a Meteor-M N2-3 or N2-4 **LRPT** downlink and project the decoded image. Import the resulting GeoTIFF in the 1kEE desktop app. Each pass gives you a swath of clouds and surface features along the satellite’s track. NOAA retired the NOAA-15, -18 and -19 satellites in 2025, so their older analog APT tutorials no longer yield live images. [Meteor reception guide](https://a-centauri.com/articoli/meteor-satellite-reception) · [NOAA mission closure](https://www.nesdis.noaa.gov/news/legacy-orbit-noaa-decommissions-the-poes-satellite-constellation)
 

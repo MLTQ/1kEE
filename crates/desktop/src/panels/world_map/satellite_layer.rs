@@ -30,6 +30,10 @@ impl SatelliteLayer {
         }
     }
 
+    pub(super) fn set_opacity(&mut self, percent: u8) {
+        self.opacity = percent.min(100);
+    }
+
     fn tint(&self, mut mesh: egui::Mesh) -> egui::Mesh {
         let tint = egui::Color32::from_white_alpha(((u16::from(self.opacity) * 255) / 100) as u8);
         for vertex in &mut mesh.vertices {

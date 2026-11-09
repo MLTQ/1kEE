@@ -124,6 +124,7 @@ impl eframe::App for DashboardApp {
         }
 
         panels::layer_file_import::poll(ctx, &mut self.model);
+        self.model.global_weather.tick(ctx, self.model.active_body);
         panels::terrain_library::tick(ctx, &mut self.model);
         factal_stream::tick(&mut self.model);
         factal_stream::history_tick(&mut self.model);

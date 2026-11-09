@@ -27,6 +27,9 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
             ui.separator();
 
             egui::ScrollArea::vertical().show(ui, |ui| {
+                section_label(ui, "GLOBAL SATELLITE WEATHER");
+                world_map::global_weather::controls(ui, model);
+                ui.separator();
                 section_label(ui, "IMPORTED LAYERS");
                 super::layer_file_import::button(ui, model);
                 if model.geojson_layers.is_empty() && model.satellite_layers.is_empty() { ui.small("GeoJSON, KML, KMZ or GeoTIFF"); }

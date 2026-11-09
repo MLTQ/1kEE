@@ -46,6 +46,7 @@ mod layer_snapshot;
 mod swot_layer;
 mod raster_mesh;
 pub(crate) mod satellite_layer;
+pub(crate) mod global_weather;
 mod atlas_image;
 mod atlas_relief;
 mod atlas_viewport;

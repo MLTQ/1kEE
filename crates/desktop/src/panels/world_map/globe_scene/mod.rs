@@ -187,7 +187,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 &model.gravity.map().id,
             );
         }
-        for image in &model.satellite_layers {
+        for image in model.global_weather.images().chain(&model.satellite_layers) {
             image.draw_globe(painter, &layout, &model.globe_view);
         }
         if model.show_coastlines && model.map_theme != theme::MapTheme::Atlas {

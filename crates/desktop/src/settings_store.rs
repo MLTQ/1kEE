@@ -64,6 +64,8 @@ pub struct AppSettings {
     pub eyes_on_enabled: bool,
     #[serde(default)]
     pub ai_buildout_enabled: bool,
+    #[serde(default)]
+    pub global_weather: crate::panels::world_map::global_weather::Settings,
     /// Optional ISO alpha-2 country code used to scope directory discovery.
     #[serde(default)]
     pub eyes_on_country_code: String,
@@ -132,6 +134,7 @@ impl Default for AppSettings {
             ny511_api_key: String::new(),
             eyes_on_enabled: false,
             ai_buildout_enabled: false,
+            global_weather: Default::default(),
             eyes_on_country_code: String::new(),
             eyes_on_requests_per_minute: DEFAULT_EYES_ON_REQUESTS_PER_MINUTE,
             aisstream_api_key: String::new(),
