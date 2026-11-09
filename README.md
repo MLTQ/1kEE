@@ -42,6 +42,7 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
 - **Global satellite weather** — enable daily NOAA-20 VIIRS true color and three-hourly
   EUMETSAT infrared under **Earth → Layers → Global Satellite Weather**. Both Globe
   and Local show the latest available frames, with independent opacity controls.
+  Zooming in loads finer imagery for the visible region at the displayed observation time.
   You can also import GeoTIFFs from your own satellite passes. [Layer and receiver guide](docs/sdr-weather-imagery.md)
 - **Nearby radio** — find open public-safety and emergency radio near a selected
   event, browse feeds, and listen in a small player. Supports saved public streams

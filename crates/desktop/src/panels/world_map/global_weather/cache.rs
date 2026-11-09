@@ -34,6 +34,42 @@ pub(super) fn write(path: &Path, product: Product, stamp: &str, png: &[u8]) -> R
     Ok(())
 }
 
+// Regional PNGs are optional. The last good whole-Earth frames occupy their
+// own table and never participate in this eviction policy.
+pub(super) fn detail_png(path: &Path, key: &str) -> Option<Vec<u8>> {
+    let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE).ok()?;
+    let bytes = db
+        .query_row(
+            "SELECT png FROM detail WHERE key=?1 AND length(png)<=?2",
+            params![key, MAX_BYTES],
+            |r| r.get(0),
+        )
+        .ok()?;
+    let _ = db.execute("UPDATE detail SET used=unixepoch() WHERE key=?1", [key]);
+    Some(bytes)
+}
+
+pub(super) fn store_detail(path: &Path, key: &str, bytes: &[u8]) -> rusqlite::Result<()> {
+    let mut db = Connection::open(path)?;
+    let tx = db.transaction()?;
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS detail (key TEXT UNIQUE, used INTEGER, png BLOB)",
+    )?;
+    tx.execute(
+        "INSERT OR REPLACE INTO detail VALUES (?1,unixepoch(),?2)",
+        params![key, bytes],
+    )?;
+    tx.execute(
+        "DELETE FROM detail WHERE rowid IN (
+        SELECT id FROM (SELECT rowid AS id, row_number() OVER recent AS n,
+            sum(length(png)) OVER recent AS total FROM detail
+            WINDOW recent AS (ORDER BY used DESC, rowid DESC ROWS UNBOUNDED PRECEDING))
+        WHERE n>64 OR total>?1)",
+        [96_u64 << 20],
+    )?;
+    tx.commit()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

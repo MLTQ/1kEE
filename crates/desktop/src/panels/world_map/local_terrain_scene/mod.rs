@@ -295,7 +295,10 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     }
 
     if model.active_body == crate::model::ActiveBody::Earth {
-        for image in model.global_weather.images().chain(&model.satellite_layers) {
+        model.global_weather.draw(painter.ctx(), clip.width().max(clip.height()) * painter.ctx().pixels_per_point(),
+            || super::atlas_viewport::local_visible(clip, &layout, &model.globe_view, viewport_center, half),
+            |image| image.draw_local(painter, &layout, &model.globe_view, viewport_center, half));
+        for image in &model.satellite_layers {
             image.draw_local(painter, &layout, &model.globe_view, viewport_center, visual_half_extent_for_zoom(model.globe_view.local_zoom));
         }
     }

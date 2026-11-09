@@ -117,7 +117,7 @@ fn frame_time(product: Product, xml: &str, cutoff: &str) -> Result<String, Strin
     Ok(stamp.to_owned())
 }
 
-fn size(product: Product) -> [u32; 2] {
+pub(super) fn size(product: Product) -> [u32; 2] {
     match product {
         Product::TrueColor => [4096, 2048],
         Product::Infrared => [2048, 1024],
@@ -125,11 +125,27 @@ fn size(product: Product) -> [u32; 2] {
 }
 
 pub(super) fn fetch_png(client: &Client, product: Product, stamp: &str) -> Result<Vec<u8>, String> {
+    fetch_map(
+        client,
+        product,
+        stamp,
+        [-180., -90., 180., 90.],
+        size(product),
+    )
+}
+
+pub(super) fn fetch_map(
+    client: &Client,
+    product: Product,
+    stamp: &str,
+    bounds: [f64; 4],
+    [w, h]: [u32; 2],
+) -> Result<Vec<u8>, String> {
     let (url, layer) = match product {
         Product::TrueColor => (NASA_MAP, VIIRS),
         Product::Infrared => (EUMET_RING, RING),
     };
-    let [w, h] = size(product);
+    let [west, south, east, north] = bounds;
     // WMS 1.3 orders EPSG:4326 bounds by latitude, then longitude.
     get(
         client.get(url).query(&[
@@ -142,7 +158,7 @@ pub(super) fn fetch_png(client: &Client, product: Product, stamp: &str) -> Resul
             ("TRANSPARENT", "TRUE"),
             ("TIME", stamp),
             ("CRS", "EPSG:4326"),
-            ("BBOX", "-90,-180,90,180"),
+            ("BBOX", &format!("{south},{west},{north},{east}")),
             ("WIDTH", &w.to_string()),
             ("HEIGHT", &h.to_string()),
         ]),
@@ -155,16 +171,8 @@ pub(super) fn decode(
     bytes: &[u8],
     max_side: usize,
 ) -> Result<SatelliteImage, String> {
-    let reader = || image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Png);
     let [w, h] = size(product);
-    if reader()
-        .into_dimensions()
-        .map_err(|e| format!("Invalid map PNG: {e}"))?
-        != (w, h)
-    {
-        return Err("Provider returned unexpected map dimensions".into());
-    }
-    let mut image = reader().decode().map_err(|e| e.to_string())?;
+    let mut image = decode_png(bytes, [w, h])?;
     let width = w.min(max_side.clamp(2, 4096) as u32);
     if width < w {
         image = image.resize_exact(width, width / 2, image::imageops::FilterType::Triangle);
@@ -183,6 +191,18 @@ pub(super) fn decode(
             &pixels,
         ),
     })
+}
+
+pub(super) fn decode_png(bytes: &[u8], [w, h]: [u32; 2]) -> Result<image::DynamicImage, String> {
+    let reader = || image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Png);
+    if reader()
+        .into_dimensions()
+        .map_err(|e| format!("Invalid map PNG: {e}"))?
+        != (w, h)
+    {
+        return Err("Provider returned unexpected map dimensions".into());
+    }
+    reader().decode().map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

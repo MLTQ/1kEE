@@ -9,6 +9,10 @@ On **Earth**, open **Layers → Global Satellite Weather**. Select either layer,
 
 The time below each checkbox identifies the displayed image in UTC. While enabled on Earth, 1kEE checks published dates hourly for true color and every 15 minutes for infrared. **Check now** checks the provider immediately. If a request fails, the current image stays visible with its original date and 1kEE retries in five minutes. The last good PNG for each source is cached in `satellite/global-weather.sqlite` within the selected Data folder. These are online layers and require no radio, account, or GDAL installation.
 
+Zoom into a region in **Globe** or **Local** and pause briefly. 1kEE requests a finer image covering the visible area at the same UTC date or frame time. The layer shows its current detail grid spacing when the image arrives. At the equator, true color can refine from about 9.8 km to 245 m per displayed source-grid pixel, and infrared from about 19.6 km to 2.45 km. VIIRS sensor bands measure roughly 375–750 m at nadir. Cloud cover, the original sensor footprint and viewing angle limit what the finer grid reveals. [NASA GIBS tile grids](https://nasa-gibs.github.io/gibs-api-docs/access-basics/) · [NOAA VIIRS instrument](https://www.star.nesdis.noaa.gov/jpss/VIIRS.php)
+
+The overview covers the map during downloads and when finer data is unavailable. Date-matched regional images can be reused from the weather cache, including across restarts. The cache keeps up to 64 regional PNGs with a combined payload of 96 MiB, separately from the two global frames.
+
 ## Receive your own Meteor pass
 
 Use SatDump to receive a Meteor-M N2-3 or N2-4 **LRPT** downlink and project the decoded image. Import the resulting GeoTIFF in the 1kEE desktop app. Each pass gives you a swath of clouds and surface features along the satellite’s track. NOAA retired the NOAA-15, -18 and -19 satellites in 2025, so their older analog APT tutorials no longer yield live images. [Meteor reception guide](https://a-centauri.com/articoli/meteor-satellite-reception) · [NOAA mission closure](https://www.nesdis.noaa.gov/news/legacy-orbit-noaa-decommissions-the-poes-satellite-constellation)
