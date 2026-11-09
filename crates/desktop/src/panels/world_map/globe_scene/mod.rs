@@ -163,6 +163,9 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 
     let contour_stroke_width_px = model.contour_stroke_width_px(painter.ctx().pixels_per_point());
     if model.active_body == crate::model::ActiveBody::Earth {
+        if model.map_theme == theme::MapTheme::Atlas {
+            super::atlas_relief::draw_globe(painter, &layout, &model.globe_view, selected_root);
+        }
         if model.show_bathymetry {
             geography::draw_global_bathymetry(
                 painter,

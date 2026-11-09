@@ -6,6 +6,8 @@ mod admin;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum MapTheme {
+    /// Cream paper, mineral elevation tints and sculpted blue bathymetry.
+    Atlas,
     /// Perfect-black/sodium-amber/warm ivory.
     /// Evokes low-pressure street lamps, darkroom safelights, and amber HUD glass.
     Sodium,
@@ -40,6 +42,7 @@ pub enum MapTheme {
 impl MapTheme {
     pub const ALL: &'static [MapTheme] = &[
         MapTheme::Topo,
+        MapTheme::Atlas,
         MapTheme::Phosphor,
         MapTheme::Thermal,
         MapTheme::Ghost,
@@ -54,6 +57,7 @@ impl MapTheme {
         match self {
             Self::Sodium => "SODIUM",
             Self::Topo => "TOPO",
+            Self::Atlas => "ATLAS",
             Self::Phosphor => "PHOSPHOR",
             Self::Thermal => "THERMAL",
             Self::Ghost => "GHOST",
@@ -68,6 +72,7 @@ impl MapTheme {
         match self {
             Self::Sodium => "monochrome · sodium amber / lamp black",
             Self::Topo => "complementary · blue / orange",
+            Self::Atlas => "printed atlas · parchment / mineral earth / ocean blue",
             Self::Phosphor => "analogous · green / amber",
             Self::Thermal => "split-complementary · violet / gold",
             Self::Ghost => "achromatic · value contrast only",
@@ -84,6 +89,10 @@ impl MapTheme {
 fn theme_lock() -> &'static RwLock<MapTheme> {
     static T: OnceLock<RwLock<MapTheme>> = OnceLock::new();
     T.get_or_init(|| RwLock::new(MapTheme::Topo))
+}
+
+pub fn is_atlas() -> bool {
+    current() == MapTheme::Atlas
 }
 
 fn current() -> MapTheme {
@@ -104,10 +113,26 @@ fn apply_egui_style(ctx: &egui::Context, theme: MapTheme) {
     style.spacing.item_spacing = egui::vec2(10.0, 10.0);
     style.spacing.button_padding = egui::vec2(12.0, 8.0);
     style.spacing.window_margin = egui::Margin::same(14);
-    style.visuals = egui::Visuals::dark();
+    style.visuals = if theme == MapTheme::Atlas {
+        egui::Visuals::light()
+    } else {
+        egui::Visuals::dark()
+    };
 
     let (panel, faint, extreme, active, hovered, inactive, window, selection, hyper, text) =
         match theme {
+            MapTheme::Atlas => (
+                egui::Color32::from_rgb(238, 230, 213),
+                egui::Color32::from_rgb(228, 218, 198),
+                egui::Color32::from_rgb(249, 243, 230),
+                egui::Color32::from_rgb(190, 199, 182),
+                egui::Color32::from_rgb(215, 205, 183),
+                egui::Color32::from_rgb(235, 226, 208),
+                egui::Color32::from_rgb(244, 237, 221),
+                egui::Color32::from_rgb(190, 207, 202),
+                egui::Color32::from_rgb(41, 91, 111),
+                Some(egui::Color32::from_rgb(51, 49, 43)),
+            ),
             MapTheme::Sodium => (
                 egui::Color32::from_rgb(0, 0, 0),
                 egui::Color32::from_rgb(8, 5, 2),
@@ -240,6 +265,7 @@ pub fn install(ctx: &egui::Context) {
 
 pub fn canvas_background() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(230, 220, 202),
         MapTheme::Sodium => egui::Color32::from_rgb(0, 0, 0),
         MapTheme::Topo => egui::Color32::from_rgb(5, 15, 22),
         MapTheme::Phosphor => egui::Color32::from_rgb(3, 9, 3),
@@ -254,6 +280,7 @@ pub fn canvas_background() -> egui::Color32 {
 
 pub fn section_background() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(238, 230, 213),
         MapTheme::Sodium => egui::Color32::from_rgb(5, 3, 1),
         MapTheme::Topo => egui::Color32::from_rgb(10, 22, 31),
         MapTheme::Phosphor => egui::Color32::from_rgb(7, 18, 7),
@@ -268,6 +295,7 @@ pub fn section_background() -> egui::Color32 {
 
 pub fn grid_color() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(161, 156, 137),
         MapTheme::Sodium => egui::Color32::from_rgb(52, 28, 9),
         MapTheme::Topo => egui::Color32::from_rgb(30, 68, 82),
         MapTheme::Phosphor => egui::Color32::from_rgb(15, 52, 15),
@@ -286,6 +314,7 @@ pub fn camera_color() -> egui::Color32 {
 
 pub fn text_muted() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(105, 99, 84),
         MapTheme::Sodium => egui::Color32::from_rgb(188, 152, 103),
         MapTheme::Topo => egui::Color32::from_rgb(154, 178, 189),
         MapTheme::Phosphor => egui::Color32::from_rgb(145, 178, 145),
@@ -300,6 +329,7 @@ pub fn text_muted() -> egui::Color32 {
 
 pub fn wireframe_color() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(110, 118, 101),
         MapTheme::Sodium => egui::Color32::from_rgb(120, 70, 24),
         MapTheme::Topo => egui::Color32::from_rgb(66, 123, 143),
         MapTheme::Phosphor => egui::Color32::from_rgb(48, 115, 48),
@@ -314,6 +344,7 @@ pub fn wireframe_color() -> egui::Color32 {
 
 pub fn topo_color() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(123, 124, 103),
         MapTheme::Sodium => egui::Color32::from_rgb(82, 48, 16),
         MapTheme::Topo => egui::Color32::from_rgb(39, 88, 105),
         MapTheme::Phosphor => egui::Color32::from_rgb(22, 70, 22),
@@ -328,6 +359,7 @@ pub fn topo_color() -> egui::Color32 {
 
 pub fn hot_color() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(141, 64, 49),
         MapTheme::Sodium => egui::Color32::from_rgb(255, 170, 72),
         MapTheme::Topo => egui::Color32::from_rgb(245, 125, 78),
         MapTheme::Phosphor => egui::Color32::from_rgb(210, 162, 40),
@@ -342,6 +374,7 @@ pub fn hot_color() -> egui::Color32 {
 
 pub fn contour_color() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(116, 100, 77),
         MapTheme::Sodium => egui::Color32::from_rgb(212, 128, 44),
         MapTheme::Topo => egui::Color32::from_rgb(96, 164, 181),
         MapTheme::Phosphor => egui::Color32::from_rgb(72, 180, 72),
@@ -358,7 +391,11 @@ pub fn contour_color() -> egui::Color32 {
 
 /// Semi-transparent fill for overlay panels (layer bar, focus card, footer).
 pub fn panel_fill(alpha: u8) -> egui::Color32 {
+    if is_atlas() {
+        return egui::Color32::from_rgba_unmultiplied(243, 235, 218, alpha);
+    }
     let (r, g, b) = match current() {
+        MapTheme::Atlas => unreachable!("handled above"),
         MapTheme::Sodium => (4, 2, 0),
         MapTheme::Topo => (7, 18, 24),
         MapTheme::Phosphor => (5, 14, 5),
@@ -375,6 +412,7 @@ pub fn panel_fill(alpha: u8) -> egui::Color32 {
 /// Stroke/border color for overlay panels and chrome frames.
 pub fn panel_stroke() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(147, 133, 109),
         MapTheme::Sodium => egui::Color32::from_rgb(84, 50, 18),
         MapTheme::Topo => egui::Color32::from_rgb(24, 63, 79),
         MapTheme::Phosphor => egui::Color32::from_rgb(18, 65, 18),
@@ -390,6 +428,7 @@ pub fn panel_stroke() -> egui::Color32 {
 /// Fill for floating windows (Settings, Terrain Library).
 pub fn window_fill() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(244, 237, 221),
         MapTheme::Sodium => egui::Color32::from_rgb(7, 4, 1),
         MapTheme::Topo => egui::Color32::from_rgb(14, 18, 23),
         MapTheme::Phosphor => egui::Color32::from_rgb(9, 16, 9),
@@ -405,6 +444,7 @@ pub fn window_fill() -> egui::Color32 {
 /// Stroke for floating windows.
 pub fn window_stroke() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(133, 121, 103),
         MapTheme::Sodium => egui::Color32::from_rgb(94, 58, 22),
         MapTheme::Topo => egui::Color32::from_rgb(43, 49, 58),
         MapTheme::Phosphor => egui::Color32::from_rgb(28, 48, 28),
@@ -421,6 +461,7 @@ pub fn window_stroke() -> egui::Color32 {
 /// Fill color for the active state of chrome toggle buttons (GLOBE/LOCAL etc.).
 pub fn chrome_active_fill() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(57, 80, 84),
         MapTheme::Sodium => egui::Color32::from_rgb(96, 55, 18),
         MapTheme::Topo => egui::Color32::from_rgb(24, 63, 79),
         MapTheme::Phosphor => egui::Color32::from_rgb(18, 65, 18),
@@ -436,6 +477,7 @@ pub fn chrome_active_fill() -> egui::Color32 {
 /// Text color for the active state of chrome toggle buttons — near-white with a theme tint.
 pub fn chrome_active_text() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(249, 242, 224),
         MapTheme::Sodium => egui::Color32::from_rgb(255, 245, 224),
         MapTheme::Topo => egui::Color32::from_rgb(225, 245, 250), // near-white cyan
         MapTheme::Phosphor => egui::Color32::from_rgb(220, 245, 220), // near-white green
@@ -451,6 +493,7 @@ pub fn chrome_active_text() -> egui::Color32 {
 /// Fill for list/card items in side panels (terrain library, camera list).
 pub fn item_fill() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(232, 223, 204),
         MapTheme::Sodium => egui::Color32::from_rgb(8, 5, 2),
         MapTheme::Topo => egui::Color32::from_rgb(15, 22, 28),
         MapTheme::Phosphor => egui::Color32::from_rgb(9, 18, 9),
@@ -466,6 +509,7 @@ pub fn item_fill() -> egui::Color32 {
 /// Fill for the selected/highlighted item in a list.
 pub fn selected_item_fill() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(210, 216, 195),
         MapTheme::Sodium => egui::Color32::from_rgb(36, 20, 8),
         MapTheme::Topo => egui::Color32::from_rgb(18, 44, 56),
         MapTheme::Phosphor => egui::Color32::from_rgb(14, 44, 14),
@@ -481,6 +525,7 @@ pub fn selected_item_fill() -> egui::Color32 {
 /// Near-opaque backdrop fill for the globe scene (space/void behind the sphere).
 pub fn scene_backdrop() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(164, 188, 186),
         MapTheme::Sodium => egui::Color32::from_rgba_premultiplied(1, 0, 0, 252),
         MapTheme::Topo => egui::Color32::from_rgba_premultiplied(2, 6, 10, 252),
         MapTheme::Phosphor => egui::Color32::from_rgba_premultiplied(2, 6, 2, 252),
@@ -496,6 +541,7 @@ pub fn scene_backdrop() -> egui::Color32 {
 /// Warm glow halo behind event markers.
 pub fn marker_glow_warm() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgba_unmultiplied(110, 72, 42, 170),
         MapTheme::Sodium => egui::Color32::from_rgba_premultiplied(255, 190, 96, 170),
         MapTheme::Topo => egui::Color32::from_rgba_premultiplied(255, 241, 212, 170),
         MapTheme::Phosphor => egui::Color32::from_rgba_premultiplied(240, 222, 155, 170),
@@ -519,6 +565,7 @@ pub fn marker_camera_ring() -> egui::Color32 {
 /// Scheduled passenger airline flights (sky-blue family).
 pub fn flight_airline_color() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(34, 98, 139),
         MapTheme::Sodium => egui::Color32::from_rgb(255, 214, 150),
         MapTheme::Topo => egui::Color32::from_rgb(80, 185, 255),
         MapTheme::Phosphor => egui::Color32::from_rgb(60, 215, 205),
@@ -534,6 +581,7 @@ pub fn flight_airline_color() -> egui::Color32 {
 /// Cargo / freight operators (warm orange family).
 pub fn flight_cargo_color() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(165, 99, 37),
         MapTheme::Sodium => egui::Color32::from_rgb(255, 166, 70),
         MapTheme::Topo => egui::Color32::from_rgb(255, 155, 40),
         MapTheme::Phosphor => egui::Color32::from_rgb(230, 180, 35),
@@ -549,6 +597,7 @@ pub fn flight_cargo_color() -> egui::Color32 {
 /// Military / government callsigns (red family).
 pub fn flight_military_color() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(166, 53, 52),
         MapTheme::Sodium => egui::Color32::from_rgb(220, 96, 44),
         MapTheme::Topo => egui::Color32::from_rgb(215, 65, 75),
         MapTheme::Phosphor => egui::Color32::from_rgb(205, 100, 50),
@@ -564,6 +613,7 @@ pub fn flight_military_color() -> egui::Color32 {
 /// General aviation — private / training / recreational (lime-green family).
 pub fn flight_ga_color() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(66, 115, 60),
         MapTheme::Sodium => egui::Color32::from_rgb(214, 184, 92),
         MapTheme::Topo => egui::Color32::from_rgb(155, 225, 70),
         MapTheme::Phosphor => egui::Color32::from_rgb(200, 230, 45),
@@ -579,6 +629,7 @@ pub fn flight_ga_color() -> egui::Color32 {
 /// No callsign / unrecognised pattern (muted amber).
 pub fn flight_unknown_color() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(134, 113, 49),
         MapTheme::Sodium => egui::Color32::from_rgb(165, 126, 58),
         MapTheme::Topo => egui::Color32::from_rgb(195, 170, 60),
         MapTheme::Phosphor => egui::Color32::from_rgb(165, 160, 50),
@@ -595,6 +646,7 @@ pub fn flight_unknown_color() -> egui::Color32 {
 /// per theme so it reads clearly against each background palette.
 pub fn water_color() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(74, 121, 145),
         MapTheme::Sodium => egui::Color32::from_rgb(145, 105, 52),
         MapTheme::Topo => egui::Color32::from_rgb(60, 145, 210),
         MapTheme::Phosphor => egui::Color32::from_rgb(50, 200, 160),
@@ -610,6 +662,7 @@ pub fn water_color() -> egui::Color32 {
 /// Muted roadbed tones keep highways below live markers in the visual hierarchy.
 pub fn road_major_color() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(137, 84, 65),
         MapTheme::Sodium => egui::Color32::from_rgb(146, 105, 60),
         MapTheme::Topo => egui::Color32::from_rgb(136, 91, 82),
         MapTheme::Phosphor => egui::Color32::from_rgb(122, 114, 73),
@@ -640,6 +693,7 @@ pub fn building_color() -> egui::Color32 {
 /// Side streets sit close to the background, in the same subdued palette.
 pub fn road_minor_color() -> egui::Color32 {
     match current() {
+        MapTheme::Atlas => egui::Color32::from_rgb(167, 144, 115),
         MapTheme::Sodium => egui::Color32::from_rgb(72, 56, 37),
         MapTheme::Topo => egui::Color32::from_rgb(67, 63, 64),
         MapTheme::Phosphor => egui::Color32::from_rgb(53, 66, 50),

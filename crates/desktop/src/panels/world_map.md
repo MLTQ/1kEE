@@ -143,3 +143,7 @@ paint only the recap chyron and clock/header, suppressing the live selected card
 The camera stays in Globe view for recap and returns to its saved view for live.
 
 A buildout marker click opens its record in the shared campus, rule and news browser. Existing event, camera and infrastructure click targets retain priority.
+
+`atlas_image` converts measured global GEBCO heights into a paper/mineral/blue
+shaded-relief image. `atlas_relief` loads it asynchronously and shares cached
+Globe/Local projections, active only for Earth with the Atlas appearance.

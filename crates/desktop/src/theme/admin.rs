@@ -5,6 +5,10 @@ impl MapTheme {
     /// Boundary colors in OSM level order, from countries (2) to local areas (11).
     pub fn admin_palette(self) -> [Color32; 10] {
         let rgb: [u32; 10] = match self {
+            Self::Atlas => [
+                0x574839, 0x8f6651, 0x456b78, 0x6e7350, 0x984f50, 0x77617f, 0x477867, 0x937b48,
+                0x846758, 0x686c78,
+            ],
             Self::Topo => [
                 0xffdc83, 0xf79460, 0x61d8ee, 0x83a9e4, 0xe991ad, 0xb9a4dd, 0x89deb3, 0x50b7b1,
                 0xe3ad87, 0xbbd0df,

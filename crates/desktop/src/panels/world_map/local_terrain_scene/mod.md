@@ -243,3 +243,7 @@ SWOT, below contours/markers and independent of terrain streaming. It reads
 only its own prepared regional product, never altering elevations.
 
 Local Earth projects buildout campuses and geolocated rules at ground level and passes visible marker positions to the shared picker.
+
+Earth + Atlas paints the same measured overview relief on the sea-level plane
+before detailed contours, optional hillshade and scientific overlays. All
+operational layers and elevations retain their existing projections.

@@ -135,6 +135,17 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let viewport_center = model.globe_view.local_center;
     let render_zoom = local_render_zoom(model.globe_view.local_zoom);
     let half = visual_half_extent_for_zoom(model.globe_view.local_zoom);
+    if model.active_body == crate::model::ActiveBody::Earth && model.map_theme == theme::MapTheme::Atlas
+    {
+        super::atlas_relief::draw_local(
+            painter,
+            &layout,
+            &model.globe_view,
+            model.selected_root.as_deref(),
+            viewport_center,
+            half,
+        );
+    }
     let extent_x = (half * 111.32 * viewport_center.lat.to_radians().cos().abs().max(0.2)).max(1.0);
     let extent_y = (half * 111.32).max(1.0);
     let projection = projection::local_projection_params(&layout, &model.globe_view, viewport_center, extent_x, extent_y);

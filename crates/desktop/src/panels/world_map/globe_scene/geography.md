@@ -40,3 +40,7 @@ The optional cable catalogue enables route picking by feature index only for the
 Earth globe contours pass persistent disjoint tile handles to
 `contour_pass::tiles::paint`. The renderer handles spatial culling and staged
 uploads while retaining the same colours, fade, altitude and stroke width.
+
+Atlas supplies its own blue bathymetry as part of the measured relief base.
+The legacy dark depth-fill image is skipped in that theme, while the Bathymetry
+toggle continues to control the optional isobath contour lines.

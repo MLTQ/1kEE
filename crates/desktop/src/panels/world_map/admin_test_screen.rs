@@ -64,6 +64,15 @@ impl Screen {
             target,
         }
     }
+    #[allow(dead_code)]
+    pub fn install_globe(&mut self) {
+        self.renderer.callback_resources.insert(
+            crate::panels::world_map::globe_pass::GlobePassResources::new(
+                &self.device,
+                wgpu::TextureFormat::Rgba8Unorm,
+            ),
+        );
+    }
     pub fn render(
         &mut self,
         ctx: &egui::Context,

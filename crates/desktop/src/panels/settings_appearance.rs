@@ -4,8 +4,7 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
     ui.heading("Map Theme");
     ui.colored_label(
         theme::text_muted(),
-        "Each palette is grounded in a complementary color relationship. \
-         The active theme applies immediately.",
+        "Choose a map palette. The active theme applies immediately.",
     );
     ui.add_space(8.0);
     ui.horizontal_wrapped(|ui| {
@@ -31,5 +30,11 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
     });
     if let Some(active) = theme::MapTheme::ALL.iter().find(|&&t| t == model.map_theme) {
         ui.small(active.theory());
+    }
+    if model.map_theme == theme::MapTheme::Atlas {
+        ui.add_space(8.0);
+        ui.label("Vintage shaded relief · northwest light · elevation and ocean-depth tints");
+        ui.small("Earth relief uses your prepared GEBCO overview in Derived/terrain. \
+            Detail follows that overview's resolution. Colors describe height and depth, not geology.");
     }
 }

@@ -124,6 +124,7 @@ pub fn blast_tile_caches() {
         }
     }
     gebco_depth_fill::clear();
+    super::atlas_relief::clear();
     super::swot_layer::clear();
     super::gravity_layer::clear();
     super::local_terrain_scene::hillshade_layer::clear();

@@ -117,7 +117,9 @@ pub(super) fn draw_global_bathymetry(
     // so the fill follows actual bathymetry contours with no rectangular grid
     // artefacts, and land shows as the dark globe background because those
     // pixels are transparent in the texture.
-    if let Some(tex_id) = gebco_depth_fill::ensure_texture(painter.ctx(), selected_root) {
+    if !theme::is_atlas()
+        && let Some(tex_id) = gebco_depth_fill::ensure_texture(painter.ctx(), selected_root)
+    {
         // The projected mesh depends only on the camera transform and the
         // texture, so it is cached across frames and only rebuilt when the
         // view actually moves — free whenever the camera is still.

@@ -40,3 +40,9 @@ transparency. Country borders retain the brightest color and widest stroke.
 Native Earth terrain applies these colors at draw time: Globe recolors retained
 class-coverage images, and Local updates major/minor uniforms. Palette changes
 do not invalidate source tiles or wait for geometry rebuilds/uploads.
+
+### Atlas
+`ATLAS` is an optional light theme: warm paper chrome, dark ink text, mineral
+contours, subdued roads and blue water. `is_atlas` also identifies the measured
+relief base in the globe pass. Light overlay fills use unmultiplied input so
+translucent parchment remains valid premultiplied color. The default stays Topo.
