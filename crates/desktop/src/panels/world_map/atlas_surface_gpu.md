@@ -15,3 +15,5 @@ Local depth uses the same monotonic ground-distance rule as native contour
 occlusion. Globe uses perspective distance to the actual displaced sphere.
 
 The surface shader is composed with runtime measured-height lighting. Light/style uniforms participate in the cached render key, so moving light redraws the retained height field without source reads or re-upload.
+
+Forest coverage binds at source slot 3 and shares the staging budget through `atlas_surface_forest`. Readiness and mask ID participate in render caching; visibility changes restore the original material without source re-upload.

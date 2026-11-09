@@ -66,6 +66,8 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
   choices. The Globe overview remains visible while native detail loads. Local Layer Spread
   controls the surface and contours together. Contours and other layers
   remain independently selectable. Colors represent height/depth, not geology.
+  In Local Atlas, Trees applies cached forest coverage directly to the relief,
+  sharing its elevations, lighting and occlusion.
 - **Terrain & bodies** — GEBCO / SRTM / Natural Earth elevation, the Yale Bright
   Star Catalogue and planetary ephemeris, and a replay timeline.
 - **Washington LiDAR** — optional DNR bare-earth and top-surface hillshade in

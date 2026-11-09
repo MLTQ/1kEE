@@ -26,3 +26,7 @@ Native GDAL discovery remains independent of the terminal PATH. Runtime tests
 exercise source selection, staging, real drawing and contour toggles.
 
 Height fields now retain unlit pigments. Both scene controllers pass saved art-direction controls and the app clock into the surface callback; light changes never invalidate source requests.
+
+Local Trees requests exact-height-field coverage through `atlas_forest`; its material is applied by the actual terrain shader. Coverage never changes source elevations or light controls.
+
+Hiding Local Trees suspends pending coverage work without discarding a reusable completed mask.

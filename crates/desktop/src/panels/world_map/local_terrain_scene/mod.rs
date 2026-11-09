@@ -345,7 +345,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             model.selected_root.as_deref(),
             viewport_center,
             render_zoom,
-            model.show_trees,
+            model.show_trees && !atlas_terrain,
         );
         super::building_layer::draw_buildings(
             painter,

@@ -93,6 +93,7 @@ pub(super) struct Callback {
     pub rect: egui::Rect,
     pub ctx: egui::Context,
     pub slot: usize,
+    pub forest: Option<Arc<super::atlas_forest::Mask>>,
 }
 impl Callback {
     fn base(
@@ -176,6 +177,7 @@ impl Callback {
             rect,
             ctx: painter.ctx().clone(),
             slot: 1,
+            forest: None,
         }
     }
     pub fn globe(
@@ -215,7 +217,18 @@ impl Callback {
             rect,
             ctx: painter.ctx().clone(),
             slot: 0,
+            forest: None,
         }
+    }
+    pub fn with_forest(mut self, mask: Option<Arc<super::atlas_forest::Mask>>) -> Self {
+        self.forest = mask.filter(|mask| {
+            self.data.iter().any(|raster| {
+                raster.id == mask.raster_id
+                    && raster.size == mask.size
+                    && mask.pixels.len() == mask.size[0] * mask.size[1]
+            })
+        });
+        self
     }
     pub fn with_style(mut self, style: crate::atlas_style::AtlasStyle, jd: f64) -> Self {
         let style = style.normalized();
@@ -238,6 +251,14 @@ impl Callback {
     }
     pub fn submit(self, painter: &egui::Painter) {
         let rect = self.rect;
+        self.ctx.data_mut(|d| {
+            let id = egui::Id::new("atlas-forest-wanted");
+            if let Some(mask) = &self.forest {
+                d.insert_temp(id, mask.id);
+            } else {
+                d.remove::<u64>(id);
+            }
+        });
         if let Some(last) = self.data.last() {
             painter.ctx().data_mut(|d| {
                 d.insert_temp(egui::Id::new(("atlas-surface-wanted", self.slot)), last.id)

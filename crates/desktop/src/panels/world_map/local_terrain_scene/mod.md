@@ -253,3 +253,5 @@ Source terrain acquisition and other overlays keep their existing paths. The old
 vector-upload progress/grid is suppressed; Atlas reports its own source/staging
 state. Independent OSM extraction progress remains visible. Other bodies/themes
 preserve the original contour rendering contract.
+
+Atlas Trees uses forest coverage on the real terrain surface; its legacy polygon overlay is suppressed without changing the model toggle. Other themes use proper concave forest triangles and bounded outline strokes.

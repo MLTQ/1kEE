@@ -2,6 +2,8 @@
 use super::*;
 use std::collections::{HashMap, HashSet};
 use wgpu::util::DeviceExt;
+#[path = "atlas_surface_forest.rs"]
+mod forest;
 
 struct Source {
     raster: Arc<Raster>,
@@ -9,6 +11,7 @@ struct Source {
     color: wgpu::Texture,
     bind: wgpu::BindGroup,
     row: usize,
+    forest: forest::Forest,
 }
 struct Target {
     _color: wgpu::Texture,
@@ -68,6 +71,43 @@ fn image_entry(binding: u32, filterable: bool) -> wgpu::BindGroupLayoutEntry {
         count: None,
     }
 }
+fn source_bind(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    height: &wgpu::Texture,
+    color: &wgpu::Texture,
+    forest: &wgpu::Texture,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Atlas source and forest"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(
+                    &height.create_view(&Default::default()),
+                ),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(
+                    &color.create_view(&Default::default()),
+                ),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(
+                    &forest.create_view(&Default::default()),
+                ),
+            },
+        ],
+    })
+}
 impl Resources {
     pub fn release_inactive(&mut self, active: Option<usize>) {
         for (index, slot) in self.slots.iter_mut().enumerate() {
@@ -96,6 +136,7 @@ impl Resources {
             entries: &[
                 image_entry(0, false),
                 image_entry(1, true),
+                image_entry(3, true),
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -181,34 +222,22 @@ impl Resources {
         let usage = wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING;
         let height = texture(device, size, wgpu::TextureFormat::R32Float, usage);
         let color = texture(device, size, wgpu::TextureFormat::Rgba8Unorm, usage);
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &self.source_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(
-                        &height.create_view(&Default::default()),
-                    ),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(
-                        &color.create_view(&Default::default()),
-                    ),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
-        });
+        let forest = forest::Forest::empty(device);
+        let bind = source_bind(
+            device,
+            &self.source_layout,
+            &self.sampler,
+            &height,
+            &color,
+            &forest.texture,
+        );
         Source {
             raster,
             height,
             color,
             bind,
             row: 0,
+            forest,
         }
     }
     fn make_target(&self, device: &wgpu::Device, size: [u32; 2]) -> Target {
@@ -318,6 +347,26 @@ impl Resources {
                 callback.ctx.request_repaint();
             }
         }
+        if let Some(mask) = &callback.forest
+            && let Some(source) = state.sources.get_mut(&mask.raster_id)
+        {
+            if source
+                .forest
+                .stage(device, queue, mask.clone(), &mut budget)
+            {
+                source.bind = source_bind(
+                    device,
+                    &self.source_layout,
+                    &self.sampler,
+                    &source.height,
+                    &source.color,
+                    &source.forest.texture,
+                );
+            }
+            if !source.forest.ready(mask) {
+                callback.ctx.request_repaint();
+            }
+        }
         let ready: Vec<_> = callback
             .data
             .iter()
@@ -351,6 +400,28 @@ impl Resources {
         if active != old {
             callback.ctx.request_repaint();
         }
+        let forest_active = callback
+            .forest
+            .as_ref()
+            .filter(|mask| {
+                state.active.contains(&mask.raster_id)
+                    && state.sources[&mask.raster_id].forest.ready(mask)
+            })
+            .map(|mask| mask.id);
+        let old_forest = callback
+            .ctx
+            .data(|d| d.get_temp::<u64>(egui::Id::new("atlas-forest-active")));
+        callback.ctx.data_mut(|d| {
+            let id = egui::Id::new("atlas-forest-active");
+            if let Some(mask) = forest_active {
+                d.insert_temp(id, mask);
+            } else {
+                d.remove::<u64>(id);
+            }
+        });
+        if forest_active != old_forest {
+            callback.ctx.request_repaint();
+        }
         if state.active.is_empty() {
             return;
         }
@@ -373,6 +444,13 @@ impl Resources {
                 u.extra[2] = 1.0;
                 u.exclude = state.sources[state.active.last().unwrap()].raster.bounds;
             }
+            let forest_id = callback
+                .forest
+                .as_ref()
+                .filter(|mask| mask.raster_id == *id && state.sources[id].forest.ready(mask))
+                .map_or(0, |mask| mask.id);
+            u.appearance[2] = u32::from(forest_id != 0) as f32;
+            key.extend_from_slice(&forest_id.to_le_bytes());
             key.extend_from_slice(&id.to_le_bytes());
             key.extend_from_slice(bytemuck::bytes_of(&u));
             let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -409,6 +487,12 @@ impl Resources {
                     contents: bytemuck::bytes_of(u),
                     usage: wgpu::BufferUsages::UNIFORM,
                 });
+                let forest_id = callback
+                    .forest
+                    .as_ref()
+                    .filter(|mask| mask.raster_id == *id && state.sources[id].forest.ready(mask))
+                    .map_or(0, |mask| mask.id);
+                key.extend_from_slice(&forest_id.to_le_bytes());
                 key.extend_from_slice(&id.to_le_bytes());
                 key.extend_from_slice(bytemuck::bytes_of(u));
             }

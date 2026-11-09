@@ -232,6 +232,9 @@ pub(super) fn draw_local(
     focus: GeoPoint,
     half: f32,
 ) {
+    if !model.show_trees {
+        super::atlas_forest::suspend();
+    }
     let view = &model.globe_view;
     let root = model.selected_root.as_deref();
     if let Some(region) =
@@ -249,6 +252,11 @@ pub(super) fn draw_local(
                 model.show_bathymetry,
                 model.contour_stroke_width_px(painter.ctx().pixels_per_point()),
             )
+            .with_forest(if model.show_trees {
+                super::atlas_forest::get(painter.ctx(), root, &detail.raster)
+            } else {
+                None
+            })
             .with_style(model.atlas_style, model.stellar_jd)
             .with_coastlines(model.show_coastlines)
             .submit(painter);
@@ -258,6 +266,7 @@ pub(super) fn draw_local(
 }
 
 pub(super) fn clear() {
+    super::atlas_forest::clear();
     if let Some(cache) = IMAGE.get() {
         cache.lock().unwrap().clear();
     }

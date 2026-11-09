@@ -8,6 +8,7 @@ struct Uniforms {
 @group(1) @binding(0) var heights:texture_2d<f32>;
 @group(1) @binding(1) var pigments:texture_2d<f32>;
 @group(1) @binding(2) var linear_sampler:sampler;
+@group(1) @binding(3) var forest_coverage:texture_2d<f32>;
 
 struct Vertex {
     @builtin(position) clip:vec4<f32>,
@@ -88,6 +89,10 @@ fn fs_surface(v:Vertex)->@location(0) vec4<f32> {
     }
     var color=textureSampleLevel(pigments,linear_sampler,v.uv,0.0);
     if color.a<0.5 {discard;}
+    if u.appearance.z>0.5 {
+        let coverage=textureSampleLevel(forest_coverage,linear_sampler,v.uv,0.0).r;
+        color=vec4<f32>(mix(color.rgb,vec3<f32>(0.22,0.36,0.20),coverage*0.74),1.0);
+    }
     color=vec4<f32>(atlas_shade(v.uv,v.geo,color.rgb,pixel),1.0);
     let enabled=select(u.style.w,u.style.z,v.elevation>=0.0);
     color=vec4<f32>(mix(color.rgb,u.minor.rgb,minor*select(0.18,0.32,v.elevation>=0.0)*enabled),1.0);

@@ -50,6 +50,7 @@ mod atlas_relief;
 mod atlas_viewport;
 mod atlas_source;
 mod atlas_surface;
+mod atlas_forest;
 mod gravity_layer;
 pub(crate) use gravity_layer::controls as gravity_controls;
 pub(crate) use swot_layer::controls as swot_controls;
@@ -170,6 +171,10 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         infrastructure_hover::begin(
             response.hover_pos().filter(|_| !response.dragged() && !model.obs_view && !model.event_follow.enabled()),
         );
+        if !(local_terrain_mode && model.map_theme==theme::MapTheme::Atlas
+            && model.active_body==crate::model::ActiveBody::Earth && model.show_trees) {
+            atlas_forest::suspend();
+        }
         painter.add(atlas_surface::visibility_callback(
             rect,
             (model.map_theme == theme::MapTheme::Atlas

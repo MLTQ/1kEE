@@ -12,3 +12,5 @@ uses `ONEKEE_ATLAS_3D_FIXTURE`. Both targets are private and sources read-only.
 
 `render_styled` shares the real surface callback with the movable-light hardware
 fixture in `atlas_light_gpu_tests.rs`; the original geometry tests use defaults.
+
+`render_material` additionally accepts exact-source forest coverage for GPU material/visibility/light regression.

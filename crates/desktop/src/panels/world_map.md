@@ -161,3 +161,7 @@ elevation-displaced triangle grid and render a private color/depth target. Local
 uses the shared contour projector; Globe uses real Earth-radius displacement.
 Atlas isolines lie on the surface and self-occlude. Visibility callbacks release
 inactive Atlas GPU sources/targets. The flat Local relief-image path is removed.
+
+`atlas_forest` prepares native geographic forest coverage on a worker. Local Atlas uses it as terrain material, sharing elevation, lighting and depth; other local themes keep worker-triangulated tree geometry.
+
+Inactive Atlas Trees cancels pending coverage reads between cells; one cell is held at a time while preparing the bounded native mask.

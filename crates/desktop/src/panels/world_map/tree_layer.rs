@@ -5,10 +5,11 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use super::cell_loader::{LoadedPolyline, load_features_from_cells};
-use super::local_terrain_scene::{
-    LocalLayout, local_geo_bounds, project_local, visual_half_extent_for_zoom,
-};
+use super::local_terrain_scene::{LocalLayout, local_geo_bounds, visual_half_extent_for_zoom};
 use super::srtm_stream;
+
+#[path = "tree_geometry.rs"]
+mod geometry;
 
 const ELEVATION_OFFSET_M: f32 = 0.5;
 const GEO_MARGIN_FACTOR: f32 = 0.75;
@@ -18,20 +19,27 @@ const GEO_MARGIN_FACTOR: f32 = 0.75;
 struct ElevatedTree {
     points: Vec<(GeoPoint, f32)>,
     is_polygon: bool,
+    fill: Option<geometry::Fill>,
 }
 
 impl ElevatedTree {
     fn from_polyline(poly: &LoadedPolyline, selected_root: Option<&Path>) -> Self {
-        let points = crate::feature_heights::prepare(
+        let mut points = crate::feature_heights::prepare(
             &poly.points,
             poly.elevations.as_deref(),
             usize::MAX,
             ELEVATION_OFFSET_M,
             |pt| srtm_stream::sample_elevation_m(selected_root, pt),
         );
+        geometry::unwrap(&mut points);
+        let fill = poly
+            .is_polygon
+            .then(|| geometry::tessellate(&points))
+            .flatten();
         Self {
             points,
             is_polygon: poly.is_polygon,
+            fill,
         }
     }
 }
@@ -154,40 +162,57 @@ pub(super) fn draw_trees(
         return;
     };
 
-    let fill_color = theme::tree_color();
-    let thin_stroke = egui::epaint::PathStroke::new(0.6, egui::Color32::from_rgb(20, 80, 30));
+    // A cache from another root can finish while the source selection changes.
+    if cache.last_root != root {
+        return;
+    }
+    let params = super::local_terrain_scene::projection::local_projection_params(
+        layout,
+        view,
+        viewport_center,
+        extent_x_km,
+        extent_y_km,
+    );
+    paint_features(painter, &cache.features, &params, viewport_center);
+}
 
-    for feat in &cache.features {
-        let mut pts: Vec<egui::Pos2> = Vec::with_capacity(feat.points.len());
-        for &(pt, elev) in &feat.points {
-            let Some(pos) = project_local(
-                layout,
-                view,
-                viewport_center,
-                pt,
-                elev,
-                extent_x_km,
-                extent_y_km,
-            )
-            .map(|p| p.pos) else {
-                continue;
-            };
-            pts.push(pos);
-        }
-
-        if pts.len() < 3 {
+fn paint_features(
+    painter: &egui::Painter,
+    features: &[ElevatedTree],
+    params: &super::local_terrain_scene::projection::LocalProjectionParams,
+    focus: GeoPoint,
+) {
+    let color = theme::tree_color();
+    for feature in features {
+        let Some((anchor, _)) = feature
+            .points
+            .iter()
+            .find(|(p, _)| p.lon.is_finite() && p.lat.is_finite())
+        else {
             continue;
+        };
+        let shift = ((focus.lon - anchor.lon) / 360.0).round() * 360.0;
+        let project = |mut p: GeoPoint, h| {
+            p.lon += shift;
+            let (x, y, _) = params.project_logical(p, h);
+            let p = egui::pos2(x, y);
+            p.is_finite().then_some(p)
+        };
+        if let Some(fill) = &feature.fill {
+            let mesh = geometry::project_fill(fill, color, painter.clip_rect(), project);
+            if !mesh.is_empty() {
+                painter.add(egui::Shape::mesh(mesh));
+            }
         }
-
-        if feat.is_polygon {
-            painter.add(egui::Shape::Path(egui::epaint::PathShape {
-                points: pts,
-                closed: true,
-                fill: fill_color,
-                stroke: thin_stroke.clone(),
-            }));
-        } else if pts.len() >= 2 {
-            painter.add(egui::Shape::line(pts, egui::Stroke::new(0.8, fill_color)));
-        }
+        let stroke = if feature.is_polygon {
+            egui::Stroke::new(0.6, egui::Color32::from_rgb(20, 80, 30))
+        } else {
+            egui::Stroke::new(0.8, color)
+        };
+        painter.extend(geometry::outlines(&feature.points, stroke, project));
     }
 }
+
+#[cfg(test)]
+#[path = "tree_layer_tests.rs"]
+mod tests;
