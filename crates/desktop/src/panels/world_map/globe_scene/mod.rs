@@ -164,9 +164,9 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let contour_stroke_width_px = model.contour_stroke_width_px(painter.ctx().pixels_per_point());
     if model.active_body == crate::model::ActiveBody::Earth {
         if model.map_theme == theme::MapTheme::Atlas {
-            super::atlas_relief::draw_globe(painter, rect, &layout, &model.globe_view, selected_root);
+            super::atlas_relief::draw_globe(painter, rect, &layout, model);
         }
-        if model.show_bathymetry {
+        if model.show_bathymetry && model.map_theme != theme::MapTheme::Atlas {
             geography::draw_global_bathymetry(
                 painter,
                 &layout,
@@ -187,7 +187,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 &model.gravity.map().id,
             );
         }
-        if model.show_coastlines {
+        if model.show_coastlines && model.map_theme != theme::MapTheme::Atlas {
             geography::draw_global_coastlines(
                 painter,
                 &layout,
@@ -196,7 +196,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 contour_stroke_width_px,
             );
         }
-        if model.show_contours {
+        if model.show_contours && model.map_theme != theme::MapTheme::Atlas {
             geography::draw_global_topo(
                 painter,
                 &layout,

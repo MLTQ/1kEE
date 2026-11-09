@@ -1,18 +1,15 @@
 //! Cached Atlas base map shared by Globe and Local views.
 use super::{atlas_image::HeightGrid, globe_scene::GlobeLayout, local_terrain_scene::LocalLayout};
-use crate::{
-    model::{GeoPoint, GlobeViewState},
-    terrain_assets,
-};
+#[cfg(test)]
+use crate::model::GlobeViewState;
+use crate::{model::GeoPoint, terrain_assets};
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
 };
 
-type Images = super::layer_snapshot::Snapshot<Option<PathBuf>, egui::TextureHandle>;
+type Images = super::layer_snapshot::Snapshot<Option<PathBuf>, Arc<super::atlas_surface::Raster>>;
 static IMAGE: OnceLock<Mutex<Images>> = OnceLock::new();
-type MeshCache = Option<(Vec<u32>, egui::TextureId, Arc<egui::Mesh>)>;
-static MESH: OnceLock<Mutex<[MeshCache; 4]>> = OnceLock::new();
 
 #[derive(Clone, PartialEq, Eq)]
 struct DetailRequest {
@@ -28,8 +25,7 @@ struct DetailNotice {
 }
 
 struct LoadedDetail {
-    texture: egui::TextureHandle,
-    region: super::atlas_viewport::Region,
+    raster: Arc<super::atlas_surface::Raster>,
 }
 type Details = super::layer_snapshot::Snapshot<DetailRequest, LoadedDetail>;
 static GLOBE_DETAIL: OnceLock<Mutex<Details>> = OnceLock::new();
@@ -56,7 +52,7 @@ fn detail_texture(
         "atlas-native-detail",
         |a, b| a.root == b.root,
         move |request| {
-            let result = load_detail(&wake, &request);
+            let result = load_detail(&request);
             let message = result.as_ref().err().cloned();
             wake.data_mut(|d| {
                 d.insert_temp(
@@ -74,17 +70,12 @@ fn detail_texture(
     result
 }
 
-fn load_detail(ctx: &egui::Context, request: &DetailRequest) -> Result<LoadedDetail, String> {
+fn load_detail(request: &DetailRequest) -> Result<LoadedDetail, String> {
     let detail =
         super::atlas_source::load(request.root.as_deref(), request.region, request.max_edge)?;
-    let image = detail
-        .grid
-        .image_for(detail.region.bounds())
+    let raster = super::atlas_surface::Raster::new(detail.grid, detail.region.bounds())
         .ok_or("Atlas terrain cannot be shaded: invalid image bounds.")?;
-    Ok(LoadedDetail {
-        texture: ctx.load_texture(detail.source, image, egui::TextureOptions::LINEAR),
-        region: detail.region,
-    })
+    Ok(LoadedDetail { raster })
 }
 
 fn paint_detail_notice(painter: &egui::Painter, rect: egui::Rect, local: bool) {
@@ -96,6 +87,14 @@ fn paint_detail_notice(painter: &egui::Painter, rect: egui::Rect, local: bool) {
                 .map(|m| format!("Atlas detail unavailable: {m}")),
             _ => Some("Atlas: refining terrain…".into()),
         }
+    });
+    let message = message.or_else(|| {
+        let slot = usize::from(local);
+        let wanted = painter
+            .ctx()
+            .data(|d| d.get_temp::<u64>(egui::Id::new(("atlas-surface-wanted", slot))))?;
+        (!super::atlas_surface::uploaded(painter.ctx(), slot, wanted))
+            .then(|| "Atlas: preparing 3D terrain…".into())
     });
     let Some(message) = message else {
         return;
@@ -119,21 +118,17 @@ fn paint_detail_notice(painter: &egui::Painter, rect: egui::Rect, local: bool) {
 
 const WORLD: [f32; 4] = [-180.0, -90.0, 180.0, 90.0];
 
-fn texture(ctx: &egui::Context, root: Option<&Path>) -> Option<egui::TextureId> {
-    let wake = ctx.clone();
+fn texture(ctx: &egui::Context, root: Option<&Path>) -> Option<Arc<super::atlas_surface::Raster>> {
     let result = IMAGE.get_or_init(Default::default).lock().ok()?.get(
         root.map(Path::to_path_buf),
         "atlas-relief",
         |a, b| a == b,
-        move |root| {
-            let image = load_grid(root.as_deref())?.image()?;
-            Some(wake.load_texture("atlas-relief", image, egui::TextureOptions::LINEAR))
-        },
+        move |root| super::atlas_surface::Raster::new(load_grid(root.as_deref())?, WORLD),
     );
     if result.is_none() {
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
     }
-    result.map(|image| image.id())
+    result.map(|image| image.as_ref().clone())
 }
 
 /// All discovery, file reads, decoding and lighting run on the snapshot worker.
@@ -192,59 +187,39 @@ fn read_preview(path: &Path, signed: bool) -> Option<HeightGrid> {
     })
 }
 
-fn paint_cached(
-    painter: &egui::Painter,
-    texture: egui::TextureId,
-    index: usize,
-    key: Vec<u32>,
-    build: impl FnOnce() -> egui::Mesh,
-) {
-    let Ok(mut caches) = MESH.get_or_init(Default::default).lock() else {
-        return;
-    };
-    let cache = &mut caches[index];
-    if cache
-        .as_ref()
-        .is_none_or(|(old, id, _)| old != &key || *id != texture)
-    {
-        *cache = Some((key, texture, Arc::new(build())));
-    }
-    if let Some((_, _, mesh)) = cache.as_ref() {
-        painter.add(egui::Shape::mesh(mesh.clone()));
-    }
-}
-
 pub(super) fn draw_globe(
     painter: &egui::Painter,
     rect: egui::Rect,
     layout: &GlobeLayout,
-    view: &GlobeViewState,
-    root: Option<&Path>,
+    model: &crate::model::AppModel,
 ) {
-    let key = vec![
-        0,
-        view.yaw.to_bits(),
-        view.pitch.to_bits(),
-        layout.center.x.to_bits(),
-        layout.center.y.to_bits(),
-        layout.radius.to_bits(),
-        layout.focal_length.to_bits(),
-        layout.camera_distance.to_bits(),
-    ];
-    if let Some(texture) = texture(painter.ctx(), root) {
-        paint_cached(painter, texture, 0, key.clone(), || {
-            super::raster_mesh::globe(layout, view, texture, WORLD, false)
-        });
+    let view = &model.globe_view;
+    let root = model.selected_root.as_deref();
+    let mut rasters = Vec::new();
+    if let Some(overview) = texture(painter.ctx(), root) {
+        rasters.push(overview);
     }
-    if let Some(region) =
-        super::atlas_viewport::globe(rect, layout, view, painter.ctx().pixels_per_point())
+    let region = super::atlas_viewport::globe(rect, layout, view, painter.ctx().pixels_per_point());
+    if let Some(region) = region
+        && let Some(detail) = detail_texture(painter.ctx(), root, region, false)
     {
-        if let Some(detail) = detail_texture(painter.ctx(), root, region, false) {
-            let texture = detail.texture.id();
-            paint_cached(painter, texture, 1, key, || {
-                super::raster_mesh::globe(layout, view, texture, detail.region.bounds(), true)
-            });
-        }
+        rasters.push(detail.raster.clone());
+    }
+    if !rasters.is_empty() {
+        super::atlas_surface::Callback::globe(
+            painter,
+            rect,
+            layout,
+            view,
+            rasters,
+            model.show_contours,
+            model.show_bathymetry,
+            model.contour_stroke_width_px(painter.ctx().pixels_per_point()),
+        )
+        .with_coastlines(model.show_coastlines)
+        .submit(painter);
+    }
+    if region.is_some() {
         paint_detail_notice(painter, rect, false);
     }
 }
@@ -252,81 +227,32 @@ pub(super) fn draw_globe(
 pub(super) fn draw_local(
     painter: &egui::Painter,
     layout: &LocalLayout,
-    view: &GlobeViewState,
-    root: Option<&Path>,
+    model: &crate::model::AppModel,
     focus: GeoPoint,
     half: f32,
 ) {
-    let clip = painter.clip_rect();
-    let key = vec![
-        1,
-        view.local_yaw.to_bits(),
-        view.local_pitch.to_bits(),
-        view.local_layer_spread.to_bits(),
-        focus.lat.to_bits(),
-        focus.lon.to_bits(),
-        half.to_bits(),
-        layout.focus_center.x.to_bits(),
-        layout.focus_center.y.to_bits(),
-        layout.width.to_bits(),
-        layout.height.to_bits(),
-        layout.horizontal_scale.to_bits(),
-        clip.min.x.to_bits(),
-        clip.min.y.to_bits(),
-        clip.max.x.to_bits(),
-        clip.max.y.to_bits(),
-    ];
-    if let Some(texture) = texture(painter.ctx(), root) {
-        paint_cached(painter, texture, 2, key.clone(), || {
-            local_mesh(layout, view, texture, focus, half, clip)
-        });
-    }
-    if let Some(region) = super::atlas_viewport::local(clip, layout, view, focus, half) {
+    let view = &model.globe_view;
+    let root = model.selected_root.as_deref();
+    if let Some(region) =
+        super::atlas_viewport::local(painter.clip_rect(), layout, view, focus, half)
+    {
         if let Some(detail) = detail_texture(painter.ctx(), root, region, true) {
-            let texture = detail.texture.id();
-            paint_cached(painter, texture, 3, key, || {
-                super::raster_mesh::local(
-                    layout,
-                    view,
-                    texture,
-                    detail.region.bounds(),
-                    focus,
-                    half,
-                    clip,
-                )
-            });
+            super::atlas_surface::Callback::local(
+                painter,
+                layout,
+                view,
+                detail.raster.clone(),
+                focus,
+                half,
+                model.show_contours,
+                model.show_bathymetry,
+                model.contour_stroke_width_px(painter.ctx().pixels_per_point()),
+            )
+            .with_coastlines(model.show_coastlines)
+            .submit(painter);
         }
-        paint_detail_notice(painter, clip, true);
+        paint_detail_notice(painter, painter.clip_rect(), true);
     }
-}
-
-fn local_mesh(
-    layout: &LocalLayout,
-    view: &GlobeViewState,
-    texture: egui::TextureId,
-    focus: GeoPoint,
-    half: f32,
-    clip: egui::Rect,
-) -> egui::Mesh {
-    let mut mesh = egui::Mesh::with_texture(texture);
-    // Separate longitude quarters unwrap independently around the focus,
-    // so Local remains continuous when a viewport crosses the dateline.
-    for west in [-180.0, -90.0, 0.0, 90.0] {
-        let mut part = super::raster_mesh::local(
-            layout,
-            view,
-            texture,
-            [west, -90.0, west + 90.0, 90.0],
-            focus,
-            half,
-            clip,
-        );
-        for vertex in &mut part.vertices {
-            vertex.uv.x = (west + 180.0) / 360.0 + vertex.uv.x * 0.25;
-        }
-        mesh.append(part);
-    }
-    mesh
 }
 
 pub(super) fn clear() {
@@ -337,9 +263,6 @@ pub(super) fn clear() {
         if let Some(cache) = cache.get() {
             cache.lock().unwrap().clear();
         }
-    }
-    if let Some(cache) = MESH.get() {
-        *cache.lock().unwrap() = Default::default();
     }
 }
 

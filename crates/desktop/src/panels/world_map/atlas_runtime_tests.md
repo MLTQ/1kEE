@@ -16,3 +16,10 @@ Catch the gap between a manually loaded native crop and the running application.
   `ONEKEE_ATLAS_RUNTIME_PREVIEW` optionally saves the actual scene render.
 
 No app window is opened and no user settings or original sources are modified.
+
+The globe regression now waits for actual GPU height/color staging, not only CPU
+image publication. The Local production-controller regression loads its real
+viewport, draws a solid elevation surface, then enables optional surface contours
+without changing terrain geometry. It waits an extra publication frame before
+comparison so removing a loading notice cannot satisfy the contour assertion.
+Separate screenshots can capture both states.

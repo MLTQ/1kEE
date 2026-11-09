@@ -244,6 +244,12 @@ only its own prepared regional product, never altering elevations.
 
 Local Earth projects buildout campuses and geolocated rules at ground level and passes visible marker positions to the shared picker.
 
-Earth + Atlas paints the same measured overview relief on the sea-level plane
-before detailed contours, optional hillshade and scientific overlays. All
-operational layers and elevations retain their existing projections.
+### Atlas 3D surface
+Atlas now uses measured-height GPU terrain rather than a sea-level image quad.
+The surface copies the shared local projector, including vertical exaggeration
+and layer spread, and derives optional contours on that same opaque geometry.
+It does not upload or draw the old detached vector contour stack in Atlas.
+Source terrain acquisition and other overlays keep their existing paths. The old
+vector-upload progress/grid is suppressed; Atlas reports its own source/staging
+state. Independent OSM extraction progress remains visible. Other bodies/themes
+preserve the original contour rendering contract.

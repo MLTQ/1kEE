@@ -1,34 +1,26 @@
 # atlas_relief.rs
 
 ## Purpose
-Own the Atlas overview and independently refined Globe/Local relief images.
-Source discovery, decoding, lighting and texture preparation stay on coalesced
-background workers; painting never opens terrain files or invokes GDAL.
+Load measured Atlas height fields and submit actual 3D terrain in both views.
+Native data, pigmentation and errors are prepared asynchronously; painting never
+opens files or invokes GDAL. Local view has no flat-image ground-plane fallback.
 
 ## Components
-- `load_grid` reads the small existing GEBCO overview as an immediate fallback.
-- `detail_texture` uses `atlas_viewport` and `atlas_source` to load native windows
-  up to the live GPU limit (8192 edge / 32 million pixels maximum). Root-keyed
-  snapshots retain each previous georeferenced window while replacements load.
-- `draw_globe` paints overview then native relief on the unit sphere. Regional
-  tessellation follows camera scale. The actual scene rectangle drives selection.
-- `draw_local` uses the inverse oblique clip for fine detail; the overview still
-  unwraps longitude quarters independently around the dateline.
-- `paint_cached` retains four immutable Arc meshes (overview/detail × two views),
-  keyed by texture and all camera/layout inputs. `clear` releases these plus all
-  image snapshots and rejects stale workers.
+- `load_grid` provides the coarse global height field for the globe overview.
+- `detail_texture` retains native metre heights as `atlas_surface::Raster`, not
+  just a rendered image. Root/region/texture-limit/epoch keys reject stale work.
+  Each raster owns the geographic bounds used for projection and publication.
+- `draw_globe` submits overview and native height fields to the displaced sphere
+  renderer, preserving their own geographic bounds during refinement.
+- `draw_local` submits the native height field using the exact contour camera
+  projection, including layer spread. Only real terrain is drawn in Local view.
+- `paint_detail_notice` distinguishes source refinement, staged 3D preparation
+  and actual source/tool errors. GPU publication IDs keep readiness honest.
 
 ## Contracts
-Only Earth + Atlas paints this base. Contours and every other layer retain their
-independent visibility controls; no theme selection changes layer choices.
-Scientific images, optional contours and operational markers draw above relief.
-No overview file is required for the original-data detail path to start.
-Missing sources leave the existing image visible and retry with snapshot backoff.
-
-### Runtime diagnostics
-Native requests keep a request/epoch-scoped notice in the egui context. The map
-shows a small refining notice while loading, and a concrete tool/data error if
-refinement fails. Success removes the notice. Late results from another viewport
-or a cleared epoch cannot supply a misleading ready state. Errors keep the last
-valid georeferenced image through the existing single-flight retry/backoff.
-`atlas_runtime_tests` exercises the production scene rather than a fixed crop.
+Contour/coastline/bathymetry controls become surface isolines in Atlas. They use
+exactly the same geometry and depth buffer as the colored terrain; other themes
+retain their existing vector pipelines. Heights and colors persist together until
+GPU staging completes; late status notices cannot override a new request/epoch.
+Native GDAL discovery remains independent of the terminal PATH. Runtime tests
+exercise source selection, staging, real drawing and contour toggles.

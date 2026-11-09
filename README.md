@@ -56,9 +56,12 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
   all campuses, jurisdictional rules and dated news with source links.
 - **Atlas appearance** — choose **Settings → Appearance → ATLAS** for cream-paper
   controls, mineral elevation tints, blue bathymetry and northwest-lit GEBCO
-  shaded relief in Earth Globe and Local views. Automatically refines from original
-  GEBCO terrain, SRTM land elevations and finer cached surveys as you zoom. The
-  overview remains visible while native detail loads. Contours and other layers
+  3D terrain in Earth Globe and Local views. Heights displace the actual surface;
+  optional contours lie on it and disappear behind nearer ridges. Automatically
+  refines from original GEBCO terrain, SRTM land elevations and finer cached
+  surveys as you zoom. The
+  Globe overview remains visible while native detail loads. Local Layer Spread
+  controls the surface and contours together. Contours and other layers
   remain independently selectable. Colors represent height/depth, not geology.
 - **Terrain & bodies** — GEBCO / SRTM / Natural Earth elevation, the Yale Bright
   Star Catalogue and planetary ephemeris, and a replay timeline.

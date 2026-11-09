@@ -153,3 +153,9 @@ Earth + Atlas passes the real scene rectangle to native detail selection and
 paints refined measured relief before bathymetry contours and other
 overlays. The layer is independent of contour visibility. Existing event,
 camera and scientific layers retain their ordering and interaction.
+
+### Atlas 3D surface
+Atlas submits measured height fields to `atlas_surface`: elevations displace the
+sphere by metres/Earth radius. Optional contours, coastlines and bathymetry are
+isolines on that depth-tested surface, bypassing the legacy constant-radius shells.
+Other map themes retain those vector pipelines and their existing behavior.

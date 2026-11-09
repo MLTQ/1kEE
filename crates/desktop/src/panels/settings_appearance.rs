@@ -33,11 +33,11 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
     }
     if model.map_theme == theme::MapTheme::Atlas {
         ui.add_space(8.0);
-        ui.label("Vintage shaded relief · northwest light · elevation and ocean-depth tints");
+        ui.label("3D terrain · measured elevation · northwest light · mineral colors");
         ui.small(
             "Relief refines automatically as you zoom: native seafloor terrain, \
             detailed land elevations, and finer cached surveys where available.",
         );
-        ui.small("Contours and other layers stay independently selectable. Colors describe height and depth, not geology.");
+        ui.small("Contours stay independently selectable and follow the 3D surface. Layer Spread moves terrain and contours together. Colors describe height and depth, not geology.");
     }
 }

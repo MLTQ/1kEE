@@ -57,58 +57,6 @@ mod appearance;
 mod screen;
 
 #[test]
-fn local_dateline_quarters_keep_coverage_and_source_uvs() {
-    let clip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024., 768.));
-    let layout = LocalLayout {
-        center: clip.center(),
-        focus_center: clip.center(),
-        width: 840.,
-        height: 570.,
-        horizontal_scale: 317.,
-    };
-    for longitude in [-179.9, 179.9] {
-        let focus = GeoPoint {
-            lat: 20.,
-            lon: longitude,
-        };
-        let view = GlobeViewState::from_focus(focus);
-        let mesh = local_mesh(&layout, &view, egui::TextureId::Managed(0), focus, 2., clip);
-        assert!(!mesh.indices.is_empty());
-        // Both ends of the same global image are present beside one another.
-        assert!(mesh.vertices.iter().any(|v| v.uv.x < 0.01));
-        assert!(mesh.vertices.iter().any(|v| v.uv.x > 0.99));
-        assert!(
-            mesh.vertices
-                .iter()
-                .all(|v| (0.0..=1.0).contains(&v.uv.x) && (0.0..=1.0).contains(&v.uv.y))
-        );
-        for corner in [
-            clip.left_top(),
-            clip.right_top(),
-            clip.left_bottom(),
-            clip.right_bottom(),
-            clip.center(),
-        ] {
-            assert!(
-                mesh.indices.chunks_exact(3).any(|triangle| {
-                    let points = [triangle[0], triangle[1], triangle[2]]
-                        .map(|i| mesh.vertices[i as usize].pos);
-                    let crosses: Vec<_> = (0..3)
-                        .map(|i| {
-                            let a = points[i];
-                            let b = points[(i + 1) % 3];
-                            (b.x - a.x) * (corner.y - a.y) - (b.y - a.y) * (corner.x - a.x)
-                        })
-                        .collect();
-                    crosses.iter().all(|&v| v >= -0.01) || crosses.iter().all(|&v| v <= 0.01)
-                }),
-                "local map covers {corner:?} at longitude {longitude}"
-            );
-        }
-    }
-}
-
-#[test]
 #[ignore = "requires a GPU and an explicit existing GEBCO terrain root"]
 fn atlas_real_terrain_preview() {
     let root = PathBuf::from(std::env::var("ONEKEE_ATLAS_ROOT").expect("GEBCO asset root"));
@@ -128,8 +76,7 @@ fn atlas_real_terrain_preview() {
     );
     gpu.render(&ctx, initial, false);
     crate::theme::set_theme(&ctx, crate::theme::MapTheme::Atlas);
-    let image = detail.grid.image_for(region.bounds()).unwrap();
-    let texture = ctx.load_texture("atlas-preview", image, egui::TextureOptions::LINEAR);
+    let raster = super::super::atlas_surface::Raster::new(detail.grid, region.bounds()).unwrap();
     let mut model = crate::model::AppModel::new();
     model.map_theme = crate::theme::MapTheme::Atlas;
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1536., 1024.));
@@ -142,7 +89,8 @@ fn atlas_real_terrain_preview() {
         focal_length: 2.8,
         camera_distance: 2.0,
     };
-    for frame in 0..3 {
+    let mut captured = false;
+    for _frame in 0..100 {
         let output = ctx.run(
             egui::RawInput {
                 screen_rect: Some(rect),
@@ -181,18 +129,23 @@ fn atlas_real_terrain_preview() {
                             )
                             .into_paint_callback(ui.max_rect()),
                         );
-                        let mesh = super::super::raster_mesh::globe(
+                        super::super::atlas_surface::Callback::globe(
+                            painter,
+                            ui.max_rect(),
                             &layout,
                             &view,
-                            texture.id(),
-                            region.bounds(),
-                            true,
-                        );
-                        painter.add(egui::Shape::mesh(mesh));
+                            vec![raster.clone()],
+                            false,
+                            false,
+                            1.0,
+                        )
+                        .submit(painter);
                     });
             },
         );
-        if let Some(pixels) = gpu.render(&ctx, output, frame == 2) {
+        if let Some(pixels) = gpu.render(&ctx, output, true)
+            && super::super::atlas_surface::uploaded(&ctx, 0, raster.id)
+        {
             assert!(
                 pixels
                     .chunks_exact(4)
@@ -204,8 +157,11 @@ fn atlas_real_terrain_preview() {
             if let Ok(path) = std::env::var("ONEKEE_ATLAS_PREVIEW") {
                 image::save_buffer(path, &pixels, 1536, 1024, image::ColorType::Rgba8).unwrap();
             }
+            captured = true;
+            break;
         }
     }
+    assert!(captured, "3D preview never uploaded");
     crate::theme::set_theme(&ctx, crate::theme::MapTheme::Topo);
 }
 
@@ -233,10 +189,10 @@ fn native_detail_publishes_in_both_scenes_without_blocking_draw() {
         let globe = detail_texture(&ctx, Some(&root), region, false);
         let local = detail_texture(&ctx, Some(&root), region, true);
         if let (Some(globe), Some(local)) = (globe, local) {
-            assert_eq!(globe.texture.size(), [900, 900]);
-            assert_eq!(local.texture.size(), [900, 900]);
-            assert_eq!(globe.region, region);
-            assert_eq!(local.region, region);
+            assert_eq!(globe.raster.size, [900, 900]);
+            assert_eq!(local.raster.size, [900, 900]);
+            assert_eq!(globe.raster.bounds, region.bounds());
+            assert_eq!(local.raster.bounds, region.bounds());
             break;
         }
         assert!(start.elapsed() < Duration::from_secs(40));

@@ -116,3 +116,8 @@ to `world_map::gravity_controls`. It describes mGal, grid spacing and regional
 coverage without reload controls, citations or file access in the drawer.
 
 Public Data includes the saved AI data center buildout toggle, refresh status, publisher attribution and browser button.
+
+Atlas keeps the independent Contours checkbox and physical width control. Its
+contours are part of solid 3D terrain, so the separate transparent-vector distant
+contour option is replaced by an explanatory line while Atlas Earth is active.
+The saved vector occlusion choice is preserved for other themes.
