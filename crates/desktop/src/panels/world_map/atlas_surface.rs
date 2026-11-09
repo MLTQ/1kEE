@@ -23,14 +23,32 @@ pub(super) struct Raster {
 }
 impl Raster {
     pub fn new(grid: HeightGrid, bounds: [f32; 4]) -> Option<Arc<Self>> {
-        static NEXT: AtomicU64 = AtomicU64::new(1);
         let image = grid.image_for(bounds)?;
+        Self::prepared(
+            grid,
+            bounds,
+            image.pixels.iter().flat_map(|c| c.to_array()).collect(),
+        )
+    }
+    pub fn prepared(grid: HeightGrid, bounds: [f32; 4], colors: Vec<u8>) -> Option<Arc<Self>> {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let count = grid.width.checked_mul(grid.height)?;
+        if grid.width < 3
+            || grid.height < 3
+            || grid.metres.len() != count
+            || colors.len() != count.checked_mul(4)?
+            || !bounds.iter().all(|v| v.is_finite())
+            || bounds[0] >= bounds[2]
+            || bounds[1] >= bounds[3]
+        {
+            return None;
+        }
         Some(Arc::new(Self {
             id: NEXT.fetch_add(1, Ordering::Relaxed),
-            size: image.size,
+            size: [grid.width, grid.height],
             bounds,
             heights: grid.metres,
-            colors: image.pixels.iter().flat_map(|c| c.to_array()).collect(),
+            colors,
         }))
     }
 }
@@ -277,7 +295,11 @@ pub(super) fn shader_source() -> String {
 pub(super) fn uploaded(ctx: &egui::Context, slot: usize, id: u64) -> bool {
     ctx.data(|d| d.get_temp::<u64>(egui::Id::new(("atlas-surface-active", slot)))) == Some(id)
 }
-struct Visibility(Option<usize>);
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+pub(super) fn clear() {
+    GENERATION.fetch_add(1, Ordering::Relaxed);
+}
+struct Visibility;
 impl egui_wgpu::CallbackTrait for Visibility {
     fn prepare(
         &self,
@@ -288,7 +310,7 @@ impl egui_wgpu::CallbackTrait for Visibility {
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         if let Some(res) = resources.get_mut::<gpu::Resources>() {
-            res.release_inactive(self.0);
+            res.sync_generation(GENERATION.load(Ordering::Relaxed));
         }
         vec![]
     }
@@ -300,8 +322,8 @@ impl egui_wgpu::CallbackTrait for Visibility {
     ) {
     }
 }
-pub(super) fn visibility_callback(rect: egui::Rect, active: Option<usize>) -> egui::PaintCallback {
-    egui_wgpu::Callback::new_paint_callback(rect, Visibility(active))
+pub(super) fn visibility_callback(rect: egui::Rect) -> egui::PaintCallback {
+    egui_wgpu::Callback::new_paint_callback(rect, Visibility)
 }
 
 impl egui_wgpu::CallbackTrait for Callback {
@@ -320,6 +342,7 @@ impl egui_wgpu::CallbackTrait for Callback {
             .get::<super::contour_pass::ContourPassResources>()
             .map_or(wgpu::TextureFormat::Rgba8Unorm, |r| r.format);
         let res = resources.get_mut::<gpu::Resources>().unwrap();
+        res.sync_generation(GENERATION.load(Ordering::Relaxed));
         res.set_format(device, format);
         res.prepare(device, queue, encoder, self, screen.pixels_per_point);
         vec![]

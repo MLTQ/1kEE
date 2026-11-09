@@ -279,6 +279,7 @@ fn atlas_recent_details_reuse_rasters_and_evict_by_recency() {
         request.region.bounds(),
     )
     .unwrap();
+    cache.budget = 8 * (raster.heights.len() * 4 + raster.colors.len());
     for epoch in 0..8 {
         cache.insert(
             DetailRequest {
@@ -314,4 +315,76 @@ fn atlas_recent_details_reuse_rasters_and_evict_by_recency() {
         cache.bytes,
         8 * (raster.heights.len() * 4 + raster.colors.len())
     );
+}
+
+#[test]
+fn atlas_retention_uses_bytes_and_recovers_covered_views() {
+    use super::super::atlas_viewport::Region;
+    let mut cache = RecentDetails::default();
+    let request = DetailRequest {
+        root: None,
+        region: Region([0, 0, 360, 360]),
+        max_edge: 8192,
+        epoch: 0,
+    };
+    let raster = super::super::atlas_surface::Raster::new(
+        HeightGrid {
+            width: 8,
+            height: 4,
+            metres: vec![123.; 32],
+        },
+        request.region.bounds(),
+    )
+    .unwrap();
+    for offset in 0..40 {
+        cache.insert(
+            DetailRequest {
+                region: Region([offset * 360, 0, (offset + 1) * 360, 360]),
+                ..request.clone()
+            },
+            LoadedDetail {
+                raster: raster.clone(),
+            },
+        );
+    }
+    assert_eq!(
+        cache.entries.len(),
+        40,
+        "small views have no arbitrary count ceiling"
+    );
+    let shifted = DetailRequest {
+        region: Region([-10, -10, 350, 350]),
+        ..request.clone()
+    };
+    let (key, hit) = cache.covering(&shifted, [0.01, 0.01, 0.08, 0.08]).unwrap();
+    assert_eq!(key.region, request.region);
+    assert!(Arc::ptr_eq(&hit.raster, &raster));
+    assert!(
+        cache
+            .covering(
+                &DetailRequest {
+                    epoch: 1,
+                    ..shifted.clone()
+                },
+                [0.01, 0.01, 0.08, 0.08]
+            )
+            .is_none()
+    );
+    assert!(
+        cache
+            .covering(
+                &DetailRequest {
+                    root: Some("other".into()),
+                    ..shifted
+                },
+                [0.01, 0.01, 0.08, 0.08]
+            )
+            .is_none()
+    );
+    let mut tiny = RecentDetails {
+        budget: 1,
+        ..Default::default()
+    };
+    tiny.insert(request, LoadedDetail { raster });
+    assert!(tiny.entries.is_empty());
 }

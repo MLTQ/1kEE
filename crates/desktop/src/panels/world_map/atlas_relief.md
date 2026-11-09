@@ -35,9 +35,11 @@ The global overview first reads the Overview tier in atlas_heights_v1.sqlite.
 Existing GEBCO previews remain the fallback for incomplete/missing caches.
 Detailed windows use the corresponding cache-first path in atlas_source.rs.
 
-Interactive Atlas retains up to eight prepared views within a 384 MiB LRU budget
-for heights and pigments. Exact revisits share the original raster; both scenes
-can use it. Explicit clear/epoch changes reject those in-memory entries. Pending
+Interactive Atlas retains prepared heights and pigments within the configurable
+ONEKEE_ATLAS_RAM_MIB LRU byte budget (1 GiB normally, 8 GiB in the 4090 profile).
+There is no entry-count limit. Exact and compatible coverage revisits share the
+original raster; both scenes can use it. A cache hit installs the ready snapshot
+immediately, bypassing an unrelated pending load without releasing its worker gate. Explicit clear/epoch changes reject those in-memory entries. Pending
 and current geographic requests are stabilized while their padded terrain still
 contains the actual visible viewport, subject to detail-tier and zoom checks.
 This prevents small pans from repeatedly discarding useful in-flight work.

@@ -41,3 +41,7 @@ background persistence. Failed SRTM/fine overlays may display the existing coars
 fallback, but that incomplete result is not retained as a reusable completed view.
 Missing, unreadable, full or locked recent-view storage cannot prevent native
 terrain from loading. Source identity checks do not hash whole original files.
+
+Saved views can supply both verified heights and prepared pigment bytes directly
+to Raster::prepared, skipping color generation as well as GDAL. Height-only
+entries are still usable and their regenerated colors are saved asynchronously.

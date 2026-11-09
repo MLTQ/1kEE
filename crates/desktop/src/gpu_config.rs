@@ -8,6 +8,8 @@ pub(crate) struct Settings {
     pub cpu_bytes: usize,
     pub upload_bytes: usize,
     pub upload_us: u64,
+    pub atlas_cpu_bytes: usize,
+    pub atlas_disk_bytes: usize,
 }
 
 fn bounded(value: Option<&str>, default: usize, min: usize, max: usize) -> usize {
@@ -35,6 +37,8 @@ pub(crate) fn settings() -> &'static Settings {
         cpu_bytes: setting("ONEKEE_CPU_CACHE_MIB", 4096, 256, 65536) * 1024 * 1024,
         upload_bytes: setting("ONEKEE_UPLOAD_MIB", 4, 1, 64) * 1024 * 1024,
         upload_us: setting("ONEKEE_UPLOAD_US", 2000, 100, 8000) as u64,
+        atlas_cpu_bytes: setting("ONEKEE_ATLAS_RAM_MIB", 1024, 256, 32768) * 1024 * 1024,
+        atlas_disk_bytes: setting("ONEKEE_ATLAS_DISK_MIB", 8192, 512, 262144) * 1024 * 1024,
     })
 }
 
@@ -46,6 +50,11 @@ pub(crate) fn log_settings() {
         s.cpu_bytes / 1048576,
         s.upload_bytes / 1048576,
         s.upload_us
+    );
+    eprintln!(
+        "[1kEE GPU] Atlas prepared terrain: RAM={} MiB, disk={} MiB",
+        s.atlas_cpu_bytes / 1048576,
+        s.atlas_disk_bytes / 1048576,
     );
 }
 

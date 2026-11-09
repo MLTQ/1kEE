@@ -29,3 +29,9 @@ antialiasing. The native globe window excludes the overview beneath its extent.
 `with_style` supplies live geographic light, richness and contrast uniforms; the composed `atlas_lighting.wgsl` shader shades unlit pigments without changing heights, IDs or upload state. The shared uniform layout is now 256 bytes.
 
 `with_forest` accepts coverage only for a matching raster ID/size. Completed R8 coverage blends a forest pigment before the shared lighting/contour pass, so it has exactly the terrain silhouette and occlusion.
+
+`Raster::prepared` accepts validated saved height/color arrays with fresh immutable
+IDs, avoiding pigment regeneration on disk-cache reloads. Both scene slots retain
+GPU sources and render targets across visibility changes. Explicit terrain clear
+increments a generation observed by the visibility and drawing callbacks; source
+replacement within a slot still drops superseded GPU windows.

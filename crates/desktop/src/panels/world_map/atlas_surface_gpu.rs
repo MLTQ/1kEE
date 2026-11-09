@@ -37,6 +37,9 @@ pub(super) struct Resources {
     blit_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     slots: [Slot; 2],
+    generation: u64,
+    #[cfg(test)]
+    uploaded_bytes: usize,
 }
 fn texture(
     device: &wgpu::Device,
@@ -109,11 +112,13 @@ fn source_bind(
     })
 }
 impl Resources {
-    pub fn release_inactive(&mut self, active: Option<usize>) {
-        for (index, slot) in self.slots.iter_mut().enumerate() {
-            if Some(index) != active {
-                *slot = Slot::default();
-            }
+    pub fn sync_generation(&mut self, generation: u64) {
+        // Switching Globe/Local/theme keeps both completed GPU views. Only an
+        // explicit terrain invalidation drops them. Each slot still bounds its
+        // sources to the displayed and incoming windows in prepare().
+        if self.generation != generation {
+            self.slots = Default::default();
+            self.generation = generation;
         }
     }
 
@@ -215,6 +220,9 @@ impl Resources {
             blit_layout,
             sampler,
             slots: Default::default(),
+            generation: GENERATION.load(Ordering::Relaxed),
+            #[cfg(test)]
+            uploaded_bytes: 0,
         }
     }
     fn make_source(&self, device: &wgpu::Device, raster: Arc<Raster>) -> Source {
@@ -342,6 +350,10 @@ impl Resources {
                 }
                 source.row += rows;
                 budget -= bytes;
+                #[cfg(test)]
+                {
+                    self.uploaded_bytes += bytes;
+                }
             }
             if source.row < raster.size[1] {
                 callback.ctx.request_repaint();
@@ -591,3 +603,7 @@ impl Resources {
         self.blit.insert(format, pipeline);
     }
 }
+
+#[cfg(test)]
+#[path = "atlas_retention_gpu_tests.rs"]
+mod retention_tests;

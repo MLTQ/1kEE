@@ -29,3 +29,7 @@ The composed Appearance preview explicitly uses default Atlas lighting, independ
 Recent-view tests pin prepared raster reuse/eviction and geographic hysteresis:
 small pans retain coverage, but leaving coverage, zooming in, crossing the SRTM
 detail threshold, changing roots or clearing the cache requests fresh data.
+
+Retention tests use explicit byte budgets to pin LRU eviction, reject oversized
+entries, retain more than eight small windows, reuse covered geographic windows,
+and reject different roots/epochs.

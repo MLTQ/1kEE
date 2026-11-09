@@ -31,6 +31,14 @@ impl<K: Clone + Eq + Send + 'static, V: Send + Sync + 'static> Snapshot<K, V> {
         self.epoch
     }
 
+    /// Publish an already prepared value without waiting for another key's
+    /// worker. Keep the single-flight gate until that worker finishes.
+    pub fn install(&mut self, key: K, value: V) {
+        self.requested = Some(key.clone());
+        self.current = Some((key, Arc::new(value)));
+        self.retry = None;
+    }
+
     pub fn clear(&mut self) {
         self.requested = None;
         self.current = None;
@@ -101,6 +109,53 @@ impl<K: Clone + Eq + Send + 'static, V: Send + Sync + 'static> Snapshot<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn retained_value_bypasses_an_unrelated_slow_worker() {
+        let mut cache = Snapshot::<u8, u8>::default();
+        let (release, wait) = mpsc::channel();
+        assert!(
+            cache
+                .get(
+                    1,
+                    "snapshot-slow",
+                    |_, _| true,
+                    move |_| {
+                        wait.recv().unwrap();
+                        Some(1)
+                    }
+                )
+                .is_none()
+        );
+        cache.install(2, 42);
+        let immediate = cache.get(
+            2,
+            "snapshot-warm",
+            |_, _| true,
+            |_| panic!("warm view must not start a worker"),
+        );
+        assert_eq!(immediate.as_deref(), Some(&42));
+        assert!(
+            cache.pending.is_some(),
+            "single-flight gate survives a warm hit"
+        );
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while cache.pending.is_some() {
+            let value = cache.get(
+                2,
+                "snapshot-warm",
+                |_, _| true,
+                |_| panic!("warm view reloaded"),
+            );
+            assert_eq!(
+                value.as_deref(),
+                Some(&42),
+                "obsolete completion must not replace warm view"
+            );
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+    }
     #[test]
     fn slow_load_does_not_block_and_reset_rejects_late_result() {
         let mut cache = Snapshot::<u8, u8>::default();

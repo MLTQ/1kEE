@@ -177,12 +177,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
             && model.active_body==crate::model::ActiveBody::Earth && model.show_trees) {
             atlas_forest::suspend();
         }
-        painter.add(atlas_surface::visibility_callback(
-            rect,
-            (model.map_theme == theme::MapTheme::Atlas
-                && model.active_body == crate::model::ActiveBody::Earth)
-                .then_some(usize::from(local_terrain_mode)),
-        ));
+        painter.add(atlas_surface::visibility_callback(rect));
         contour_pass::begin_frame();
         painter.add(contour_pass::residency_callback(rect));
         painter.add(local_contour_pass::residency_callback(rect, ui.ctx()));

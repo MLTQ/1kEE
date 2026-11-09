@@ -86,6 +86,26 @@ fn detail_texture_visible(
     {
         request.region = previous.region;
     }
+    // A warm view must not queue behind an unrelated, potentially slow GDAL
+    // read. Search retained coverage as well as the exact padded window.
+    if let Some((key, detail)) = RECENT
+        .get_or_init(Default::default)
+        .lock()
+        .ok()?
+        .covering(&request, visible)
+    {
+        request = key;
+        cache.install(request.clone(), detail);
+        ctx.data_mut(|d| {
+            d.insert_temp(
+                egui::Id::new(("atlas-notice", local)),
+                DetailNotice {
+                    request: request.clone(),
+                    message: None,
+                },
+            );
+        });
+    }
     ctx.data_mut(|d| d.insert_temp(egui::Id::new(("atlas-wanted", local)), request.clone()));
     let result = cache.get(
         request,
@@ -110,12 +130,35 @@ fn detail_texture_visible(
     result
 }
 
-#[derive(Default)]
 struct RecentDetails {
     entries: std::collections::VecDeque<(DetailRequest, LoadedDetail)>,
     bytes: usize,
+    budget: usize,
+}
+impl Default for RecentDetails {
+    fn default() -> Self {
+        Self {
+            entries: Default::default(),
+            bytes: 0,
+            budget: crate::gpu_config::settings().atlas_cpu_bytes,
+        }
+    }
 }
 impl RecentDetails {
+    fn covering(
+        &mut self,
+        request: &DetailRequest,
+        visible: [f32; 4],
+    ) -> Option<(DetailRequest, LoadedDetail)> {
+        let index = self
+            .entries
+            .iter()
+            .rposition(|(key, _)| key == request || key.reusable_for(request, visible))?;
+        let entry = self.entries.remove(index)?;
+        let result = entry.clone();
+        self.entries.push_back(entry);
+        Some(result)
+    }
     fn get(&mut self, request: &DetailRequest) -> Option<LoadedDetail> {
         let index = self.entries.iter().position(|(key, _)| key == request)?;
         let entry = self.entries.remove(index)?;
@@ -125,14 +168,13 @@ impl RecentDetails {
     }
     fn insert(&mut self, request: DetailRequest, detail: LoadedDetail) {
         let bytes = detail.raster.heights.len() * 4 + detail.raster.colors.len();
-        const BUDGET: usize = 384 * 1024 * 1024;
-        if bytes > BUDGET {
+        if bytes > self.budget {
             return;
         }
         if self.get(&request).is_some() {
             return;
         }
-        while self.entries.len() >= 8 || self.bytes + bytes > BUDGET {
+        while self.bytes + bytes > self.budget {
             if let Some((_, old)) = self.entries.pop_front() {
                 self.bytes -= old.raster.heights.len() * 4 + old.raster.colors.len();
             } else {
@@ -371,6 +413,7 @@ pub(super) fn draw_local(
 }
 
 pub(super) fn clear() {
+    super::atlas_surface::clear();
     super::atlas_forest::clear();
     if let Some(recent) = RECENT.get() {
         *recent.lock().unwrap() = RecentDetails::default();

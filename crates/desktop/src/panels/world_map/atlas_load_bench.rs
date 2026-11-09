@@ -49,6 +49,7 @@ fn atlas_map_load_latency() {
             }
             if pass == 3 {
                 assert_ne!(first_raster.as_ref().unwrap().id, detail.raster.id);
+                assert_eq!(first_raster.as_ref().unwrap().colors, detail.raster.colors);
                 assert!(
                     first_raster
                         .as_ref()
@@ -67,7 +68,7 @@ fn atlas_map_load_latency() {
         .join("Derived/terrain/atlas_recent_views_v1.sqlite");
     let c = rusqlite::Connection::open(&database).unwrap();
     let (views, bytes): (u64, u64) = c
-        .query_row("SELECT count(*),sum(length(payload)) FROM views", [], |r| {
+        .query_row("SELECT count(*),sum(length(v.payload)+length(m.payload)) FROM views v JOIN materials m USING(key)", [], |r| {
             Ok((r.get(0)?, r.get(1)?))
         })
         .unwrap();

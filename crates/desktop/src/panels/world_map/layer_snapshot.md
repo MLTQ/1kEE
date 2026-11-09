@@ -17,3 +17,8 @@ changing the pending request or starting a worker.
 
 `epoch` lets downstream presentation caches honor explicit reloads while
 retaining a compatible display during normal camera movement.
+
+`install` publishes an already prepared value immediately while preserving an
+unrelated worker's gate. The warm-hit regression holds that worker blocked and
+checks that a cache hit displays immediately and cannot be overwritten by its
+obsolete completion.

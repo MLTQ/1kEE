@@ -16,10 +16,16 @@ pub(super) struct Detail {
     pub source: &'static str,
     pub complete: bool,
     save: Option<view_cache::Ticket>,
+    colors: Option<Vec<u8>>,
 }
 impl Detail {
     pub(super) fn into_raster(self) -> Option<std::sync::Arc<super::atlas_surface::Raster>> {
-        let raster = super::atlas_surface::Raster::new(self.grid, self.region.bounds())?;
+        let raster = match self.colors {
+            Some(colors) => {
+                super::atlas_surface::Raster::prepared(self.grid, self.region.bounds(), colors)
+            }
+            None => super::atlas_surface::Raster::new(self.grid, self.region.bounds()),
+        }?;
         if let Some(ticket) = self.save {
             view_cache::persist(ticket, raster.clone());
         }
@@ -77,13 +83,15 @@ pub(super) fn load(root: Option<&Path>, region: Region, max_edge: usize) -> Resu
     });
     if let Some(ticket) = &ticket {
         match ticket.read() {
-            Ok(Some(grid)) => {
+            Ok(Some(saved)) => {
+                let upgrade = saved.colors.is_none();
                 return Ok(Detail {
-                    grid,
+                    grid: saved.grid,
+                    colors: saved.colors,
                     region,
                     source,
                     complete: true,
-                    save: None,
+                    save: upgrade.then(|| ticket.clone()),
                 });
             }
             Ok(None) => {}
@@ -113,6 +121,7 @@ pub(super) fn load(root: Option<&Path>, region: Region, max_edge: usize) -> Resu
         source,
         complete,
         save: if complete { ticket } else { None },
+        colors: None,
     })
 }
 
@@ -162,6 +171,7 @@ fn cached_file(
                 },
                 region,
                 save: None,
+                colors: None,
                 complete: true,
                 source: if tier == Tier::Land {
                     "Atlas cache · 1 arcsecond land"

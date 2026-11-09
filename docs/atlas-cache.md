@@ -73,16 +73,38 @@ Desktop cache consumption is covered by
 
 ## Interactive map reuse
 
-The map now caches terrain it generates while browsing, even if you have not
-run an Atlas builder job. Small pans reuse the current padded window. Recently
-prepared views stay in a bounded RAM cache; completed native windows are also
-saved losslessly in `Derived/terrain/atlas_recent_views_v1.sqlite`. This uses at
-most 16 windows / 512 MiB of compressed payloads, with a 768 MiB database ceiling
-plus temporary journal space. Saving happens on a bounded background worker.
+The map saves terrain it generates while browsing, even before an Atlas builder
+job has run. Completed native windows are saved losslessly in
+`Derived/terrain/atlas_recent_views_v1.sqlite`, beside the other terrain caches.
+Both measured heights and prepared color data are retained; lighting, contours,
+projection and exaggeration stay live. Reloading a saved window avoids GDAL and
+color preparation. Existing height-only entries are reused and upgraded on load.
 
-Revisiting a retained window avoids GDAL, and the disk cache survives desktop
-restarts. New terrain still needs its first native-source read. Source changes
-invalidate matching disk entries; unreadable entries are regenerated. The
-recent-view cache is independent of the OSM job and Atlas prebuild database.
-RAM reuse is capped at eight windows / 384 MiB of retained height and color data;
-current rendering resources and the bounded save queue have separate lifetimes.
+Small pans reuse padded coverage. Returning to a retained region uses its
+prepared RAM data immediately, including while another region is still loading.
+There is no eight-view RAM cap or sixteen-view disk cap. Retention is by bytes:
+
+| Setting | Normal launch | `./scripts/run-4090.sh` |
+| --- | --- | --- |
+| `ONEKEE_ATLAS_RAM_MIB` | 1024 MiB | 8192 MiB |
+| `ONEKEE_ATLAS_DISK_MIB` | 8192 MiB | 32768 MiB |
+
+Environment overrides take precedence. RAM accepts 256–32768 MiB; disk accepts
+512–262144 MiB. These are lazy cache budgets, not up-front allocations. RAM evicts
+least recently used prepared views; disk removes oldest written windows only
+when compressed heights plus colors reach its byte budget. SQLite allows 25%
+plus 256 MiB above that payload budget for pages; its journal is additional.
+
+Globe and Local keep their last GPU terrain and rendered targets when hidden,
+so switching modes/themes back does not upload them again. GPU sources remain
+bounded to current and incoming windows in each mode; this does not load the
+whole planet into VRAM. Current rendering resources and the bounded background
+save queue have separate RAM lifetimes. Cache Blast/source invalidation clears
+RAM and GPU views explicitly. Recent saved windows survive a desktop restart.
+
+New regions still need their first native-source read. Persistent keys include
+source identities, exact padded bounds and dimensions; corrupt heights are
+regenerated, while missing/stale/damaged colors are rebuilt from cached heights.
+A bounded writer keeps compression and disk writes off the rendering path. A
+full write queue can skip a save; read/write failures fall back without hiding
+terrain. The recent-view cache is independent of OSM builds and Atlas prebuilds.

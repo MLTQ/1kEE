@@ -11,10 +11,15 @@ use std::{
 
 const FILE_NAME: &str = "atlas_recent_views_v1.sqlite";
 const APPLICATION_ID: i32 = 0x314b4156;
-const PAYLOAD_BUDGET: usize = 512 * 1024 * 1024;
-const MAX_VIEWS: usize = 16;
+// Increment when the unlit elevation palette changes. Heights stay reusable.
+const MATERIAL_VERSION: i32 = 1;
 const MAX_PIXELS: usize = 32_020_000;
 type Result<T> = std::result::Result<T, String>;
+
+pub(super) struct Saved {
+    pub grid: HeightGrid,
+    pub colors: Option<Vec<u8>>,
+}
 
 #[derive(Clone)]
 pub(super) struct Ticket {
@@ -74,7 +79,7 @@ impl Ticket {
             files,
         })
     }
-    pub(super) fn read(&self) -> Result<Option<HeightGrid>> {
+    pub(super) fn read(&self) -> Result<Option<Saved>> {
         if !self.path.exists() {
             return Ok(None);
         }
@@ -114,13 +119,65 @@ impl Ticket {
         for value in &mut metres {
             *value = f32::from_bits(value.to_bits().swap_bytes());
         }
-        Ok(Some(HeightGrid {
-            width: self.size[0],
-            height: self.size[1],
-            metres,
+        // Older caches contain just heights. A damaged or stale material can
+        // be regenerated from these verified heights without another GDAL read.
+        let colors = self.read_colors(&c, count * 4).unwrap_or_else(|error| {
+            eprintln!("[atlas] rebuilding cached material: {error}");
+            None
+        });
+        Ok(Some(Saved {
+            grid: HeightGrid {
+                width: self.size[0],
+                height: self.size[1],
+                metres,
+            },
+            colors,
         }))
     }
+    fn read_colors(&self, c: &Connection, bytes: usize) -> Result<Option<Vec<u8>>> {
+        let exists: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='materials')",
+            [], |r| r.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !exists {
+            return Ok(None);
+        }
+        let row: Option<(usize, u32, i32)> = c
+            .query_row(
+                "SELECT length(payload),crc,version FROM materials WHERE key=?1",
+                [&self.key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        let Some((length, crc, version)) = row else {
+            return Ok(None);
+        };
+        if version != MATERIAL_VERSION {
+            return Ok(None);
+        }
+        if length > lz4_flex::block::get_maximum_output_size(bytes) {
+            return Err("Invalid Atlas material size".into());
+        }
+        let payload: Vec<u8> = c
+            .query_row(
+                "SELECT payload FROM materials WHERE key=?1",
+                [&self.key],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let mut colors = vec![0; bytes];
+        let written =
+            lz4_flex::block::decompress_into(&payload, &mut colors).map_err(|e| e.to_string())?;
+        if written != bytes || crc32fast::hash(&colors) != crc {
+            return Err("Damaged Atlas material".into());
+        }
+        Ok(Some(colors))
+    }
     fn store(&self, raster: &Raster) -> Result<()> {
+        self.store_with_budget(raster, crate::gpu_config::settings().atlas_disk_bytes)
+    }
+    fn store_with_budget(&self, raster: &Raster, budget: usize) -> Result<()> {
         if raster.size != self.size
             || raster.bounds != self.region.bounds()
             || identity(self.region, self.size, &self.files)? != self.key
@@ -139,7 +196,10 @@ impl Ticket {
         let bytes = bytemuck::cast_slice(&raster.heights);
         let crc = crc32fast::hash(bytes);
         let payload = lz4_flex::block::compress(bytes);
-        if payload.len() > PAYLOAD_BUDGET {
+        let colors_crc = crc32fast::hash(&raster.colors);
+        let colors = lz4_flex::block::compress(&raster.colors);
+        let incoming = payload.len() + colors.len();
+        if incoming > budget {
             return Ok(());
         }
         fs::create_dir_all(self.path.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -152,23 +212,37 @@ impl Ticket {
         } else {
             c.execute_batch(&format!("PRAGMA auto_vacuum=INCREMENTAL; BEGIN IMMEDIATE; PRAGMA application_id={APPLICATION_ID}; PRAGMA user_version=1; CREATE TABLE views(key TEXT PRIMARY KEY,payload BLOB NOT NULL,crc INTEGER NOT NULL); COMMIT;")).map_err(|e| e.to_string())?;
         }
-        c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-2048; PRAGMA max_page_count=196608;").map_err(|e| e.to_string())?;
+        // A separate table keeps existing height-only entries usable in place.
+        c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-2048; CREATE TABLE IF NOT EXISTS materials(key TEXT PRIMARY KEY,payload BLOB NOT NULL,crc INTEGER NOT NULL,version INTEGER NOT NULL);").map_err(|e| e.to_string())?;
+        let page_size: usize = c
+            .pragma_query_value(None, "page_size", |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        let max_pages = (budget + budget / 4 + 256 * 1024 * 1024) / page_size;
+        c.pragma_update(None, "max_page_count", max_pages)
+            .map_err(|e| e.to_string())?;
         let tx = c
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM views WHERE key=?1", [&self.key])
             .map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM materials WHERE key NOT IN (SELECT key FROM views)",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
         loop {
-            let (count, used): (usize, usize) = tx
-                .query_row(
-                    "SELECT count(*),coalesce(sum(length(payload)),0) FROM views",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .map_err(|e| e.to_string())?;
-            if count < MAX_VIEWS && used + payload.len() <= PAYLOAD_BUDGET {
+            let used: usize = tx.query_row(
+                "SELECT coalesce(sum(length(v.payload)+coalesce(length(m.payload),0)),0) FROM views v LEFT JOIN materials m USING(key)",
+                [], |r| r.get(0),
+            ).map_err(|e| e.to_string())?;
+            if used + incoming <= budget {
                 break;
             }
+            tx.execute(
+                "DELETE FROM materials WHERE key=(SELECT key FROM views ORDER BY rowid LIMIT 1)",
+                [],
+            )
+            .map_err(|e| e.to_string())?;
             tx.execute(
                 "DELETE FROM views WHERE rowid=(SELECT min(rowid) FROM views)",
                 [],
@@ -178,6 +252,11 @@ impl Ticket {
         tx.execute(
             "INSERT INTO views VALUES (?1,?2,?3)",
             params![self.key, payload, crc],
+        )
+        .map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO materials VALUES (?1,?2,?3,?4)",
+            params![self.key, colors, colors_crc, MATERIAL_VERSION],
         )
         .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;

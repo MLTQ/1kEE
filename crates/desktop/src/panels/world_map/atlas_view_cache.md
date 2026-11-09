@@ -8,7 +8,10 @@ Keys include algorithm version, exact geographic bounds, dimensions, and the
 canonical paths, sizes and modification times of all GEBCO/SRTM/fine sources.
 Changing sources or detail selection misses the old entry. LZ4 blocks store
 little-endian Float32 heights without quantization; CRC32 checks all decompressed
-bytes. Expected dimensions bound allocation before decompression. Corrupt entries
+bytes. An additive `materials` table stores lossless prepared RGBA colors with
+its own CRC and material version. Missing/stale/damaged colors are regenerated
+from verified cached heights and upgraded in the background; old height-only
+caches remain usable. Expected dimensions bound allocation before decompression. Corrupt entries
 fall back to original terrain and are replaced only after a complete successful
 load. Failed high-detail overlays never become persistent completed views.
 
@@ -16,7 +19,9 @@ One background writer and a one-item queue keep compression and USB writes out
 of first-display latency and prevent unbounded queued rasters. Queue saturation
 skips a save; it never blocks map rendering. SQLite transactions publish whole
 entries, with exclusive application ID/version checks protecting unrelated files.
-The cache keeps at most 16 windows and 512 MiB of compressed payloads, deleting
-oldest generations first. SQLite has a 768 MiB page ceiling and incremental
-vacuum; its temporary WAL can add transient space during publication. Write
+The cache is bounded by ONEKEE_ATLAS_DISK_MIB (8 GiB normally, 32 GiB in the
+4090 profile), counting both compressed heights and colors. There is no view-count
+limit. The oldest written windows and their materials are deleted together when
+necessary. SQLite's page ceiling is the payload budget plus 25% and 256 MiB;
+incremental vacuum reclaims pages, and the WAL can add transient space. Write
 failures leave terrain displayed and are logged. Sources remain read-only.
