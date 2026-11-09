@@ -35,6 +35,7 @@ mod threedep;
 mod hillshade_source;
 mod terrain_precompute;
 mod theme;
+mod transit;
 mod usgs_stream;
 mod world_archive;
 

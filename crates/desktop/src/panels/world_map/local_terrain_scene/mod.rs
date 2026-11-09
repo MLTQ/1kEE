@@ -624,6 +624,11 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         model,
     );
 
+    let transit_markers = crate::transit::draw(painter, rect, model, |geo| {
+        projection::project_local(&layout, &model.globe_view, viewport_center, geo, 0.0, extent_x, extent_y)
+            .map(|p| p.pos)
+    });
+
     // Camera link lines anchor to the selected event if one exists.
     let anchor = event_markers
         .iter()
@@ -736,6 +741,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         camera_markers,
         ship_markers: Vec::new(),
         flight_markers: Vec::new(),
+        transit_markers,
         arcgis_feature_markers: Vec::new(),
         landing_point_markers,
         buildout_markers,

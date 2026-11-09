@@ -129,6 +129,7 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
                     .on_disabled_hover_text("Configure AISStream key in Settings");
                 }
                 ui.checkbox(&mut model.show_flights, "Flights");
+                crate::transit::controls(ui, model);
                 ui.checkbox(&mut model.show_stellar_correspondence, "Stars");
                 if model.show_stellar_correspondence && !model.globe_view.local_mode {
                     let obs_active = model.stellar_observatory_open;

@@ -543,6 +543,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "chrono"
+version = "0.4.45"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "clipboard-win"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2542,11 +2551,13 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "cell-format",
+ "chrono",
  "crc32fast",
  "crossbeam-channel",
  "csv",
  "eframe",
  "egui",
+ "flate2",
  "gruve-sdk",
  "image",
  "lyon_tessellation",
@@ -2556,6 +2567,8 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "one-thousand-electric-eye-cache-builder",
  "osmpbf",
+ "protobuf",
+ "protobuf-codegen-pure",
  "rayon",
  "reqwest",
  "rfd",

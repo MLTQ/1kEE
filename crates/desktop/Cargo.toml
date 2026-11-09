@@ -26,6 +26,9 @@ gruve-sdk = { path = "../gruve_sdk" }
 tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 crossbeam-channel = "0.5.15"
 csv = "1.4"
+protobuf = "2.28"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+flate2 = "1"
 rayon = "1.11.0"
 lyon_tessellation = "1"
 one-thousand-electric-eye-cache-builder = { path = "../cache_builder" }
@@ -34,3 +37,6 @@ one-thousand-electric-eye-cache-builder = { path = "../cache_builder" }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL", "NSError"] }
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "AVPlayer", "AVPlayerItem"] }
+
+[build-dependencies]
+protobuf-codegen-pure = "2.28"

@@ -18,6 +18,7 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
   the brief panel and on the map.
 - **Moving tracks** — AIS vessel tracking over AISStream WebSocket (`moving_tracks.rs`)
   and ADS-B flights via OpenSky (`flight_tracks.rs`).
+- **Live transit** — selectable rail and station reports for Seattle/Tacoma, Boston, New York, London, Tokyo Toei, Finland, and Malaysia KTM on the globe and local map. See the [transit guide](docs/live-transit.md).
 - **Cameras** — public webcam registries, provider scrapers, and an opt-in
   [Project Eyes On](https://github.com/Y0oshi/Project-Eyes-On)-inspired Insecam
   directory pipeline with feed verification, geolocated map dots, and a

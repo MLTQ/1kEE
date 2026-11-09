@@ -117,6 +117,10 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
                 flight_tracks::poll(model.globe_view.globe_center_latlon(), ui.ctx().clone());
         }
 
+        if model.active_body == crate::model::ActiveBody::Earth {
+            model.transit.poll(ui.ctx());
+        }
+
         // Poll ArcGIS sources (non-blocking)
         {
             let source_refs: Vec<(String, std::collections::HashSet<u32>)> = model
@@ -228,6 +232,8 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
                     model.open_camera_feed(&marker.id);
                 } else if let Some(marker) = marker_style::pick(&scene.event_markers, pointer) {
                     model.select_event(&marker.id);
+                } else if let Some(marker) = crate::transit::pick(&scene.transit_markers, pointer) {
+                    model.transit.select(marker);
                 } else if let Some((src_url, obj_id, _)) = scene
                     .arcgis_feature_markers
                     .iter()
@@ -273,6 +279,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
             map_tooltips::draw_flight_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
             map_tooltips::draw_landing_hover_tooltip(ui.ctx(), model, &scene, response.hover_pos());
         }
+        crate::transit::detail(ui.ctx(), model);
         map_detail_panels::draw_ship_detail_panel(ui.ctx(), model);
         map_detail_panels::draw_flight_detail_panel(ui.ctx(), model);
         map_detail_panels::draw_landing_detail_panel(ui.ctx(), model);

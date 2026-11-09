@@ -124,6 +124,7 @@ pub struct AppModel {
     pub show_surveillance: bool,
     pub show_ships: bool,
     pub show_flights: bool,
+    pub transit: crate::transit::Transit,
     pub show_stellar_correspondence: bool,
     // ── Stellar Observatory ───────────────────────────────────────────────────
     /// Julian Date for the stellar/planet layer (updated by live mode or animation).
@@ -339,6 +340,7 @@ impl AppModel {
             show_surveillance: false,
             show_ships: false,
             show_flights: false,
+            transit: crate::transit::Transit::default(),
             show_stellar_correspondence: false,
             stellar_jd: stellar_time::unix_to_jd(
                 std::time::SystemTime::now()

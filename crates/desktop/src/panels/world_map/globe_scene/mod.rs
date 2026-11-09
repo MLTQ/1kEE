@@ -36,6 +36,7 @@ pub struct GlobeScene {
     pub ship_markers: Vec<(u64, egui::Pos2)>,
     /// ICAO24 → screen position for hover detection.
     pub flight_markers: Vec<(String, egui::Pos2)>,
+    pub transit_markers: Vec<crate::transit::Marker>,
     /// (source_url, object_id, screen_pos) for ArcGIS feature click detection.
     pub arcgis_feature_markers: Vec<(String, i64, egui::Pos2)>,
     /// (index into `submarine_cables::catalog().landings`, screen_pos) for
@@ -424,6 +425,10 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     }
     draw_deflock_alprs(painter, &layout, &model.globe_view, model);
 
+    let transit_markers = crate::transit::draw(painter, rect, model, |geo| {
+        project_surface(&layout, &model.globe_view, geo).filter(|p| p.front_facing).map(|p| p.pos)
+    });
+
     // ── AIS ship markers ──────────────────────────────────────────────────
     // `model.tracks` is refreshed each frame by `render_world_map` before
     // this function is called. Project each visible source only once so paint,
@@ -554,6 +559,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         camera_markers,
         ship_markers,
         flight_markers,
+        transit_markers,
         arcgis_feature_markers,
         landing_point_markers,
         buildout_markers,
