@@ -101,3 +101,24 @@ fn alaska_wraps_to_either_side_of_dateline_and_outside_region_is_empty() {
         .is_empty()
     );
 }
+
+#[test]
+fn global_strip_shows_both_texture_edges_at_dateline() {
+    let clip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 900.0));
+    let focus = GeoPoint {
+        lat: 10.0,
+        lon: 180.0,
+    };
+    let mesh = local(
+        &layout(),
+        &GlobeViewState::from_focus(focus),
+        egui::TextureId::Managed(1),
+        [-180.0, -90.0, 180.0, 90.0],
+        focus,
+        1.0,
+        clip,
+    );
+    assert_eq!(mesh.indices.len(), 12);
+    assert!(mesh.vertices.iter().any(|v| v.uv.x == 0.0));
+    assert!(mesh.vertices.iter().any(|v| v.uv.x == 1.0));
+}

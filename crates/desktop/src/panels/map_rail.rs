@@ -23,7 +23,7 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
                 view_buttons(ui, model);
                 body_button(ui, model);
                 ui.separator();
-                let has_custom = !model.geojson_layers.is_empty() || !model.arcgis_sources.is_empty();
+                let has_custom = !model.geojson_layers.is_empty() || !model.arcgis_sources.is_empty() || !model.satellite_layers.is_empty();
                 if button(ui, if has_custom {"Layers •"} else {"Layers"}, model.show_layer_drawer)
                     .on_hover_text("Layer visibility and imported overlays").clicked() {
                     model.show_layer_drawer = !model.show_layer_drawer;

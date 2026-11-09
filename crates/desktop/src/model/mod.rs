@@ -142,6 +142,7 @@ pub struct AppModel {
     pub planet_trail_years: f32,
     /// User-uploaded vector overlay layers (GeoJSON, KML, or KMZ).
     pub geojson_layers: Vec<GeoJsonLayer>,
+    pub satellite_layers: Vec<crate::panels::world_map::satellite_layer::SatelliteLayer>,
     /// ArcGIS FeatureServer sources added by the user.
     pub arcgis_sources: Vec<ArcGisSourceRef>,
     /// Merged features from all enabled source/layer combos (refreshed each frame).
@@ -344,6 +345,7 @@ impl AppModel {
             show_planet_trails: false,
             planet_trail_years: 0.0,
             geojson_layers: Vec::new(),
+            satellite_layers: Vec::new(),
             arcgis_sources: Vec::new(),
             arcgis_features: Arc::new(Vec::new()),
             selected_arcgis_feature: None,

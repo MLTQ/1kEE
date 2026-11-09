@@ -1,4 +1,4 @@
-//! Geographic raster projection shared by gravity overlays.
+//! Geographic raster projection shared by satellite imagery and gravity overlays.
 use super::globe_scene::{GlobeLayout, project_surface};
 use super::local_terrain_scene::{LocalLayout, projection::local_projection_params};
 use crate::model::{GeoPoint, GlobeViewState};
@@ -113,24 +113,35 @@ pub(super) fn local(
         visible[2] = visible[2].max(lon);
         visible[3] = visible[3].max(lat);
     }
-    let left = west.max(visible[0]);
+    // Near edge-on pitch the clip rectangle can span multiple revolutions.
+    // Show each longitude only once in the plane centered on the observer.
+    visible[0] = visible[0].max(focus.lon - 180.0);
+    visible[2] = visible[2].min(focus.lon + 180.0);
     let bottom = south.max(visible[1]);
-    let right = east.min(visible[2]);
     let top = north.min(visible[3]);
-    if left >= right || bottom >= top {
+    if bottom >= top {
         return mesh;
     }
-    for (lat, lon) in [(top, left), (top, right), (bottom, right), (bottom, left)] {
-        mesh.vertices.push(egui::epaint::Vertex {
-            pos: project(lat, lon),
-            uv: egui::pos2(
-                (lon - west) / (east - west),
-                (north - lat) / (north - south),
-            ),
-            color: egui::Color32::WHITE,
-        });
+    // A full-width image can have both UV edges inside one dateline viewport.
+    for offset in [-360.0, 0.0, 360.0] {
+        let left = (west + offset).max(visible[0]);
+        let right = (east + offset).min(visible[2]);
+        if left >= right {
+            continue;
+        }
+        let start = mesh.vertices.len() as u32;
+        for (lat, lon) in [(top, left), (top, right), (bottom, right), (bottom, left)] {
+            mesh.vertices.push(egui::epaint::Vertex {
+                pos: project(lat, lon),
+                uv: egui::pos2(
+                    (lon - (west + offset)) / (east - west),
+                    (north - lat) / (north - south),
+                ),
+                color: egui::Color32::WHITE,
+            });
+        }
+        mesh.indices.extend([0, 1, 2, 0, 2, 3].map(|i| start + i));
     }
-    mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
     mesh
 }
 

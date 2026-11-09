@@ -29,7 +29,8 @@ pub fn render_layer_drawer(ctx: &egui::Context, model: &mut AppModel) {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 section_label(ui, "IMPORTED LAYERS");
                 super::layer_file_import::button(ui, model);
-                if model.geojson_layers.is_empty() { ui.small("GeoJSON, KML or KMZ"); }
+                if model.geojson_layers.is_empty() && model.satellite_layers.is_empty() { ui.small("GeoJSON, KML, KMZ or GeoTIFF"); }
+                world_map::satellite_layer::controls(ui, model);
                 if !model.geojson_layers.is_empty() {
                     let mut remove_idx: Option<usize> = None;
                     for (idx, layer) in model.geojson_layers.iter_mut().enumerate() {

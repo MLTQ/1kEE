@@ -2,15 +2,16 @@
 
 ## Purpose
 Project a north-up geographic image onto the existing globe or local sea-level
-surface. Shared by SWOT VGG and NCEI anomaly imagery; never changes elevation.
+surface. SWOT VGG, NCEI anomaly imagery and imported satellite images share it.
 
 ## Components
 - `globe` tessellates exact geographic bounds, maps their UV edges and omits
   cells behind the perspective horizon. Detailed images adapt tessellation to
   camera scale; global overviews retain two-degree cells.
 - `local` inverts the actual clip rectangle through the affine sea-level
-  projector and clips image bounds before drawing one exact quad. It unwraps
-  regional longitudes around the focus. No coarse-vertex rejection can blank
+  projector and clips image bounds before drawing each visible longitude copy.
+  It unwraps regional longitudes around the focus. Both edges of a full-width
+  texture can meet in a dateline viewport. No coarse-vertex rejection can blank
   a large regional image at close zoom.
 
 ## Contracts

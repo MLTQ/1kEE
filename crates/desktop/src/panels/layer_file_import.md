@@ -1,8 +1,10 @@
 # layer_file_import.rs
 
 ## Purpose
-Read uploaded GeoJSON/KML/KMZ files and decompress/parse their content on a
-single worker, keeping map interaction responsive.
+Read uploaded GeoJSON/KML/KMZ files or a projected satellite GeoTIFF on a
+single worker, keeping map interaction responsive. The file extension selects
+the vector parser or GDAL image loader. Successful GeoTIFF imports get their
+own texture and controls in Imported Layers.
 
 ## Contracts
 The explicit file picker supplies the path. While an import runs the import

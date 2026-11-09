@@ -123,7 +123,7 @@ impl eframe::App for DashboardApp {
             bridge.drain_commands(&mut self.model);
         }
 
-        panels::layer_file_import::poll(&mut self.model);
+        panels::layer_file_import::poll(ctx, &mut self.model);
         panels::terrain_library::tick(ctx, &mut self.model);
         factal_stream::tick(&mut self.model);
         factal_stream::history_tick(&mut self.model);
