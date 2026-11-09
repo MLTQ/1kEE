@@ -21,6 +21,7 @@ Without `ONEKEE_GPU`, the existing eframe adapter selection remains unchanged.
 | `ONEKEE_CPU_CACHE_MIB` | 4096 | 12288 | 256–65536 |
 | `ONEKEE_ATLAS_RAM_MIB` | 1024 | 8192 | 256–32768 |
 | `ONEKEE_ATLAS_DISK_MIB` | 8192 | 32768 | 512–262144 |
+| `ONEKEE_ATLAS_KEEP_GLOBE` | 0 | 1 | 0–1 |
 | `ONEKEE_UPLOAD_MIB` | 4 | 16 | 1–64 |
 | `ONEKEE_UPLOAD_US` | 2000 | 2000 | 100–8000 |
 
@@ -31,7 +32,10 @@ For example, `ONEKEE_UPLOAD_MIB=8 ./scripts/run-4090.sh` tries a smaller upload 
 budgets too: the script's memory profile is intended for the 24 GiB card.
 
 The Atlas settings govern prepared height/color RAM and compressed disk caches
-separately from contour memory. See [Atlas reuse](atlas-cache.md#interactive-map-reuse).
+separately from contour memory. With `ONEKEE_ATLAS_KEEP_GLOBE=1`, completed Globe
+windows bypass RAM eviction and their GPU textures stay resident until Cache
+Blast or exit; Local remains bounded. Use `0` for a bounded-residency comparison.
+See [Atlas reuse](atlas-cache.md#interactive-map-reuse).
 
 Memory settings are terrain retention targets, not reservations or
 whole-application memory limits. Visible geometry takes priority over eviction;

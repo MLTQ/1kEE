@@ -388,3 +388,75 @@ fn atlas_retention_uses_bytes_and_recovers_covered_views() {
     tiny.insert(request, LoadedDetail { raster });
     assert!(tiny.entries.is_empty());
 }
+
+#[test]
+fn atlas_globe_residency_keeps_old_regions_and_clear_rejects_late_loads() {
+    use super::super::atlas_viewport::Region;
+    let mut globe = RecentDetails {
+        budget: 256,
+        ..RecentDetails::resident()
+    };
+    let mut local = RecentDetails {
+        budget: 256,
+        ..Default::default()
+    };
+    let requests: Vec<_> = (0..3)
+        .map(|offset| DetailRequest {
+            root: None,
+            region: Region([offset * 360, 0, (offset + 1) * 360, 360]),
+            max_edge: 8192,
+            epoch: 0,
+        })
+        .collect();
+    let details: Vec<_> = requests
+        .iter()
+        .map(|request| LoadedDetail {
+            raster: super::super::atlas_surface::Raster::new(
+                HeightGrid {
+                    width: 8,
+                    height: 4,
+                    metres: vec![123.; 32],
+                },
+                request.region.bounds(),
+            )
+            .unwrap(),
+        })
+        .collect();
+    for (request, detail) in requests.iter().zip(&details) {
+        globe.publish(0, request.clone(), detail.clone());
+        local.publish(0, request.clone(), detail.clone());
+    }
+    assert_eq!(globe.entries.len(), 3);
+    assert_eq!(
+        globe.bytes, 768,
+        "resident globe bypasses ordinary LRU pressure"
+    );
+    assert!(Arc::ptr_eq(
+        &globe.get(&requests[0]).unwrap().raster,
+        &details[0].raster
+    ));
+    assert!(
+        local.get(&requests[0]).is_none(),
+        "Local still evicts by its byte budget"
+    );
+    assert_eq!(local.entries.len(), 1);
+    globe.clear();
+    assert_eq!(globe.bytes, 0);
+    assert!(globe.entries.is_empty());
+    globe.publish(0, requests[0].clone(), details[0].clone());
+    assert!(
+        globe.entries.is_empty(),
+        "a pre-clear worker cannot re-pin terrain"
+    );
+    let delayed = Mutex::new(RecentDetails::resident());
+    delayed.lock().unwrap().clear();
+    assert!(
+        matches!(load_detail_from(&requests[0], &delayed, 0), Err(error) if error == "Atlas request was invalidated"),
+        "a worker starting after clear must not read or re-pin old terrain"
+    );
+    globe.publish(1, requests[0].clone(), details[0].clone());
+    assert!(
+        globe.get(&requests[0]).is_some(),
+        "new loads resume residency after clear"
+    );
+}

@@ -10,3 +10,7 @@ include separate Atlas prepared RAM and compressed disk budgets. Residency and b
 Invalid, zero, out-of-range and overflowing values fall back with a diagnostic.
 Tests validate boundaries without mutating process-global environment variables.
 See [GPU tuning](../../../docs/gpu-performance.md) for ranges and limitations.
+
+ONEKEE_ATLAS_KEEP_GLOBE is a strict 0/1 launch option (default 0; 4090 script 1).
+It selects session-long retention of completed Atlas Globe RAM/GPU sources,
+separately from Local and contour budgets. Startup logs this mode explicitly.

@@ -96,9 +96,9 @@ when compressed heights plus colors reach its byte budget. SQLite allows 25%
 plus 256 MiB above that payload budget for pages; its journal is additional.
 
 Globe and Local keep their last GPU terrain and rendered targets when hidden,
-so switching modes/themes back does not upload them again. GPU sources remain
-bounded to current and incoming windows in each mode; this does not load the
-whole planet into VRAM. Current rendering resources and the bounded background
+so switching modes/themes back does not upload them again. Normally GPU sources
+are bounded to current and incoming windows in each mode. The Globe residency
+experiment below keeps older completed Globe windows too. Current rendering resources and the bounded background
 save queue have separate RAM lifetimes. Cache Blast/source invalidation clears
 RAM and GPU views explicitly. Recent saved windows survive a desktop restart.
 
@@ -108,3 +108,27 @@ regenerated, while missing/stale/damaged colors are rebuilt from cached heights.
 A bounded writer keeps compression and disk writes off the rendering path. A
 full write queue can skip a save; read/write failures fall back without hiding
 terrain. The recent-view cache is independent of OSM builds and Atlas prebuilds.
+
+## Globe residency experiment
+
+The 4090 launcher now sets `ONEKEE_ATLAS_KEEP_GLOBE=1`. Every completed Atlas
+Globe relief window stays in RAM and, once uploaded, VRAM until **Cache Blast**
+or desktop exit. Panning, zooming, visiting other regions and switching views
+retain it. Returning to covered terrain reuses the original raster and uploaded
+textures. Only currently selected terrain is drawn; old resident regions add no
+extra terrain draw calls. Incomplete abandoned GPU uploads are discarded.
+
+This option applies only to **Globe**. Local keeps its existing RAM budget and
+GPU replacement policy. The pinned Globe pool is separate and bypasses the RAM
+LRU budget; memory grows as new Globe regions finish loading. Startup logs the
+mode, and each new retained region logs the count and prepared RAM size. No
+whole-planet preload is performed. Persistent disk cache behavior is unchanged.
+Cache Blast also rejects old workers so they cannot re-pin terrain after clear.
+
+Use `./scripts/run-4090.sh` to test. To compare against bounded residency:
+
+```sh
+ONEKEE_ATLAS_KEEP_GLOBE=0 ./scripts/run-4090.sh
+```
+
+Ordinary launches default to bounded residency unless the variable is set.

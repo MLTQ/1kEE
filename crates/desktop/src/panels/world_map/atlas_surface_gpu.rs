@@ -38,6 +38,7 @@ pub(super) struct Resources {
     sampler: wgpu::Sampler,
     slots: [Slot; 2],
     generation: u64,
+    keep_globe: bool,
     #[cfg(test)]
     uploaded_bytes: usize,
 }
@@ -114,8 +115,8 @@ fn source_bind(
 impl Resources {
     pub fn sync_generation(&mut self, generation: u64) {
         // Switching Globe/Local/theme keeps both completed GPU views. Only an
-        // explicit terrain invalidation drops them. Each slot still bounds its
-        // sources to the displayed and incoming windows in prepare().
+        // explicit terrain invalidation drops them. The Globe residency
+        // experiment also keeps older completed regions in prepare().
         if self.generation != generation {
             self.slots = Default::default();
             self.generation = generation;
@@ -221,6 +222,7 @@ impl Resources {
             sampler,
             slots: Default::default(),
             generation: GENERATION.load(Ordering::Relaxed),
+            keep_globe: crate::gpu_config::settings().atlas_keep_globe,
             #[cfg(test)]
             uploaded_bytes: 0,
         }
@@ -396,7 +398,10 @@ impl Resources {
             .map(|r| r.id)
             .chain(state.active.iter().copied())
             .collect();
-        state.sources.retain(|id, _| keep.contains(id));
+        state.sources.retain(|id, source| {
+            keep.contains(id)
+                || (slot == 0 && self.keep_globe && source.row == source.raster.size[1])
+        });
         let active = state.active.last().copied();
         let old = callback
             .ctx

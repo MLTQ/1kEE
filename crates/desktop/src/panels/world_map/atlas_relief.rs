@@ -88,12 +88,7 @@ fn detail_texture_visible(
     }
     // A warm view must not queue behind an unrelated, potentially slow GDAL
     // read. Search retained coverage as well as the exact padded window.
-    if let Some((key, detail)) = RECENT
-        .get_or_init(Default::default)
-        .lock()
-        .ok()?
-        .covering(&request, visible)
-    {
+    if let Some((key, detail)) = detail_cache(local).lock().ok()?.covering(&request, visible) {
         request = key;
         cache.install(request.clone(), detail);
         ctx.data_mut(|d| {
@@ -107,12 +102,14 @@ fn detail_texture_visible(
         });
     }
     ctx.data_mut(|d| d.insert_temp(egui::Id::new(("atlas-wanted", local)), request.clone()));
+    let recent = detail_cache(local);
+    let generation = recent.lock().ok()?.generation;
     let result = cache.get(
         request,
         "atlas-native-detail",
         |a, b| a.root == b.root,
         move |request| {
-            let result = load_detail(&request);
+            let result = load_detail_from(&request, recent, generation);
             let message = result.as_ref().err().cloned();
             wake.data_mut(|d| {
                 d.insert_temp(
@@ -134,6 +131,8 @@ struct RecentDetails {
     entries: std::collections::VecDeque<(DetailRequest, LoadedDetail)>,
     bytes: usize,
     budget: usize,
+    resident: bool,
+    generation: u64,
 }
 impl Default for RecentDetails {
     fn default() -> Self {
@@ -141,10 +140,28 @@ impl Default for RecentDetails {
             entries: Default::default(),
             bytes: 0,
             budget: crate::gpu_config::settings().atlas_cpu_bytes,
+            resident: false,
+            generation: 0,
         }
     }
 }
 impl RecentDetails {
+    fn resident() -> Self {
+        Self {
+            resident: true,
+            ..Default::default()
+        }
+    }
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+        self.generation = self.generation.wrapping_add(1);
+    }
+    fn publish(&mut self, generation: u64, request: DetailRequest, detail: LoadedDetail) {
+        if self.generation == generation {
+            self.insert(request, detail);
+        }
+    }
     fn covering(
         &mut self,
         request: &DetailRequest,
@@ -168,13 +185,13 @@ impl RecentDetails {
     }
     fn insert(&mut self, request: DetailRequest, detail: LoadedDetail) {
         let bytes = detail.raster.heights.len() * 4 + detail.raster.colors.len();
-        if bytes > self.budget {
+        if !self.resident && bytes > self.budget {
             return;
         }
         if self.get(&request).is_some() {
             return;
         }
-        while self.bytes + bytes > self.budget {
+        while !self.resident && self.bytes + bytes > self.budget {
             if let Some((_, old)) = self.entries.pop_front() {
                 self.bytes -= old.raster.heights.len() * 4 + old.raster.colors.len();
             } else {
@@ -183,14 +200,46 @@ impl RecentDetails {
         }
         self.bytes += bytes;
         self.entries.push_back((request, detail));
+        if self.resident {
+            eprintln!(
+                "[atlas] Globe retained: {} regions, {:.1} MiB prepared RAM",
+                self.entries.len(),
+                self.bytes as f64 / 1048576.
+            );
+        }
     }
 }
 static RECENT: OnceLock<Mutex<RecentDetails>> = OnceLock::new();
+static GLOBE_RESIDENT: OnceLock<Mutex<RecentDetails>> = OnceLock::new();
 
+fn detail_cache(local: bool) -> &'static Mutex<RecentDetails> {
+    if !local && crate::gpu_config::settings().atlas_keep_globe {
+        GLOBE_RESIDENT.get_or_init(|| Mutex::new(RecentDetails::resident()))
+    } else {
+        RECENT.get_or_init(Default::default)
+    }
+}
+
+#[cfg(test)]
 fn load_detail(request: &DetailRequest) -> Result<LoadedDetail, String> {
     let recent = RECENT.get_or_init(Default::default);
-    if let Some(detail) = recent.lock().map_err(|e| e.to_string())?.get(request) {
-        return Ok(detail);
+    let generation = recent.lock().map_err(|e| e.to_string())?.generation;
+    load_detail_from(request, recent, generation)
+}
+
+fn load_detail_from(
+    request: &DetailRequest,
+    recent: &Mutex<RecentDetails>,
+    generation: u64,
+) -> Result<LoadedDetail, String> {
+    {
+        let mut cache = recent.lock().map_err(|e| e.to_string())?;
+        if cache.generation != generation {
+            return Err("Atlas request was invalidated".into());
+        }
+        if let Some(detail) = cache.get(request) {
+            return Ok(detail);
+        }
     }
     let detail =
         super::atlas_source::load(request.root.as_deref(), request.region, request.max_edge)?;
@@ -200,10 +249,9 @@ fn load_detail(request: &DetailRequest) -> Result<LoadedDetail, String> {
         .ok_or("Atlas terrain cannot be shaded: invalid image bounds.")?;
     let detail = LoadedDetail { raster };
     if complete {
-        recent
-            .lock()
-            .map_err(|e| e.to_string())?
-            .insert(request.clone(), detail.clone());
+        let mut cache = recent.lock().map_err(|e| e.to_string())?;
+        // A worker that was running during Cache Blast must not re-pin data.
+        cache.publish(generation, request.clone(), detail.clone());
     }
     Ok(detail)
 }
@@ -415,8 +463,10 @@ pub(super) fn draw_local(
 pub(super) fn clear() {
     super::atlas_surface::clear();
     super::atlas_forest::clear();
-    if let Some(recent) = RECENT.get() {
-        *recent.lock().unwrap() = RecentDetails::default();
+    for recent in [&RECENT, &GLOBE_RESIDENT] {
+        if let Some(recent) = recent.get() {
+            recent.lock().unwrap().clear();
+        }
     }
     if let Some(cache) = IMAGE.get() {
         cache.lock().unwrap().clear();

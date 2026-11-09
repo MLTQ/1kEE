@@ -46,3 +46,9 @@ This prevents small pans from repeatedly discarding useful in-flight work.
 
 Complete native windows are queued for background persistence after pigment
 preparation. The rendering worker never waits for compression or cache writes.
+
+With ONEKEE_ATLAS_KEEP_GLOBE, Globe uses a separate non-evicting prepared pool;
+Local continues using RECENT's bounded LRU. The request's cache generation is
+captured before its worker is spawned. Clear releases both pools and increments
+their generations; old workers cannot read/publish into the cleared pool, even
+if they start after the clear. Completed regions log retained count/RAM bytes.

@@ -10,6 +10,7 @@ pub(crate) struct Settings {
     pub upload_us: u64,
     pub atlas_cpu_bytes: usize,
     pub atlas_disk_bytes: usize,
+    pub atlas_keep_globe: bool,
 }
 
 fn bounded(value: Option<&str>, default: usize, min: usize, max: usize) -> usize {
@@ -39,6 +40,7 @@ pub(crate) fn settings() -> &'static Settings {
         upload_us: setting("ONEKEE_UPLOAD_US", 2000, 100, 8000) as u64,
         atlas_cpu_bytes: setting("ONEKEE_ATLAS_RAM_MIB", 1024, 256, 32768) * 1024 * 1024,
         atlas_disk_bytes: setting("ONEKEE_ATLAS_DISK_MIB", 8192, 512, 262144) * 1024 * 1024,
+        atlas_keep_globe: setting("ONEKEE_ATLAS_KEEP_GLOBE", 0, 0, 1) == 1,
     })
 }
 
@@ -56,6 +58,11 @@ pub(crate) fn log_settings() {
         s.atlas_cpu_bytes / 1048576,
         s.atlas_disk_bytes / 1048576,
     );
+    if s.atlas_keep_globe {
+        eprintln!(
+            "[1kEE GPU] Atlas Globe retains completed relief in RAM/VRAM until Cache Blast or exit; Local remains bounded"
+        );
+    }
 }
 
 pub(crate) fn adapter_name() -> Option<String> {

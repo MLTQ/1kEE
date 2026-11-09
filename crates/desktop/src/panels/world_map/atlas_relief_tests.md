@@ -33,3 +33,7 @@ detail threshold, changing roots or clearing the cache requests fresh data.
 Retention tests use explicit byte budgets to pin LRU eviction, reject oversized
 entries, retain more than eight small windows, reuse covered geographic windows,
 and reject different roots/epochs.
+
+Globe residency tests exceed a deliberately tiny LRU budget with three distinct
+rasters, revisit the original allocation, contrast Local eviction, and verify
+clear prevents both already-running and not-yet-started workers from re-pinning.
