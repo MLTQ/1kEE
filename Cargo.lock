@@ -2560,6 +2560,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "cell-format",
+ "crc32fast",
  "crossbeam-channel",
  "csv",
  "eframe",
@@ -2567,6 +2568,7 @@ dependencies = [
  "gruve-sdk",
  "image",
  "lyon_tessellation",
+ "lz4_flex",
  "objc2 0.6.4",
  "objc2-av-foundation",
  "objc2-foundation 0.3.2",

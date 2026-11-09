@@ -17,3 +17,7 @@ On macOS, the narrow AVFoundation bindings provide native asynchronous radio
 playback, with no external audio player dependency. Other platforms use ffplay.
 
 The buildout adapter uses a temporary file in the cache directory to publish three validated tables atomically.
+
+LZ4 block compression and CRC32 back the bounded interactive Atlas recent-view
+cache. These versions were already locked through other workspace dependencies;
+frame-format dependencies and elevation quantization are not introduced.

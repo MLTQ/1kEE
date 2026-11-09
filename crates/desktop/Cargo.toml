@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+crc32fast = "1"
+lz4_flex = { version = "0.11.6", default-features = false, features = ["std", "safe-encode", "safe-decode", "checked-decode"] }
 eframe = { version = "0.31", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
 bytemuck = { version = "1", features = ["derive"] }
 egui = "0.31"

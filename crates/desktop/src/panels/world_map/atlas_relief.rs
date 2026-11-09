@@ -24,6 +24,7 @@ struct DetailNotice {
     message: Option<String>,
 }
 
+#[derive(Clone)]
 struct LoadedDetail {
     raster: Arc<super::atlas_surface::Raster>,
 }
@@ -31,21 +32,60 @@ type Details = super::layer_snapshot::Snapshot<DetailRequest, LoadedDetail>;
 static GLOBE_DETAIL: OnceLock<Mutex<Details>> = OnceLock::new();
 static LOCAL_DETAIL: OnceLock<Mutex<Details>> = OnceLock::new();
 
+#[cfg(test)]
 fn detail_texture(
     ctx: &egui::Context,
     root: Option<&Path>,
     region: super::atlas_viewport::Region,
     local: bool,
 ) -> Option<Arc<LoadedDetail>> {
+    detail_texture_visible(ctx, root, region, region.bounds(), local)
+}
+
+impl DetailRequest {
+    fn reusable_for(&self, wanted: &Self, visible: [f32; 4]) -> bool {
+        let old = self.region.span();
+        let new = wanted.region.span();
+        let tier = |span: [f32; 2]| {
+            if span[0] <= 0.15 && span[1] <= 0.15 {
+                2
+            } else if span[0] <= 8. && span[1] <= 8. {
+                1
+            } else {
+                0
+            }
+        };
+        self.root == wanted.root
+            && self.epoch == wanted.epoch
+            && self.max_edge == wanted.max_edge
+            && old.iter().zip(new).all(|(old, new)| *old <= new * 1.25)
+            && tier(old) == tier(new)
+            && self.region.contains(visible)
+    }
+}
+
+fn detail_texture_visible(
+    ctx: &egui::Context,
+    root: Option<&Path>,
+    region: super::atlas_viewport::Region,
+    visible: [f32; 4],
+    local: bool,
+) -> Option<Arc<LoadedDetail>> {
     let wake = ctx.clone();
     let state = if local { &LOCAL_DETAIL } else { &GLOBE_DETAIL };
     let mut cache = state.get_or_init(Default::default).lock().ok()?;
-    let request = DetailRequest {
+    let mut request = DetailRequest {
         root: root.map(Path::to_path_buf),
         region,
         max_edge: ctx.input(|i| i.max_texture_side).clamp(16, 8192),
         epoch: cache.epoch(),
     };
+    if let Some(previous) =
+        ctx.data(|d| d.get_temp::<DetailRequest>(egui::Id::new(("atlas-wanted", local))))
+        && previous.reusable_for(&request, visible)
+    {
+        request.region = previous.region;
+    }
     ctx.data_mut(|d| d.insert_temp(egui::Id::new(("atlas-wanted", local)), request.clone()));
     let result = cache.get(
         request,
@@ -70,12 +110,60 @@ fn detail_texture(
     result
 }
 
+#[derive(Default)]
+struct RecentDetails {
+    entries: std::collections::VecDeque<(DetailRequest, LoadedDetail)>,
+    bytes: usize,
+}
+impl RecentDetails {
+    fn get(&mut self, request: &DetailRequest) -> Option<LoadedDetail> {
+        let index = self.entries.iter().position(|(key, _)| key == request)?;
+        let entry = self.entries.remove(index)?;
+        let result = entry.1.clone();
+        self.entries.push_back(entry);
+        Some(result)
+    }
+    fn insert(&mut self, request: DetailRequest, detail: LoadedDetail) {
+        let bytes = detail.raster.heights.len() * 4 + detail.raster.colors.len();
+        const BUDGET: usize = 384 * 1024 * 1024;
+        if bytes > BUDGET {
+            return;
+        }
+        if self.get(&request).is_some() {
+            return;
+        }
+        while self.entries.len() >= 8 || self.bytes + bytes > BUDGET {
+            if let Some((_, old)) = self.entries.pop_front() {
+                self.bytes -= old.raster.heights.len() * 4 + old.raster.colors.len();
+            } else {
+                break;
+            }
+        }
+        self.bytes += bytes;
+        self.entries.push_back((request, detail));
+    }
+}
+static RECENT: OnceLock<Mutex<RecentDetails>> = OnceLock::new();
+
 fn load_detail(request: &DetailRequest) -> Result<LoadedDetail, String> {
+    let recent = RECENT.get_or_init(Default::default);
+    if let Some(detail) = recent.lock().map_err(|e| e.to_string())?.get(request) {
+        return Ok(detail);
+    }
     let detail =
         super::atlas_source::load(request.root.as_deref(), request.region, request.max_edge)?;
-    let raster = super::atlas_surface::Raster::new(detail.grid, detail.region.bounds())
+    let complete = detail.complete;
+    let raster = detail
+        .into_raster()
         .ok_or("Atlas terrain cannot be shaded: invalid image bounds.")?;
-    Ok(LoadedDetail { raster })
+    let detail = LoadedDetail { raster };
+    if complete {
+        recent
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(request.clone(), detail.clone());
+    }
+    Ok(detail)
 }
 
 fn paint_detail_notice(painter: &egui::Painter, rect: egui::Rect, local: bool) {
@@ -134,12 +222,19 @@ fn texture(ctx: &egui::Context, root: Option<&Path>) -> Option<Arc<super::atlas_
 /// All discovery, file reads, decoding and lighting run on the snapshot worker.
 fn load_grid(root: Option<&Path>) -> Option<HeightGrid> {
     let directory = terrain_assets::find_derived_root(root)?.join("terrain");
-    if let Ok(mut cache) = tile_archive::atlas::Reader::open(
-        &directory.join(tile_archive::atlas::FILE_NAME),
-    ) && let Ok(Some(metres)) = cache.sample(
-        [-180., -90., 180., 90.], [4096, 2048], tile_archive::atlas::Tier::Overview,
-    ) {
-        return Some(HeightGrid { width: 4096, height: 2048, metres });
+    if let Ok(mut cache) =
+        tile_archive::atlas::Reader::open(&directory.join(tile_archive::atlas::FILE_NAME))
+        && let Ok(Some(metres)) = cache.sample(
+            [-180., -90., 180., 90.],
+            [4096, 2048],
+            tile_archive::atlas::Tier::Overview,
+        )
+    {
+        return Some(HeightGrid {
+            width: 4096,
+            height: 2048,
+            metres,
+        });
     }
     for (name, signed) in [
         ("gebco_2025_preview_4096.tif", true),
@@ -206,9 +301,11 @@ pub(super) fn draw_globe(
     if let Some(overview) = texture(painter.ctx(), root) {
         rasters.push(overview);
     }
-    let region = super::atlas_viewport::globe(rect, layout, view, painter.ctx().pixels_per_point());
-    if let Some(region) = region
-        && let Some(detail) = detail_texture(painter.ctx(), root, region, false)
+    let visible =
+        super::atlas_viewport::globe_visible(rect, layout, view, painter.ctx().pixels_per_point());
+    let region = visible.and_then(super::atlas_viewport::Region::padded);
+    if let (Some(region), Some(visible)) = (region, visible)
+        && let Some(detail) = detail_texture_visible(painter.ctx(), root, region, visible, false)
     {
         rasters.push(detail.raster.clone());
     }
@@ -244,10 +341,11 @@ pub(super) fn draw_local(
     }
     let view = &model.globe_view;
     let root = model.selected_root.as_deref();
-    if let Some(region) =
-        super::atlas_viewport::local(painter.clip_rect(), layout, view, focus, half)
+    if let Some(visible) =
+        super::atlas_viewport::local_visible(painter.clip_rect(), layout, view, focus, half)
+        && let Some(region) = super::atlas_viewport::Region::padded(visible)
     {
-        if let Some(detail) = detail_texture(painter.ctx(), root, region, true) {
+        if let Some(detail) = detail_texture_visible(painter.ctx(), root, region, visible, true) {
             super::atlas_surface::Callback::local(
                 painter,
                 layout,
@@ -274,6 +372,9 @@ pub(super) fn draw_local(
 
 pub(super) fn clear() {
     super::atlas_forest::clear();
+    if let Some(recent) = RECENT.get() {
+        *recent.lock().unwrap() = RecentDetails::default();
+    }
     if let Some(cache) = IMAGE.get() {
         cache.lock().unwrap().clear();
     }
@@ -291,3 +392,7 @@ mod tests;
 #[cfg(test)]
 #[path = "atlas_runtime_tests.rs"]
 mod runtime_tests;
+
+#[cfg(test)]
+#[path = "atlas_load_bench.rs"]
+mod load_bench;

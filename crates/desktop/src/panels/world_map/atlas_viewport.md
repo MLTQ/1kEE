@@ -16,3 +16,8 @@ Arcsecond edges permit fine native sampling without a one-degree minimum crop.
 Bounds are west/south/east/north pixel edges; longitudes may cross ±180 degrees.
 Selection performs no I/O. Texture limits also honor the current GPU limit.
 Padding includes room for terrain lighting samples and modest camera movement.
+
+The scene controllers receive actual visible bounds separately from padded
+source regions. A still-covering region can survive small pans, including wrapped
+longitudes, while zoom/detail-tier changes request new terrain. Output dimensions
+stay within the strict 32-million-pixel reader budget even after rounding.

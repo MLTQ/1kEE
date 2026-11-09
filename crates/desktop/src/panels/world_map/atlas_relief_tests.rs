@@ -221,3 +221,97 @@ fn native_detail_publishes_in_both_scenes_without_blocking_draw() {
     }
     clear();
 }
+
+#[test]
+fn atlas_pan_reuses_padding_but_zoom_source_and_epoch_changes_refine() {
+    use super::super::atlas_viewport::Region;
+    let previous = DetailRequest {
+        root: Some("first".into()),
+        region: Region([-3600, -3600, 3600, 3600]),
+        max_edge: 8192,
+        epoch: 0,
+    };
+    let mut wanted = previous.clone();
+    wanted.region = Region([-3000, -3600, 4200, 3600]);
+    assert!(previous.reusable_for(&wanted, [-0.5, -0.6, 0.8, 0.6]));
+    assert!(!previous.reusable_for(&wanted, [-0.5, -0.6, 1.01, 0.6]));
+    wanted.region = Region([-900, -900, 900, 900]);
+    assert!(
+        !previous.reusable_for(&wanted, [-0.2, -0.2, 0.2, 0.2]),
+        "zoom must gain detail"
+    );
+    wanted = previous.clone();
+    wanted.epoch = 1;
+    assert!(!previous.reusable_for(&wanted, [-0.5, -0.5, 0.5, 0.5]));
+    wanted = previous.clone();
+    wanted.root = Some("second".into());
+    assert!(!previous.reusable_for(&wanted, [-0.5, -0.5, 0.5, 0.5]));
+    let old = DetailRequest {
+        region: Region([-14580, -14580, 14580, 14580]),
+        ..previous.clone()
+    };
+    wanted = DetailRequest {
+        region: Region([-14220, -14220, 14220, 14220]),
+        ..previous
+    };
+    assert!(
+        !old.reusable_for(&wanted, [-3., -3., 3., 3.]),
+        "crossing 8 degrees must select SRTM"
+    );
+}
+
+#[test]
+fn atlas_recent_details_reuse_rasters_and_evict_by_recency() {
+    use super::super::atlas_viewport::Region;
+    let mut cache = RecentDetails::default();
+    let request = DetailRequest {
+        root: None,
+        region: Region([0, 0, 360, 360]),
+        max_edge: 8192,
+        epoch: 0,
+    };
+    let raster = super::super::atlas_surface::Raster::new(
+        HeightGrid {
+            width: 8,
+            height: 4,
+            metres: vec![123.; 32],
+        },
+        request.region.bounds(),
+    )
+    .unwrap();
+    for epoch in 0..8 {
+        cache.insert(
+            DetailRequest {
+                epoch,
+                ..request.clone()
+            },
+            LoadedDetail {
+                raster: raster.clone(),
+            },
+        );
+    }
+    assert!(Arc::ptr_eq(&cache.get(&request).unwrap().raster, &raster));
+    cache.insert(
+        DetailRequest {
+            epoch: 8,
+            ..request.clone()
+        },
+        LoadedDetail {
+            raster: raster.clone(),
+        },
+    );
+    assert!(cache.get(&request).is_some());
+    assert!(
+        cache
+            .get(&DetailRequest {
+                epoch: 1,
+                ..request
+            })
+            .is_none()
+    );
+    assert_eq!(cache.entries.len(), 8);
+    assert_eq!(
+        cache.bytes,
+        8 * (raster.heights.len() * 4 + raster.colors.len())
+    );
+}

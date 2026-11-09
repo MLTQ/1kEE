@@ -70,3 +70,19 @@ run the private synthetic raster tests with
 `cargo test --release -p one-thousand-electric-eye-cache-builder gdal_atlas -- --ignored --test-threads=1`.
 Desktop cache consumption is covered by
 `cargo test --release -p one-thousand-electric-eye-desktop atlas -- --test-threads=1`.
+
+## Interactive map reuse
+
+The map now caches terrain it generates while browsing, even if you have not
+run an Atlas builder job. Small pans reuse the current padded window. Recently
+prepared views stay in a bounded RAM cache; completed native windows are also
+saved losslessly in `Derived/terrain/atlas_recent_views_v1.sqlite`. This uses at
+most 16 windows / 512 MiB of compressed payloads, with a 768 MiB database ceiling
+plus temporary journal space. Saving happens on a bounded background worker.
+
+Revisiting a retained window avoids GDAL, and the disk cache survives desktop
+restarts. New terrain still needs its first native-source read. Source changes
+invalidate matching disk entries; unreadable entries are regenerated. The
+recent-view cache is independent of the OSM job and Atlas prebuild database.
+RAM reuse is capped at eight windows / 384 MiB of retained height and color data;
+current rendering resources and the bounded save queue have separate lifetimes.

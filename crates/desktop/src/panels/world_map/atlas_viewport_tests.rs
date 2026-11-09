@@ -7,7 +7,7 @@ fn windows_keep_native_detail_and_bound_texture_memory() {
     assert_eq!(region.size(1.0, 8192), [7200, 3600]);
     let huge = Region([-648000, -324000, 648000, 324000]);
     let size = huge.size(1.0, 8192);
-    assert!(size[0] <= 8192 && size[1] <= 8192 && size[0] * size[1] < 32_020_000);
+    assert!(size[0] <= 8192 && size[1] <= 8192 && size[0] * size[1] <= 32_000_000);
     assert!(huge.size(15.0, 2048).iter().all(|&v| v <= 2048));
 }
 
@@ -67,4 +67,12 @@ fn globe_detail_uses_the_real_zoom_and_visible_pole() {
     let b = globe(rect, &layout, &view, 2.0).unwrap().bounds();
     assert_eq!(b[3], 90.0);
     assert_eq!(b[2] - b[0], 360.0);
+}
+
+#[test]
+fn padded_windows_contain_date_line_equivalent_views() {
+    let region = Region([179 * 3600, -3600, 181 * 3600, 3600]);
+    assert!(region.contains([-180.5, -0.5, -179.5, 0.5]));
+    assert!(!region.contains([-180.5, -0.5, -178.5, 0.5]));
+    assert!(!region.contains([179.5, -0.5, f32::NAN, 0.5]));
 }

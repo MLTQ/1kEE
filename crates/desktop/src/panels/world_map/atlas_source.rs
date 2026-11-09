@@ -7,10 +7,24 @@ use std::{
     time::Duration,
 };
 
+#[path = "atlas_view_cache.rs"]
+mod view_cache;
+
 pub(super) struct Detail {
     pub grid: HeightGrid,
     pub region: Region,
     pub source: &'static str,
+    pub complete: bool,
+    save: Option<view_cache::Ticket>,
+}
+impl Detail {
+    pub(super) fn into_raster(self) -> Option<std::sync::Arc<super::atlas_surface::Raster>> {
+        let raster = super::atlas_surface::Raster::new(self.grid, self.region.bounds())?;
+        if let Some(ticket) = self.save {
+            view_cache::persist(ticket, raster.clone());
+        }
+        Some(raster)
+    }
 }
 
 pub(super) fn load(root: Option<&Path>, region: Region, max_edge: usize) -> Result<Detail, String> {
@@ -52,6 +66,30 @@ pub(super) fn load(root: Option<&Path>, region: Region, max_edge: usize) -> Resu
         (15.0, "GEBCO · 15 arcsecond terrain")
     };
     let size = region.size(spacing, max_edge);
+    let ticket = terrain_assets::find_derived_root(root).and_then(|derived| {
+        view_cache::Ticket::new(
+            &derived,
+            region,
+            size,
+            base.iter().chain(&srtm).chain(&fine).cloned().collect(),
+        )
+        .ok()
+    });
+    if let Some(ticket) = &ticket {
+        match ticket.read() {
+            Ok(Some(grid)) => {
+                return Ok(Detail {
+                    grid,
+                    region,
+                    source,
+                    complete: true,
+                    save: None,
+                });
+            }
+            Ok(None) => {}
+            Err(error) => eprintln!("[atlas] recent-view read: {error}"),
+        }
+    }
     let scratch =
         tempfile::tempdir().map_err(|e| format!("Cannot create Atlas working folder: {e}"))?;
     let metres = warp(&base, bounds, size, scratch.path(), "ocean")?;
@@ -60,17 +98,21 @@ pub(super) fn load(root: Option<&Path>, region: Region, max_edge: usize) -> Resu
         height: size[1],
         metres,
     };
+    let mut complete = true;
     for (name, files) in [("land", srtm), ("fine", fine)] {
-        if !files.is_empty()
-            && let Ok(land) = warp(&files, bounds, size, scratch.path(), name)
-        {
-            merge_land(&mut grid.metres, &land);
+        if !files.is_empty() {
+            match warp(&files, bounds, size, scratch.path(), name) {
+                Ok(land) => merge_land(&mut grid.metres, &land),
+                Err(_) => complete = false, // Never persist a degraded fallback as finished detail.
+            }
         }
     }
     Ok(Detail {
         grid,
         region,
         source,
+        complete,
+        save: if complete { ticket } else { None },
     })
 }
 
@@ -119,6 +161,8 @@ fn cached_file(
                     metres,
                 },
                 region,
+                save: None,
+                complete: true,
                 source: if tier == Tier::Land {
                     "Atlas cache · 1 arcsecond land"
                 } else {
@@ -260,3 +304,8 @@ fn warp(
 #[cfg(test)]
 #[path = "atlas_source_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+pub(super) fn flush_view_cache() {
+    view_cache::flush();
+}

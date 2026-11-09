@@ -25,3 +25,7 @@ selection, desktop tool discovery and actual refined drawing are now covered by
 `atlas_runtime_tests`, including a minimal Finder-style PATH.
 
 The composed Appearance preview explicitly uses default Atlas lighting, independent of any saved user light settings.
+
+Recent-view tests pin prepared raster reuse/eviction and geographic hysteresis:
+small pans retain coverage, but leaving coverage, zooming in, crossing the SRTM
+detail threshold, changing roots or clearing the cache requests fresh data.

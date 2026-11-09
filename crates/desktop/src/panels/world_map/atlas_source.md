@@ -33,3 +33,11 @@ Derived/terrain/atlas_heights_v1.sqlite. Matching Land or Terrain tiles supply
 measured heights directly. Missing/corrupt coverage falls back to original
 sources; available raw SRTM and cached fine-provider terrain retain their higher
 resolution when the matching Atlas tier has not been built.
+
+Interactive loads also check atlas_recent_views_v1.sqlite before launching GDAL.
+Its key includes every selected source's identity, exact bounds and dimensions.
+`Detail::into_raster` queues successful original-source loads for lossless
+background persistence. Failed SRTM/fine overlays may display the existing coarse
+fallback, but that incomplete result is not retained as a reusable completed view.
+Missing, unreadable, full or locked recent-view storage cannot prevent native
+terrain from loading. Source identity checks do not hash whole original files.

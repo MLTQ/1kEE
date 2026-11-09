@@ -27,6 +27,17 @@ impl Region {
             ceil(bounds[3]).min(324000),
         ]))
     }
+    pub fn contains(self, mut bounds: [f32; 4]) -> bool {
+        let [w, south, e, north] = self.bounds();
+        let shift = (((w + e) - (bounds[0] + bounds[2])) / 720.0).round() * 360.0;
+        bounds[0] += shift;
+        bounds[2] += shift;
+        bounds.iter().all(|v| v.is_finite())
+            && bounds[0] >= w
+            && bounds[2] <= e
+            && bounds[1] >= south
+            && bounds[3] <= north
+    }
     pub fn bounds(self) -> [f32; 4] {
         self.0.map(|v| v as f32 / 3600.0)
     }
@@ -47,16 +58,21 @@ impl Region {
             .min(edge / raw[1])
             .min((32_000_000.0 / (raw[0] * raw[1])).sqrt())
             .min(1.0);
-        raw.map(|v| (v * factor).ceil().max(16.0) as usize)
+        let mut size = raw.map(|v| (v * factor).ceil().max(16.0) as usize);
+        // Ceil on both axes can exceed the reader's strict pixel budget.
+        if size[0] * size[1] > 32_000_000 {
+            size[1] = 32_000_000 / size[0];
+        }
+        size
     }
 }
 
-pub(super) fn globe(
+pub(super) fn globe_visible(
     rect: egui::Rect,
     layout: &GlobeLayout,
     view: &GlobeViewState,
     ppp: f32,
-) -> Option<Region> {
+) -> Option<[f32; 4]> {
     let scale = layout.radius * layout.focal_length / (layout.camera_distance - 1.0);
     if scale * std::f32::consts::TAU / 4096.0 * ppp < 0.7 {
         return None;
@@ -116,16 +132,16 @@ pub(super) fn globe(
             }
         }
     }
-    Region::padded(bounds)
+    Some(bounds)
 }
 
-pub(super) fn local(
+pub(super) fn local_visible(
     clip: egui::Rect,
     layout: &LocalLayout,
     view: &GlobeViewState,
     focus: GeoPoint,
     half: f32,
-) -> Option<Region> {
+) -> Option<[f32; 4]> {
     let ex = (half * 111.32 * focus.lat.to_radians().cos().abs().max(0.2)).max(1.0);
     let projection = local_projection_params(layout, view, focus, ex, (half * 111.32).max(1.0));
     let project = |lat, lon| {
@@ -159,9 +175,29 @@ pub(super) fn local(
         bounds[2] = bounds[2].max(lon);
         bounds[3] = bounds[3].max(lat);
     }
-    Region::padded(bounds)
+    Some(bounds)
 }
 
 #[cfg(test)]
 #[path = "atlas_viewport_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+pub(super) fn globe(
+    rect: egui::Rect,
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    ppp: f32,
+) -> Option<Region> {
+    Region::padded(globe_visible(rect, layout, view, ppp)?)
+}
+#[cfg(test)]
+pub(super) fn local(
+    clip: egui::Rect,
+    layout: &LocalLayout,
+    view: &GlobeViewState,
+    focus: GeoPoint,
+    half: f32,
+) -> Option<Region> {
+    Region::padded(local_visible(clip, layout, view, focus, half)?)
+}
