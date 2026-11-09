@@ -78,7 +78,6 @@ pub(super) fn draw_trees(
     render_zoom: f32,
     show_trees: bool,
 ) {
-    puffin::profile_function!();
     let _ = render_zoom; // zoom no longer drives cache invalidation
 
     if !show_trees {

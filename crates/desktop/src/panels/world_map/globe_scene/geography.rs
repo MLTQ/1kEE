@@ -71,7 +71,6 @@ pub(super) fn draw_global_coastlines(
     selected_root: Option<&std::path::Path>,
     contour_stroke_width_px: f32,
 ) {
-    puffin::profile_function!();
     let Some(coastlines) =
         contour_asset::load_global_coastlines(selected_root, view.zoom, painter.ctx().clone())
     else {
@@ -107,7 +106,6 @@ pub(super) fn draw_global_bathymetry(
     selected_root: Option<&std::path::Path>,
     contour_stroke_width_px: f32,
 ) {
-    puffin::profile_function!();
     // ── Layer 1: depth-fill texture mapped onto the sphere ───────────────────
     //
     // Strategy: upload a 1440×720 (0.25°/px) depth ColorImage as an egui
@@ -211,7 +209,6 @@ fn build_bathy_mesh(
     view: &GlobeViewState,
     tex_id: egui::TextureId,
 ) -> egui::epaint::Mesh {
-    puffin::profile_function!();
     const STEP: f32 = 2.0;
     const HALF: f32 = STEP / 2.0;
 
@@ -288,7 +285,6 @@ pub(super) fn draw_geojson_layers(
     layers: &[GeoJsonLayer],
     cables: Option<&crate::submarine_cables::CableCatalog>,
 ) {
-    puffin::profile_function!();
     for (layer_index, layer) in layers.iter().enumerate() {
         if !layer.visible {
             continue;
@@ -394,7 +390,6 @@ pub(super) fn draw_global_topo(
     selected_root: Option<&std::path::Path>,
     contour_stroke_width_px: f32,
 ) {
-    puffin::profile_function!();
     // Crossfade: full opacity at zoom ≤ 3.0, fade to zero by zoom 5.0.
     // SRTM globe tiles fade in from 1.5→3.0, so there is overlap in the
     // 3–5× range where both layers contribute before SRTM dominates.
@@ -446,7 +441,6 @@ pub(super) fn draw_srtm_on_globe(
     selected_root: Option<&std::path::Path>,
     contour_stroke_width_px: f32,
 ) {
-    puffin::profile_function!();
     if view.zoom < 1.5 {
         return;
     }
@@ -483,7 +477,6 @@ pub(super) fn draw_lunar_topo(
     show_contours: bool,
     contour_stroke_width_px: f32,
 ) {
-    puffin::profile_function!();
     // ── Contour lines ─────────────────────────────────────────────────────────
     // Fade in from zoom 0.6 → 1.4 so they don't clutter the full-disc view.
     let contour_alpha = ((view.zoom - 0.6) / 0.8).clamp(0.0, 1.0);
@@ -566,7 +559,6 @@ pub(super) fn draw_mars_topo(
     show_contours: bool,
     contour_stroke_width_px: f32,
 ) {
-    puffin::profile_function!();
     // ── Contour lines ─────────────────────────────────────────────────────────
     // Fade in from zoom 0.6 → 1.4 so they don't clutter the full-disc view.
     let contour_alpha = ((view.zoom - 0.6) / 0.8).clamp(0.0, 1.0);

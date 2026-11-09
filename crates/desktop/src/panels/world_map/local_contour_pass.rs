@@ -252,7 +252,6 @@ pub fn instances_for_tile(
         .name("local-contour-instance-build".into())
         .spawn(move || {
             let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                puffin::profile_scope!("local_contour_instances_build");
                 let instances = contours
                     .par_iter()
                     .flat_map_iter(|contour| {
@@ -676,7 +675,6 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
                     continue;
                 }
                 uploads += 1;
-                puffin::profile_scope!("local_contour_tile_upload");
                 let pending = res.pending.entry(key).or_insert_with(|| PendingTile {
                     lines: super::line_upload::Upload::new(batch.instances.clone()),
                     occlusion: super::line_upload::Upload::new(batch.occlusion.segments.clone()),

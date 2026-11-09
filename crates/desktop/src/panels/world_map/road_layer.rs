@@ -71,7 +71,6 @@ pub(super) fn draw_roads(
     show_major_roads: bool,
     show_minor_roads: bool,
 ) {
-    puffin::profile_function!();
     if !show_major_roads && !show_minor_roads {
         return;
     }

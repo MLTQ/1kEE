@@ -20,7 +20,6 @@ pub(super) fn draw_tile_pulse_grid(
     progress: &std::collections::HashMap<(i32, i32), f32>,
     half_extent_override: Option<f32>,
 ) {
-    puffin::profile_function!();
     const EDGE_BAND: f32 = 0.14; // fraction of remaining work that counts as "burning"
     const CELL_INSET: f32 = 0.10; // fractional gap between cells (10% each side)
     const OPACITY: f32 = 0.75;

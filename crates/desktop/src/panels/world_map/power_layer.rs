@@ -65,8 +65,6 @@ pub(super) fn draw_power(
     _render_zoom: f32,
     show: bool,
 ) {
-    puffin::profile_function!();
-
     if !show {
         if let Ok(mut g) = power_cache().lock() {
             g.cache = None;

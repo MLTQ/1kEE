@@ -119,7 +119,6 @@ struct DeflockLocalMeshKey {
 }
 
 pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: f64) -> GlobeScene {
-    puffin::profile_function!();
     let atlas_terrain = model.map_theme == theme::MapTheme::Atlas
         && model.active_body == crate::model::ActiveBody::Earth;
     painter.rect_filled(
@@ -1096,7 +1095,6 @@ fn draw_local_beam(
     contours: Option<&[contour_asset::ContourPath]>,
     show: bool,
 ) -> f32 {
-    puffin::profile_function!();
     let cherry = egui::Color32::from_rgb(210, 18, 50);
 
     // Preserve the contour-only estimate for the targeting beam and readout.
@@ -1268,7 +1266,6 @@ fn draw_loading_boxes(
     view: &GlobeViewState,
     focus: GeoPoint,
 ) {
-    puffin::profile_function!();
     let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
     let km_per_deg_lat = 111.32f32;
     let km_per_deg_lon = km_per_deg_lat * focus.lat.to_radians().cos().abs().max(0.2);

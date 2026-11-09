@@ -11,7 +11,6 @@ pub(super) fn draw_ships(
     projected_tracks: &[ProjectedMarker],
     selected_mmsi: Option<u64>,
 ) {
-    puffin::profile_function!();
     // Cyan-teal — distinct from event (red/orange) and camera (blue) markers.
     let ship_color = egui::Color32::from_rgb(40, 210, 180);
     let selected_color = egui::Color32::from_rgb(255, 230, 80);
@@ -87,7 +86,6 @@ pub(super) fn draw_flights(
     projected_flights: &[ProjectedMarker],
     selected_icao24: Option<&str>,
 ) {
-    puffin::profile_function!();
     for projected in projected_flights {
         let flight = &flights[projected.source_index];
         // ── Category → base colour (theme-aware) ───────────────────────────

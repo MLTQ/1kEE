@@ -95,8 +95,6 @@ fn draw_infra(
     stroke_for_class: impl Fn(&str) -> egui::Stroke,
     fill_for_class: impl Fn(&str) -> Option<egui::Color32>,
 ) {
-    puffin::profile_function!();
-
     if !show {
         if let Ok(mut g) = cache_fn().lock() {
             g.cache = None;

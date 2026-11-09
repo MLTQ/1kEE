@@ -363,7 +363,6 @@ pub fn instances_for(
             .name("contour-instance-build".into())
             .spawn(move || {
                 let built = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    puffin::profile_scope!("contour_instances_rebuild");
                     contours
                         .par_iter()
                         .flat_map_iter(|contour| {

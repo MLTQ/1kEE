@@ -27,8 +27,6 @@ tungstenite = { version = "0.24", default-features = false, features = ["handsha
 crossbeam-channel = "0.5.15"
 csv = "1.4"
 rayon = "1.11.0"
-puffin = "0.19"
-puffin_http = "0.16"
 lyon_tessellation = "1"
 one-thousand-electric-eye-cache-builder = { path = "../cache_builder" }
 

@@ -37,7 +37,6 @@ pub struct DashboardApp {
     event_camera_sidebar: panels::EventCameraSidebar,
     event_radio: panels::EventRadio,
     last_theme: theme::MapTheme,
-    _puffin_server: Option<puffin_http::Server>,
     /// Gruve mesh bridge: serves the companion web view + announces to the local
     /// agent. `None` when no port was free; the app runs identically without it.
     gruve: Option<crate::gruve::GruveBridge>,
@@ -70,14 +69,6 @@ impl DashboardApp {
         // Open the event history store (creates DB if not present).
         crate::event_store::open();
 
-        puffin::set_scopes_on(true);
-        let puffin_server = puffin_http::Server::new("127.0.0.1:8585")
-            .inspect_err(|e| eprintln!("puffin server unavailable (port in use?): {e}"))
-            .ok();
-        if puffin_server.is_some() {
-            eprintln!("puffin profiler server on 127.0.0.1:8585 — connect with `puffin_viewer`");
-        }
-
         let model = AppModel::new();
         let gruve = crate::gruve::GruveBridge::start(&model);
         Self {
@@ -86,7 +77,6 @@ impl DashboardApp {
             camera_feed_viewer: CameraFeedViewer::default(),
             event_camera_sidebar: panels::EventCameraSidebar::default(),
             event_radio: panels::EventRadio::default(),
-            _puffin_server: puffin_server,
             gruve,
         }
     }
@@ -105,8 +95,6 @@ impl Drop for DashboardApp {
 
 impl eframe::App for DashboardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        puffin::GlobalProfiler::lock().new_frame();
-
         // Handle escape before hidden panels can consume it. Presentation mode
         // changes only visibility, so returning restores the operator's layout.
         ctx.input_mut(|input| {

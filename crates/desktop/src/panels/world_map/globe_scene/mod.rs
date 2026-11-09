@@ -105,7 +105,6 @@ struct DeflockGlobeMeshKey {
 }
 
 pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: f64) -> GlobeScene {
-    puffin::profile_function!();
     painter.rect_filled(
         rect,
         if model.obs_view { 0.0 } else { 12.0 },

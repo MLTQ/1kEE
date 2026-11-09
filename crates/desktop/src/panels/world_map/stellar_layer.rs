@@ -27,7 +27,6 @@ pub(super) fn draw_stellar_correspondence(
     stellar_jd: f64,
     stellar_precess: bool,
 ) {
-    puffin::profile_function!();
     let gmst = stellar_time::gmst_deg(stellar_jd);
 
     for star in stellar_catalog::STARS {
@@ -96,7 +95,6 @@ pub(super) fn draw_planets(
     view: &GlobeViewState,
     stellar_jd: f64,
 ) {
-    puffin::profile_function!();
     let gmst = stellar_time::gmst_deg(stellar_jd);
 
     for &planet in planet_ephemeris::ALL_PLANETS {
@@ -142,7 +140,6 @@ pub(super) fn draw_planet_trails(
     stellar_jd: f64,
     trail_years: f32,
 ) {
-    puffin::profile_function!();
     const TRAIL_POINTS: usize = 240;
 
     for &planet in planet_ephemeris::ALL_PLANETS {

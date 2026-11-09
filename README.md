@@ -219,8 +219,6 @@ boundaries.
 
 ## Notes
 
-- A `puffin` profiler server runs on `127.0.0.1:8585` while the app is up; connect with
-  `puffin_viewer`.
 - `crates/desktop/src/stellar_catalog.rs` is generated. Regenerate it from the
   Yale Bright Star Catalogue with `python3 tools/generate_star_catalog.py`,
   which preserves the curated common names already in the file.
