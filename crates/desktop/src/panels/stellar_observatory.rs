@@ -40,7 +40,7 @@ pub fn render_stellar_observatory(ctx: &egui::Context, model: &mut AppModel) {
                 ui.colored_label(theme::text_muted(), &jd_str);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let (label, col) = if model.stellar_live {
-                        ("● LIVE", theme::hot_color())
+                        ("● LIVE", theme::chrome_hot_color())
                     } else {
                         ("○ MANUAL", theme::text_muted())
                     };

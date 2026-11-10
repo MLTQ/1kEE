@@ -58,9 +58,23 @@ fn chrome_gpu_preview() {
         ("paths", Some(Section::Paths), false),
         ("activity", Some(Section::Activity), false),
         ("layers", None, true),
+        ("atlas-day", Some(Section::Appearance), false),
+        ("atlas-night", Some(Section::Appearance), false),
     ] {
         let ctx = context();
         let mut model = model();
+        if matches!(name, "atlas-day" | "atlas-night") {
+            model.map_theme = crate::theme::MapTheme::Atlas;
+            model.stellar_jd = crate::stellar_time::JD_J2000;
+            model.atlas_style = crate::atlas_style::AtlasStyle::default();
+            let lon = if name == "atlas-day" { 0.0 } else { 180.0 };
+            model.globe_view.focus_on(GeoPoint { lat: 0.0, lon });
+        }
+        crate::theme::sync_view(&ctx, &model);
+        if model.map_theme == crate::theme::MapTheme::Atlas {
+            assert!(crate::theme::is_atlas());
+            assert_eq!(ctx.style().visuals.dark_mode, name == "atlas-night");
+        }
         model.show_layer_drawer = drawer;
         model.settings_open = section.is_some();
         if let Some(section) = section {

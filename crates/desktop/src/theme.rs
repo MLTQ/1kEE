@@ -1,6 +1,8 @@
 use std::sync::{OnceLock, RwLock};
 
 mod admin;
+#[cfg(test)]
+mod tests;
 
 // ── Theme enum ────────────────────────────────────────────────────────────────
 
@@ -86,9 +88,39 @@ impl MapTheme {
 
 // ── Global active theme ───────────────────────────────────────────────────────
 
-fn theme_lock() -> &'static RwLock<MapTheme> {
-    static T: OnceLock<RwLock<MapTheme>> = OnceLock::new();
-    T.get_or_init(|| RwLock::new(MapTheme::Topo))
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Palette {
+    map: MapTheme,
+    chrome: MapTheme,
+}
+
+impl Palette {
+    fn for_view(model: &crate::model::AppModel) -> Self {
+        let map = model.map_theme;
+        let mut chrome = map;
+        if map == MapTheme::Atlas && model.active_body == crate::model::ActiveBody::Earth {
+            let view = &model.globe_view;
+            let center = if view.local_mode {
+                view.local_center
+            } else {
+                view.globe_center_latlon()
+            };
+            if model.atlas_style.is_night_at(model.atlas_light_jd(), center) {
+                chrome = MapTheme::Topo;
+            }
+        }
+        Self { map, chrome }
+    }
+
+    fn apply(self, ctx: &egui::Context) {
+        *theme_lock().write().unwrap_or_else(|e| e.into_inner()) = self;
+        apply_egui_style(ctx, self.chrome);
+    }
+}
+
+fn theme_lock() -> &'static RwLock<Palette> {
+    static T: OnceLock<RwLock<Palette>> = OnceLock::new();
+    T.get_or_init(|| RwLock::new(Palette::default()))
 }
 
 pub fn is_atlas() -> bool {
@@ -96,14 +128,28 @@ pub fn is_atlas() -> bool {
 }
 
 fn current() -> MapTheme {
+    active_palette().map
+}
+
+fn active_palette() -> Palette {
     *theme_lock().read().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Apply a new theme.  Call this whenever the user changes the picker.
 /// Updates both the internal palette and the egui widget style.
 pub fn set_theme(ctx: &egui::Context, theme: MapTheme) {
-    *theme_lock().write().unwrap_or_else(|e| e.into_inner()) = theme;
-    apply_egui_style(ctx, theme);
+    Palette {
+        map: theme,
+        chrome: theme,
+    }
+    .apply(ctx);
+}
+
+pub fn sync_view(ctx: &egui::Context, model: &crate::model::AppModel) {
+    let desired = Palette::for_view(model);
+    if desired != active_palette() {
+        desired.apply(ctx);
+    }
 }
 
 // ── egui widget style ─────────────────────────────────────────────────────────
@@ -258,13 +304,13 @@ fn apply_egui_style(ctx: &egui::Context, theme: MapTheme) {
 
 /// Called once at startup to install the default theme.
 pub fn install(ctx: &egui::Context) {
-    apply_egui_style(ctx, current());
+    apply_egui_style(ctx, active_palette().chrome);
 }
 
 // ── Map palette ───────────────────────────────────────────────────────────────
 
 pub fn canvas_background() -> egui::Color32 {
-    match current() {
+    match active_palette().chrome {
         MapTheme::Atlas => egui::Color32::from_rgb(230, 220, 202),
         MapTheme::Sodium => egui::Color32::from_rgb(0, 0, 0),
         MapTheme::Topo => egui::Color32::from_rgb(5, 15, 22),
@@ -279,7 +325,7 @@ pub fn canvas_background() -> egui::Color32 {
 }
 
 pub fn section_background() -> egui::Color32 {
-    match current() {
+    match active_palette().chrome {
         MapTheme::Atlas => egui::Color32::from_rgb(238, 230, 213),
         MapTheme::Sodium => egui::Color32::from_rgb(5, 3, 1),
         MapTheme::Topo => egui::Color32::from_rgb(10, 22, 31),
@@ -313,7 +359,7 @@ pub fn camera_color() -> egui::Color32 {
 }
 
 pub fn text_muted() -> egui::Color32 {
-    match current() {
+    match active_palette().chrome {
         MapTheme::Atlas => egui::Color32::from_rgb(105, 99, 84),
         MapTheme::Sodium => egui::Color32::from_rgb(188, 152, 103),
         MapTheme::Topo => egui::Color32::from_rgb(154, 178, 189),
@@ -358,7 +404,15 @@ pub fn topo_color() -> egui::Color32 {
 }
 
 pub fn hot_color() -> egui::Color32 {
-    match current() {
+    hot_color_for(current())
+}
+
+pub fn chrome_hot_color() -> egui::Color32 {
+    hot_color_for(active_palette().chrome)
+}
+
+fn hot_color_for(theme: MapTheme) -> egui::Color32 {
+    match theme {
         MapTheme::Atlas => egui::Color32::from_rgb(141, 64, 49),
         MapTheme::Sodium => egui::Color32::from_rgb(255, 170, 72),
         MapTheme::Topo => egui::Color32::from_rgb(245, 125, 78),
@@ -391,11 +445,8 @@ pub fn contour_color() -> egui::Color32 {
 
 /// Semi-transparent fill for overlay panels (layer bar, focus card, footer).
 pub fn panel_fill(alpha: u8) -> egui::Color32 {
-    if is_atlas() {
-        return egui::Color32::from_rgba_unmultiplied(243, 235, 218, alpha);
-    }
-    let (r, g, b) = match current() {
-        MapTheme::Atlas => unreachable!("handled above"),
+    let (r, g, b) = match active_palette().chrome {
+        MapTheme::Atlas => return egui::Color32::from_rgba_unmultiplied(243, 235, 218, alpha),
         MapTheme::Sodium => (4, 2, 0),
         MapTheme::Topo => (7, 18, 24),
         MapTheme::Phosphor => (5, 14, 5),
@@ -411,7 +462,7 @@ pub fn panel_fill(alpha: u8) -> egui::Color32 {
 
 /// Stroke/border color for overlay panels and chrome frames.
 pub fn panel_stroke() -> egui::Color32 {
-    match current() {
+    match active_palette().chrome {
         MapTheme::Atlas => egui::Color32::from_rgb(147, 133, 109),
         MapTheme::Sodium => egui::Color32::from_rgb(84, 50, 18),
         MapTheme::Topo => egui::Color32::from_rgb(24, 63, 79),
@@ -427,7 +478,7 @@ pub fn panel_stroke() -> egui::Color32 {
 
 /// Fill for floating windows (Settings, Terrain Library).
 pub fn window_fill() -> egui::Color32 {
-    match current() {
+    match active_palette().chrome {
         MapTheme::Atlas => egui::Color32::from_rgb(244, 237, 221),
         MapTheme::Sodium => egui::Color32::from_rgb(7, 4, 1),
         MapTheme::Topo => egui::Color32::from_rgb(14, 18, 23),
@@ -443,7 +494,7 @@ pub fn window_fill() -> egui::Color32 {
 
 /// Stroke for floating windows.
 pub fn window_stroke() -> egui::Color32 {
-    match current() {
+    match active_palette().chrome {
         MapTheme::Atlas => egui::Color32::from_rgb(133, 121, 103),
         MapTheme::Sodium => egui::Color32::from_rgb(94, 58, 22),
         MapTheme::Topo => egui::Color32::from_rgb(43, 49, 58),
@@ -460,7 +511,7 @@ pub fn window_stroke() -> egui::Color32 {
 
 /// Fill color for the active state of chrome toggle buttons (GLOBE/LOCAL etc.).
 pub fn chrome_active_fill() -> egui::Color32 {
-    match current() {
+    match active_palette().chrome {
         MapTheme::Atlas => egui::Color32::from_rgb(57, 80, 84),
         MapTheme::Sodium => egui::Color32::from_rgb(96, 55, 18),
         MapTheme::Topo => egui::Color32::from_rgb(24, 63, 79),
@@ -476,7 +527,7 @@ pub fn chrome_active_fill() -> egui::Color32 {
 
 /// Text color for the active state of chrome toggle buttons — near-white with a theme tint.
 pub fn chrome_active_text() -> egui::Color32 {
-    match current() {
+    match active_palette().chrome {
         MapTheme::Atlas => egui::Color32::from_rgb(249, 242, 224),
         MapTheme::Sodium => egui::Color32::from_rgb(255, 245, 224),
         MapTheme::Topo => egui::Color32::from_rgb(225, 245, 250), // near-white cyan
@@ -492,7 +543,7 @@ pub fn chrome_active_text() -> egui::Color32 {
 
 /// Fill for list/card items in side panels (terrain library, camera list).
 pub fn item_fill() -> egui::Color32 {
-    match current() {
+    match active_palette().chrome {
         MapTheme::Atlas => egui::Color32::from_rgb(232, 223, 204),
         MapTheme::Sodium => egui::Color32::from_rgb(8, 5, 2),
         MapTheme::Topo => egui::Color32::from_rgb(15, 22, 28),
@@ -508,7 +559,7 @@ pub fn item_fill() -> egui::Color32 {
 
 /// Fill for the selected/highlighted item in a list.
 pub fn selected_item_fill() -> egui::Color32 {
-    match current() {
+    match active_palette().chrome {
         MapTheme::Atlas => egui::Color32::from_rgb(210, 216, 195),
         MapTheme::Sodium => egui::Color32::from_rgb(36, 20, 8),
         MapTheme::Topo => egui::Color32::from_rgb(18, 44, 56),

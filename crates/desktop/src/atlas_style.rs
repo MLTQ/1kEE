@@ -49,28 +49,45 @@ impl AtlasStyle {
     pub fn light(self, jd: f64) -> [f32; 4] {
         let style = self.normalized();
         if style.light_mode == LightMode::Sun {
-            let jd = if jd.is_finite() {
-                jd
-            } else {
-                crate::stellar_time::JD_J2000
-            };
-            let jd = ((jd + style.time_offset_hours as f64 / 24.0) * 1440.0).floor() / 1440.0;
-            let (ra, dec) =
-                crate::planet_ephemeris::geocentric_radec(crate::planet_ephemeris::Planet::Sun, jd)
-                    .unwrap_or((0.0, 0.0));
-            let lon = (ra - crate::stellar_time::gmst_deg(jd)).to_radians();
-            let lat = dec.to_radians();
-            return [
-                (lat.cos() * lon.cos()) as f32,
-                lat.sin() as f32,
-                (lat.cos() * lon.sin()) as f32,
-                1.0,
-            ];
+            let [x, y, z] = sun_direction(jd, style.time_offset_hours);
+            return [x, y, z, 1.0];
         }
         let az = style.azimuth_deg.to_radians();
         let alt = style.altitude_deg.to_radians();
         [az.sin() * alt.cos(), az.cos() * alt.cos(), alt.sin(), 0.0]
     }
+
+    pub fn is_night_at(self, jd: f64, center: crate::model::GeoPoint) -> bool {
+        let offset = if self.light_mode == LightMode::Sun {
+            self.normalized().time_offset_hours
+        } else {
+            0.0
+        };
+        let [x, y, z] = sun_direction(jd, offset);
+        let (sin_lat, cos_lat) = center.lat.to_radians().sin_cos();
+        let (sin_lon, cos_lon) = center.lon.to_radians().sin_cos();
+        // Dot the Sun direction with local up, as in the Atlas terrain shader.
+        cos_lat * (x * cos_lon + z * sin_lon) + y * sin_lat < 0.0
+    }
+}
+
+fn sun_direction(jd: f64, offset_hours: f32) -> [f32; 3] {
+    let jd = if jd.is_finite() {
+        jd
+    } else {
+        crate::stellar_time::JD_J2000
+    };
+    let jd = ((jd + f64::from(offset_hours) / 24.0) * 1440.0).floor() / 1440.0;
+    let (ra, dec) =
+        crate::planet_ephemeris::geocentric_radec(crate::planet_ephemeris::Planet::Sun, jd)
+            .unwrap_or((0.0, 0.0));
+    let lon = (ra - crate::stellar_time::gmst_deg(jd)).to_radians();
+    let lat = dec.to_radians();
+    [
+        (lat.cos() * lon.cos()) as f32,
+        lat.sin() as f32,
+        (lat.cos() * lon.sin()) as f32,
+    ]
 }
 
 #[cfg(test)]

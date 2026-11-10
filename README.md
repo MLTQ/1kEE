@@ -68,6 +68,8 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
   refines from original GEBCO terrain, SRTM land elevations and finer cached
   surveys as you zoom. Appearance controls move the light direction/height,
   adjust color richness and relief contrast, or use the Sun with a time offset.
+  At sunset at the map center, the controls switch to dark navy. Sunrise brings
+  back the parchment colors. During Follow Events recaps, the UI follows replay time.
   Warm highlights, cool shadows and broad valley shading follow measured heights;
   moving the light reuses terrain already on the GPU. Save Settings retains these
   choices. The Globe overview remains visible while native detail loads. Local Layer Spread

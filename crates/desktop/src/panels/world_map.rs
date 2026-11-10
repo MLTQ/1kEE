@@ -365,7 +365,7 @@ fn draw_local_footer(ui: &mut egui::Ui, model: &mut AppModel, beam_elevation_m: 
                 }
 
                 ui.separator();
-                ui.colored_label(theme::hot_color(), "MAJOR CONTOURS");
+                ui.colored_label(theme::chrome_hot_color(), "MAJOR CONTOURS");
                 ui.label("(50m)");
 
                 ui.separator();

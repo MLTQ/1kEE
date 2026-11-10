@@ -42,7 +42,13 @@ class-coverage images, and Local updates major/minor uniforms. Palette changes
 do not invalidate source tiles or wait for geometry rebuilds/uploads.
 
 ### Atlas
-`ATLAS` is an optional light theme: warm paper chrome, dark ink text, mineral
+`ATLAS` uses warm paper controls and dark ink text in daylight. When the Sun is
+below the horizon at the center of the Earth Globe or Local view, the controls
+use the navy Topo palette. The selected map palette still supplies Atlas mineral
 contours, subdued roads and blue water. `is_atlas` also identifies the measured
 relief base in the globe pass. Light overlay fills use unmultiplied input so
 translucent parchment remains valid premultiplied color. The default stays Topo.
+
+The UI checks the Atlas clock, including the Follow Events recap playhead.
+Sunlight mode applies its preview offset to both terrain and controls. Studio
+lighting uses the unshifted clock for this check.

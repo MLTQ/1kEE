@@ -197,7 +197,7 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
         }
         Ok(false) => {
             ui.colored_label(
-                theme::hot_color(),
+                theme::chrome_hot_color(),
                 "Planet lacks LocationsOnWays; pure-Rust global roads bootstrap will fail on this source",
             );
         }

@@ -36,7 +36,6 @@ pub struct DashboardApp {
     camera_feed_viewer: CameraFeedViewer,
     event_camera_sidebar: panels::EventCameraSidebar,
     event_radio: panels::EventRadio,
-    last_theme: theme::MapTheme,
     /// Gruve mesh bridge: serves the companion web view + announces to the local
     /// agent. `None` when no port was free; the app runs identically without it.
     gruve: Option<crate::gruve::GruveBridge>,
@@ -79,7 +78,6 @@ impl DashboardApp {
             .then(|| crate::gruve::GruveBridge::start(&model))
             .flatten();
         Self {
-            last_theme: model.map_theme,
             model,
             camera_feed_viewer: CameraFeedViewer::default(),
             event_camera_sidebar: panels::EventCameraSidebar::default(),
@@ -105,11 +103,10 @@ impl DashboardApp {
         self.model.buildout.tick();
         self.model.tick_event_follow(ctx.input(|i| i.time));
 
-        // Atlas sunlight shares the app clock even when star overlays are hidden.
-        let atlas_sun = self.model.map_theme == theme::MapTheme::Atlas
-            && self.model.active_body == crate::model::ActiveBody::Earth
-            && self.model.atlas_style.light_mode == crate::atlas_style::LightMode::Sun;
-        if self.model.show_stellar_correspondence || atlas_sun {
+        // The Atlas UI follows the solar clock even when terrain uses studio light.
+        let earth_atlas = self.model.map_theme == theme::MapTheme::Atlas
+            && self.model.active_body == crate::model::ActiveBody::Earth;
+        if self.model.show_stellar_correspondence || earth_atlas {
             if self.model.stellar_live {
                 let now_unix = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -131,10 +128,7 @@ impl DashboardApp {
             }
         }
 
-        if self.model.map_theme != self.last_theme {
-            theme::set_theme(ctx, self.model.map_theme);
-            self.last_theme = self.model.map_theme;
-        }
+        theme::sync_view(ctx, &self.model);
         // The USGS quake feed polls with no key configured, so the frame loop
         // must keep ticking even when no API keys are present.
         ctx.request_repaint_after(Duration::from_secs(1));

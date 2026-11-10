@@ -65,3 +65,25 @@ fn sunlight_moves_with_time_and_reuses_the_app_solar_position() {
     assert_eq!(offset.light(jd), midnight);
     assert_eq!(style.light(jd), style.light(jd + 1.0 / 86400.0));
 }
+
+#[test]
+fn polar_day_and_night_depend_on_latitude_and_season() {
+    use crate::model::GeoPoint;
+    let style = AtlasStyle::default();
+    let north = GeoPoint {
+        lat: 85.0,
+        lon: 0.0,
+    };
+    let south = GeoPoint {
+        lat: -85.0,
+        lon: 0.0,
+    };
+    let winter = crate::stellar_time::JD_J2000;
+    let summer = winter + 182.0;
+    for day_fraction in [0.0, 0.5] {
+        assert!(style.is_night_at(winter + day_fraction, north));
+        assert!(!style.is_night_at(winter + day_fraction, south));
+        assert!(!style.is_night_at(summer + day_fraction, north));
+        assert!(style.is_night_at(summer + day_fraction, south));
+    }
+}

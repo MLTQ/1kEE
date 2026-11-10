@@ -5,4 +5,6 @@ Layers sidebar. Set ONEKEE_CHROME_PREVIEW to export PNGs. Uses
 synthetic records from chrome_tests; no live source poll or settings save occurs.
 
 The rail preview shows Meander and Follow Events directly, without a Cinematic toggle.
+The Atlas day and night previews render the Appearance window and map rail at
+opposite longitudes at the same instant.
 The `follow-events` preview shows the dedicated Settings dwell-time section.

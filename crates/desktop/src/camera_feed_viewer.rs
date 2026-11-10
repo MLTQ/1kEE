@@ -85,7 +85,7 @@ impl CameraFeedViewer {
                 }
 
                 if let Some(error) = &self.player.error {
-                    ui.colored_label(theme::hot_color(), error);
+                    ui.colored_label(theme::chrome_hot_color(), error);
                 } else {
                     let age = self
                         .player

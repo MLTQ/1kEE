@@ -281,7 +281,7 @@ fn paint_feed_label(ui: &egui::Ui, rect: egui::Rect, ranked: &RankedCamera, rank
 
 fn feed_status(player: &CameraFeedPlayer) -> (String, egui::Color32) {
     if player.error.is_some() {
-        ("Retrying…".into(), theme::hot_color())
+        ("Retrying…".into(), theme::chrome_hot_color())
     } else if let Some(at) = player.last_frame_at {
         let age = at.elapsed().as_secs();
         (
