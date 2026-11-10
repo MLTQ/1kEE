@@ -1,6 +1,7 @@
 use std::sync::{OnceLock, RwLock};
 
 mod admin;
+mod fade;
 #[cfg(test)]
 mod tests;
 
@@ -88,16 +89,16 @@ impl MapTheme {
 
 // ── Global active theme ───────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Palette {
     map: MapTheme,
-    chrome: MapTheme,
+    night_mix: f32,
 }
 
 impl Palette {
     fn for_view(model: &crate::model::AppModel) -> Self {
         let map = model.map_theme;
-        let mut chrome = map;
+        let mut night_mix = 0.0;
         if map == MapTheme::Atlas && model.active_body == crate::model::ActiveBody::Earth {
             let view = &model.globe_view;
             let center = if view.local_mode {
@@ -105,16 +106,51 @@ impl Palette {
             } else {
                 view.globe_center_latlon()
             };
-            if model.atlas_style.is_night_at(model.atlas_light_jd(), center) {
-                chrome = MapTheme::Topo;
+            if model
+                .atlas_style
+                .is_night_at(model.atlas_light_jd(), center)
+            {
+                night_mix = 1.0;
             }
         }
-        Self { map, chrome }
+        Self { map, night_mix }
+    }
+
+    fn chrome_color(self, color: impl Fn(MapTheme) -> egui::Color32) -> egui::Color32 {
+        if self.night_mix == 0.0 {
+            color(self.map)
+        } else if self.night_mix == 1.0 {
+            color(MapTheme::Topo)
+        } else {
+            color(MapTheme::Atlas).lerp_to_gamma(color(MapTheme::Topo), self.night_mix)
+        }
+    }
+
+    fn chrome_ink(self, color: impl Fn(MapTheme) -> egui::Color32) -> egui::Color32 {
+        Self {
+            night_mix: fade::ink_mix(self.night_mix),
+            ..self
+        }
+        .chrome_color(color)
+    }
+
+    fn visuals(self) -> egui::Visuals {
+        if self.night_mix == 0.0 {
+            visuals_for(self.map)
+        } else if self.night_mix == 1.0 {
+            visuals_for(MapTheme::Topo)
+        } else {
+            fade::visuals(
+                visuals_for(MapTheme::Atlas),
+                visuals_for(MapTheme::Topo),
+                self.night_mix,
+            )
+        }
     }
 
     fn apply(self, ctx: &egui::Context) {
         *theme_lock().write().unwrap_or_else(|e| e.into_inner()) = self;
-        apply_egui_style(ctx, self.chrome);
+        apply_egui_style(ctx, self);
     }
 }
 
@@ -125,6 +161,15 @@ fn theme_lock() -> &'static RwLock<Palette> {
 
 pub fn is_atlas() -> bool {
     current() == MapTheme::Atlas
+}
+
+pub(crate) fn atlas_day_weight() -> f32 {
+    let palette = active_palette();
+    if palette.map == MapTheme::Atlas {
+        1.0 - palette.night_mix
+    } else {
+        0.0
+    }
 }
 
 fn current() -> MapTheme {
@@ -140,26 +185,35 @@ fn active_palette() -> Palette {
 pub fn set_theme(ctx: &egui::Context, theme: MapTheme) {
     Palette {
         map: theme,
-        chrome: theme,
+        night_mix: 0.0,
     }
     .apply(ctx);
 }
 
 pub fn sync_view(ctx: &egui::Context, model: &crate::model::AppModel) {
-    let desired = Palette::for_view(model);
-    if desired != active_palette() {
+    let current = active_palette();
+    let mut desired = Palette::for_view(model);
+    if desired.map == MapTheme::Atlas && model.active_body == crate::model::ActiveBody::Earth {
+        desired.night_mix = fade::night_mix(ctx, desired.night_mix, current.map == MapTheme::Atlas);
+    }
+    if desired != current {
         desired.apply(ctx);
     }
 }
 
 // ── egui widget style ─────────────────────────────────────────────────────────
 
-fn apply_egui_style(ctx: &egui::Context, theme: MapTheme) {
+fn apply_egui_style(ctx: &egui::Context, palette: Palette) {
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = egui::vec2(10.0, 10.0);
     style.spacing.button_padding = egui::vec2(12.0, 8.0);
     style.spacing.window_margin = egui::Margin::same(14);
-    style.visuals = if theme == MapTheme::Atlas {
+    style.visuals = palette.visuals();
+    ctx.set_style(style);
+}
+
+fn visuals_for(theme: MapTheme) -> egui::Visuals {
+    let mut visuals = if theme == MapTheme::Atlas {
         egui::Visuals::light()
     } else {
         egui::Visuals::dark()
@@ -289,28 +343,28 @@ fn apply_egui_style(ctx: &egui::Context, theme: MapTheme) {
             ),
         };
 
-    style.visuals.panel_fill = panel;
-    style.visuals.faint_bg_color = faint;
-    style.visuals.extreme_bg_color = extreme;
-    style.visuals.widgets.active.bg_fill = active;
-    style.visuals.widgets.hovered.bg_fill = hovered;
-    style.visuals.widgets.inactive.bg_fill = inactive;
-    style.visuals.window_fill = window;
-    style.visuals.selection.bg_fill = selection;
-    style.visuals.hyperlink_color = hyper;
-    style.visuals.override_text_color = text;
-    ctx.set_style(style);
+    visuals.panel_fill = panel;
+    visuals.faint_bg_color = faint;
+    visuals.extreme_bg_color = extreme;
+    visuals.widgets.active.bg_fill = active;
+    visuals.widgets.hovered.bg_fill = hovered;
+    visuals.widgets.inactive.bg_fill = inactive;
+    visuals.window_fill = window;
+    visuals.selection.bg_fill = selection;
+    visuals.hyperlink_color = hyper;
+    visuals.override_text_color = text;
+    visuals
 }
 
 /// Called once at startup to install the default theme.
 pub fn install(ctx: &egui::Context) {
-    apply_egui_style(ctx, active_palette().chrome);
+    apply_egui_style(ctx, active_palette());
 }
 
 // ── Map palette ───────────────────────────────────────────────────────────────
 
 pub fn canvas_background() -> egui::Color32 {
-    match active_palette().chrome {
+    active_palette().chrome_color(|theme| match theme {
         MapTheme::Atlas => egui::Color32::from_rgb(230, 220, 202),
         MapTheme::Sodium => egui::Color32::from_rgb(0, 0, 0),
         MapTheme::Topo => egui::Color32::from_rgb(5, 15, 22),
@@ -321,11 +375,11 @@ pub fn canvas_background() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(2, 2, 3),
         MapTheme::Mars => egui::Color32::from_rgb(3, 1, 0),
         MapTheme::MarsDark => egui::Color32::from_rgb(0, 0, 0),
-    }
+    })
 }
 
 pub fn section_background() -> egui::Color32 {
-    match active_palette().chrome {
+    active_palette().chrome_color(|theme| match theme {
         MapTheme::Atlas => egui::Color32::from_rgb(238, 230, 213),
         MapTheme::Sodium => egui::Color32::from_rgb(5, 3, 1),
         MapTheme::Topo => egui::Color32::from_rgb(10, 22, 31),
@@ -336,7 +390,7 @@ pub fn section_background() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(9, 9, 13),
         MapTheme::Mars => egui::Color32::from_rgb(12, 5, 3),
         MapTheme::MarsDark => egui::Color32::from_rgb(5, 0, 0),
-    }
+    })
 }
 
 pub fn grid_color() -> egui::Color32 {
@@ -359,7 +413,7 @@ pub fn camera_color() -> egui::Color32 {
 }
 
 pub fn text_muted() -> egui::Color32 {
-    match active_palette().chrome {
+    active_palette().chrome_ink(|theme| match theme {
         MapTheme::Atlas => egui::Color32::from_rgb(105, 99, 84),
         MapTheme::Sodium => egui::Color32::from_rgb(188, 152, 103),
         MapTheme::Topo => egui::Color32::from_rgb(154, 178, 189),
@@ -370,7 +424,7 @@ pub fn text_muted() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(155, 152, 142),
         MapTheme::Mars => egui::Color32::from_rgb(190, 145, 120),
         MapTheme::MarsDark => egui::Color32::from_rgb(190, 100, 100),
-    }
+    })
 }
 
 pub fn wireframe_color() -> egui::Color32 {
@@ -408,7 +462,7 @@ pub fn hot_color() -> egui::Color32 {
 }
 
 pub fn chrome_hot_color() -> egui::Color32 {
-    hot_color_for(active_palette().chrome)
+    active_palette().chrome_ink(hot_color_for)
 }
 
 fn hot_color_for(theme: MapTheme) -> egui::Color32 {
@@ -445,7 +499,11 @@ pub fn contour_color() -> egui::Color32 {
 
 /// Semi-transparent fill for overlay panels (layer bar, focus card, footer).
 pub fn panel_fill(alpha: u8) -> egui::Color32 {
-    let (r, g, b) = match active_palette().chrome {
+    active_palette().chrome_color(|theme| panel_fill_for(theme, alpha))
+}
+
+fn panel_fill_for(theme: MapTheme, alpha: u8) -> egui::Color32 {
+    let (r, g, b) = match theme {
         MapTheme::Atlas => return egui::Color32::from_rgba_unmultiplied(243, 235, 218, alpha),
         MapTheme::Sodium => (4, 2, 0),
         MapTheme::Topo => (7, 18, 24),
@@ -462,7 +520,7 @@ pub fn panel_fill(alpha: u8) -> egui::Color32 {
 
 /// Stroke/border color for overlay panels and chrome frames.
 pub fn panel_stroke() -> egui::Color32 {
-    match active_palette().chrome {
+    active_palette().chrome_color(|theme| match theme {
         MapTheme::Atlas => egui::Color32::from_rgb(147, 133, 109),
         MapTheme::Sodium => egui::Color32::from_rgb(84, 50, 18),
         MapTheme::Topo => egui::Color32::from_rgb(24, 63, 79),
@@ -473,12 +531,12 @@ pub fn panel_stroke() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(40, 40, 50),
         MapTheme::Mars => egui::Color32::from_rgb(60, 25, 15),
         MapTheme::MarsDark => egui::Color32::from_rgb(60, 10, 10),
-    }
+    })
 }
 
 /// Fill for floating windows (Settings, Terrain Library).
 pub fn window_fill() -> egui::Color32 {
-    match active_palette().chrome {
+    active_palette().chrome_color(|theme| match theme {
         MapTheme::Atlas => egui::Color32::from_rgb(244, 237, 221),
         MapTheme::Sodium => egui::Color32::from_rgb(7, 4, 1),
         MapTheme::Topo => egui::Color32::from_rgb(14, 18, 23),
@@ -489,12 +547,12 @@ pub fn window_fill() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(8, 8, 12),
         MapTheme::Mars => egui::Color32::from_rgb(10, 4, 2),
         MapTheme::MarsDark => egui::Color32::from_rgb(5, 0, 0),
-    }
+    })
 }
 
 /// Stroke for floating windows.
 pub fn window_stroke() -> egui::Color32 {
-    match active_palette().chrome {
+    active_palette().chrome_color(|theme| match theme {
         MapTheme::Atlas => egui::Color32::from_rgb(133, 121, 103),
         MapTheme::Sodium => egui::Color32::from_rgb(94, 58, 22),
         MapTheme::Topo => egui::Color32::from_rgb(43, 49, 58),
@@ -506,12 +564,12 @@ pub fn window_stroke() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(38, 38, 50),
         MapTheme::Mars => egui::Color32::from_rgb(50, 20, 12),
         MapTheme::MarsDark => egui::Color32::from_rgb(45, 5, 5),
-    }
+    })
 }
 
 /// Fill color for the active state of chrome toggle buttons (GLOBE/LOCAL etc.).
 pub fn chrome_active_fill() -> egui::Color32 {
-    match active_palette().chrome {
+    active_palette().chrome_color(|theme| match theme {
         MapTheme::Atlas => egui::Color32::from_rgb(57, 80, 84),
         MapTheme::Sodium => egui::Color32::from_rgb(96, 55, 18),
         MapTheme::Topo => egui::Color32::from_rgb(24, 63, 79),
@@ -522,12 +580,12 @@ pub fn chrome_active_fill() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(44, 43, 58),
         MapTheme::Mars => egui::Color32::from_rgb(72, 28, 14),
         MapTheme::MarsDark => egui::Color32::from_rgb(90, 15, 15),
-    }
+    })
 }
 
 /// Text color for the active state of chrome toggle buttons — near-white with a theme tint.
 pub fn chrome_active_text() -> egui::Color32 {
-    match active_palette().chrome {
+    active_palette().chrome_color(|theme| match theme {
         MapTheme::Atlas => egui::Color32::from_rgb(249, 242, 224),
         MapTheme::Sodium => egui::Color32::from_rgb(255, 245, 224),
         MapTheme::Topo => egui::Color32::from_rgb(225, 245, 250), // near-white cyan
@@ -538,12 +596,12 @@ pub fn chrome_active_text() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(218, 214, 204), // pale warm grey
         MapTheme::Mars => egui::Color32::from_rgb(240, 210, 195),
         MapTheme::MarsDark => egui::Color32::from_rgb(255, 190, 190),
-    }
+    })
 }
 
 /// Fill for list/card items in side panels (terrain library, camera list).
 pub fn item_fill() -> egui::Color32 {
-    match active_palette().chrome {
+    active_palette().chrome_color(|theme| match theme {
         MapTheme::Atlas => egui::Color32::from_rgb(232, 223, 204),
         MapTheme::Sodium => egui::Color32::from_rgb(8, 5, 2),
         MapTheme::Topo => egui::Color32::from_rgb(15, 22, 28),
@@ -554,12 +612,12 @@ pub fn item_fill() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(11, 11, 15),
         MapTheme::Mars => egui::Color32::from_rgb(14, 6, 4),
         MapTheme::MarsDark => egui::Color32::from_rgb(8, 0, 0),
-    }
+    })
 }
 
 /// Fill for the selected/highlighted item in a list.
 pub fn selected_item_fill() -> egui::Color32 {
-    match active_palette().chrome {
+    active_palette().chrome_color(|theme| match theme {
         MapTheme::Atlas => egui::Color32::from_rgb(210, 216, 195),
         MapTheme::Sodium => egui::Color32::from_rgb(36, 20, 8),
         MapTheme::Topo => egui::Color32::from_rgb(18, 44, 56),
@@ -570,7 +628,7 @@ pub fn selected_item_fill() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(28, 28, 40),
         MapTheme::Mars => egui::Color32::from_rgb(45, 18, 10),
         MapTheme::MarsDark => egui::Color32::from_rgb(35, 5, 5),
-    }
+    })
 }
 
 /// Near-opaque backdrop fill for the globe scene (space/void behind the sphere).

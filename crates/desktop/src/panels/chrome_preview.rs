@@ -59,18 +59,35 @@ fn chrome_gpu_preview() {
         ("activity", Some(Section::Activity), false),
         ("layers", None, true),
         ("atlas-day", Some(Section::Appearance), false),
+        ("atlas-dusk", Some(Section::Appearance), false),
         ("atlas-night", Some(Section::Appearance), false),
     ] {
         let ctx = context();
+        let mut renderer = egui_wgpu::Renderer::new(&device, format, None, 1, false);
         let mut model = model();
-        if matches!(name, "atlas-day" | "atlas-night") {
+        if matches!(name, "atlas-day" | "atlas-dusk" | "atlas-night") {
             model.map_theme = crate::theme::MapTheme::Atlas;
             model.stellar_jd = crate::stellar_time::JD_J2000;
             model.atlas_style = crate::atlas_style::AtlasStyle::default();
-            let lon = if name == "atlas-day" { 0.0 } else { 180.0 };
+            let lon = if name == "atlas-night" { 180.0 } else { 0.0 };
             model.globe_view.focus_on(GeoPoint { lat: 0.0, lon });
         }
         crate::theme::sync_view(&ctx, &model);
+        if name == "atlas-dusk" {
+            model.globe_view.focus_on(GeoPoint { lat: 0.0, lon: 180.0 });
+            for time in [1.0, 1.3] {
+                let output = ctx.run(
+                    egui::RawInput { time: Some(time), ..Default::default() },
+                    |ctx| crate::theme::sync_view(ctx, &model),
+                );
+                for (id, delta) in &output.textures_delta.set {
+                    renderer.update_texture(&device, &queue, *id, delta);
+                }
+            }
+            let window = crate::theme::window_fill();
+            assert_ne!(window, egui::Color32::from_rgb(244, 237, 221));
+            assert_ne!(window, egui::Color32::from_rgb(14, 18, 23));
+        }
         if model.map_theme == crate::theme::MapTheme::Atlas {
             assert!(crate::theme::is_atlas());
             assert_eq!(ctx.style().visuals.dark_mode, name == "atlas-night");
@@ -80,7 +97,6 @@ fn chrome_gpu_preview() {
         if let Some(section) = section {
             ctx.data_mut(|d| d.insert_temp(egui::Id::new("settings-section"), section));
         }
-        let mut renderer = egui_wgpu::Renderer::new(&device, format, None, 1, false);
         for index in 0..3 {
             let output = frame(&ctx, &mut model, 1536., vec![]);
             for (id, delta) in &output.textures_delta.set {

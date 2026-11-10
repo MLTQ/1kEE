@@ -385,11 +385,21 @@ impl Operator {
             style.spacing.item_spacing = egui::vec2(8., 8.);
             style.spacing.slider_width = 220.;
             style.spacing.icon_width = 22.;
-            if !style.visuals.dark_mode {
-                style.visuals.widgets.inactive.bg_stroke =
-                    Stroke::new(1., Color32::from_rgb(131, 137, 128));
-                style.visuals.widgets.hovered.bg_stroke =
-                    Stroke::new(2., Color32::from_rgb(19, 96, 98));
+            let day = theme::atlas_day_weight();
+            if day > 0.0 {
+                for (stroke, daylight) in [
+                    (
+                        &mut style.visuals.widgets.inactive.bg_stroke,
+                        Stroke::new(1., Color32::from_rgb(131, 137, 128)),
+                    ),
+                    (
+                        &mut style.visuals.widgets.hovered.bg_stroke,
+                        Stroke::new(2., Color32::from_rgb(19, 96, 98)),
+                    ),
+                ] {
+                    stroke.width = egui::lerp(stroke.width..=daylight.width, day);
+                    stroke.color = stroke.color.lerp_to_gamma(daylight.color, day);
+                }
             }
             for text in [egui::TextStyle::Body, egui::TextStyle::Button] {
                 style.text_styles.get_mut(&text).unwrap().size = 19.;

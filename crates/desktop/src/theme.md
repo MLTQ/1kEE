@@ -52,3 +52,7 @@ translucent parchment remains valid premultiplied color. The default stays Topo.
 The UI checks the Atlas clock, including the Follow Events recap playhead.
 Sunlight mode applies its preview offset to both terrain and controls. Studio
 lighting uses the unshifted clock for this check.
+
+Crossing the solar horizon fades the UI colors over 0.8 seconds of screen time.
+Panning back during the fade reverses it from the displayed colors. Entering
+Atlas starts directly in the palette for the viewed region.
