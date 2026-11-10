@@ -412,7 +412,7 @@ pub(super) fn draw_globe(
             model.show_bathymetry,
             model.contour_stroke_width_px(painter.ctx().pixels_per_point()),
         )
-        .with_style(model.atlas_style, model.stellar_jd)
+        .with_style(model.atlas_style, model.atlas_light_jd())
         .with_coastlines(model.show_coastlines)
         .submit(painter);
     }
@@ -479,7 +479,7 @@ pub(super) fn draw_local(
             } else {
                 None
             })
-            .with_style(model.atlas_style, model.stellar_jd)
+            .with_style(model.atlas_style, model.atlas_light_jd())
             .with_coastlines(model.show_coastlines)
             .submit(painter);
         }

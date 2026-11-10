@@ -90,12 +90,23 @@ impl ReplayState {
         sim_to: i64,
         wall_duration: f64,
     ) -> Self {
+        let mut replay = Self::new_paused(events, sim_from, sim_to, wall_duration);
+        replay.resume();
+        replay
+    }
+
+    pub(super) fn new_paused(
+        events: Vec<(i64, EventRecord)>,
+        sim_from: i64,
+        sim_to: i64,
+        wall_duration: f64,
+    ) -> Self {
         Self {
             events,
             sim_from,
             sim_to,
             wall_duration,
-            play_start: Some(Instant::now()),
+            play_start: None,
             elapsed_before_pause: 0.0,
             active_flares: Vec::new(),
             next_idx: 0,
@@ -114,6 +125,12 @@ impl ReplayState {
     /// Fraction through the replay `[0, 1]`.
     pub fn progress(&self) -> f32 {
         (self.wall_elapsed() / self.wall_duration).clamp(0.0, 1.0) as f32
+    }
+
+    /// UTC timestamp reached after this many seconds of playback.
+    pub(super) fn unix_at_elapsed(&self, elapsed: f64) -> f64 {
+        let fraction = (elapsed / self.wall_duration).clamp(0.0, 1.0);
+        self.sim_from as f64 + fraction * (self.sim_to - self.sim_from) as f64
     }
 
     pub fn is_paused(&self) -> bool {
@@ -186,9 +203,7 @@ impl ReplayState {
     }
 
     fn update_flares(&mut self, wall_now: f64) {
-        let sim_now = self.sim_from as f64
-            + (wall_now / self.wall_duration).clamp(0.0, 1.0)
-                * (self.sim_to - self.sim_from) as f64;
+        let sim_now = self.unix_at_elapsed(wall_now);
 
         // Spawn events whose simulated time has been reached.
         while self.next_idx < self.events.len() {

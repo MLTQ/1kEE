@@ -66,7 +66,7 @@ pub(crate) fn atlas_controls(ui: &mut egui::Ui, style: &mut crate::atlas_style::
             );
         }
         LightMode::Sun => {
-            ui.small("Follows the app’s date and time. Preview another hour with the offset.");
+            ui.small("Sunlight follows the app clock and switches to replay time during Follow Events recaps. The time offset applies to both.");
             ui.add(
                 egui::Slider::new(&mut style.time_offset_hours, -12.0..=12.0)
                     .text("Time offset")

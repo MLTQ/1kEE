@@ -327,6 +327,35 @@ fn loading_waits_without_advancing_clock_and_skipped_frames_do_not_replay_old_fl
 }
 
 #[test]
+fn atlas_sunlight_tracks_the_rolling_day_and_returns_to_the_app_clock() {
+    use crate::stellar_time::{JD_J2000, unix_to_jd};
+
+    let mut model = model(false);
+    model.stellar_jd = JD_J2000;
+    let end = 1_800_012_345;
+    model.follow_recaps.active = Some(RegionalRecap::with_events(
+        RecapRegion::Europe,
+        0.0,
+        end,
+        model.globe_view,
+        vec![],
+    ));
+    let start = end - DAY;
+    for (elapsed, expected_unix) in [
+        (1.0, start), // framing
+        (FRAMING_SECONDS, start),
+        (FRAMING_SECONDS + RECAP_SECONDS / 4.0, start + DAY / 4),
+        (FRAMING_SECONDS + RECAP_SECONDS / 2.0, start + DAY / 2),
+        (FRAMING_SECONDS + RECAP_SECONDS + 0.25, end), // final frame
+    ] {
+        model.tick_event_follow(elapsed);
+        assert_eq!(model.atlas_light_jd(), unix_to_jd(expected_unix as f64));
+    }
+    model.tick_event_follow(FRAMING_SECONDS + RECAP_SECONDS + 0.5);
+    assert_eq!(model.atlas_light_jd(), JD_J2000);
+}
+
+#[test]
 fn cancellation_and_live_refresh_never_resume_an_abandoned_recap() {
     for cancel in 0..4 {
         let mut model = model(true);
@@ -352,6 +381,7 @@ fn cancellation_and_live_refresh_never_resume_an_abandoned_recap() {
         }
         assert!(!model.event_follow.enabled());
         assert!(model.follow_recaps.active.is_none());
+        assert_eq!(model.atlas_light_jd(), model.stellar_jd);
         model.tick_event_follow(1000.0);
         assert!(model.follow_recaps.active.is_none());
         assert!(!model.event_follow.enabled());

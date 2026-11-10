@@ -45,11 +45,9 @@ impl RegionalRecap {
         view: GlobeViewState,
         events: History,
     ) -> Self {
-        let mut replay = ReplayState::new(Vec::new(), unix - DAY, unix, RECAP_SECONDS);
-        replay.pause();
         let mut recap = Self {
             region,
-            replay,
+            replay: ReplayState::new_paused(Vec::new(), unix - DAY, unix, RECAP_SECONDS),
             started: now,
             saved_view: view,
             pending: None,
@@ -66,13 +64,7 @@ impl RegionalRecap {
                 && RecapRegion::at(event.location) == Some(self.region)
         });
         events.sort_by_key(|(unix, _)| *unix);
-        self.replay = ReplayState::new(
-            events,
-            self.replay.sim_from,
-            self.replay.sim_to,
-            RECAP_SECONDS,
-        );
-        self.replay.pause();
+        self.replay.events = events;
     }
 
     pub fn loading(&self) -> bool {
@@ -185,6 +177,17 @@ impl AppModel {
             .as_ref()
             .map(|recap| &recap.replay)
             .or(self.replay_state.as_ref().filter(|_| self.replay_mode))
+    }
+
+    /// Atlas sunlight follows the regional recap playhead, then resumes the app clock.
+    pub fn atlas_light_jd(&self) -> f64 {
+        self.follow_recaps
+            .active
+            .as_ref()
+            .map_or(self.stellar_jd, |recap| {
+                let replay = &recap.replay;
+                crate::stellar_time::unix_to_jd(replay.unix_at_elapsed(replay.wall_elapsed()))
+            })
     }
 
     pub fn tick_event_follow(&mut self, now: f64) {

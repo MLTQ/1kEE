@@ -26,3 +26,5 @@ touring resumes. A stopped Globe recap leaves the operator at its current pose.
 Brief and camera-sidebar rendering are suppressed without changing their flags.
 The clock measures elapsed hours in the rolling window (00:00:00–23:59:59);
 the overlay also shows the actual UTC start/end so it cannot be read as UTC midnight.
+Atlas sunlight uses the UTC position of the same playhead, even in regions with
+no reports. After completion or cancellation, it uses the app clock again.
