@@ -1,5 +1,7 @@
 struct Uniforms {
     vp: mat4x4<f32>, inv_vp: mat4x4<f32>, brief_vp: mat4x4<f32>,
+    scene_vp: mat4x4<f32>, stage_vp: mat4x4<f32>, world_eye:vec4<f32>,
+    laser_start:vec4<f32>, laser_end:vec4<f32>,
     wrist_vp: mat4x4<f32>, table_inverse: mat4x4<f32>, table_eye:vec4<f32>,
     source_projection:vec4<f32>, source_rotation:vec4<f32>, layers:vec4<f32>, wrist_cursor:vec4<f32>,
     eye: vec4<f32>, viewport: vec4<f32>, marker: vec4<f32>, cursor: vec4<f32>,
@@ -19,7 +21,13 @@ struct Uniforms {
     let p = array<vec2<f32>,3>(vec2(-1.,-1.),vec2(3.,-1.),vec2(-1.,3.));
     return vec4(p[id],0.,1.);
 }
-@fragment fn fs_main(@builtin(position) pixel: vec4<f32>) -> @location(0) vec4<f32> {
+struct SurfacePixel { @location(0) color:vec4<f32>, @builtin(frag_depth) depth:f32 }
+fn background() -> SurfacePixel { return SurfacePixel(vec4(0.006,0.009,0.015,1.),1.); }
+fn on_surface(rgb:vec3<f32>, point:vec3<f32>) -> SurfacePixel {
+    let clip = u.scene_vp * vec4(point,1.);
+    return SurfacePixel(vec4(rgb,1.),clamp(clip.z / clip.w,0.,1.));
+}
+@fragment fn fs_main(@builtin(position) pixel: vec4<f32>) -> SurfacePixel {
     let uv = pixel.xy / u.viewport.xy;
     let ndc = vec4(uv * vec2(2.,-2.) + vec2(-1.,1.), 0.5, 1.);
     if u.layers.z > 1.5 { return local_map(ndc); }
@@ -28,10 +36,10 @@ struct Uniforms {
     let dir = normalize(point.xyz / point.w - origin);
     let b = dot(origin,dir);
     let disc = b*b - dot(origin,origin) + 1.;
-    if disc < 0. { return vec4(0.006,0.009,0.015,1.); }
+    if disc < 0. { return background(); }
     let root = sqrt(disc);
     let t = select(-b+root,-b-root,-b-root > 0.);
-    if t <= 0. { return vec4(0.006,0.009,0.015,1.); }
+    if t <= 0. { return background(); }
     let hit = normalize(origin + dir*t);
     let geo = hit.zyx;
     let facing = max(dot(hit,-dir),0.);
@@ -53,11 +61,12 @@ struct Uniforms {
         let proj=u.source_projection;
         let map_uv=proj.xy-vec2(x,y)*proj.z/(proj.w-depth);
         if depth*proj.w>1. && all(map_uv>=vec2(0.)) && all(map_uv<=vec2(1.)) {
-            rgb=map_color(map_uv);
+            let map = map_color(map_uv);
+            rgb = rgb * (1. - map.a) + map.rgb;
         }
     }
     let cursor = (1.-smoothstep(0.006,0.012,length(hit-u.cursor.xyz)*u.viewport.z)) * u.cursor.w;
-    return vec4(mix(rgb,vec3(1.),cursor),1.);
+    return on_surface(mix(rgb,vec3(1.),cursor),hit);
 }
 struct LineVertex { @builtin(position) clip: vec4<f32>, @location(0) point: vec3<f32> }
 @vertex fn vs_line(@location(0) point: vec3<f32>) -> LineVertex {
@@ -80,10 +89,10 @@ struct BriefVertex { @builtin(position) clip: vec4<f32>, @location(0) uv: vec2<f
     return textureSampleLevel(brief,earth_sampler,v.uv,0.);
 }
 
-fn map_color(uv: vec2<f32>) -> vec3<f32> {
+fn map_color(uv: vec2<f32>) -> vec4<f32> {
     let margin = 0.5 / vec2<f32>(textureDimensions(native_map));
     let inside = clamp(uv, margin, vec2(1.) - margin);
-    return textureSampleLevel(native_map, earth_sampler, inside, i32(u.layers.x), 0.).rgb;
+    return textureSampleLevel(native_map, earth_sampler, inside, i32(u.layers.x), 0.);
 }
 
 fn terrain_height(uv: vec2<f32>) -> f32 {
@@ -104,12 +113,12 @@ fn table_uv(point: vec3<f32>) -> vec2<f32> {
     return vec2(0.5 + point.x, 0.5 - point.y);
 }
 
-fn local_map(ndc: vec4<f32>) -> vec4<f32> {
-    let background = vec4(0.006, 0.009, 0.015, 1.);
+fn local_map(ndc: vec4<f32>) -> SurfacePixel {
+    var elevation = 0.;
     let eye = u.table_eye.xyz;
     let through = u.table_inverse * ndc;
     let ray = normalize(through.xyz / through.w - eye);
-    if ray.z >= -0.000001 { return background; }
+    if ray.z >= -0.000001 { return background(); }
 
     var uv = table_uv(eye + ray * (-eye.z / ray.z));
     if u.layers.w > 0.5 {
@@ -123,7 +132,7 @@ fn local_map(ndc: vec4<f32>) -> vec4<f32> {
         let far = max(a, b);
         let start = max(0., max(near.x, max(near.y, near.z)));
         let end = min(far.x, min(far.y, far.z));
-        if start >= end { return background; }
+        if start >= end { return background(); }
 
         var low = start;
         var found = false;
@@ -141,16 +150,17 @@ fn local_map(ndc: vec4<f32>) -> vec4<f32> {
                     }
                 }
                 uv = table_uv(eye + ray * high);
+                elevation = terrain_height(uv);
                 found = true;
                 break;
             }
             low = high;
         }
-        if !found { return background; }
+        if !found { return background(); }
     }
-    if any(uv < vec2(0.)) || any(uv > vec2(1.)) { return background; }
+    if any(uv < vec2(0.)) || any(uv > vec2(1.)) { return background(); }
     let pointer = (1. - smoothstep(0.002, 0.006, distance(uv, u.cursor.xy))) * u.cursor.w;
-    return vec4(mix(map_color(uv), vec3(1.), pointer), 1.);
+    return on_surface(mix(map_color(uv).rgb, vec3(1.), pointer), vec3(uv.x - 0.5, 0.5 - uv.y, elevation));
 }
 
 @vertex fn vs_wrist(@builtin(vertex_index) id: u32) -> BriefVertex {
@@ -161,7 +171,39 @@ fn local_map(ndc: vec4<f32>) -> vec4<f32> {
 
 @fragment fn fs_wrist(vertex: BriefVertex) -> @location(0) vec4<f32> {
     let color = textureSampleLevel(wrist_panel, earth_sampler, vertex.uv, i32(u.layers.y), 0.).rgb;
-    let distance_to_cursor = distance(vertex.uv, u.wrist_cursor.xy);
-    let ring = (1. - smoothstep(0.001, 0.003, abs(distance_to_cursor - 0.008))) * u.wrist_cursor.z;
-    return vec4(mix(color, vec3(0.3, 1., 0.8), ring), 1.);
+    let d = length((vertex.uv - u.wrist_cursor.xy) * vec2<f32>(textureDimensions(wrist_panel)));
+    let outline = 1. - smoothstep(6.,8.,d);
+    let center = 1. - smoothstep(3.,5.,d);
+    let cursor = mix(vec3(0.012,0.024,0.033), vec3(0.6,1.,0.87), center);
+    return vec4(mix(color, cursor, outline * u.wrist_cursor.z), 1.);
+}
+
+struct SpireVertex { @builtin(position) clip:vec4<f32>, @location(0) color:vec3<f32> }
+@vertex fn vs_spire(@builtin(vertex_index) id:u32, @location(0) base:vec3<f32>,
+    @location(1) radius:f32, @location(2) tip:vec3<f32>, @location(3) color:vec4<f32>) -> SpireVertex {
+    let axis = normalize(tip - base);
+    let tangent = normalize(cross(axis,select(vec3(0.,1.,0.), vec3(1.,0.,0.),abs(axis.y)>0.9)));
+    let angle = (f32(id / 3u) + select(0.,1.,id % 3u == 1u)) * 2. * PI / 8.;
+    let side = tangent * cos(angle) + cross(axis,tangent) * sin(angle);
+    let apex = id % 3u == 2u;
+    let point = select(base + side * radius, tip, apex);
+    let pigment = pow(color.rgb,vec3(2.2));
+    return SpireVertex(u.scene_vp * vec4(point,1.), mix(pigment,vec3(1.),select(0.,0.5,apex)));
+}
+@fragment fn fs_spire(v:SpireVertex) -> @location(0) vec4<f32> { return vec4(v.color,1.); }
+
+struct LaserVertex { @builtin(position) clip:vec4<f32>, @location(0) across:f32 }
+@vertex fn vs_laser(@builtin(vertex_index) id:u32) -> LaserVertex {
+    let a = u.laser_start.xyz;
+    let b = u.laser_end.xyz;
+    let axis = normalize(b-a);
+    var side = cross(axis,u.world_eye.xyz-a);
+    if dot(side,side)<0.00000001 {side=cross(axis,select(vec3(0.,1.,0.),vec3(1.,0.,0.),abs(axis.y)>0.9));}
+    let offset = select(-1.,1.,id % 2u == 1u);
+    let p = select(a,b,id>=2u) + normalize(side)*offset*0.0018;
+    return LaserVertex(u.stage_vp*vec4(p,1.),offset);
+}
+@fragment fn fs_laser(v:LaserVertex) -> @location(0) vec4<f32> {
+    let center = select(vec3(0.55,0.76,0.88),vec3(0.18,1.,0.70),u.laser_end.w>0.);
+    return vec4(mix(center,vec3(0.008,0.045,0.065),smoothstep(0.45,0.80,abs(v.across))),1.);
 }

@@ -13,11 +13,18 @@ pub enum Target {
     Camera(String),
 }
 #[derive(Clone, Debug)]
-pub struct Hit {
-    pub base: [f32; 2],
-    pub tip: [f32; 2],
-    pub radius: f32,
-    pub target: Target,
+pub struct Spire {
+    /// Latitude and longitude in degrees, in the same datum as the map.
+    pub location: [f32; 2],
+    pub color: [u8; 3],
+    pub target: Option<Target>,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct GlobeCapture {
+    pub lat: f32,
+    pub lon: f32,
+    /// Distance of the capture camera from the center, in globe radii.
+    pub distance: f32,
 }
 #[derive(Default, Clone)]
 pub struct MapFrame {
@@ -26,23 +33,9 @@ pub struct MapFrame {
     pub angles: [f32; 2],
     pub bounds: [f32; 4],
     pub heights: Vec<f32>,
-    pub hits: Vec<Hit>,
-}
-impl MapFrame {
-    pub fn hit(&self, uv: [f32; 2]) -> Option<Target> {
-        let p = egui::pos2(uv[0], uv[1]);
-        self.hits
-            .iter()
-            .filter_map(|m| {
-                let a = egui::pos2(m.base[0], m.base[1]);
-                let v = (egui::pos2(m.tip[0], m.tip[1]) - a) * 0.65;
-                let t = ((p - a).dot(v) / v.length_sq().max(1e-12)).clamp(0., 1.);
-                let d = (a + v * t).distance(p);
-                (d <= m.radius).then_some((d, &m.target))
-            })
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|(_, t)| t.clone())
-    }
+    pub spires: Vec<Spire>,
+    pub marker_scale: f32,
+    pub globe_scale: f32,
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct View {
@@ -60,6 +53,7 @@ enum Page {
     Events,
     Brief,
     Cameras,
+    Settings,
 }
 
 pub struct Operator {
@@ -281,47 +275,156 @@ impl Operator {
             self.camera.stop();
         }
     }
-    pub fn paint_map(&mut self, ctx: &egui::Context) -> MapFrame {
+    pub fn paint_map(&mut self, ctx: &egui::Context, capture: Option<GlobeCapture>) -> MapFrame {
         panels::layer_file_import::poll(ctx, &mut self.app.model);
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ctx, |ui| {
-                panels::world_map::paint_vr(ui, &mut self.app.model)
+                panels::world_map::paint_vr(ui, &mut self.app.model, capture, self.scale)
             })
             .inner
     }
     pub fn wrist(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.style_mut().spacing.interact_size.y = 32.;
-            for text in [egui::TextStyle::Body, egui::TextStyle::Button] {
-                if let Some(font) = ui.style_mut().text_styles.get_mut(&text) {
-                    font.size = 16.;
-                }
-            }
-            ui.horizontal_wrapped(|ui| {
-                for (page, name) in [
-                    (Page::View, "Navigate"),
-                    (Page::Layers, "Layers"),
-                    (Page::Imagery, "Satellite"),
-                    (Page::Events, "Events"),
-                    (Page::Brief, "Brief"),
-                    (Page::Cameras, "Webcams"),
-                ] {
-                    ui.selectable_value(&mut self.page, page, name);
-                }
+        use egui::{Color32, Frame, Margin, RichText, Stroke};
+        let bar = Color32::from_rgb(23, 40, 47);
+        let accent = Color32::from_rgb(151, 228, 208);
+        let nav = Frame::new()
+            .fill(bar)
+            .inner_margin(Margin::symmetric(14, 10));
+        egui::TopBottomPanel::top("wrist-navigation")
+            .exact_height(68.)
+            .frame(nav)
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.x = 5.;
+                ui.horizontal(|ui| {
+                    let width = (ui.available_width() - 5. * ui.spacing().item_spacing.x) / 6.;
+                    for (page, name) in [
+                        (Page::View, "Navigate"),
+                        (Page::Layers, "Layers"),
+                        (Page::Imagery, "Satellite"),
+                        (Page::Events, "Events"),
+                        (Page::Brief, "Brief"),
+                        (Page::Cameras, "Webcams"),
+                    ] {
+                        let active = self.page == page;
+                        let text = RichText::new(name).size(19.).strong().color(if active {
+                            bar
+                        } else {
+                            Color32::WHITE
+                        });
+                        let tab = egui::Button::new(text).fill(if active {
+                            accent
+                        } else {
+                            Color32::from_rgb(46, 65, 73)
+                        });
+                        let response = ui.add_sized([width, 48.], tab);
+                        if response.hovered() {
+                            ui.painter().rect_stroke(
+                                response.rect,
+                                4.,
+                                Stroke::new(2., Color32::WHITE),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                        if response.clicked() {
+                            self.page = page;
+                        }
+                    }
+                });
             });
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .id_salt(self.page as u8)
-                .show(ui, |ui| self.page_ui(ui));
+        // Fixed controls stay in reach while long layer lists and briefs scroll.
+        let scroll_id = egui::Id::new(("wrist-scroll-range", self.page as u8));
+        let (up, down) = ctx
+            .data(|d| d.get_temp::<(bool, bool)>(scroll_id))
+            .unwrap_or_default();
+        let mut scroll = 0.;
+        egui::TopBottomPanel::bottom("wrist-footer")
+            .exact_height(50.)
+            .frame(
+                Frame::new()
+                    .fill(bar)
+                    .inner_margin(Margin::symmetric(16, 6)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Trigger to select  ·  Stick to scroll")
+                            .size(16.)
+                            .color(Color32::WHITE),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        for (label, enabled, direction) in
+                            [("Page down", down, -1.), ("Page up", up, 1.)]
+                        {
+                            let response = ui.add_enabled(
+                                enabled,
+                                egui::Button::new(RichText::new(label).size(16.).color(
+                                    if enabled {
+                                        Color32::WHITE
+                                    } else {
+                                        Color32::GRAY
+                                    },
+                                ))
+                                .min_size(egui::vec2(104., 38.))
+                                .fill(Color32::from_rgb(46, 65, 73)),
+                            );
+                            if response.clicked() {
+                                scroll = direction;
+                            }
+                        }
+                    });
+                });
+            });
+        let panel = Frame::new()
+            .fill(ctx.style().visuals.panel_fill)
+            .inner_margin(Margin::same(16));
+        egui::CentralPanel::default().frame(panel).show(ctx, |ui| {
+            let style = ui.style_mut();
+            style.spacing.interact_size.y = 42.;
+            style.spacing.button_padding = egui::vec2(12., 8.);
+            style.spacing.item_spacing = egui::vec2(8., 8.);
+            style.spacing.slider_width = 220.;
+            style.spacing.icon_width = 22.;
+            if !style.visuals.dark_mode {
+                style.visuals.widgets.inactive.bg_stroke =
+                    Stroke::new(1., Color32::from_rgb(131, 137, 128));
+                style.visuals.widgets.hovered.bg_stroke =
+                    Stroke::new(2., Color32::from_rgb(19, 96, 98));
+            }
+            for text in [egui::TextStyle::Body, egui::TextStyle::Button] {
+                style.text_styles.get_mut(&text).unwrap().size = 19.;
+            }
+            style
+                .text_styles
+                .get_mut(&egui::TextStyle::Small)
+                .unwrap()
+                .size = 15.;
+            let delta = scroll * ui.available_height() * 0.8;
+            let area = egui::ScrollArea::vertical()
+                .id_salt(("wrist-content", self.page as u8))
+                .auto_shrink([false, false])
+                .drag_to_scroll(false)
+                .show(ui, |ui| {
+                    if delta != 0. {
+                        ui.scroll_with_delta(egui::vec2(0., delta));
+                    }
+                    self.page_ui(ui);
+                });
+            let y = area.state.offset.y;
+            ctx.data_mut(|d| {
+                d.insert_temp(
+                    scroll_id,
+                    (
+                        y > 1.,
+                        y + area.inner_rect.height() < area.content_size.y - 1.,
+                    ),
+                )
+            });
         });
-        if self.app.model.settings_open {
-            panels::render_settings(ctx, &mut self.app.model);
-        }
     }
     fn page_ui(&mut self, ui: &mut egui::Ui) {
         let m = &mut self.app.model;
-        if matches!(self.page, Page::Layers | Page::Imagery) {
+        if self.page == Page::Imagery {
             let selection = ui
                 .add_enabled_ui(!panels::layer_file_import::busy(), |ui| {
                     self.files.ui(ui, m.selected_root.as_deref())
@@ -336,6 +439,7 @@ impl Operator {
             Page::View => {
                 let mut view = self.view();
                 let previous = view;
+                ui.heading("Map view");
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut view.local, false, "Globe");
                     ui.selectable_value(&mut view.local, true, "Local terrain");
@@ -352,7 +456,7 @@ impl Operator {
                         ("South", -1., 0.),
                         ("East", 0., 1.),
                     ] {
-                        if ui.button(name).clicked() {
+                        if ui.add_sized([95., 42.], egui::Button::new(name)).clicked() {
                             view.lat += lat * step;
                             view.lon += lon * step;
                         }
@@ -379,27 +483,38 @@ impl Operator {
                     if ui.button("Recenter table").clicked() {
                         self.recenter += 1;
                     }
-                    if ui.button("Focus event").clicked()
+                    if ui
+                        .add_enabled(
+                            m.selected_event().is_some(),
+                            egui::Button::new("Focus event"),
+                        )
+                        .clicked()
                         && let Some(event) = m.selected_event()
                     {
                         let p = event.location;
                         m.globe_view.focus_on(p);
                     }
                     if ui.button("Settings").clicked() {
-                        m.settings_open = true;
+                        self.page = Page::Settings;
                     }
                     if ui.button("Exit VR").clicked() {
                         self.quit = true;
                     }
                 });
-                ui.label(format!("{:.3}°   {:.3}°", view.lat, view.lon));
+                ui.label(format!(
+                    "{:.3}° latitude    {:.3}° longitude",
+                    view.lat, view.lon
+                ));
                 ui.separator();
-                ui.horizontal_wrapped(|ui| {
-                    for &t in theme::MapTheme::ALL {
-                        ui.selectable_value(&mut m.map_theme, t, t.label());
-                    }
+                ui.collapsing(format!("Map theme · {}", m.map_theme.label()), |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for &t in theme::MapTheme::ALL {
+                            ui.selectable_value(&mut m.map_theme, t, t.label());
+                        }
+                    });
                 });
-                ui.add(
+                ui.add_enabled(
+                    view.local,
                     egui::Slider::new(&mut m.globe_view.local_layer_spread, 0.0..=3.)
                         .text("Local relief"),
                 );
@@ -427,13 +542,19 @@ impl Operator {
                     ui.label(message);
                 }
             }
+            Page::Settings => panels::settings::wrist(ui, m),
             Page::Imagery => {
                 panels::world_map::global_weather::controls(ui, m);
                 ui.separator();
-                panels::layer_file_import::button(ui, m);
-                panels::world_map::satellite_layer::controls(ui, m);
+                panels::layer_drawer::imported_controls(ui, m);
             }
-            Page::Layers => panels::layer_drawer::controls(ui, m),
+            Page::Layers => {
+                panels::layer_drawer::map_controls(ui, m);
+                ui.separator();
+                if ui.button("Import layers…").clicked() {
+                    self.page = Page::Imagery;
+                }
+            }
             Page::Events => {
                 follow(ui, m, &mut self.room);
                 ui.label(format!(
@@ -442,14 +563,40 @@ impl Operator {
                     m.factal_stream_status
                 ));
                 let mut pick = None;
-                for e in &m.events {
+                let page = egui::Id::new("wrist-event-list-page");
+                let mut index = ui.ctx().data(|d| d.get_temp::<usize>(page)).unwrap_or(0);
+                let count = m.events.len().div_ceil(10).max(1);
+                index = index.min(count - 1);
+                if count > 1 {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(index > 0, egui::Button::new("Previous"))
+                            .clicked()
+                        {
+                            index -= 1;
+                        }
+                        ui.label(format!("{} / {count}", index + 1));
+                        if ui
+                            .add_enabled(index + 1 < count, egui::Button::new("Next"))
+                            .clicked()
+                        {
+                            index += 1;
+                        }
+                    });
+                }
+                ui.ctx().data_mut(|d| d.insert_temp(page, index));
+                for e in m.events.iter().skip(index * 10).take(10) {
                     if ui
-                        .button(format!(
-                            "{} · {}\n{}",
-                            e.severity.label(),
-                            e.location_name,
-                            e.title
-                        ))
+                        .add_sized(
+                            [ui.available_width(), 56.],
+                            egui::Button::new(format!(
+                                "{} · {}\n{}",
+                                e.severity.label(),
+                                e.location_name,
+                                e.title
+                            ))
+                            .truncate(),
+                        )
                         .clicked()
                     {
                         pick = Some(e.id.clone());
@@ -534,11 +681,17 @@ impl Operator {
                 ui.collapsing(format!("Camera registry ({})", m.cameras.len()), |ui| {
                     egui::ScrollArea::vertical().max_height(240.).show_rows(
                         ui,
-                        28.,
+                        42.,
                         m.cameras.len(),
                         |ui, range| {
                             for c in &m.cameras[range] {
-                                if ui.button(&c.label).clicked() {
+                                if ui
+                                    .add_sized(
+                                        [ui.available_width(), 42.],
+                                        egui::Button::new(&c.label).truncate(),
+                                    )
+                                    .clicked()
+                                {
                                     self.automatic_camera = false;
                                     self.playing = Some(c.id.clone());
                                 }

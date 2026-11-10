@@ -3,7 +3,7 @@ use super::*;
 use crate::scene::TileSource;
 use glam::Vec3;
 
-fn stereo(lean: f32) -> [xr::View; 2] {
+pub(crate) fn stereo(lean: f32) -> [xr::View; 2] {
     [-1., 1.].map(|side| {
         let mut pose = xr::Posef::IDENTITY;
         pose.position.x = lean + side * 0.032;
@@ -41,7 +41,7 @@ fn device() -> (wgpu::Device, wgpu::Queue) {
     .unwrap()
 }
 
-fn target(device: &wgpu::Device, size: [u32; 2]) -> wgpu::Texture {
+pub(crate) fn target(device: &wgpu::Device, size: [u32; 2]) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("test eye"),
         size: wgpu::Extent3d {
@@ -63,7 +63,7 @@ fn target(device: &wgpu::Device, size: [u32; 2]) -> wgpu::Texture {
 fn real_stereo_pixels_match_geographic_marker_and_hide_it_beyond_limb() {
     let (device, queue) = device();
     let marker = Marker::load(None).unwrap();
-    let renderer = Renderer::new(
+    let mut renderer = Renderer::new(
         &device,
         &queue,
         wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -316,7 +316,9 @@ fn local_relief_and_wrist_remain_registered_while_native_map_uploads() {
     let hand = Mat4::from_scale_rotation_translation(
         Vec3::new(0.24, 0.2, 1.),
         Quat::IDENTITY,
-        Vec3::new(-0.30, 0.16, -0.72),
+        // Through the table from both eyes. Wrist controls must remain visible
+        // when an operator lowers their hand into the geographic scene.
+        Vec3::new(-0.15, -0.12, -1.22),
     );
     renderer.cartography.wrist_pose = Some(hand);
     let at = |u: f32| 0.08 + u * 0.14;
@@ -444,4 +446,157 @@ fn local_relief_and_wrist_remain_registered_while_native_map_uploads() {
         "Local relief with wrist and streamed map at 2468 × 2740 per eye: {:.2} ms stereo GPU p95, {:.2} ms CPU through GPU completion p95",
         gpu[n], cpu[n]
     );
+}
+
+/// Check pixels using geographic landmarks in each eye, independently of the capture shader.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_native_eyes(
+    d: &wgpu::Device,
+    q: &wgpu::Queue,
+    renderer: &mut Renderer,
+    globe: &Globe,
+    marker: &Marker,
+    head: Vec3,
+    near: [f32; 2],
+    side: usize,
+) {
+    use glam::{Mat4, Quat};
+    let model = globe.transform();
+    let center = model.w_axis.truncate();
+    let camera = Mat4::look_at_rh(head, center, Vec3::Y).inverse();
+    let rot = Quat::from_mat4(&camera);
+    let local = surface(near[0], near[1]);
+    let aim = model.transform_point3(local * 1.063);
+    let start = camera.transform_point3(Vec3::new(0.22, -0.18, -0.18));
+    let ray = Mat4::look_at_rh(start, aim, Vec3::Y).inverse();
+    let pick = renderer.cartography.spires.pick(
+        model.inverse() * ray,
+        f32::INFINITY,
+        renderer.cartography.frame.as_ref().unwrap(),
+    );
+    assert_eq!(pick.map(|p| p.0), Some(0));
+    renderer.cartography.laser = Some((start, aim));
+    renderer.cartography.aiming_at_target = true;
+    const W: u32 = 1024;
+    let mut preview = image::RgbaImage::new(2 * W, W);
+    for (i, mut eye) in stereo(0.).into_iter().enumerate() {
+        let p = camera.transform_point3(Vec3::new(eye.pose.position.x, 0., 0.));
+        eye.pose.position = xr::Vector3f {
+            x: p.x,
+            y: p.y,
+            z: p.z,
+        };
+        eye.pose.orientation = xr::Quaternionf {
+            x: rot.x,
+            y: rot.y,
+            z: rot.z,
+            w: rot.w,
+        };
+        let img = read_native_eye(d, q, renderer, globe, marker, eye, i);
+        image::imageops::replace(&mut preview, &img, i as i64 * i64::from(W), 0);
+        if let Some(dir) = std::env::var_os("ONEKEE_VR_CAPTURE_DIR") {
+            preview
+                .save(std::path::Path::new(&dir).join(format!("hemisphere-{side}.png")))
+                .unwrap();
+        }
+        let vp = projection(eye.fov) * pose(eye.pose).inverse();
+        let pixel = |p| {
+            let v = vp.project_point3(p);
+            (
+                ((v.x + 1.) * 0.5 * W as f32) as u32,
+                ((1. - v.y) * 0.5 * W as f32) as u32,
+            )
+        };
+        let around = |point, pred: fn(&[u8; 4]) -> bool| {
+            let (x, y) = pixel(point);
+            (x - 2..=x + 2).any(|x| (y - 2..=y + 2).any(|y| pred(&img.get_pixel(x, y).0)))
+        };
+        let main_lon = near[1] - 32.;
+        for lat in [-15., 8., 25., 42.] {
+            for offset in [-34., -12., 17., 38.] {
+                let (x, y) = pixel(model.transform_point3(surface(lat, main_lon + offset)));
+                let p = img.get_pixel(x, y).0;
+                let warm = (main_lon + offset < 0.) == (lat > 0.);
+                assert!(
+                    if warm {
+                        p[0] > p[2].saturating_add(25)
+                    } else {
+                        p[2] > p[0].saturating_add(25)
+                    },
+                    "eye {i} lat {lat} lon {} expected warm={warm} got {p:?}",
+                    main_lon + offset
+                );
+            }
+        }
+        assert!(
+            around(model.transform_point3(local * 1.025), |p| p[0] > 190
+                && p[1] < 165
+                && p[2] > 190),
+            "radial spire missing in eye {i}"
+        );
+        assert!(
+            around(start.lerp(aim, 0.43), |p| p[1] > 230
+                && p[0] < 180
+                && p[2] > 175),
+            "laser missing in eye {i}"
+        );
+        assert!(
+            !img.pixels().any(|p| p[1] > 240 && p[0] < 40 && p[2] < 40),
+            "back-side spire visible through globe"
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn read_native_eye(
+    d: &wgpu::Device,
+    q: &wgpu::Queue,
+    renderer: &mut Renderer,
+    globe: &Globe,
+    marker: &Marker,
+    eye: xr::View,
+    i: usize,
+) -> image::RgbaImage {
+    const W: u32 = 1024;
+    let tex = target(d, [W, W]);
+    let mut e = d.create_command_encoder(&Default::default());
+    renderer.draw(
+        q,
+        &mut e,
+        i,
+        &tex.create_view(&Default::default()),
+        [W, W],
+        eye,
+        globe,
+        marker,
+        false,
+        None,
+        None,
+    );
+    let buf = d.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: (W * W * 4).into(),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    e.copy_texture_to_buffer(
+        tex.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buf,
+            layout: wgpu::TexelCopyBufferLayout {
+                bytes_per_row: Some(W * 4),
+                ..Default::default()
+            },
+        },
+        tex.size(),
+    );
+    q.submit([e.finish()]);
+    let (tx, rx) = mpsc::channel();
+    buf.slice(..)
+        .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
+    d.poll(wgpu::Maintain::Wait);
+    rx.recv().unwrap().unwrap();
+    let img = image::RgbaImage::from_raw(W, W, buf.slice(..).get_mapped_range().to_vec()).unwrap();
+    buf.unmap();
+    img
 }

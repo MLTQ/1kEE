@@ -1,7 +1,9 @@
 //! The native map and wrist UI have their own frame cadence and GPU device.
 //! Only completed images cross into the headset loop; eye poses never enter the worker.
 use anyhow::{Context, Result, anyhow};
-use one_thousand_electric_eye_desktop::vr_operator::{MapFrame, Operator, Target, View};
+use one_thousand_electric_eye_desktop::vr_operator::{
+    GlobeCapture, MapFrame, Operator, Target, View,
+};
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex, mpsc},
@@ -29,9 +31,22 @@ pub struct Updates {
 struct Requests {
     events: Vec<egui::Event>,
     nav: Option<(u64, View)>,
+    capture: Option<GlobeCapture>,
     picks: Vec<Target>,
     visible: bool,
     stop: bool,
+}
+impl Requests {
+    fn take_wrist_events(&mut self) -> Vec<egui::Event> {
+        // egui hit-tests at the final position of a pass. Preserve the position
+        // of each trigger edge even when a slow map pass batches several XR frames.
+        let end = self
+            .events
+            .iter()
+            .position(|e| matches!(e, egui::Event::PointerButton { .. }))
+            .map_or(self.events.len(), |i| i + 1);
+        self.events.drain(..end).collect()
+    }
 }
 pub struct Link {
     input: Arc<Mutex<Requests>>,
@@ -95,9 +110,10 @@ impl Link {
     pub fn pick(&self, t: Target) {
         self.input.lock().unwrap().picks.push(t);
     }
-    pub fn wrist(&self, events: Vec<egui::Event>, visible: bool) {
+    pub fn wrist(&self, events: Vec<egui::Event>, visible: bool, capture: GlobeCapture) {
         let mut q = self.input.lock().unwrap();
         q.visible = visible;
+        q.capture = Some(capture);
         for e in events {
             if matches!(e, egui::Event::PointerMoved(_))
                 && matches!(q.events.last(), Some(egui::Event::PointerMoved(_)))
@@ -177,7 +193,7 @@ impl Canvas {
                     view: &self.view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -247,6 +263,31 @@ fn raw(
     raw.viewports.entry(id).or_default().native_pixels_per_point = Some(1.);
     raw
 }
+fn map_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("operator-map")
+}
+fn room_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("operator-room")
+}
+fn wrist_pass(
+    ctx: &egui::Context,
+    events: Vec<egui::Event>,
+    time: f64,
+    ui: impl FnMut(&egui::Context),
+) -> egui::FullOutput {
+    let mut ui = ui;
+    ctx.run(
+        raw(WRIST_SIZE, egui::ViewportId::ROOT, events, time),
+        |ctx| {
+            // egui drops a child's widget and pointer memory when its parent doesn't
+            // declare it. The wrist owns the persistent root; these two are canvases.
+            for child in [map_id(), room_id()] {
+                ctx.show_viewport_deferred(child, Default::default(), |_, _| {});
+            }
+            ui(ctx);
+        },
+    )
+}
 impl Worker {
     fn new(
         name: &str,
@@ -275,6 +316,12 @@ impl Worker {
         let mut renderer =
             egui_wgpu::Renderer::new(&device, wgpu::TextureFormat::Rgba8Unorm, None, 1, false);
         let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        ctx.options_mut(|o| {
+            // A trigger squeeze can shift the aim several pixels on a wrist display.
+            o.input_options.max_click_dist = 18.;
+            o.input_options.max_click_duration = 2.;
+        });
         let operator = Operator::new(
             &ctx,
             &device,
@@ -307,16 +354,17 @@ impl Worker {
         let mut prev_room = Vec::new();
         loop {
             let started = Instant::now();
-            let (events, nav, picks, visible) = {
+            let (events, nav, picks, visible, capture) = {
                 let mut req = input.lock().unwrap();
                 if req.stop {
                     return Ok(());
                 }
                 (
-                    std::mem::take(&mut req.events),
+                    req.take_wrist_events(),
                     req.nav.take(),
                     std::mem::take(&mut req.picks),
                     req.visible,
+                    req.capture,
                 )
             };
             if let Some((seq, view)) = nav {
@@ -326,15 +374,10 @@ impl Worker {
             for pick in picks {
                 self.operator.pick(pick);
             }
-            // Both viewports share texture IDs (including live webcams) and have separate UI memory.
-            let wrist_id = egui::ViewportId::from_hash_of("operator-wrist");
-            let out = self.ctx.run(
-                raw(
-                    WRIST_SIZE,
-                    wrist_id,
-                    events,
-                    self.start.elapsed().as_secs_f64(),
-                ),
+            let out = wrist_pass(
+                &self.ctx,
+                events,
+                self.start.elapsed().as_secs_f64(),
                 |ctx| {
                     self.operator.tick(ctx, visible);
                 },
@@ -369,7 +412,7 @@ impl Worker {
             let show_room = self.operator.room_visible();
             output.lock().unwrap().show_room = Some(show_room);
             if show_room {
-                let id = egui::ViewportId::from_hash_of("room-brief");
+                let id = room_id();
                 let out = self.ctx.run(
                     raw(ROOM_SIZE, id, vec![], self.start.elapsed().as_secs_f64()),
                     |c| self.operator.paint_room(c),
@@ -391,12 +434,12 @@ impl Worker {
                 let out = self.ctx.run(
                     raw(
                         MAP_SIZE,
-                        egui::ViewportId::ROOT,
+                        map_id(),
                         vec![],
                         self.start.elapsed().as_secs_f64(),
                     ),
                     |ctx| {
-                        frame = Some(self.operator.paint_map(ctx));
+                        frame = Some(self.operator.paint_map(ctx, capture));
                     },
                 );
                 let pixels = self.map.pixels(
@@ -422,25 +465,25 @@ mod tests {
     use super::*;
     use tile_archive::atlas::{Key, Tier, Writer};
     fn snapshot(w: &mut Worker, canvas: &str) -> (MapFrame, Vec<u8>) {
+        capture(w, canvas, None)
+    }
+    fn capture(w: &mut Worker, canvas: &str, camera: Option<GlobeCapture>) -> (MapFrame, Vec<u8>) {
         let mut frame = MapFrame::default();
         let c = match canvas {
             "map" => &w.map,
             "room" => &w.room,
             _ => &w.wrist,
         };
-        let id = if canvas == "map" {
-            egui::ViewportId::ROOT
-        } else {
-            egui::ViewportId::from_hash_of(canvas)
+        let time = w.start.elapsed().as_secs_f64();
+        let out = match canvas {
+            "map" => w.ctx.run(raw(c.size, map_id(), vec![], time), |ctx| {
+                frame = w.operator.paint_map(ctx, camera)
+            }),
+            "room" => w.ctx.run(raw(c.size, room_id(), vec![], time), |ctx| {
+                w.operator.paint_room(ctx)
+            }),
+            _ => wrist_pass(&w.ctx, vec![], time, |ctx| w.operator.wrist(ctx)),
         };
-        let out = w.ctx.run(
-            raw(c.size, id, vec![], w.start.elapsed().as_secs_f64()),
-            |ctx| match canvas {
-                "map" => frame = w.operator.paint_map(ctx),
-                "room" => w.operator.paint_room(ctx),
-                _ => w.operator.wrist(ctx),
-            },
-        );
         let pixels = c
             .pixels(&w.ctx, out, &mut w.renderer, &w.device, &w.queue)
             .unwrap();
@@ -467,19 +510,19 @@ mod tests {
             }
         }
         let mut draw = |events| {
-            let out = w.ctx.run(
-                raw(
-                    WRIST_SIZE,
-                    egui::ViewportId::from_hash_of("operator-wrist"),
-                    events,
-                    w.start.elapsed().as_secs_f64(),
-                ),
-                |ctx| w.operator.wrist(ctx),
-            );
-            let point = out.shapes.iter().find_map(|s| find(&s.shape, label));
+            let out = wrist_pass(&w.ctx, events, w.start.elapsed().as_secs_f64(), |ctx| {
+                w.operator.wrist(ctx)
+            });
+            let point = out
+                .shapes
+                .iter()
+                .find_map(|s| find(&s.shape, label).filter(|p| s.clip_rect.contains(*p)));
             w.wrist
                 .pixels(&w.ctx, out, &mut w.renderer, &w.device, &w.queue)
                 .unwrap();
+            // Exercise the production viewport order between hover, press and release.
+            snapshot(w, "map");
+            snapshot(w, "room");
             point
         };
         let start = Instant::now();
@@ -493,15 +536,160 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(20));
         };
-        draw(vec![egui::Event::PointerMoved(p)]);
-        for pressed in [true, false] {
-            draw(vec![egui::Event::PointerButton {
-                pos: p,
-                button: egui::PointerButton::Primary,
-                pressed,
-                modifiers: Default::default(),
-            }]);
+        let panel = crate::wrist::mount(
+            glam::Mat4::from_translation(glam::vec3(-0.2, 0.12, -0.6)),
+            glam::Vec3::ZERO,
+        );
+        let hit_at = |p: egui::Pos2| {
+            let point = panel.transform_point3(glam::vec3(
+                p.x / WRIST_SIZE[0] as f32 - 0.5,
+                0.5 - p.y / WRIST_SIZE[1] as f32,
+                0.,
+            ));
+            let ray = glam::Mat4::look_at_rh(glam::vec3(0.2, -0.1, -0.12), point, glam::Vec3::Y)
+                .inverse();
+            crate::wrist::hit(panel, ray).expect("visible control is on wrist")
+        };
+        let mut pointer = crate::wrist::Pointer::default();
+        let hit = hit_at(p);
+        draw(pointer.events(Some(hit), false, 0.));
+        draw(vec![pointer.press(hit)]);
+        draw(pointer.events(Some(hit_at(p + egui::vec2(3., 1.))), false, 0.));
+    }
+    fn check_hemispheres_and_spires(worker: &mut Worker) {
+        let dir = tempfile::tempdir().unwrap();
+        let terrain = dir.path().join("Derived/terrain");
+        std::fs::create_dir_all(&terrain).unwrap();
+        // Known east/west and north/south elevation bands in the native global overview.
+        let grid: Vec<u8> = (0..1440 * 720)
+            .flat_map(|i| {
+                let elevation: i16 = if (i % 1440 < 720) == (i / 1440 < 360) {
+                    1800
+                } else {
+                    -5000
+                };
+                elevation.to_le_bytes()
+            })
+            .collect();
+        std::fs::write(terrain.join("gebco_depth_1440x720.bil"), grid).unwrap();
+        worker.operator.use_asset_root(dir.path());
+        let marker = crate::scene::Marker::load(None).unwrap();
+        let mut globe =
+            crate::scene::Globe::place(&crate::render::stereo_test::stereo(0.), &marker);
+        globe.lon = -120.;
+        globe.lat = 20.;
+        let center = globe.transform().w_axis.truncate();
+        let mut renderer = crate::render::Renderer::new(
+            &worker.device,
+            &worker.queue,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            &marker,
+        )
+        .unwrap();
+        for (side, lat, lon) in [(0, 20., -120.), (1, 20., 60.)] {
+            let facing = globe
+                .transform()
+                .transform_vector3(crate::scene::surface(lat, lon))
+                .normalize();
+            let head = center + facing * 0.94;
+            let camera = globe.capture(head);
+            let start = Instant::now();
+            let (mut f, rgba) = loop {
+                let (f, rgba) = capture(worker, "map", Some(camera));
+                let map = rgba.as_chunks::<4>().0;
+                let covered = map
+                    .iter()
+                    .filter(|p| p[3] > 245 && p[0].abs_diff(p[2]) > 35)
+                    .count();
+                if covered > map.len() / 2 {
+                    break (f, rgba);
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(30),
+                    "overview covers only {covered} pixels"
+                );
+                thread::sleep(Duration::from_millis(50));
+            };
+            // Place one bright spire off-axis and another on the occluded side.
+            let near = [lat, lon + 32.];
+            use one_thousand_electric_eye_desktop::vr_operator::Spire;
+            f.spires = vec![
+                Spire {
+                    location: near,
+                    color: [255, 0, 255],
+                    target: Some(Target::Event("visible".into())),
+                },
+                Spire {
+                    location: [-lat, lon + 180.],
+                    color: [0, 255, 0],
+                    target: Some(Target::Camera("hidden".into())),
+                },
+            ];
+            f.marker_scale = 1.;
+            renderer.cartography.advance(
+                &worker.queue,
+                Some(MapImage {
+                    frame: f,
+                    pixels: rgba,
+                }),
+                None,
+            );
+            for _ in 0..7 {
+                renderer.cartography.advance(&worker.queue, None, None);
+            }
+            crate::render::stereo_test::check_native_eyes(
+                &worker.device,
+                &worker.queue,
+                &mut renderer,
+                &globe,
+                &marker,
+                head,
+                near,
+                side,
+            );
         }
+    }
+
+    #[test]
+    fn stationary_hover_and_trigger_capture_survive_map_and_room_refreshes() {
+        let ctx = egui::Context::default();
+        ctx.set_embed_viewports(false);
+        let mut pos = egui::Pos2::ZERO;
+        let mut clicks = 0;
+        for tick in 0..90 {
+            let t = f64::from(tick) / 25.;
+            let events = match tick {
+                1 => vec![egui::Event::PointerMoved(pos)],
+                31 | 36 => vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: tick == 31,
+                    modifiers: Default::default(),
+                }],
+                _ => vec![],
+            };
+            let _ = wrist_pass(&ctx, events, t, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let b = ui.button("Local terrain");
+                    pos = b.rect.center();
+                    if tick > 1 {
+                        assert!(
+                            b.hovered() || b.is_pointer_button_down_on(),
+                            "lost hover at frame {tick}"
+                        );
+                    }
+                    clicks += usize::from(b.clicked());
+                });
+            });
+            for id in [map_id(), room_id()] {
+                let _ = ctx.run(raw(MAP_SIZE, id, vec![], t), |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        ui.label("Map");
+                    });
+                });
+            }
+        }
+        assert_eq!(clicks, 1);
     }
     #[test]
     #[ignore = "requires a Vulkan GPU; set ONEKEE_GPU to its full name"]
@@ -533,6 +721,10 @@ mod tests {
         drop(db);
         let gpu = std::env::var("ONEKEE_GPU").expect("set ONEKEE_GPU");
         let mut w = Worker::new(&gpu, 0.5, 0.5, Some(dir.path()), Some(&events)).unwrap();
+        // DashboardApp owns process-wide services. Exercise the whole operator
+        // in one session, just as the executable does before shutting them down.
+        check_hemispheres_and_spires(&mut w);
+        w.operator.use_asset_root(dir.path());
         let (_, wrist) = snapshot(&mut w, "wrist");
         assert!(
             wrist
@@ -541,6 +733,14 @@ mod tests {
                 .iter()
                 .any(|p| p[0] > 150 && p[1] > 150)
         );
+        wrist_click(&mut w, "Settings");
+        wrist_click(&mut w, "Follow Events");
+        wrist_click(&mut w, "Layers");
+        wrist_click(&mut w, "Page down");
+        wrist_click(&mut w, "Page up");
+        wrist_click(&mut w, "Webcams");
+        wrist_click(&mut w, "Brief");
+        wrist_click(&mut w, "Navigate");
         wrist_click(&mut w, "Local terrain");
         assert!(w.operator.view().local);
         wrist_click(&mut w, "Globe");
@@ -553,12 +753,13 @@ mod tests {
         assert!(!w.operator.room_visible());
         let (g, _) = snapshot(&mut w, "map");
         let event = g
-            .hits
+            .spires
             .iter()
-            .find(|h| h.target == Target::Event("hist-one".into()))
+            .find(|h| h.target == Some(Target::Event("hist-one".into())))
             .expect("cached event marker")
             .target
-            .clone();
+            .clone()
+            .unwrap();
         w.operator.pick(event);
         assert!(w.operator.room_visible());
         snapshot(&mut w, "room");
@@ -595,6 +796,34 @@ mod tests {
         wrist_click(&mut w, "Satellite");
         wrist_click(&mut w, "Browse files on wrist");
         wrist_click(&mut w, "pass.tif");
+        // Confirm the controller finished the import before testing terrain.
+        // The label from the imported layer has no file extension.
+        let import_start = Instant::now();
+        loop {
+            snapshot(&mut w, "map");
+            let out = wrist_pass(&w.ctx, vec![], w.start.elapsed().as_secs_f64(), |ctx| {
+                w.operator.wrist(ctx)
+            });
+            let labels: Vec<_> = out
+                .shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect();
+            w.wrist
+                .pixels(&w.ctx, out, &mut w.renderer, &w.device, &w.queue)
+                .unwrap();
+            if labels.iter().any(|s| s == "pass") {
+                break;
+            }
+            assert!(
+                import_start.elapsed() < Duration::from_secs(5),
+                "import not shown: {labels:?}"
+            );
+            thread::sleep(Duration::from_millis(40));
+        }
         for lon in [0.5, 1.5] {
             w.operator.navigate(View {
                 lat: 0.5,
@@ -648,7 +877,6 @@ mod tests {
                         start.elapsed().as_secs_f64(),
                         f.bounds
                     );
-                    snapshot(&mut w, "wrist");
                     break;
                 }
                 assert!(
@@ -658,6 +886,64 @@ mod tests {
                         .data(|d| d.get_temp::<String>(egui::Id::new("vr-terrain-status")))
                 );
                 thread::sleep(Duration::from_millis(250));
+            }
+            // Inspect the actual tracked-view capture from the same drive as Local.
+            wrist_click(&mut w, "Navigate");
+            wrist_click(&mut w, "Globe");
+            let marker = crate::scene::Marker::load(None).unwrap();
+            let views = crate::render::stereo_test::stereo(0.);
+            let globe = crate::scene::Globe::place(&views, &marker);
+            let camera = globe.capture(glam::Vec3::ZERO);
+            let start = Instant::now();
+            let (f, pixels) = loop {
+                let (f, pixels) = capture(&mut w, "map", Some(camera));
+                let coverage = pixels
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .filter(|p| p[3] > 245 && p[0].abs_diff(p[2]) > 24)
+                    .count();
+                if !f.local && coverage > pixels.len() / 4 / 3 {
+                    break (f, pixels);
+                }
+                assert!(
+                    start.elapsed() < Duration::from_secs(45),
+                    "real globe overview covers only {coverage} pixels"
+                );
+                thread::sleep(Duration::from_millis(80));
+            };
+            let (_, wrist) = snapshot(&mut w, "wrist");
+            let mut r = crate::render::Renderer::new(
+                &w.device,
+                &w.queue,
+                wgpu::TextureFormat::Rgba8UnormSrgb,
+                &marker,
+            )
+            .unwrap();
+            r.cartography
+                .advance(&w.queue, Some(MapImage { frame: f, pixels }), Some(wrist));
+            for _ in 0..7 {
+                r.cartography.advance(&w.queue, None, None);
+            }
+            let panel = crate::wrist::mount(
+                glam::Mat4::from_translation(glam::vec3(-0.29, -0.19, -0.66)),
+                glam::Vec3::ZERO,
+            );
+            r.cartography.wrist_pose = Some(panel);
+            let end = panel.transform_point3(glam::vec3(-0.20, 0.19, 0.));
+            let start = glam::vec3(0.29, -0.24, -0.24);
+            r.cartography.pointer = crate::wrist::hit(
+                panel,
+                glam::Mat4::look_at_rh(start, end, glam::Vec3::Y).inverse(),
+            );
+            r.cartography.laser = Some((start, end));
+            r.cartography.aiming_at_target = true;
+            if let Some(dir) = std::env::var_os("ONEKEE_VR_CAPTURE_DIR") {
+                let eye = crate::render::stereo_test::read_native_eye(
+                    &w.device, &w.queue, &mut r, &globe, &marker, views[0], 0,
+                );
+                eye.save(std::path::PathBuf::from(dir).join("operator-eye.png"))
+                    .unwrap();
             }
         }
     }

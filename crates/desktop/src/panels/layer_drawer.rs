@@ -36,6 +36,11 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
     ui.separator();
     section_label(ui, "IMPORTED LAYERS");
     super::layer_file_import::button(ui, model);
+    imported_controls(ui, model);
+    map_controls(ui, model);
+}
+
+pub(crate) fn imported_controls(ui: &mut egui::Ui, model: &mut AppModel) {
     if model.geojson_layers.is_empty() && model.satellite_layers.is_empty() { ui.small("GeoJSON, KML, KMZ or GeoTIFF"); }
     world_map::satellite_layer::controls(ui, model);
     if !model.geojson_layers.is_empty() {
@@ -61,7 +66,9 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
 
     ui.separator();
     ui.add_space(6.0);
+}
 
+pub(crate) fn map_controls(ui: &mut egui::Ui, model: &mut AppModel) {
     // ── BASE ─────────────────────────────────────────────────────
     section_label(ui, "BASE");
     ui.checkbox(&mut model.show_event_markers, "Events");

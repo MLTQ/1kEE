@@ -106,14 +106,28 @@ struct DeflockGlobeMeshKey {
 }
 
 pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: f64) -> GlobeScene {
-    painter.rect_filled(
-        rect,
-        if model.obs_view { 0.0 } else { 12.0 },
-        theme::canvas_background(),
-    );
+    paint_with_layout(painter, rect, model, time, globe_layout(rect, &model.globe_view), false)
+}
+
+pub(super) fn paint_with_layout(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    model: &AppModel,
+    time: f64,
+    layout: GlobeLayout,
+    stereo: bool,
+) -> GlobeScene {
+    // Leave gaps in the Atlas capture transparent until measured imagery arrives.
+    let backdrop = !(stereo && model.map_theme == theme::MapTheme::Atlas);
+    if backdrop {
+        painter.rect_filled(
+            rect,
+            if model.obs_view { 0.0 } else { 12.0 },
+            theme::canvas_background(),
+        );
+    }
 
     let lod = camera::lod(&model.globe_view);
-    let layout = globe_layout(rect, &model.globe_view);
     contour_asset::globe_residency::set_viewport(
         (model.show_contours
             && (model.active_body != crate::model::ActiveBody::Earth || model.globe_view.zoom >= 1.5))
@@ -128,25 +142,27 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     // the soft SDF approximation the fragment shader produces.
     let ppp = painter.ctx().pixels_per_point();
     let show_grat = model.show_graticule && !model.globe_view.local_mode;
-    painter.add(
-        globe_pass::GlobeCallback::new(
-            layout.center,
-            layout.radius,
-            layout.focal_length,
-            layout.camera_distance,
-            model.globe_view.yaw,
-            model.globe_view.pitch,
-            ppp,
-            false, // graticule always off in GPU pass — drawn CPU-side instead
-            model.active_body,
-            theme::scene_backdrop(),
-            theme::topo_color(),
-            theme::wireframe_color(),
-            theme::grid_color(),
-            theme::hot_color(),
-        )
-        .into_paint_callback(rect),
-    );
+    if backdrop {
+        painter.add(
+            globe_pass::GlobeCallback::new(
+                layout.center,
+                layout.radius,
+                layout.focal_length,
+                layout.camera_distance,
+                model.globe_view.yaw,
+                model.globe_view.pitch,
+                ppp,
+                false, // graticule always off in GPU pass — drawn CPU-side instead
+                model.active_body,
+                theme::scene_backdrop(),
+                theme::topo_color(),
+                theme::wireframe_color(),
+                theme::grid_color(),
+                theme::hot_color(),
+            )
+            .into_paint_callback(rect),
+        );
+    }
 
     if !model.obs_view {
         painter.rect_stroke(
@@ -304,7 +320,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let nearby = model.nearby_camera_snapshot(250.0);
 
     // ── Replay flares (shown instead of live markers while replay is active) ──
-    if model.active_body == crate::model::ActiveBody::Earth
+    if !stereo && model.active_body == crate::model::ActiveBody::Earth
         && let Some(state) = model.active_replay()
     {
         let wall_elapsed = state.wall_elapsed();
@@ -362,15 +378,17 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 )
                 .map(|p| p.pos)
                 .unwrap_or(base.pos); // fallback: zero-length beam
-                markers::draw_event_marker(
-                    painter,
-                    base,
-                    tip,
-                    event,
-                    selected_event_id == Some(event.id.as_str()),
-                    time,
-                    model.marker_scale(),
-                );
+                if !stereo {
+                    markers::draw_event_marker(
+                        painter,
+                        base,
+                        tip,
+                        event,
+                        selected_event_id == Some(event.id.as_str()),
+                        time,
+                        model.marker_scale(),
+                    );
+                }
                 Some(MapMarker::new(&event.id, base.pos, tip, model.marker_scale()))
             })
             .collect()
@@ -395,7 +413,9 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                         let tip = projection::project_geo_unit_surface_elevated(
                             &layout, &model.globe_view, camera.location, extra_r,
                         ).map(|p| p.pos).unwrap_or(projected.pos);
-                        draw_camera_spire(painter, projected.pos, tip, is_selected, model.marker_scale());
+                        if !stereo {
+                            draw_camera_spire(painter, projected.pos, tip, is_selected, model.marker_scale());
+                        }
                         MapMarker::new(&camera.id, projected.pos, tip, model.marker_scale())
                     })
             })
@@ -929,8 +949,14 @@ pub fn screen_to_latlon(
     view: &GlobeViewState,
     screen_pos: egui::Pos2,
 ) -> Option<GeoPoint> {
-    let layout = globe_layout(rect, view);
+    latlon_in_layout(&globe_layout(rect, view), view, screen_pos)
+}
 
+pub(super) fn latlon_in_layout(
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    screen_pos: egui::Pos2,
+) -> Option<GeoPoint> {
     let dx = (layout.center.x - screen_pos.x) / layout.radius;
     let dy = (layout.center.y - screen_pos.y) / layout.radius;
     let fl = layout.focal_length;

@@ -1,9 +1,15 @@
 //! Render the geography alone, retaining the projection that produced its pixels.
 use super::*;
-use crate::vr_operator::{HEIGHT_EDGE, Hit, MapFrame, Target};
+use crate::model::GeoPoint;
+use crate::vr_operator::{GlobeCapture, HEIGHT_EDGE, MapFrame, Spire, Target};
 use std::sync::Arc;
 
-pub(crate) fn paint(ui: &mut egui::Ui, model: &mut AppModel) -> MapFrame {
+pub(crate) fn paint(
+    ui: &mut egui::Ui,
+    model: &mut AppModel,
+    capture: Option<GlobeCapture>,
+    globe_scale: f32,
+) -> MapFrame {
     let rect = ui.max_rect();
     let painter = ui.painter_at(rect);
     ui.ctx().data_mut(|d| {
@@ -22,8 +28,12 @@ pub(crate) fn paint(ui: &mut egui::Ui, model: &mut AppModel) -> MapFrame {
     let obs = model.obs_view;
     model.obs_view = true;
     let t = ui.ctx().input(|i| i.time);
-    let mut frame = MapFrame::default();
-    let scene = if local {
+    let mut frame = MapFrame {
+        marker_scale: model.marker_scale(),
+        globe_scale,
+        ..MapFrame::default()
+    };
+    if local {
         // Render a north-up map. Stereo displacement is applied once by the headset.
         contour_asset::globe_residency::set_viewport(None, None);
         model.globe_view.local_pitch = 0.;
@@ -33,7 +43,7 @@ pub(crate) fn paint(ui: &mut egui::Ui, model: &mut AppModel) -> MapFrame {
             d.insert_temp(egui::Id::new("vr-local-capture"), true);
             d.remove::<Arc<atlas_surface::Raster>>(egui::Id::new("vr-local-raster"));
         });
-        let scene = local_terrain_scene::paint(&painter, rect, model, t);
+        local_terrain_scene::paint(&painter, rect, model, t);
         let layout = local_terrain_scene::layout(rect);
         let center = saved.local_center;
         let half = local_terrain_scene::visual_half_extent_for_zoom(saved.local_zoom);
@@ -60,43 +70,90 @@ pub(crate) fn paint(ui: &mut egui::Ui, model: &mut AppModel) -> MapFrame {
         if let Some(raster) = raster {
             frame.heights = heights(&raster, frame.bounds, lon_km, saved.local_layer_spread);
         }
-        scene
     } else {
         contour_asset::leave_local_view();
-        let layout = globe_scene::globe_layout(rect, &saved);
+        let mut layout = globe_scene::globe_layout(rect, &saved);
+        if let Some(c) = capture {
+            model.globe_view.yaw = c.lon.to_radians() - std::f32::consts::FRAC_PI_2;
+            model.globe_view.pitch = c.lat.to_radians();
+            model.globe_view.local_center = GeoPoint {
+                lat: c.lat,
+                lon: c.lon,
+            };
+            // Fit the entire silhouette to the square capture. The guard angle
+            // beyond both eyes' horizons accommodates IPD and small head movements.
+            layout.camera_distance = c.distance;
+            layout.center = rect.center();
+            layout.radius =
+                rect.width() * 0.48 * (c.distance * c.distance - 1.).sqrt() / layout.focal_length;
+        }
         frame.projection = [
             (layout.center.x - rect.left()) / rect.width(),
             (layout.center.y - rect.top()) / rect.height(),
             layout.radius * layout.focal_length / rect.width(),
             layout.camera_distance,
         ];
-        frame.angles = [saved.yaw, saved.pitch];
-        globe_scene::paint(&painter, rect, model, t)
+        frame.angles = [model.globe_view.yaw, model.globe_view.pitch];
+        globe_scene::paint_with_layout(&painter, rect, model, t, layout, true);
     };
     model.globe_view = saved;
     model.obs_view = obs;
     contour_pass::end_frame();
-    for (markers, camera) in [(scene.event_markers, false), (scene.camera_markers, true)] {
-        for m in markers {
-            if !rect.contains(m.base) {
-                continue;
+    if model.active_body == crate::model::ActiveBody::Earth {
+        let mut push = |p: GeoPoint, color: egui::Color32, target: Option<Target>| {
+            let [west, south, east, north] = frame.bounds;
+            let lon = p.lon + (((west + east) * 0.5 - p.lon) / 360.).round() * 360.;
+            if p.lat.is_finite()
+                && lon.is_finite()
+                && (!local || ((west..=east).contains(&lon) && (south..=north).contains(&p.lat)))
+            {
+                frame.spires.push(Spire {
+                    location: [p.lat, lon],
+                    color: [color.r(), color.g(), color.b()],
+                    target,
+                });
             }
-            let uv = |p: egui::Pos2| {
-                [
-                    (p.x - rect.left()) / rect.width(),
-                    (p.y - rect.top()) / rect.height(),
-                ]
-            };
-            frame.hits.push(Hit {
-                base: uv(m.base),
-                tip: uv(m.tip),
-                radius: (10. * m.scale).max(5.) / rect.width(),
-                target: if camera {
-                    Target::Camera(m.id)
-                } else {
-                    Target::Event(m.id)
-                },
-            });
+        };
+        if !local && model.replay_mode {
+            if let Some(replay) = model.active_replay() {
+                for flare in &replay.active_flares {
+                    let alpha = flare.alpha(replay.wall_elapsed());
+                    if alpha > 0.01 {
+                        push(
+                            flare.event.location,
+                            flare.event.severity.color().gamma_multiply(alpha),
+                            None,
+                        );
+                    }
+                }
+            }
+        } else if model.show_event_markers && (local || model.follow_recaps.active.is_none()) {
+            for e in model.map_events() {
+                let selected = model.selected_event_id.as_deref() == Some(&e.id);
+                push(
+                    e.location,
+                    if selected {
+                        egui::Color32::WHITE
+                    } else {
+                        e.severity.color()
+                    },
+                    Some(Target::Event(e.id.clone())),
+                );
+            }
+        }
+        if model.show_camera_markers {
+            for c in &model.cameras {
+                let selected = model.selected_camera_id.as_deref() == Some(&c.id);
+                push(
+                    c.location,
+                    if selected {
+                        egui::Color32::WHITE
+                    } else {
+                        crate::theme::camera_color()
+                    },
+                    Some(Target::Camera(c.id.clone())),
+                );
+            }
         }
     }
     frame

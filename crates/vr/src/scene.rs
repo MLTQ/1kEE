@@ -103,6 +103,25 @@ impl Globe {
         let center = self.center + self.heading * Vec3::Z * (RADIUS_M - r);
         Mat4::from_scale_rotation_translation(Vec3::splat(r), rotation, center)
     }
+    pub fn capture(
+        &self,
+        head: Vec3,
+    ) -> one_thousand_electric_eye_desktop::vr_operator::GlobeCapture {
+        // The operator's navigation focus locates the globe in the room. A user
+        // can inspect any side of that object without changing the focus.
+        let eye = self.transform().inverse().transform_point3(head);
+        let facing = eye.normalize_or(Vec3::Z);
+        let quantize = |value: f32| (value * 8.).round() / 8.;
+        // Express the stereo guard in angular units. At close zoom the
+        // head sees a small surface cap that needs the full map resolution.
+        let horizon = (1. / eye.length().max(1.001)).acos();
+        let guarded = (horizon + 0.11 / self.scale.sqrt()).min(1.55);
+        one_thousand_electric_eye_desktop::vr_operator::GlobeCapture {
+            lat: quantize(facing.y.asin().to_degrees()),
+            lon: quantize(facing.x.atan2(facing.z).to_degrees()),
+            distance: (256. / guarded.cos()).ceil() / 256.,
+        }
+    }
     pub fn zoom(&mut self, y: f32, dt: f32) {
         if y.abs() > 0.15 {
             self.scale = (self.scale * (y * dt * 1.5).exp()).clamp(1., 32.);
@@ -141,7 +160,9 @@ impl Globe {
         if disc < 0. {
             return None;
         }
-        let t = -b - disc.sqrt();
+        let root = disc.sqrt();
+        let near = -b - root;
+        let t = if near > 0. { near } else { -b + root };
         (t > 0.).then_some(origin + dir * t)
     }
 }

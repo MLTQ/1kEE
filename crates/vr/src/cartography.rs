@@ -93,6 +93,9 @@ pub struct Cartography {
     heights: wgpu::Texture,
     pub height_view: wgpu::TextureView,
     pub frame: Option<MapFrame>,
+    pub spires: crate::spires::Spires,
+    pub laser: Option<(Vec3, Vec3)>,
+    pub aiming_at_target: bool,
     next: Option<MapImage>,
     uploading: Option<MapFrame>,
     next_wrist: Option<Vec<u8>>,
@@ -118,6 +121,9 @@ impl Cartography {
             height_view: heights.create_view(&Default::default()),
             heights,
             frame: None,
+            laser: None,
+            aiming_at_target: false,
+            spires: crate::spires::Spires::new(d),
             next: None,
             uploading: None,
             next_wrist: None,
@@ -172,7 +178,10 @@ impl Cartography {
         if self.wrist.bytes.is_none() {
             self.wrist.bytes = self.next_wrist.take();
         }
-        if self.wrist.advance(q, 512 * 1024) {
+        if self
+            .wrist
+            .advance(q, (WRIST_SIZE[0] * WRIST_SIZE[1] * 4) as usize)
+        {
             self.wrist_ready = true;
         }
         if self.map.bytes.is_none()
@@ -183,6 +192,9 @@ impl Cartography {
         }
         if self.map.advance(q, 512 * 1024) {
             self.frame = self.uploading.take();
+            if let Some(f) = &self.frame {
+                self.spires.publish(q, f);
+            }
             if let Some(f) = &self.frame
                 && !f.heights.is_empty()
             {
@@ -212,6 +224,7 @@ impl Cartography {
     }
 }
 
+#[cfg(test)]
 pub fn globe_uv(f: &MapFrame, point: Vec3) -> Option<Vec2> {
     let (sy, cy) = f.angles[0].sin_cos();
     let (sp, cp) = f.angles[1].sin_cos();
@@ -226,7 +239,7 @@ pub fn globe_uv(f: &MapFrame, point: Vec3) -> Option<Vec2> {
     let uv = Vec2::new(cx, cy) - Vec2::new(x, y) * gain / (distance - vz);
     (uv.min_element() >= 0. && uv.max_element() <= 1.).then_some(uv)
 }
-fn height(f: &MapFrame, uv: Vec2) -> f32 {
+pub fn height(f: &MapFrame, uv: Vec2) -> f32 {
     if f.heights.is_empty() {
         return 0.;
     }

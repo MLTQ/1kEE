@@ -1,6 +1,6 @@
 //! Stable, padded geographic windows for measured Atlas detail.
 use super::{
-    globe_scene::{GlobeLayout, project_surface, screen_to_latlon},
+    globe_scene::{GlobeLayout, project_surface, latlon_in_layout},
     local_terrain_scene::{LocalLayout, projection::local_projection_params},
 };
 use crate::model::{GeoPoint, GlobeViewState};
@@ -94,7 +94,7 @@ pub(super) fn globe_bounds(
         f32::NEG_INFINITY,
     ];
     let mut include = |pos| {
-        if let Some(p) = screen_to_latlon(rect, view, pos) {
+        if let Some(p) = latlon_in_layout(layout, view, pos) {
             let lon = center.lon + (p.lon - center.lon + 180.0).rem_euclid(360.0) - 180.0;
             bounds[0] = bounds[0].min(lon);
             bounds[1] = bounds[1].min(p.lat);

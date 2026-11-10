@@ -375,6 +375,16 @@ fn run(o: Options) -> Result<()> {
             globe.rotate(hands.rotate.x, hands.rotate.y, dt);
             globe.zoom(hands.zoom, dt);
             controls.cursor = hands.right.and_then(|a| globe.aim_point(a));
+            renderer.cartography.laser = hands.right.map(|aim| {
+                let ray = crate::scene::pose(aim);
+                let start = ray.w_axis.truncate();
+                let end = controls
+                    .cursor
+                    .map_or(start - ray.z_axis.truncate() * 2., |p| {
+                        globe.transform().transform_point3(p)
+                    });
+                (start, end)
+            });
             if hands.click {
                 controls.selected = controls.cursor.is_some_and(|p| {
                     p.distance(crate::scene::surface(marker.lat, marker.lon)) * globe.scale < 0.045

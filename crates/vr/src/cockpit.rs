@@ -7,8 +7,70 @@ use crate::{
     wrist,
 };
 use anyhow::{Result, bail};
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 use one_thousand_electric_eye_desktop::vr_operator::View;
+
+#[derive(Clone, Copy)]
+enum Hit {
+    Surface(Vec3),
+    Spire(usize),
+    Wrist(Vec2),
+    Brief,
+}
+fn aim(cart: &cartography::Cartography, globe: &Globe, aim: openxr::Posef) -> Option<(Vec3, Hit)> {
+    let ray = pose(aim);
+    let start = ray.w_axis.truncate();
+    // The wrist is a foreground control surface, including when a user
+    // lowers their hand inside the globe. Its beam uses the same priority.
+    if let Some(wrist) = cart.wrist_pose.filter(|_| cart.wrist_ready)
+        && let Some(uv) = wrist::hit(wrist, ray)
+    {
+        let point = wrist.transform_point3(glam::vec3(uv.x - 0.5, 0.5 - uv.y, 0.));
+        return Some((point, Hit::Wrist(uv)));
+    }
+    let frame = cart.frame.as_ref();
+    let (model, point, cursor) = if let Some(f) = frame.filter(|f| f.local) {
+        let table = globe.table_transform();
+        let uv = cartography::table_uv(f, table, ray);
+        (
+            table,
+            uv.map(|p| glam::vec3(p.x - 0.5, 0.5 - p.y, cartography::height(f, p))),
+            uv.map(|p| p.extend(0.)),
+        )
+    } else {
+        let p = globe.aim_point(aim);
+        (globe.transform(), p, p)
+    };
+    let local = model.inverse() * ray;
+    let origin = local.w_axis.truncate();
+    let mut nearest = point
+        .zip(cursor)
+        .map(|(p, c)| (model.transform_point3(p), Hit::Surface(c)));
+    if let Some((i, t)) = frame.and_then(|f| {
+        cart.spires.pick(
+            local,
+            point.map_or(f32::INFINITY, |p| p.distance(origin)),
+            f,
+        )
+    }) {
+        let p = origin - local.z_axis.truncate().normalize() * t;
+        nearest = Some((model.transform_point3(p), Hit::Spire(i)));
+    }
+    let brief = globe.brief_transform();
+    if cart.show_room
+        && cart.room_ready
+        && frame.is_some()
+        && let Some(uv) = wrist::hit(brief, ray)
+    {
+        let p = brief.transform_point3(glam::vec3(uv.x - 0.5, 0.5 - uv.y, 0.));
+        if nearest
+            .is_none_or(|(other, _)| start.distance_squared(p) <= start.distance_squared(other))
+        {
+            nearest = Some((p, Hit::Brief));
+        }
+    }
+    nearest
+}
 
 pub struct Cockpit {
     pub cursor: Option<Vec3>,
@@ -72,11 +134,11 @@ impl Cockpit {
             .left
             .filter(|_| self.menu)
             .map(|p| wrist::mount(pose(p), head));
-        let ray = hands.right.map(pose);
-        let hover = ray
-            .zip(cart.wrist_pose)
-            .and_then(|(r, p)| wrist::hit(p, r))
-            .filter(|_| cart.wrist_ready);
+        let hit = hands.right.and_then(|p| aim(cart, globe, p));
+        let hover = match hit {
+            Some((_, Hit::Wrist(uv))) => Some(uv),
+            _ => None,
+        };
         cart.pointer = hover;
         let mut events = self
             .pointer
@@ -86,8 +148,26 @@ impl Cockpit {
         {
             events.push(self.pointer.press(uv));
         }
-        self.link.wrist(events, cart.wrist_pose.is_some());
-        self.cursor = None;
+        cart.aiming_at_target = matches!(hit, Some((_, Hit::Wrist(_) | Hit::Spire(_))));
+        cart.laser = hands.right.map(|p| {
+            let ray = pose(p);
+            let start = ray.w_axis.truncate();
+            (
+                start,
+                hit.map_or(start - ray.z_axis.truncate() * 2., |(end, _)| end),
+            )
+        });
+        self.cursor = match hit {
+            Some((_, Hit::Surface(p))) => Some(p),
+            _ => None,
+        };
+        if hands.click
+            && let Some((_, Hit::Spire(i))) = hit
+            && let Some(target) = cart.frame.as_ref().and_then(|f| f.spires[i].target.clone())
+        {
+            self.menu = true;
+            self.link.pick(target);
+        }
         if hover.is_none() {
             let previous = self.view;
             let moving = hands.rotate.abs().max_element() > 0.15 || hands.zoom.abs() > 0.15;
@@ -115,23 +195,9 @@ impl Cockpit {
             if self.view != previous {
                 self.link.navigate(self.view);
             }
-            if let (Some(f), Some(r)) = (&cart.frame, ray) {
-                let uv = if f.local {
-                    let p = cartography::table_uv(f, globe.table_transform(), r);
-                    self.cursor = p.map(|uv| uv.extend(0.));
-                    p
-                } else {
-                    self.cursor = hands.right.and_then(|p| globe.aim_point(p));
-                    self.cursor.and_then(|p| cartography::globe_uv(f, p))
-                };
-                if hands.click
-                    && let Some(target) = uv.and_then(|v| f.hit(v.to_array()))
-                {
-                    self.menu = true;
-                    self.link.pick(target);
-                }
-            }
         }
+        self.link
+            .wrist(events, cart.wrist_pose.is_some(), globe.capture(head));
         Ok((recenter, exit))
     }
 }

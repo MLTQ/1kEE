@@ -12,7 +12,7 @@ The program uses the active OpenXR runtime, the GPU driving the headset, and the
 
 ## Wrist controls
 
-Lift the left controller. The panel follows the wrist and faces your eyes. **Left A** hides or shows it. Point with the right controller and click the trigger. The right stick scrolls while the pointer is over the panel. Looking around, leaning and turning your head continue at the headset’s frame cadence.
+Lift the left controller. The panel follows the wrist and faces your eyes. **Left A** hides or shows it. Follow the beam from the right controller. A bright dot marks its position on the wrist. The wrist stays visible and takes clicks where it overlaps the globe or terrain. Squeeze and release the Index trigger to activate a control, or hold it while moving a slider. Use the right stick or the fixed **Page up** and **Page down** buttons to scroll. Looking around, leaning and turning your head continue at the headset’s frame cadence.
 
 | Menu | Actions |
 | --- | --- |
@@ -27,7 +27,7 @@ Away from the wrist, the left stick turns the globe or pans Local terrain. The r
 
 ## Terrain and imagery
 
-Atlas opens by default. The globe uses geographically registered images from the native map renderer. Local shows a north-up terrain table with binocular relief derived from the active Atlas elevation raster. Both eyes share one published geographic view. Zooming and panning drive the desktop’s tile selection and terrain refinement, including GEBCO, SRTM and available finer surveys. Local retains a flat map where measured heights are unavailable.
+Atlas opens by default. The native map renderer captures the hemisphere facing the tracked headset. Walking around the globe changes the requested map coverage while the globe stays anchored in the room. Event and webcam spires are stereo geometry. They rise perpendicular to the globe or the measured Local surface, and terrain occludes them in each eye. Local shows a north-up terrain table with binocular relief derived from the active Atlas elevation raster. Both eyes share one published geographic view. Zooming and panning drive the desktop’s tile selection and terrain refinement, including GEBCO, SRTM and available finer surveys. Local retains a flat map where measured heights are unavailable.
 
 The native operator has its own worker and Vulkan queue. It drives the existing sources, satellite refresh, layer rendering, event scheduler and webcam decoder. The headset draws from completed images and uploads new ones in bounded strips. A new map, its pick targets, and its height grid become visible together. Labels, terrain and imagery refresh at the operator’s cadence. Head pose and controller pointers update on each XR frame.
 
@@ -39,7 +39,7 @@ target/release/one-thousand-electric-eye-vr --events target/release/.1kee_events
 target/release/one-thousand-electric-eye-vr --import /path/to/georeferenced-pass.tif
 ```
 
-VR starts its event queue with the latest cached day and polls the configured live providers. GeoTIFF, GeoJSON, KML and KMZ imports use the desktop import path. Use **Browse files on wrist** in Layers or Satellite to navigate folders and import with the controller. The desktop file-picker button also remains available on the workstation. Source credentials can be configured in the desktop settings before launch. The standalone VR app does not require the desktop app to be running.
+VR starts its event queue with the latest cached day and polls the configured live providers. GeoTIFF, GeoJSON, KML and KMZ imports use the desktop import path. Open **Satellite → Browse files on wrist** to navigate folders and import with the controller. **Layers → Import layers…** opens the same page. Source credentials can be configured in the desktop settings before launch. The standalone VR app does not require the desktop app to be running.
 
 ## Check frame pacing
 
@@ -55,8 +55,8 @@ The original isolated globe remains available with `--demo`. The diagnostic opti
 ONEKEE_GPU='RTX 4090' cargo test --release -p one-thousand-electric-eye-vr -- --ignored --nocapture --test-threads=1
 ```
 
-The GPU tests exercise wrist clicks, event picking, Follow Events, GeoTIFF import, geographic tile changes, terrain displacement and per-eye registration while images upload. Set `ONEKEE_VR_ASSET_ROOT` to include an additional check against measured Mount Rainier terrain on a data drive. Set `ONEKEE_VR_CAPTURE_DIR` to an existing directory to save the native map and panels, or `ONEKEE_VR_STEREO_PNG` to save the diagnostic stereo pair.
+The GPU tests check both eyes from opposite sides of a globe with known elevation bands, visible and hidden spires, the controller beam, and wrist clicks interleaved with map and room redraws. They also exercise Follow Events, GeoTIFF import, geographic tile changes and terrain displacement during uploads. Set `ONEKEE_VR_ASSET_ROOT` to include an additional check against measured Mount Rainier terrain on a data drive. Set `ONEKEE_VR_CAPTURE_DIR` to an existing directory to save the native map and panels, or `ONEKEE_VR_STEREO_PNG` to save the diagnostic stereo pair.
 
-On November 9, 2026, SteamVR opened the Index on the RTX 4090 with two 2468 × 2740 eye targets. The full operator hardware run submitted one stereo frame before SteamVR stopped requesting visible frames. A separate one-frame run exited cleanly at an 8.33 ms display period. That cold frame took 126.77 ms of application wall time including image acquisition and submission. The offscreen local-terrain and wrist test at the same resolution measured 0.24 ms p95 for the two GPU passes and 0.70 ms p95 from starting the pair through GPU completion during map uploads. The drive-backed check loaded and colored the measured Mount Rainier Local view in 1.80 seconds. The stereo timings use synthetic poses and exclude physical tracking, source rendering on the independent worker, compositor work and scanout.
+On November 9, 2026, the repaired viewer completed 240 tracked stereo frames on the Index in a focused SteamVR session at 120 Hz, with 2468 × 2740 pixels per eye. The first 120 frames recorded seven predicted display gaps and 17.33 ms application CPU p95 including image acquisition. The next 120 recorded zero gaps and 4.03 ms CPU p95. Stereo GPU p95 was 0.16 ms in both intervals. The separate offscreen tests use synthetic head and hand poses to check geographic coverage, marker occlusion and controller targeting. Physical trigger feel and compositor-to-display latency require an operator in the headset.
 
 The fallback Earth texture comes from Natural Earth shaded relief. The diagnostic tile comes from SRTM GL1 N46W122, simplified at 0.002° and encoded as CTF1. [Natural Earth](https://www.naturalearthdata.com/downloads/10m-raster-data/) · [NASA SRTM](https://www.earthdata.nasa.gov/data/instruments/srtm)

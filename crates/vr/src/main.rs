@@ -15,6 +15,8 @@ mod render;
 #[cfg(target_os = "linux")]
 mod scene;
 #[cfg(target_os = "linux")]
+mod spires;
+#[cfg(target_os = "linux")]
 mod vulkan;
 #[cfg(target_os = "linux")]
 mod wrist;

@@ -11,6 +11,11 @@ struct Uniforms {
     vp: [[f32; 4]; 4],
     inv_vp: [[f32; 4]; 4],
     brief_vp: [[f32; 4]; 4],
+    scene_vp: [[f32; 4]; 4],
+    stage_vp: [[f32; 4]; 4],
+    world_eye: [f32; 4],
+    laser_start: [f32; 4],
+    laser_end: [f32; 4],
     wrist_vp: [[f32; 4]; 4],
     table_inverse: [[f32; 4]; 4],
     table_eye: [f32; 4],
@@ -31,6 +36,11 @@ struct Uniforms {
 
 pub struct Renderer {
     pub cartography: crate::cartography::Cartography,
+    device: wgpu::Device,
+    depths: [Option<([u32; 2], wgpu::TextureView)>; 2],
+    spire: wgpu::RenderPipeline,
+    laser: wgpu::RenderPipeline,
+    wrist_laser: wgpu::RenderPipeline,
     wrist: wgpu::RenderPipeline,
     globe: wgpu::RenderPipeline,
     lines: wgpu::RenderPipeline,
@@ -182,41 +192,53 @@ impl Renderer {
             bind_group_layouts: &[&bindings],
             push_constant_ranges: &[],
         });
-        let pipeline = |vertex, fragment, topology, buffers: &[wgpu::VertexBufferLayout]| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(vertex),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some(vertex),
-                    compilation_options: Default::default(),
-                    buffers,
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some(fragment),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                multiview: None,
-                cache: None,
-            })
-        };
+        let pipeline =
+            |vertex, fragment, topology, buffers: &[wgpu::VertexBufferLayout], foreground: bool| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(vertex),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some(vertex),
+                        compilation_options: Default::default(),
+                        buffers,
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        topology,
+                        ..Default::default()
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_write_enabled: !foreground,
+                        depth_compare: if foreground {
+                            wgpu::CompareFunction::Always
+                        } else {
+                            wgpu::CompareFunction::LessEqual
+                        },
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some(fragment),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview: None,
+                    cache: None,
+                })
+            };
         let globe = pipeline(
             "vs_main",
             "fs_main",
             wgpu::PrimitiveTopology::TriangleList,
             &[],
+            false,
         );
         let lines = pipeline(
             "vs_line",
@@ -227,18 +249,46 @@ impl Renderer {
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &wgpu::vertex_attr_array![0 => Float32x3],
             }],
+            false,
         );
         let brief = pipeline(
             "vs_brief",
             "fs_brief",
             wgpu::PrimitiveTopology::TriangleStrip,
             &[],
+            false,
         );
         let wrist = pipeline(
             "vs_wrist",
             "fs_wrist",
             wgpu::PrimitiveTopology::TriangleStrip,
             &[],
+            true,
+        );
+        let spire = pipeline(
+            "vs_spire",
+            "fs_spire",
+            wgpu::PrimitiveTopology::TriangleList,
+            &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<crate::spires::Instance>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32, 2 => Float32x3, 3 => Unorm8x4],
+            }],
+            false,
+        );
+        let laser = pipeline(
+            "vs_laser",
+            "fs_laser",
+            wgpu::PrimitiveTopology::TriangleStrip,
+            &[],
+            false,
+        );
+        let wrist_laser = pipeline(
+            "vs_laser",
+            "fs_laser",
+            wgpu::PrimitiveTopology::TriangleStrip,
+            &[],
+            true,
         );
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("resident contour tile"),
@@ -247,6 +297,11 @@ impl Renderer {
             mapped_at_creation: false,
         });
         Ok(Self {
+            device: device.clone(),
+            depths: [None, None],
+            laser,
+            wrist_laser,
+            spire,
             wrist,
             cartography,
             globe,
@@ -278,7 +333,7 @@ impl Renderer {
 
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
-        &self,
+        &mut self,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         index: usize,
@@ -300,7 +355,18 @@ impl Renderer {
         let native = &self.cartography;
         let f = native.frame.as_ref();
         let [yaw, pitch] = f.map_or([0.; 2], |f| f.angles);
+        let (start, end) = native.laser.unwrap_or_default();
         let data = Uniforms {
+            scene_vp: if f.is_some_and(|f| f.local) {
+                camera * table
+            } else {
+                vp
+            }
+            .to_cols_array_2d(),
+            stage_vp: camera.to_cols_array_2d(),
+            world_eye: world_eye.w_axis.to_array(),
+            laser_start: start.extend(1.).to_array(),
+            laser_end: end.extend(f32::from(native.aiming_at_target)).to_array(),
             wrist_vp: (camera * native.wrist_pose.unwrap_or(glam::Mat4::IDENTITY))
                 .to_cols_array_2d(),
             table_inverse: (camera * table).inverse().to_cols_array_2d(),
@@ -337,6 +403,24 @@ impl Renderer {
         };
         let (buf, bind) = &self.eyes[index];
         queue.write_buffer(buf, 0, bytemuck::bytes_of(&data));
+        let depth = &mut self.depths[index];
+        if depth.as_ref().is_none_or(|(old, _)| *old != size) {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("eye scene depth"),
+                size: wgpu::Extent3d {
+                    width: size[0],
+                    height: size[1],
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            *depth = Some((size, texture.create_view(&Default::default())));
+        }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("globe eye"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -347,7 +431,14 @@ impl Renderer {
                     store: wgpu::StoreOp::Store,
                 },
             })],
-            depth_stencil_attachment: None,
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &depth.as_ref().unwrap().1,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.),
+                    store: wgpu::StoreOp::Discard,
+                }),
+                stencil_ops: None,
+            }),
             timestamp_writes: timestamps,
             occlusion_query_set: None,
         });
@@ -359,14 +450,28 @@ impl Renderer {
             pass.set_vertex_buffer(0, self.vertices.slice(..));
             pass.draw(0..self.published, 0..1);
         }
+        if !native.spires.instances.is_empty() {
+            pass.set_pipeline(&self.spire);
+            pass.set_vertex_buffer(0, native.spires.buffer.slice(..));
+            pass.draw(0..24, 0..native.spires.instances.len() as u32);
+        }
         if (selected && native.frame.is_none())
             || (native.show_room && native.room_ready && native.frame.is_some())
         {
             pass.set_pipeline(&self.brief);
             pass.draw(0..4, 0..1);
         }
+        let has_beam = native.laser.is_some() && start.distance_squared(end) > 1e-8;
+        if has_beam && native.pointer.is_none() {
+            pass.set_pipeline(&self.laser);
+            pass.draw(0..4, 0..1);
+        }
         if native.wrist_ready && native.wrist_pose.is_some() {
             pass.set_pipeline(&self.wrist);
+            pass.draw(0..4, 0..1);
+        }
+        if has_beam && native.pointer.is_some() {
+            pass.set_pipeline(&self.wrist_laser);
             pass.draw(0..4, 0..1);
         }
     }
@@ -446,4 +551,4 @@ impl GpuTimer {
 
 #[cfg(test)]
 #[path = "stereo_test.rs"]
-mod stereo_test;
+pub(crate) mod stereo_test;

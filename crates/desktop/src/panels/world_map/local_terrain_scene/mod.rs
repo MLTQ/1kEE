@@ -507,6 +507,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
 
+    let stereo = painter.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("vr-local-capture")).unwrap_or(false));
     let event_markers: Vec<MapMarker> = if !should_show_local_event_indicators(
         model.active_body,
         model.show_event_markers,
@@ -540,15 +541,17 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                     extent_y_km,
                 )?;
                 let tip = local_tip(ground.pos, markers::EVENT_BEAM_HEIGHT, model.marker_scale());
-                markers::draw_event_marker(
-                    painter,
-                    ground,
-                    tip,
-                    event,
-                    model.selected_event_id.as_deref() == Some(event.id.as_str()),
-                    time,
-                    model.marker_scale(),
-                );
+                if !stereo {
+                    markers::draw_event_marker(
+                        painter,
+                        ground,
+                        tip,
+                        event,
+                        model.selected_event_id.as_deref() == Some(event.id.as_str()),
+                        time,
+                        model.marker_scale(),
+                    );
+                }
                 Some(MapMarker::new(&event.id, ground.pos, tip, model.marker_scale()))
             })
             .collect()
@@ -588,13 +591,15 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                     )
                     .map(|projected| {
                         let tip = local_tip(projected.pos, markers::CAMERA_BEAM_HEIGHT, model.marker_scale());
-                        draw_camera_spire(
-                            painter,
-                            projected.pos,
-                            tip,
-                            model.selected_camera_id.as_deref() == Some(camera.id.as_str()),
-                            model.marker_scale(),
-                        );
+                        if !stereo {
+                            draw_camera_spire(
+                                painter,
+                                projected.pos,
+                                tip,
+                                model.selected_camera_id.as_deref() == Some(camera.id.as_str()),
+                                model.marker_scale(),
+                            );
+                        }
                         MapMarker::new(&camera.id, projected.pos, tip, model.marker_scale())
                     })
                 })

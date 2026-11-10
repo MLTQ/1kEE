@@ -6,6 +6,8 @@ pub struct Controls {
     rotate: xr::Action<xr::Vector2f>,
     zoom: xr::Action<xr::Vector2f>,
     select: xr::Action<bool>,
+    squeeze: xr::Action<f32>,
+    trigger_down: bool,
     aim: xr::Space,
     grip: xr::Space,
     menu: xr::Action<bool>,
@@ -18,6 +20,7 @@ impl Controls {
         let rotate = set.create_action("rotate", "Rotate globe", &[])?;
         let zoom = set.create_action("zoom", "Zoom globe", &[])?;
         let select = set.create_action("select", "Select marker", &[])?;
+        let squeeze = set.create_action("trigger_pull", "Right trigger pull", &[])?;
         let aim = set.create_action("aim", "Point at marker", &[])?;
         let grip = set.create_action("left_wrist", "Left wrist", &[])?;
         let menu = set.create_action("wrist_menu", "Show wrist menu", &[])?;
@@ -29,7 +32,7 @@ impl Controls {
                 xr::Binding::new(&grip, path("/user/hand/left/input/grip/pose")?),
                 xr::Binding::new(&rotate, path("/user/hand/left/input/thumbstick")?),
                 xr::Binding::new(&zoom, path("/user/hand/right/input/thumbstick")?),
-                xr::Binding::new(&select, path("/user/hand/right/input/trigger/click")?),
+                xr::Binding::new(&squeeze, path("/user/hand/right/input/trigger/value")?),
                 xr::Binding::new(&aim, path("/user/hand/right/input/aim/pose")?),
             ],
         )?;
@@ -48,6 +51,8 @@ impl Controls {
             rotate,
             zoom,
             select,
+            squeeze,
+            trigger_down: false,
             aim: aim_space,
             grip: grip.create_space(session, xr::Path::NULL, xr::Posef::IDENTITY)?,
             menu,
@@ -56,7 +61,7 @@ impl Controls {
         })
     }
     pub fn sample(
-        &self,
+        &mut self,
         session: &xr::Session<xr::Vulkan>,
         space: &xr::Space,
         time: xr::Time,
@@ -75,6 +80,12 @@ impl Controls {
                 )
                 .then_some(l.pose))
         };
+        let analog = self.squeeze.state(session, xr::Path::NULL)?;
+        let down = trigger.is_active && trigger.current_state
+            || analog.is_active
+                && analog.current_state >= if self.trigger_down { 0.32 } else { 0.68 };
+        let click = down && !self.trigger_down;
+        self.trigger_down = down;
         Ok(Hands {
             left: locate(&self.grip)?,
             right: locate(&self.aim)?,
@@ -88,8 +99,8 @@ impl Controls {
             } else {
                 0.
             },
-            down: trigger.is_active && trigger.current_state,
-            click: trigger.is_active && trigger.changed_since_last_sync && trigger.current_state,
+            down,
+            click,
             toggle: menu.is_active && menu.changed_since_last_sync && menu.current_state,
         })
     }

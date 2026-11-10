@@ -34,6 +34,17 @@ impl Section {
         (Self::Terrain, "Terrain Library"),
         (Self::Activity, "Activity"),
     ];
+    fn render(self, ui: &mut egui::Ui, model: &mut AppModel) {
+        match self {
+            Section::Overview => overview::render(ui, model),
+            Section::Appearance => appearance::render(ui, model),
+            Section::FollowEvents => event_follow::render(ui, model),
+            Section::Sources => sources::render(ui, model),
+            Section::Paths => paths::render(ui, model),
+            Section::Terrain => super::terrain_library::render(ui, model),
+            Section::Activity => super::status_log::render(ui, model),
+        }
+    }
 }
 
 pub fn render_settings(ctx: &egui::Context, model: &mut AppModel) {
@@ -91,15 +102,7 @@ pub fn render_settings(ctx: &egui::Context, model: &mut AppModel) {
                         .id_salt(("settings-content", section))
                         .auto_shrink([false, false])
                         .max_height(content_height)
-                        .show(ui, |ui| match section {
-                            Section::Overview => overview::render(ui, model),
-                            Section::Appearance => appearance::render(ui, model),
-                            Section::FollowEvents => event_follow::render(ui, model),
-                            Section::Sources => sources::render(ui, model),
-                            Section::Paths => paths::render(ui, model),
-                            Section::Terrain => super::terrain_library::render(ui, model),
-                            Section::Activity => super::status_log::render(ui, model),
-                        });
+                        .show(ui, |ui| section.render(ui, model));
                 });
             });
             ui.separator();
@@ -119,6 +122,33 @@ pub fn render_settings(ctx: &egui::Context, model: &mut AppModel) {
     ctx.data_mut(|d| d.insert_temp(id, section));
     actions.apply(model);
     model.settings_open = open;
+}
+
+/// The wrist already supplies scrolling and navigation. Keep the settings
+/// sections within that surface so the title bar and actions stay reachable.
+pub(crate) fn wrist(ui: &mut egui::Ui, model: &mut AppModel) {
+    let id = ui.make_persistent_id("wrist-settings-section");
+    let mut section = ui.data(|d| d.get_temp(id).unwrap_or(Section::Overview));
+    ui.horizontal_wrapped(|ui| {
+        for (value, label) in Section::ALL {
+            ui.selectable_value(&mut section, value, label);
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(id, section));
+    ui.separator();
+    section.render(ui, model);
+    ui.separator();
+    let mut actions = actions::Actions::default();
+    ui.horizontal_wrapped(|ui| {
+        actions.save = ui.button("Save settings").clicked();
+        if matches!(section, Section::Overview | Section::Sources) {
+            actions.poll = ui.button("Poll now").clicked();
+        }
+        if section == Section::Sources {
+            actions.clear_keys = ui.button("Clear keys").clicked();
+        }
+    });
+    actions.apply(model);
 }
 
 #[cfg(test)]
