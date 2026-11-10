@@ -39,7 +39,10 @@ fn model() -> AppModel {
         }),
     }]);
     model.replace_camera_registry(
-        (0..8).map(|i| camera(&i.to_string(), i as f32)).collect(),
+        (0..12)
+            .rev()
+            .map(|i| camera(&i.to_string(), i as f32))
+            .collect(),
         "Fixture",
     );
     model.toggle_event_follow();
@@ -48,7 +51,7 @@ fn model() -> AppModel {
 }
 
 fn prime(ctx: &egui::Context, sidebar: &mut EventCameraSidebar, model: &AppModel) {
-    sidebar.update_selection(model, model.selected_event().map(|event| event.location));
+    sidebar.update_selection(model);
     for ranked in &sidebar.cameras {
         let image = egui::ColorImage::new([320, 180], egui::Color32::from_rgb(45, 70, 90));
         sidebar.players.insert(
@@ -183,12 +186,11 @@ fn nearest_feeds_use_great_circle_distance_and_exclude_unusable_endpoints() {
 }
 
 #[test]
-fn event_and_registry_changes_retarget_four_feeds_and_preserve_overlapping_players() {
+fn tour_and_registry_changes_retarget_the_eight_closest_feeds_and_reuse_players() {
     let ctx = egui::Context::default();
     let mut model = model();
     let mut sidebar = EventCameraSidebar::default();
     prime(&ctx, &mut sidebar, &model);
-    let initial_map_snapshot = model.nearby_camera_snapshot(250.0);
     let texture = sidebar.players["3"].texture.as_ref().unwrap().id();
     let (old_player, stop) = CameraFeedPlayer::fixture(
         &ctx,
@@ -196,27 +198,34 @@ fn event_and_registry_changes_retarget_four_feeds_and_preserve_overlapping_playe
         egui::ColorImage::new([1, 1], egui::Color32::WHITE),
     );
     sidebar.players.insert("0".into(), old_player);
-    model.events[0].location.lon = 4.0;
-    sidebar.update_selection(&model, model.selected_event().map(|e| e.location));
+    let first = model.events[0].clone();
+    let mut next = first.clone();
+    next.id = "factal-next".into();
+    next.location.lon = 5.0;
+    model.replace_factal_events(vec![first.clone(), next]);
+    model.tick_event_follow(100.0);
+    // Independently selected map records must not move the sidebar off the tour stop.
+    model.selected_event_id = Some(first.id);
+    let initial_map_snapshot = model.nearby_camera_snapshot(250.0);
+    assert!(sidebar.update_selection(&model));
     assert_eq!(
         sidebar
             .cameras
             .iter()
             .map(|r| r.camera.id.as_str())
             .collect::<Vec<_>>(),
-        ["4", "3", "5", "2"]
+        ["5", "4", "6", "3", "7", "2", "8", "1"]
     );
     assert_eq!(sidebar.players.len(), MAX_FEEDS);
     assert!(stop.load(Ordering::Acquire));
     assert_eq!(sidebar.players["3"].texture.as_ref().unwrap().id(), texture);
-    model.events[0].location.lon = 0.0;
-    sidebar.update_selection(&model, model.selected_event().map(|e| e.location));
+    assert!(!sidebar.update_selection(&model));
     assert!(
         std::sync::Arc::ptr_eq(&initial_map_snapshot, &model.nearby_camera_snapshot(250.0)),
         "sidebar must not evict map proximity cache"
     );
     model.replace_camera_registry(vec![camera("replacement", 0.0)], "Updated fixture");
-    sidebar.update_selection(&model, model.selected_event().map(|e| e.location));
+    assert!(!sidebar.update_selection(&model));
     assert_eq!(sidebar.cameras.len(), 1);
     assert!(sidebar.players.contains_key("replacement"));
     model.stop_event_follow();
@@ -234,7 +243,8 @@ fn sidebar_is_a_single_right_column_and_brief_stays_beside_it_in_normal_and_obs_
             let mut model = model();
             model.obs_view = obs;
             model.events[0].location_name = "SRID=4326;POINT (2.398888 48.8319904)".into();
-            model.cameras[0].label = "A very long camera name ".repeat(15);
+            model.cameras.iter_mut().find(|c| c.id == "0").unwrap().label =
+                "A very long camera name ".repeat(15);
             let mut sidebar = EventCameraSidebar::default();
             prime(&ctx, &mut sidebar, &model);
             fail_second_feed(&mut sidebar);
@@ -264,11 +274,7 @@ fn sidebar_is_a_single_right_column_and_brief_stays_beside_it_in_normal_and_obs_
                         || text.starts_with("04  ")
                 })
                 .collect();
-            assert_eq!(
-                cards.len(),
-                MAX_FEEDS,
-                "compact mixed-feed layout exposes all four headings"
-            );
+            assert_eq!(cards.len(), 4, "the nearest four headings still fit in this fixture");
             for pair in cards.windows(2) {
                 assert!((pair[0].1.left() - pair[1].1.left()).abs() < 1.0);
                 assert!(pair[0].1.bottom() < pair[1].1.top());
@@ -293,6 +299,56 @@ fn sidebar_is_a_single_right_column_and_brief_stays_beside_it_in_normal_and_obs_
             assert_eq!(sidebar.players.len(), MAX_FEEDS);
         }
     }
+}
+
+#[test]
+fn scrolling_reaches_the_eighth_full_size_feed_and_a_new_stop_returns_to_the_first() {
+    let ctx = egui::Context::default();
+    let mut model = model();
+    let mut sidebar = EventCameraSidebar::default();
+    prime(&ctx, &mut sidebar, &model);
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 720.0));
+    let mut render = |model: &mut AppModel, events| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            },
+            |ctx| sidebar.render(ctx, model),
+        )
+    };
+    let visible = |output: &egui::FullOutput, heading: &str| {
+        text_shapes(output).iter().any(|(text, bounds, clip)| {
+            text == heading && clip.contains(bounds.center()) && screen.contains(bounds.center())
+        })
+    };
+    let at_top = render(&mut model, vec![]);
+    assert!(visible(&at_top, "01  Camera 0"));
+    assert!(!visible(&at_top, "08  Camera 7"));
+    render(
+        &mut model,
+        vec![
+            egui::Event::PointerMoved(egui::pos2(950.0, 420.0)),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Page,
+                delta: egui::vec2(0.0, -3.0),
+                modifiers: egui::Modifiers::NONE,
+            },
+        ],
+    );
+    for _ in 0..60 {
+        render(&mut model, vec![]);
+    }
+    let at_bottom = render(&mut model, vec![]);
+    assert!(visible(&at_bottom, "08  Camera 7"));
+    assert!(!visible(&at_bottom, "01  Camera 0"));
+
+    let mut next = model.events[0].clone();
+    next.id = "factal-same-location".into();
+    model.replace_factal_events(vec![next]);
+    model.tick_event_follow(100.0);
+    assert!(visible(&render(&mut model, vec![]), "01  Camera 0"));
 }
 
 #[test]
@@ -376,6 +432,13 @@ fn waiting_and_empty_states_do_not_start_players_and_retained_tour_targets_still
             .iter()
             .any(|(text, _, _)| text == "No camera feeds available for this event.")
     );
+    model.stop_event_follow();
+    model.toggle_event_follow();
+    model.tick_event_follow(1.0);
+    let (output, _) = frame(&ctx, &mut sidebar, &mut model, 1100.0);
+    assert!(text_shapes(&output).iter().any(|(text, _, _)| {
+        text == "Waiting for a live event to follow."
+    }));
 }
 
 #[cfg(test)]

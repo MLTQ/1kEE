@@ -5,7 +5,7 @@ use crate::theme;
 use std::collections::HashMap;
 use std::time::Duration;
 
-const MAX_FEEDS: usize = 4;
+const MAX_FEEDS: usize = 8;
 const PREVIEW_EDGE: u32 = 640;
 
 struct RankedCamera {
@@ -15,7 +15,7 @@ struct RankedCamera {
 
 #[derive(Default)]
 pub struct EventCameraSidebar {
-    selection_key: Option<(u32, u32, u64)>,
+    selection_key: Option<(String, GeoPoint, u64)>,
     cameras: Vec<RankedCamera>,
     players: HashMap<String, CameraFeedPlayer>,
 }
@@ -27,13 +27,8 @@ impl EventCameraSidebar {
             return;
         }
 
-        let event = model
-            .selected_event()
-            .filter(|_| model.event_follow.target().is_some());
-        let title = event.map(|event| event.title.clone());
-        let previous_focus = self.selection_key.map(|(lat, lon, _)| (lat, lon));
-        self.update_selection(model, event.map(|event| event.location));
-        let focus_changed = previous_focus != self.selection_key.map(|(lat, lon, _)| (lat, lon));
+        let focus_changed = self.update_selection(model);
+        let title = model.event_follow.target().map(|event| event.title.clone());
 
         egui::SidePanel::right("event_camera_sidebar")
             .default_width(320.0)
@@ -99,20 +94,21 @@ impl EventCameraSidebar {
             });
     }
 
-    fn update_selection(&mut self, model: &AppModel, focus: Option<GeoPoint>) {
-        let Some(focus) = focus else {
+    /// Returns true when the list should scroll back to the closest camera.
+    fn update_selection(&mut self, model: &AppModel) -> bool {
+        let Some(event) = model.event_follow.target() else {
             self.clear();
-            return;
+            return false;
         };
-        let key = (
-            focus.lat.to_bits(),
-            focus.lon.to_bits(),
-            model.camera_registry_revision(),
-        );
-        if self.selection_key == Some(key) {
-            return;
+        let revision = model.camera_registry_revision();
+        let mut focus_changed = true;
+        if let Some((id, location, previous_revision)) = &self.selection_key {
+            focus_changed = *id != event.id || *location != event.location;
+            if !focus_changed && revision == *previous_revision {
+                return false;
+            }
         }
-        self.cameras = nearest_feeds(&model.cameras, focus);
+        self.cameras = nearest_feeds(&model.cameras, event.location);
         self.players
             .retain(|id, _| self.cameras.iter().any(|ranked| ranked.camera.id == *id));
         for ranked in &self.cameras {
@@ -120,7 +116,8 @@ impl EventCameraSidebar {
                 .entry(ranked.camera.id.clone())
                 .or_insert_with(|| CameraFeedPlayer::new(PREVIEW_EDGE));
         }
-        self.selection_key = Some(key);
+        self.selection_key = Some((event.id.clone(), event.location, revision));
+        focus_changed
     }
 
     fn clear(&mut self) {

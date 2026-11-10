@@ -10,15 +10,17 @@ channel-backed players prevent network requests and settings writes.
 ## Components
 - Distance ordering crosses the date line, keeps distant cameras when they are
   the closest available, breaks ties deterministically and rejects unusable feeds.
-- Event/registry changes replace the four-feed set, cancel removed players,
+- Tour and registry changes replace the eight-feed set, cancel removed players,
   retain overlapping textures and leave the map's proximity cache untouched.
 - Native egui frames cover minimum/default widths and normal/OBS modes, a
   long camera name, single-column ordering and the Brief's non-overlap.
-  A failed feed collapses so all four camera headings fit without scrolling;
+  A failed feed collapses so the first four camera headings fit without scrolling;
   raw WKT location strings do not occupy the compact header.
 - Cards omit the provider/Open row; a 4:3 image occupies its full aspect and
   clicking it exercises the same open action as clicking its overlay.
 - Waiting/empty states do not create players; a tour target survives paging out.
+- Scrolling reaches the eighth preview. Moving to another report at the same
+  coordinates returns the list to its nearest feed.
 - `frame`, `prime` and `fail_second_feed` are shared by the optional GPU preview.
 
 ## Contracts

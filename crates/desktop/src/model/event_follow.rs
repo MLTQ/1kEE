@@ -128,6 +128,7 @@ impl EventFollow {
 
     pub fn enable(&mut self, events: &[EventRecord]) {
         self.enabled = true;
+        self.target = None;
         self.tour = EventTour::default();
         self.tour.refresh(events, None);
     }

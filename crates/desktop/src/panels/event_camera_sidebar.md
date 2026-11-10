@@ -8,16 +8,16 @@ space so the map, event labels and chyron lay out beside the feeds.
 ## Components
 
 ### `EventCameraSidebar`
-- Owns at most four independent 640-pixel `CameraFeedPlayer`s outside `AppModel`.
-- Recomputes selection only when event coordinates or camera-registry revision
-  change, without invalidating the map's nearby-camera snapshot.
+- Owns at most eight independent 640-pixel `CameraFeedPlayer`s outside `AppModel`.
+- Recomputes selection when the tour moves to another event, the event coordinates
+  change, or the camera registry updates. The map keeps its nearby-camera snapshot.
 - Keeps overlapping connections across tour stops. Removed cameras and leaving
   Follow Events drop players, cancel workers and release textures.
 - A new event resets the scroll position to its closest camera.
 - Waiting/no-feed states remain honest; runtime records are never synthesized.
 
 ### `nearest_feeds` / `supports_preview`
-- Select the four nearest candidate HTTP(S) image/MJPEG endpoints globally,
+- Select the eight nearest candidate HTTP(S) image/MJPEG endpoints globally,
   using canonical haversine distance and camera ID for deterministic ties.
 - Exclude known unreachable feeds, invalid positions, credentials, non-HTTP
   schemes and known unsupported video/page formats. Unknown endpoint formats

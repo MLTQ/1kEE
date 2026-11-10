@@ -25,10 +25,10 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
   non-blocking egui live-feed window for snapshots and MJPEG
   (`camera_registry.rs`, `camera_directory_pipeline.rs`,
   `camera_feed_viewer.rs`, `camera_*_catalog.rs`).
-- **Follow Events cameras** — automatically opens a right sidebar with up to
-  four nearest camera feeds, ordered by distance to the focused event. The
-  scrollable column follows the tour, supports OBS view, and opens individual
-  feeds in the floating camera window when clicked.
+- **Follow Events cameras** — shows up to eight camera feeds in the right sidebar,
+  ordered by distance from the current event. The list scrolls back to the nearest
+  camera at each new stop. Click a preview to open its floating camera window.
+  The sidebar also appears in OBS view.
   Adjust stop duration under **Settings → Follow Events → Dwell time**
   (5–300 seconds, default 30); changes apply immediately, and **Save Settings**
   keeps the choice across restarts. Dwell begins after camera arrival.
