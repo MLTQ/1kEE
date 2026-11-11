@@ -85,3 +85,98 @@ fn imported_satellite_pixels_reach_both_earth_scenes() {
         }
     }
 }
+
+/// Run against a catalog restricted to NOAAID:38 to check both the actual survey and the viewport
+/// that each scene requests. A second run reads the saved tile set with the network disabled.
+#[test]
+#[ignore = "requires GPU and NOAA survey 38 in ONEKEE_TEST_LIDAR_DB"]
+fn lidar_zoom_paints_measured_pixels_in_both_earth_views() {
+    let db = std::path::PathBuf::from(std::env::var_os("ONEKEE_TEST_LIDAR_DB").unwrap());
+    let ctx = egui::Context::default();
+    let mut gpu = screen::Screen::new([1024, 640]);
+    gpu.install_globe();
+    let mut model = AppModel::new();
+    model.lidar.set_path(db.clone());
+    model.globe_view.focus_on(GeoPoint {
+        lon: -75.075,
+        lat: 38.33,
+    });
+    model.globe_view.stop_motion();
+    model.globe_view.look_down();
+    model.globe_view.zoom = 50.;
+    model.globe_view.local_zoom = 28.;
+    model.selected_root = None;
+    model.obs_view = true;
+    model.map_theme = crate::theme::MapTheme::Topo;
+    model.show_contours = false;
+    model.show_event_markers = false;
+    model.show_camera_markers = false;
+    model.show_bathymetry = false;
+    model.show_beam = false;
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024., 640.));
+    for local in [false, true] {
+        model.globe_view.local_mode = local;
+        model.lidar.enabled = true;
+        let frame = |model: &AppModel| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(rect),
+                    ..Default::default()
+                },
+                |ctx| {
+                    let painter = ctx
+                        .layer_painter(egui::LayerId::background())
+                        .with_clip_rect(rect);
+                    if local {
+                        super::super::local_terrain_scene::paint(&painter, rect, model, 0.);
+                    } else {
+                        super::super::globe_scene::paint(&painter, rect, model, 0.);
+                    }
+                },
+            )
+        };
+        // Present the initial frame so font/texture uploads reach the renderer.
+        gpu.render(&ctx, frame(&model), false);
+        let start = Instant::now();
+        loop {
+            model.lidar.tiles.tick(&ctx, &db, "");
+            if model.lidar.tiles.visible_tiles_loaded()
+                && model.lidar.tiles.sources.contains("Winter ATM")
+            {
+                break;
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(240),
+                "local={local}: {}",
+                model.lidar.tiles.status
+            );
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        let output = frame(&model);
+        let managers = ctx.tex_manager();
+        let textures = managers.read();
+        assert!(output.shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Mesh(mesh)
+            if !mesh.indices.is_empty() && textures.meta(mesh.texture_id).is_some_and(|meta| meta.name.contains("Winter ATM")))),
+            "local={local}: measured texture absent from scene");
+        drop(textures);
+        let actual = gpu.render(&ctx, output, true).unwrap();
+        model.lidar.enabled = false;
+        let background = gpu.render(&ctx, frame(&model), true).unwrap();
+        assert_ne!(actual, background, "local={local}: no visible lidar");
+        if let Some(dir) = std::env::var_os("ONEKEE_LIDAR_PREVIEWS") {
+            let name = if local {
+                "ocean-city-local.png"
+            } else {
+                "ocean-city-globe.png"
+            };
+            image::save_buffer(
+                std::path::PathBuf::from(dir).join(name),
+                &actual,
+                1024,
+                640,
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
+        }
+    }
+}

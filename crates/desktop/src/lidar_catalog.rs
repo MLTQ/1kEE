@@ -1,7 +1,6 @@
-//! Browse the local survey index and render a selected bare-earth window.
+//! Worldwide lidar layer and optional survey search.
 use crate::model::{ActiveBody, AppModel, GeoJsonFeature, GeoJsonGeometry, GeoJsonLayer, GeoPoint};
-use crate::panels::world_map::satellite_layer::SatelliteLayer;
-use crate::{satellite_image, settings_store};
+use crate::{lidar_tiles::Tiles, settings_store};
 use rusqlite::{Connection, OpenFlags, params};
 use std::{
     path::{Path, PathBuf},
@@ -21,19 +20,17 @@ struct Survey {
     date: Option<String>,
     page: String,
     asset: Option<String>,
-    has_raster_collection: bool,
-}
-
-enum Completed {
-    Refresh(String),
-    Terrain(String, satellite_image::SatelliteImage),
 }
 
 #[derive(Default)]
 pub(crate) struct Browser {
+    pub(crate) enabled: bool,
+    pub(crate) tiles: Tiles,
+    searched: bool,
     path: PathBuf,
     last_check: Option<Instant>,
-    work: Option<mpsc::Receiver<Result<Completed, String>>>,
+    last_generation_check: Option<Instant>,
+    work: Option<mpsc::Receiver<Result<String, String>>>,
     query: String,
     near: bool,
     offset: usize,
@@ -44,15 +41,29 @@ pub(crate) struct Browser {
     status: String,
 }
 
-fn db_path(model: &AppModel) -> PathBuf {
-    settings_store::configured_data_root()
-        .unwrap_or_else(|| {
-            model
-                .selected_root
-                .as_deref()
-                .unwrap_or(Path::new("."))
-                .join("Data")
-        })
+impl Browser {
+    pub(crate) fn new(enabled: bool, path: PathBuf) -> Self {
+        let mut browser = Self {
+            enabled,
+            path,
+            ..Default::default()
+        };
+        browser.tiles.catalog_changed(&browser.path);
+        browser
+    }
+
+    pub(crate) fn set_path(&mut self, path: PathBuf) {
+        if self.path != path {
+            *self = Self::new(self.enabled, path);
+        }
+    }
+}
+
+pub(crate) fn db_path(data_root: Option<&str>, asset_root: Option<&Path>) -> PathBuf {
+    data_root
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| asset_root.unwrap_or(Path::new(".")).join("Data"))
         .join("Lidar/catalog.sqlite")
 }
 
@@ -63,7 +74,7 @@ fn connection(path: &Path) -> Result<Connection, String> {
 fn search(browser: &mut Browser, center: GeoPoint) -> Result<(), String> {
     let db = connection(&browser.path)?;
     let mut sql = String::from(
-        "SELECT id,name,product,date,page,asset,stac IS NOT NULL FROM surveys
+        "SELECT id,name,product,date,page,asset FROM surveys
          WHERE instr(lower(name||' '||product||' '||id||' '||source),lower(?1))>0",
     );
     let half_lat = 50. / 110.;
@@ -98,7 +109,6 @@ fn search(browser: &mut Browser, center: GeoPoint) -> Result<(), String> {
                     date: row.get(3)?,
                     page: row.get(4)?,
                     asset: row.get(5)?,
-                    has_raster_collection: row.get(6)?,
                 })
             },
         )
@@ -109,7 +119,39 @@ fn search(browser: &mut Browser, center: GeoPoint) -> Result<(), String> {
     browser.more = results.len() > PAGE_SIZE;
     results.truncate(PAGE_SIZE);
     browser.results = results;
+    browser.searched = true;
     Ok(())
+}
+
+fn interior(rings: &[Vec<GeoPoint>]) -> Option<GeoPoint> {
+    let outer = rings.first()?;
+    let first = *outer.first()?;
+    let (south, north) = outer.iter().fold((first.lat, first.lat), |(s, n), p| {
+        (s.min(p.lat), n.max(p.lat))
+    });
+    let lat = (south + north) * 0.5;
+    let unwrap = |lon: f32| first.lon + (lon - first.lon + 180.).rem_euclid(360.) - 180.;
+    let mut crossings = Vec::new();
+    for ring in rings {
+        for edge in ring.windows(2) {
+            let (a, b) = (edge[0], edge[1]);
+            if (a.lat > lat) != (b.lat > lat) {
+                crossings.push(
+                    unwrap(a.lon)
+                        + (lat - a.lat) / (b.lat - a.lat) * (unwrap(b.lon) - unwrap(a.lon)),
+                );
+            }
+        }
+    }
+    crossings.sort_by(f32::total_cmp);
+    crossings
+        .chunks_exact(2)
+        .max_by(|a, b| (a[1] - a[0]).total_cmp(&(b[1] - b[0])))
+        .map(|pair| GeoPoint {
+            lat,
+            lon: ((pair[0] + pair[1]) * 0.5 + 180.).rem_euclid(360.) - 180.,
+        })
+        .or(Some(first))
 }
 
 fn select(browser: &mut Browser, survey: Survey) -> Result<GeoPoint, String> {
@@ -127,15 +169,13 @@ fn select(browser: &mut Browser, survey: Survey) -> Result<GeoPoint, String> {
         .first()
         .ok_or("Missing survey footprint")?
         .geometry;
-    // A measured boundary point also works for disjoint flight strips.
     let focus = match geometry {
         GeoJsonGeometry::Point(point) => Some(*point),
-        GeoJsonGeometry::Polygon(rings) => rings.first().and_then(|ring| ring.first()).copied(),
+        GeoJsonGeometry::Polygon(rings) => interior(rings),
         GeoJsonGeometry::MultiPolygon(parts) => parts
-            .first()
-            .and_then(|rings| rings.first())
-            .and_then(|ring| ring.first())
-            .copied(),
+            .iter()
+            .max_by_key(|rings| rings.first().map_or(0, Vec::len))
+            .and_then(|rings| interior(rings)),
         _ => None,
     }
     .ok_or("Missing survey location")?;
@@ -152,7 +192,7 @@ fn select(browser: &mut Browser, survey: Survey) -> Result<GeoPoint, String> {
 
 fn start(
     browser: &mut Browser,
-    job: impl FnOnce(PathBuf) -> Result<Completed, String> + Send + 'static,
+    job: impl FnOnce(PathBuf) -> Result<String, String> + Send + 'static,
 ) {
     let db = browser.path.clone();
     let (tx, rx) = mpsc::channel();
@@ -170,6 +210,11 @@ fn start(
 fn python(db: &Path) -> Command {
     let mut cmd = Command::new(if cfg!(windows) { "python" } else { "python3" });
     cmd.arg("-c").arg(HARVESTER).arg("--db").arg(db);
+    gdal_path(&mut cmd);
+    cmd
+}
+
+pub(crate) fn gdal_path(cmd: &mut Command) -> &mut Command {
     if let Some(folder) = settings_store::resolve_gdal_tool("gdalwarp")
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -204,9 +249,7 @@ fn run(cmd: &mut Command) -> Result<String, String> {
 fn check(browser: &mut Browser) {
     browser.last_check = Some(Instant::now());
     browser.status = "Checking survey catalogs…".into();
-    start(browser, |db| {
-        run(python(&db).arg("refresh")).map(Completed::Refresh)
-    });
+    start(browser, |db| run(python(&db).arg("refresh")));
 }
 
 fn center(model: &AppModel) -> GeoPoint {
@@ -218,36 +261,74 @@ fn center(model: &AppModel) -> GeoPoint {
 }
 
 pub(crate) fn tick(ctx: &egui::Context, model: &mut AppModel) {
-    let Some(rx) = model.lidar.work.as_ref() else {
-        return;
-    };
-    let result = match rx.try_recv() {
-        Ok(r) => r,
-        Err(mpsc::TryRecvError::Empty) => return,
-        Err(mpsc::TryRecvError::Disconnected) => Err("Lidar worker stopped".into()),
-    };
-    model.lidar.work = None;
-    if db_path(model) != model.lidar.path {
+    if !model.lidar.enabled || model.active_body != ActiveBody::Earth {
+        model.lidar.tiles.stop();
+        if model.lidar.work.is_none() {
+            return;
+        }
+    }
+    let focus = center(model);
+    let earth = model.active_body == ActiveBody::Earth;
+    let b = &mut model.lidar;
+    if let Some(rx) = &b.work {
+        let result = match rx.try_recv() {
+            Ok(r) => Some(r),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Some(Err("Lidar catalog worker stopped".into()))
+            }
+        };
+        if let Some(result) = result {
+            b.work = None;
+            b.status = result.unwrap_or_else(|error| error);
+            b.tiles.catalog_changed(&b.path);
+            if b.searched
+                && let Err(e) = search(b, focus)
+            {
+                b.status.push_str(&format!("\n{e}"));
+            }
+        }
+    }
+    if b.enabled && earth {
+        if b.work.is_none()
+            && b.last_check
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(86400))
+        {
+            check(b);
+        }
+        if b.path.is_file() {
+            if b.last_generation_check
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(10))
+            {
+                b.tiles.catalog_changed(&b.path);
+                b.last_generation_check = Some(Instant::now());
+            }
+            let preferred = b.selected.as_ref().map_or("", |survey| survey.id.as_str());
+            b.tiles.tick(ctx, &b.path, preferred);
+        }
+    }
+}
+
+pub(crate) fn toggle(ui: &mut egui::Ui, model: &mut AppModel) {
+    if model.active_body != ActiveBody::Earth {
         return;
     }
-    match result {
-        Ok(Completed::Terrain(name, image)) => {
-            model
-                .satellite_layers
-                .push(SatelliteLayer::new(ctx, name, image));
-            model.lidar.status = "Bare-earth hillshade loaded.".into();
-        }
-        result => {
-            model.lidar.status = match result {
-                Ok(Completed::Refresh(msg)) | Err(msg) => msg,
-                _ => unreachable!(),
-            };
-            let focus = center(model);
-            if model.lidar.path.is_file()
-                && let Err(e) = search(&mut model.lidar, focus)
-            {
-                model.lidar.status.push_str(&format!("\n{e}"));
-            }
+    if ui
+        .checkbox(&mut model.lidar.enabled, "Lidar")
+        .on_hover_text(
+            "Zoom into teal survey paths to load and save lidar. Gray paths mark archive coverage.",
+        )
+        .changed()
+        && let Err(error) = model.save_settings()
+    {
+        model.push_log(format!("Lidar setting save failed: {error}"));
+    }
+    if model.lidar.enabled {
+        if !model.lidar.tiles.status.is_empty() {
+            ui.small(&model.lidar.tiles.status)
+                .on_hover_text(&model.lidar.tiles.sources);
+        } else if !model.lidar.status.is_empty() {
+            ui.small(&model.lidar.status);
         }
     }
 }
@@ -256,24 +337,14 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
     if model.active_body != ActiveBody::Earth {
         return;
     }
+    let mut save = false;
     ui.collapsing("Lidar surveys", |ui| {
-        let path = db_path(model);
         let focus = center(model);
         let b = &mut model.lidar;
-        let first = b.path != path;
-        if first {
-            *b = Browser {
-                path,
-                ..Default::default()
-            };
-        }
-        let due = b
-            .last_check
-            .is_none_or(|t| t.elapsed() >= Duration::from_secs(86400));
-        let refresh = ui
+        if ui
             .add_enabled(b.work.is_none(), egui::Button::new("Refresh catalogs"))
-            .clicked();
-        if b.work.is_none() && (refresh || due) {
+            .clicked()
+        {
             check(b);
         }
         ui.small(&b.status);
@@ -284,7 +355,7 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
         let changed = ui
             .checkbox(&mut b.near, "100 km box at map center")
             .changed();
-        let mut query = first;
+        let mut query = !b.searched;
         if ui.small_button("Search surveys").clicked() || changed || submitted {
             b.offset = 0;
             query = true;
@@ -325,7 +396,14 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
         }
         if let Some(row) = chosen {
             match select(b, row) {
-                Ok(point) => model.globe_view.focus_on(point),
+                Ok(point) => {
+                    save = !b.enabled;
+                    b.enabled = true;
+                    model.globe_view.stop_motion();
+                    model.globe_view.focus_on(point);
+                    model.globe_view.local_mode = true;
+                    model.globe_view.local_zoom = model.globe_view.local_zoom.max(20.);
+                }
                 Err(e) => b.status = e,
             }
         }
@@ -347,48 +425,15 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
                     asset,
                 );
             }
-            if let Some(layer) = &mut b.footprint {
-                ui.checkbox(&mut layer.visible, "Show survey footprint");
-            }
-            if s.has_raster_collection
-                && ui
-                    .add_enabled(
-                        b.work.is_none(),
-                        egui::Button::new("Stream terrain at map center"),
-                    )
-                    .on_hover_text("Load 2 km of published bare-earth relief from this survey")
-                    .clicked()
-            {
-                let (id, name) = (s.id.clone(), s.name.clone());
-                let max_side = ui.ctx().input(|i| i.max_texture_side);
-                // The selected survey may have moved the map this frame.
-                let at = if model.globe_view.local_mode {
-                    model.globe_view.local_center
-                } else {
-                    model.globe_view.globe_center_latlon()
-                };
-                b.status = "Streaming a 2 km terrain window…".into();
-                start(b, move |db| {
-                    let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
-                    let out = tmp.path().join("relief.tif");
-                    run(python(&db)
-                        .arg("terrain")
-                        .arg("--id")
-                        .arg(id)
-                        .arg("--lat")
-                        .arg(at.lat.to_string())
-                        .arg("--lon")
-                        .arg(at.lon.to_string())
-                        .arg("--output")
-                        .arg(&out))?;
-                    Ok(Completed::Terrain(
-                        format!("{name} hillshade"),
-                        satellite_image::read(&out, max_side)?,
-                    ))
-                });
+            if ui.small_button("Clear selection").clicked() {
+                b.selected = None;
+                b.footprint = None;
             }
         }
     });
+    if save && let Err(e) = model.save_settings() {
+        model.push_log(format!("Lidar setting save failed: {e}"));
+    }
 }
 
 #[cfg(test)]
@@ -422,7 +467,7 @@ mod tests {
         search(&mut browser, at).unwrap();
         assert_eq!(browser.results.len(), 1);
         let strip = browser.results[0].clone();
-        assert_eq!(select(&mut browser, strip).unwrap().lon, -55.);
+        assert_eq!(select(&mut browser, strip).unwrap().lon, -54.25);
         assert!(browser.footprint.unwrap().visible);
     }
 }

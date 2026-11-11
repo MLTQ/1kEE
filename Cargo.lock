@@ -2696,6 +2696,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "one-thousand-electric-eye-cache-builder",
  "osmpbf",
+ "png",
  "protobuf",
  "protobuf-codegen-pure",
  "rayon",

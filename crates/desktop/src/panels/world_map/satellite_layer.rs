@@ -30,6 +30,10 @@ impl SatelliteLayer {
         }
     }
 
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
     pub(super) fn set_opacity(&mut self, percent: u8) {
         self.opacity = percent.min(100);
     }

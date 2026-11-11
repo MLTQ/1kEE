@@ -206,6 +206,10 @@ pub(super) fn paint_with_layout(
         model.global_weather.draw(painter.ctx(), rect.width().max(rect.height()) * ppp,
             || super::atlas_viewport::globe_visible(rect, &layout, &model.globe_view, ppp),
             |image| image.draw_globe(painter, &layout, &model.globe_view));
+        if model.lidar.enabled {
+            model.lidar.tiles.draw(super::atlas_viewport::globe_bounds(rect, &layout, &model.globe_view),
+                |image| image.draw_globe(painter, &layout, &model.globe_view));
+        }
         for image in &model.satellite_layers {
             image.draw_globe(painter, &layout, &model.globe_view);
         }
@@ -274,7 +278,7 @@ pub(super) fn paint_with_layout(
     }
 
     if model.active_body == crate::model::ActiveBody::Earth {
-        if let Some(layer) = &model.lidar.footprint {
+        if model.lidar.enabled && let Some(layer) = &model.lidar.footprint {
             geography::draw_geojson_layers(painter, &layout, &model.globe_view, std::slice::from_ref(layer), None);
         }
         for layers in model.ghostmaps.layers() {

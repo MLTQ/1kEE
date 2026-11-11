@@ -28,6 +28,10 @@ COLLECTIONS = {
     "gliht-cloud": "C2763264735-LPCLOUD",
 }
 SWISS = "https://data.geo.admin.ch/api/stac/v1/collections/ch.swisstopo.swisssurface3d/items?limit=100"
+LINZ = "https://nz-coastal.s3.ap-southeast-2.amazonaws.com/catalog.json"
+IRELAND = ("https://gsi.geodata.gov.ie/server/rest/services/Marine/"
+           "IE_GSI_MI_Marine_Download_Seabed_Survey_Leg_Data_IE_Waters_WGS84/MapServer/0")
+MARINE = ("linz-coastal", "infomar-lidar")
 DAY = 86400
 MAX_METADATA = 100 * 1024 * 1024
 
@@ -37,6 +41,7 @@ CREATE TABLE IF NOT EXISTS surveys (
     date TEXT, page TEXT NOT NULL, asset TEXT, stac TEXT, geometry TEXT NOT NULL,
     west REAL, south REAL, east REAL, north REAL
 );
+CREATE INDEX IF NOT EXISTS surveys_extent ON surveys(west,east,south,north);
 CREATE INDEX IF NOT EXISTS surveys_source ON surveys(source);
 CREATE TABLE IF NOT EXISTS refreshes (source TEXT PRIMARY KEY, checked REAL, version TEXT);
 CREATE TABLE IF NOT EXISTS resources (url TEXT PRIMARY KEY, etag TEXT, modified TEXT, body BLOB);
@@ -270,6 +275,65 @@ def stac_records(db, source, first):
         url = urljoin(url, next_link["href"]) if next_link else None
 
 
+def linz_document(db, parent, link):
+    url = urljoin(parent, link["href"])
+    checksum = link["file:checksum"]
+    row = db.execute("SELECT body FROM resources WHERE url=? AND etag=?", (url, checksum)).fetchone()
+    if row:
+        return url, json.loads(row[0])
+    body, _ = request(url)
+    if "1220" + hashlib.sha256(body).hexdigest() != checksum:
+        raise ValueError(f"LINZ metadata checksum mismatch: {url}")
+    db.execute("INSERT OR REPLACE INTO resources VALUES(?,?,NULL,?)", (url, checksum, body))
+    return url, json.loads(body)
+
+
+def linz_coastal(db, root):
+    for child in root["links"]:
+        if child["rel"] != "child" or "/dem_1m/" not in child["href"]:
+            continue
+        collection_url, coll = linz_document(db, LINZ, child)
+        if "lidar" not in coll["title"].lower():
+            continue
+        for link in coll["links"]:
+            if link["rel"] != "item":
+                continue
+            _, item = linz_document(db, collection_url, link)
+            item_url = urljoin(collection_url, link["href"])
+            raster = item["assets"]["visual"]
+            if "cloud-optimized" not in raster["type"]:
+                raise ValueError(f"Expected a coastal COG at {item_url}")
+            yield record("LINZ:" + item_url, coll["title"] + " · " + item["id"],
+                         "LINZ topobathymetric lidar DEM (1 m)", item["properties"].get("start_datetime"),
+                         "https://radiantearth.github.io/stac-browser/#/external/" + item_url,
+                         item["geometry"], urljoin(item_url, raster["href"]))
+
+
+def irish_query():
+    # These are the airborne survey platforms and the publisher's lidar report directory.
+    return IRELAND + "/query?" + urlencode({
+        "where": "UPPER(SURVREPURL) LIKE '%/LIDAR/%' OR UPPER(VESSELNAME) LIKE 'LADS%' "
+                 "OR UPPER(VESSELNAME) LIKE 'PELYDRYN HAWK EYE%' OR UPPER(VESSELNAME) = 'BLOMS GREATMANS BAY'",
+        "outFields": "OBJECTID,GLOBALID,VESSELNAME,SURVEYYEAR,SURVREPURL,SR_URL,GRID_URL,XYZ_URL",
+        "returnGeometry": "true", "outSR": 4326, "geometryPrecision": 6, "f": "geojson"})
+
+
+def infomar(data):
+    if data.get("exceededTransferLimit") or data.get("properties", {}).get("exceededTransferLimit"):
+        raise ValueError("Incomplete Irish lidar inventory")
+    for f in data["features"]:
+        p = f["properties"]
+        # Expose the publisher's existing render as well as its measured grid/XYZ when supplied.
+        for key, product in (("SR_URL", "shaded relief"), ("GRID_URL", "depth grid"), ("XYZ_URL", "XYZ soundings")):
+            asset = p.get(key) or ""
+            if not asset.startswith("https://") or not asset.lower().endswith(".zip"):
+                continue
+            name = unquote(urlsplit(asset).path.split("/")[-1]).split("_5m")[0]
+            page = p["SURVREPURL"] if (p.get("SURVREPURL") or "").startswith("https://") else IRELAND + "/" + str(p["OBJECTID"])
+            yield record("INFOMAR:" + p["GLOBALID"] + ":" + key, "Ireland · " + name.replace("_", " "),
+                         "INFOMAR bathymetric lidar " + product, str(p["SURVEYYEAR"]), page, f["geometry"], asset)
+
+
 def refresh_source(db, source, force, collections, stac=None):
     stac = stac or {}
     with db:
@@ -282,6 +346,10 @@ def refresh_source(db, source, force, collections, stac=None):
             data, rasters = cached(db, OT_CATALOG), cached(db, OT_STAC)
             version = "lidar-v2:" + hashlib.sha256(data + rasters).hexdigest()
             records = lambda: opentopography(json.loads(data), json.loads(rasters))
+        elif source in MARINE:
+            body = cached(db, LINZ if source == "linz-coastal" else irish_query())
+            version = hashlib.sha256(body).hexdigest()
+            records = lambda: linz_coastal(db, json.loads(body)) if source == "linz-coastal" else infomar(json.loads(body))
         elif source == "eba":
             release = json.loads(request(EBA_LATEST)[0])
             archives = [f for f in release["files"] if "transect" in f["key"].lower()
@@ -303,6 +371,8 @@ def refresh_source(db, source, force, collections, stac=None):
             db.executemany("INSERT INTO surveys VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                            ((r[0], source, *r[1:]) for r in records()))
             count = db.execute("SELECT COUNT(*) FROM surveys WHERE source=?", (source,)).fetchone()[0]
+            generation = db.execute("PRAGMA user_version").fetchone()[0] + 1
+            db.execute(f"PRAGMA user_version={generation}")
             if not count:
                 raise ValueError("No geolocated lidar records returned")
         db.execute("INSERT OR REPLACE INTO refreshes VALUES(?,?,?)", (source, time.time(), version))
@@ -321,10 +391,10 @@ def refresh(db, args):
     elif args.stac_items or args.cmr_collection:
         sources = [name for name in stac if name.startswith("stac-")] + args.cmr_collection
     else:
-        sources = ["opentopography", "eba", *collections, *stac]
+        sources = ["opentopography", "eba", *MARINE, *collections, *stac]
     failed = False
     for source in dict.fromkeys(sources):
-        if source not in ("opentopography", "eba") and source not in collections and source not in stac:
+        if source not in ("opentopography", "eba", *MARINE) and source not in collections and source not in stac:
             raise ValueError(f"Unknown source {source}")
         try:
             status = refresh_source(db, source, args.force, collections, stac)

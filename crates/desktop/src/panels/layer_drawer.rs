@@ -95,6 +95,7 @@ pub(crate) fn map_controls(ui: &mut egui::Ui, model: &mut AppModel) {
     }
     ui.checkbox(&mut model.show_coastlines, "Coastline");
     ui.checkbox(&mut model.show_bathymetry, "Bathymetry");
+    crate::lidar_catalog::toggle(ui, model);
     world_map::swot_controls(ui, model);
     world_map::gravity_controls(ui, model);
     ui.checkbox(&mut model.show_graticule, "Graticule");

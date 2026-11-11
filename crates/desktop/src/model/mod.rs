@@ -358,7 +358,8 @@ impl AppModel {
             show_planet_trails: false,
             planet_trail_years: 0.0,
             geojson_layers: Vec::new(),
-            lidar: Default::default(),
+            lidar: crate::lidar_catalog::Browser::new(app_settings.lidar_enabled,
+                crate::lidar_catalog::db_path(app_settings.data_root.as_deref(), selected_root.as_deref())),
             satellite_layers: Vec::new(),
             global_weather: global_weather::GlobalWeather::new(
                 app_settings.global_weather,
@@ -586,6 +587,7 @@ impl AppModel {
             eyes_on_enabled: self.eyes_on_enabled,
             ai_buildout_enabled: self.buildout.enabled,
             ghostmaps: self.ghostmaps.settings.clone(),
+            lidar_enabled: self.lidar.enabled,
             global_weather: self.global_weather.settings(),
             eyes_on_country_code: settings_store::normalize_eyes_on_country_code(
                 &self.eyes_on_country_code,
@@ -619,6 +621,7 @@ impl AppModel {
         };
         settings_store::save_app_settings(&settings)?;
         let data_root = settings_store::load_app_settings().data_root;
+        self.lidar.set_path(crate::lidar_catalog::db_path(data_root.as_deref(), self.selected_root.as_deref()));
         self.global_weather.set_cache_path(global_weather::cache_path(
             data_root.as_deref(), self.selected_root.as_deref(),
         ));
@@ -640,9 +643,11 @@ impl AppModel {
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_default();
+        self.lidar.enabled = settings.lidar_enabled;
         self.buildout.enabled = settings.ai_buildout_enabled;
         self.ghostmaps.set_settings(settings.ghostmaps);
         self.global_weather.set_settings(settings.global_weather);
+        self.lidar.set_path(crate::lidar_catalog::db_path(settings.data_root.as_deref(), self.selected_root.as_deref()));
         self.global_weather.set_cache_path(global_weather::cache_path(
             settings.data_root.as_deref(), self.selected_root.as_deref(),
         ));

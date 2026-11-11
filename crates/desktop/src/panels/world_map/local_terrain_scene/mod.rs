@@ -298,6 +298,10 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         model.global_weather.draw(painter.ctx(), clip.width().max(clip.height()) * painter.ctx().pixels_per_point(),
             || super::atlas_viewport::local_visible(clip, &layout, &model.globe_view, viewport_center, half),
             |image| image.draw_local(painter, &layout, &model.globe_view, viewport_center, half));
+        if model.lidar.enabled {
+            model.lidar.tiles.draw(super::atlas_viewport::local_visible(clip, &layout, &model.globe_view, viewport_center, half),
+                |image| image.draw_local(painter, &layout, &model.globe_view, viewport_center, half));
+        }
         for image in &model.satellite_layers {
             image.draw_local(painter, &layout, &model.globe_view, viewport_center, visual_half_extent_for_zoom(model.globe_view.local_zoom));
         }
@@ -689,7 +693,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         );
     }
     if model.active_body == crate::model::ActiveBody::Earth {
-        if let Some(layer) = &model.lidar.footprint {
+        if model.lidar.enabled && let Some(layer) = &model.lidar.footprint {
             draw_geojson_layers_local(painter, &layout, &model.globe_view, viewport_center,
                 extent_x_km, extent_y_km, std::slice::from_ref(layer), None);
         }
