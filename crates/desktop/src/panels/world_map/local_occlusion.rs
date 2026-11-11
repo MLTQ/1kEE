@@ -205,7 +205,20 @@ impl Resources {
     }
 }
 fn ground_depth(u: &LocalContourUniforms, lon: f32, lat: f32) -> f32 {
-    (lon - u.focus_lon) * u.x_factor * u.yaw_sin + (lat - u.focus_lat) * u.y_factor * u.yaw_cos
+    use crate::model::{GeoPoint, polar};
+    let delta = if u.ground_chart[0] != 0.0 {
+        polar::offset(
+            u.ground_chart[0],
+            GeoPoint {
+                lat: u.focus_lat,
+                lon: u.focus_lon,
+            },
+            GeoPoint { lat, lon },
+        )
+    } else {
+        egui::vec2(lon - u.focus_lon, lat - u.focus_lat)
+    };
+    delta.x * u.x_factor * u.yaw_sin + delta.y * u.y_factor * u.yaw_cos
 }
 fn center_depth(u: &LocalContourUniforms, b: &LocalTileBatch) -> f32 {
     let r = b.occlusion.bounds;

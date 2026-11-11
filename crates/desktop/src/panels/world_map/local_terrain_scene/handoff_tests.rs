@@ -9,6 +9,7 @@ fn view(half: f32) -> Viewport {
         body: ActiveBody::Earth,
         rect: egui::Rect::from_min_max(egui::pos2(-half, -half), egui::pos2(half, half)),
         projection: LocalProjectionParams {
+            pole: 0.0,
             focus_lat: 0.0,
             focus_lon: 0.0,
             x_factor: 1.0,

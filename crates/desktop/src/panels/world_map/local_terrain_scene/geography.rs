@@ -3,7 +3,7 @@ use std::path::Path;
 use crate::model::{GeoPoint, GlobeViewState};
 
 use super::super::contour_asset;
-use super::projection::project_local;
+use super::projection::{contains_point, local_projection_params, project_local};
 use super::{LocalLayout, local_stroke_width_points, visual_half_extent_for_zoom};
 
 pub(super) fn draw_bathymetry_local(
@@ -30,21 +30,16 @@ pub(super) fn draw_bathymetry_local(
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
 
-    let margin = half_extent_deg * 1.5;
-    let min_lat = focus.lat - margin;
-    let max_lat = focus.lat + margin;
-    let min_lon = focus.lon - margin;
-    let max_lon = focus.lon + margin;
+    let bounds = local_projection_params(layout, view, focus, extent_x_km, extent_y_km)
+        .ground_bounds(painter.clip_rect().expand(8.))
+        .unwrap_or([-180., -90., 180., 90.]);
 
     let _ = render_zoom; // used by caller for LOD selection via bathy_zoom
 
     const BATHY_ELEV_OFFSET: f32 = -5.0; // project just below sea level
 
     for contour in bathy.iter() {
-        let in_view = contour
-            .points
-            .iter()
-            .any(|p| p.lat >= min_lat && p.lat <= max_lat && p.lon >= min_lon && p.lon <= max_lon);
+        let in_view = contour.points.iter().any(|p| contains_point(bounds, *p));
         if !in_view {
             continue;
         }
@@ -104,11 +99,9 @@ pub(super) fn draw_coastlines_local(
     let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
 
-    let margin = half_extent_deg * 1.5;
-    let min_lat = focus.lat - margin;
-    let max_lat = focus.lat + margin;
-    let min_lon = focus.lon - margin;
-    let max_lon = focus.lon + margin;
+    let bounds = local_projection_params(layout, view, focus, extent_x_km, extent_y_km)
+        .ground_bounds(painter.clip_rect().expand(8.))
+        .unwrap_or([-180., -90., 180., 90.]);
 
     // GEBCO-derived global coastline (450m resolution).
     // Single LOD in load_global_coastlines so this never reloads on zoom change.
@@ -126,10 +119,7 @@ pub(super) fn draw_coastlines_local(
     );
 
     for coast in coastlines.iter() {
-        let in_view = coast
-            .points
-            .iter()
-            .any(|p| p.lat >= min_lat && p.lat <= max_lat && p.lon >= min_lon && p.lon <= max_lon);
+        let in_view = coast.points.iter().any(|p| contains_point(bounds, *p));
         if !in_view {
             continue;
         }

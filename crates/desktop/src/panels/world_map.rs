@@ -123,7 +123,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         let (response, painter) = ui.allocate_painter(desired, egui::Sense::click_and_drag());
         let rect = response.rect;
 
-        if camera::manual_input(ui.ctx(), &response) {
+        if camera::manual_input(ui.ctx(), &response, local_terrain_mode) {
             model.stop_event_follow();
         }
         if !model.event_follow.enabled() {

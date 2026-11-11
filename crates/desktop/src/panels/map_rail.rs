@@ -98,6 +98,10 @@ fn view_buttons(ui: &mut egui::Ui, model: &mut AppModel) {
             let center = model.globe_view.globe_center_latlon();
             model.stop_event_follow();
             model.globe_view.local_center = center;
+            if crate::model::polar::pole_for(center.lat) != 0.0 {
+                model.globe_view.stop_motion();
+                model.globe_view.look_down();
+            }
             model.globe_view.local_mode = true;
         }
     })

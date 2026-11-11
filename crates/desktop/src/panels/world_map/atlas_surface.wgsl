@@ -41,6 +41,12 @@ fn vs_surface(@builtin(vertex_index) vertex:u32,@builtin(instance_index) row:u32
     let size=vec2<f32>(textureDimensions(heights));
     var uv=(coordinate*(size-1.0)+0.5)/size;
     var geo=vec2<f32>(mix(u.region.x,u.region.z,uv.x),mix(u.region.w,u.region.y,uv.y));
+    // The polar cap must reach both the geographic pole and the longitude
+    // seam. Sample clamped edge texels at the actual raster bounds.
+    if u.extra.x>0.5 && u.globe.x!=0.0 {
+        uv=coordinate;
+        geo=vec2<f32>(mix(u.region.x,u.region.z,uv.x),mix(u.region.w,u.region.y,uv.y));
+    }
     if u.extra.w>0.5 {
         geo=vec2<f32>(mix(u.exclude.x,u.exclude.z,coordinate.x),mix(u.exclude.w,u.exclude.y,coordinate.y));
         uv=vec2<f32>((geo.x-u.region.x)/(u.region.z-u.region.x),(u.region.w-geo.y)/(u.region.w-u.region.y));
@@ -48,8 +54,8 @@ fn vs_surface(@builtin(vertex_index) vertex:u32,@builtin(instance_index) row:u32
     let h=height_at(uv);
     var logical:vec2<f32>;var depth:f32;var w=1.0;
     if u.extra.x>0.5 {
-        let x=(geo.x+u.extra.y-u.a.x)*u.a.z;
-        let y=(geo.y-u.a.y)*u.a.w;
+        let offset=local_ground(vec2<f32>(geo.x+u.extra.y,geo.y),u.a.xy,u.globe.x);
+        let x=offset.x*u.a.z;let y=offset.y*u.a.w;
         let z=h*u.b.x;
         let xr=x*u.b.y-y*u.b.z;let yr=x*u.b.z+y*u.b.y;
         logical=vec2<f32>(u.c.y+xr*u.c.w,

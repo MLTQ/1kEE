@@ -157,6 +157,30 @@ fn native_globe_runtime_refines_after_gui_launch() {
 #[test]
 #[ignore = "requires GPU, GDAL and original terrain; production Local controller"]
 fn native_local_runtime_draws_solid_terrain_and_attached_contours() {
+    local_runtime(
+        GeoPoint {
+            lat: 46.5,
+            lon: 7.5,
+        },
+        0.4,
+        1.0,
+    );
+}
+
+#[test]
+#[ignore = "requires GPU, GDAL and Antarctic elevation data"]
+fn antarctic_overhead_covers_the_pole_and_the_dateline() {
+    local_runtime(
+        GeoPoint {
+            lat: -88.0,
+            lon: 173.0,
+        },
+        4.5,
+        0.0,
+    );
+}
+
+fn local_runtime(focus: GeoPoint, half: f32, pitch: f32) {
     use std::time::{Duration, Instant};
     let root = PathBuf::from(std::env::var("ONEKEE_ATLAS_ROOT").expect("terrain root"));
     let mut gpu = screen::Screen::new([1280, 832]);
@@ -167,13 +191,12 @@ fn native_local_runtime_draws_solid_terrain_and_attached_contours() {
     model.map_theme = crate::theme::MapTheme::Atlas;
     model.atlas_style = crate::atlas_style::AtlasStyle::default();
     model.selected_root = Some(root);
-    let focus = GeoPoint {
-        lat: 46.5,
-        lon: 7.5,
-    };
     model.globe_view = GlobeViewState::from_focus(focus);
     model.globe_view.local_mode = true;
-    model.globe_view.local_pitch = 1.0;
+    if pitch == 0.0 {
+        model.globe_view.local_zoom = 1.0;
+    }
+    model.globe_view.local_pitch = pitch;
     model.globe_view.local_layer_spread = 2.5;
     model.show_contours = false;
     model.show_bathymetry = false;
@@ -202,7 +225,7 @@ fn native_local_runtime_draws_solid_terrain_and_attached_contours() {
                     .layer_painter(egui::LayerId::background())
                     .with_clip_rect(rect);
                 painter.rect_filled(rect, 0., crate::theme::canvas_background());
-                draw_local(&painter, &layout, &model, focus, 0.4);
+                draw_local(&painter, &layout, &model, focus, half);
             },
         );
         let pixels = gpu.render(&ctx, output, true).unwrap();
@@ -234,6 +257,17 @@ fn native_local_runtime_draws_solid_terrain_and_attached_contours() {
             }
             if let Ok(path) = std::env::var("ONEKEE_ATLAS_LOCAL_3D_PREVIEW") {
                 image::save_buffer(path, &pixels, 1280, 832, image::ColorType::Rgba8).unwrap();
+            }
+            if pitch == 0.0 {
+                // Every interior sample must have measured terrain, including
+                // the longitude seam and the point where the meridians meet.
+                let background = crate::theme::canvas_background().to_array();
+                for y in (8..824).step_by(8) {
+                    for x in (8..1272).step_by(8) {
+                        let i = (y * 1280 + x) * 4;
+                        assert_ne!(&pixels[i..i + 3], &background[..3], "hole at {x},{y}");
+                    }
+                }
             }
             solid = Some(pixels);
             model.show_contours = true;

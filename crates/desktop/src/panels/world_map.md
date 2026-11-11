@@ -47,7 +47,7 @@ for the actual framebuffer. Palette selection and terrain geometry are separate.
 - The terrain path now prefers streamed SRTM land tiles, and contour overlays are generated into a shared SQLite-backed GDAL focus cache off the UI thread instead of one file per streamed bucket.
 - The globe now has a zoom overlap band where local terrain fades/scales in before the full local scene takes over, which makes the globe-to-local handoff much less abrupt.
 - Manual globe mode no longer forces a steady repaint loop. The panel only free-runs when auto-spin is on or when local terrain cache work is still pending.
-- At high zoom the panel now hands off from the globe renderer to a dedicated selected-event local terrain scene with a fixed oblique camera.
+- The Local button opens terrain at the current map center. Drag to pan, Shift-drag to orbit, or press Home over the map for a north-up overhead view.
 - At high zoom the panel can also follow a manual city focus from the terrain library, which is useful for terrain inspection and precompute validation away from the seeded event list.
 - In local terrain mode, plain drag now pans the streamed viewport and `Ctrl`/`Shift` drag rotates the terrain camera independently from the globe orbit state.
 - Local terrain mode now uses a footer control strip below the map for layer spread, terrain zoom readout, and a contour color legend instead of placing those controls over the rendered scene.

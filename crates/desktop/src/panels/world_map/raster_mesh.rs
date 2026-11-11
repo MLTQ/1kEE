@@ -71,10 +71,6 @@ pub(super) fn local(
 ) -> egui::Mesh {
     let mut mesh = egui::Mesh::with_texture(texture);
     let [mut west, south, mut east, north] = bounds;
-    // Put an unwrapped source such as Alaska beside the current focus.
-    let shift = ((focus.lon - (west + east) * 0.5) / 360.0).round() * 360.0;
-    west += shift;
-    east += shift;
     let extent_y = (half * 111.32).max(1.0);
     let extent_x = (half * 111.32 * focus.lat.to_radians().cos().abs().max(0.2)).max(1.0);
     let projection = local_projection_params(layout, view, focus, extent_x, extent_y);
@@ -82,41 +78,18 @@ pub(super) fn local(
         let (x, y, _) = projection.project_logical(GeoPoint { lat, lon }, 0.0);
         egui::pos2(x, y)
     };
-    // At sea level the local transform is affine. Invert the actual clip
-    // rectangle before drawing, so deep zoom cannot cull every coarse vertex
-    // of a large region, or introduce extreme offscreen coordinates.
-    let origin = project(focus.lat, focus.lon);
-    let u = project(focus.lat, focus.lon + 1.0) - origin;
-    let v = project(focus.lat + 1.0, focus.lon) - origin;
-    let det = u.x * v.y - u.y * v.x;
-    if !det.is_finite() || det.abs() < 1e-6 {
+    let Some(visible) = projection.ground_bounds(clip.expand(2.0)) else {
         return mesh;
+    };
+    let mid = (visible[0] + visible[2]) * 0.5;
+    let shift = ((mid - (west + east) * 0.5) / 360.0).round() * 360.0;
+    west += shift;
+    east += shift;
+    let mut visible = visible;
+    if projection.pole == 0.0 {
+        visible[0] = visible[0].max(focus.lon - 180.0);
+        visible[2] = visible[2].min(focus.lon + 180.0);
     }
-    let mut visible = [
-        f32::INFINITY,
-        f32::INFINITY,
-        f32::NEG_INFINITY,
-        f32::NEG_INFINITY,
-    ];
-    let clip = clip.expand(2.0);
-    for corner in [
-        clip.left_top(),
-        clip.right_top(),
-        clip.right_bottom(),
-        clip.left_bottom(),
-    ] {
-        let delta = corner - origin;
-        let lon = focus.lon + (delta.x * v.y - delta.y * v.x) / det;
-        let lat = focus.lat + (u.x * delta.y - u.y * delta.x) / det;
-        visible[0] = visible[0].min(lon);
-        visible[1] = visible[1].min(lat);
-        visible[2] = visible[2].max(lon);
-        visible[3] = visible[3].max(lat);
-    }
-    // Near edge-on pitch the clip rectangle can span multiple revolutions.
-    // Show each longitude only once in the plane centered on the observer.
-    visible[0] = visible[0].max(focus.lon - 180.0);
-    visible[2] = visible[2].min(focus.lon + 180.0);
     let bottom = south.max(visible[1]);
     let top = north.min(visible[3]);
     if bottom >= top {
@@ -129,18 +102,32 @@ pub(super) fn local(
         if left >= right {
             continue;
         }
-        let start = mesh.vertices.len() as u32;
-        for (lat, lon) in [(top, left), (top, right), (bottom, right), (bottom, left)] {
-            mesh.vertices.push(egui::epaint::Vertex {
-                pos: project(lat, lon),
-                uv: egui::pos2(
-                    (lon - (west + offset)) / (east - west),
-                    (north - lat) / (north - south),
-                ),
-                color: egui::Color32::WHITE,
-            });
+        // Polar latitude rings are arcs. Bound their chord error in screen points.
+        let steps = if projection.pole == 0.0 {
+            1
+        } else {
+            let radius = (90.0 - projection.pole * bottom).max(90.0 - projection.pole * top);
+            let px = radius * projection.x_factor * projection.horizontal_scale;
+            ((right - left).to_radians() * (px / 4.0).sqrt())
+                .ceil()
+                .max(1.0) as usize
+        };
+        for i in 0..steps {
+            let l = egui::lerp(left..=right, i as f32 / steps as f32);
+            let r = egui::lerp(left..=right, (i + 1) as f32 / steps as f32);
+            let start = mesh.vertices.len() as u32;
+            for (lat, lon) in [(top, l), (top, r), (bottom, r), (bottom, l)] {
+                mesh.vertices.push(egui::epaint::Vertex {
+                    pos: project(lat, lon),
+                    uv: egui::pos2(
+                        ((lon - (west + offset)) / (east - west)).clamp(0., 1.),
+                        ((north - lat) / (north - south)).clamp(0., 1.),
+                    ),
+                    color: egui::Color32::WHITE,
+                });
+            }
+            mesh.indices.extend([0, 1, 2, 0, 2, 3].map(|i| start + i));
         }
-        mesh.indices.extend([0, 1, 2, 0, 2, 3].map(|i| start + i));
     }
     mesh
 }

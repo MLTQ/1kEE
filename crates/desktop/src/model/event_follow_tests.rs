@@ -199,7 +199,10 @@ fn date_line_uses_short_route_and_polar_orbits_stay_bounded() {
             let f = Flight::new(&view, [0.0; 5], GeoPoint { lat, lon: -1.0 }, 0.0);
             for t in 0..400 {
                 apply(&mut view, f.sample(t as f64).0);
-                assert!(view.local_center.lat.abs() <= 85.0);
+                assert!(view.local_center.lat.abs() <= if local { 90.0 } else { 85.0 });
+                if local && t as f64 >= f.duration {
+                    assert_eq!(view.local_center.lat, lat);
+                }
                 assert!(view.local_center.lon.abs() <= 180.0);
             }
         }

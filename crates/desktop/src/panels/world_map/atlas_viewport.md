@@ -8,8 +8,8 @@ Arcsecond edges permit fine native sampling without a one-degree minimum crop.
 - `globe` samples the canvas and perspective limb, unwraps longitude around the
   view centre and includes visible poles. Small globes retain the overview.
 - `local` inverts all four real clip corners through the sea-level projector,
-  including yaw/pitch and asymmetric layout, rather than guessing a view radius.
-- `Region` pads/snaps bounds to a power-of-two arcsecond grid. `size` keeps all
+  including yaw/pitch and asymmetric layout. Polar charts also check the nearest edge and whether the viewport encloses the pole.
+- `Region` pads/snaps each axis to a power-of-two arcsecond grid. `size` keeps all
   native samples when they fit, with an 8192-edge / 32-million-pixel ceiling.
 
 ## Contracts

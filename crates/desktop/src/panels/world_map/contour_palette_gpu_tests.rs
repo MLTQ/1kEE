@@ -32,6 +32,7 @@ fn contour_palette_and_fades_match_egui_across_tile_handoff() {
         pixels_per_point: 1.0,
     };
     let params = LocalProjectionParams {
+        pole: 0.0,
         focus_lat: 0.0,
         focus_lon: 0.0,
         x_factor: 1.0,

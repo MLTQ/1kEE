@@ -1,8 +1,6 @@
-use crate::model::GlobeViewState;
+use crate::model::{GLOBE_PITCH_LIMIT_RAD, GlobeViewState, LOCAL_MAX_TILT, polar};
 
 use super::local_terrain_scene;
-
-const GLOBE_PITCH_LIMIT_RAD: f32 = 1.53;
 
 /// Half-life for momentum decay in seconds.
 /// After this many seconds the velocity has dropped to 50% of its release value.
@@ -27,12 +25,21 @@ pub struct GlobeLod {
 
 /// Only navigation over the canvas interrupts an idle flight, not a hover or
 /// typing into the brief/settings windows.
-pub fn manual_input(ctx: &egui::Context, response: &egui::Response) -> bool {
-    response.dragged() || (response.hovered() && ctx.input(|i| {
-        i.raw_scroll_delta.y.abs() > f32::EPSILON
-            || [egui::Key::ArrowLeft, egui::Key::ArrowRight, egui::Key::ArrowUp, egui::Key::ArrowDown]
-                .iter().any(|&key| i.key_down(key))
-    }))
+pub fn manual_input(ctx: &egui::Context, response: &egui::Response, local: bool) -> bool {
+    response.dragged()
+        || (response.hovered()
+            && ctx.input(|i| {
+                (local && i.key_pressed(egui::Key::Home))
+                    || i.raw_scroll_delta.y.abs() > f32::EPSILON
+                    || [
+                        egui::Key::ArrowLeft,
+                        egui::Key::ArrowRight,
+                        egui::Key::ArrowUp,
+                        egui::Key::ArrowDown,
+                    ]
+                    .iter()
+                    .any(|&key| i.key_down(key))
+            }))
 }
 
 pub fn apply_interaction(
@@ -46,6 +53,11 @@ pub fn apply_interaction(
     // Whether any live input is driving the velocity this frame.
     // When true, decay is skipped so momentum doesn't fight active input.
     let mut input_active = false;
+    if view.local_mode && response.hovered() && ctx.input(|i| i.key_pressed(egui::Key::Home)) {
+        view.stop_motion();
+        view.look_down();
+        ctx.request_repaint();
+    }
 
     // ── Mouse drag ────────────────────────────────────────────────────────────
     if response.dragged() {
@@ -71,7 +83,7 @@ pub fn apply_interaction(
             } else {
                 // Plain drag → pan.  Convert pixel delta to lat/lon deg and
                 // divide by dt to get velocity in deg/s.
-                let (dlat, dlon) = local_pan_delta_to_latlon(response.rect, view, delta);
+                let (dlat, dlon) = local_pan_delta(response.rect, view, delta);
                 view.vel_local_lat = lerp(view.vel_local_lat, dlat / dt, 0.88);
                 view.vel_local_lon = lerp(view.vel_local_lon, dlon / dt, 0.88);
                 // Dampen rotate momentum when switching to pan.
@@ -159,7 +171,7 @@ pub fn apply_interaction(
                 } else {
                     // Plain arrows → pan.  Scale the px/s target by ramp.
                     let key_px = egui::Vec2::new(-h * 160.0 * ramp, -v * 160.0 * ramp);
-                    let (lat_ps, lon_ps) = local_pan_delta_to_latlon(response.rect, view, key_px);
+                    let (lat_ps, lon_ps) = local_pan_delta(response.rect, view, key_px);
                     view.vel_local_lat = lerp(view.vel_local_lat, lat_ps, 0.5);
                     view.vel_local_lon = lerp(view.vel_local_lon, lon_ps, 0.5);
                     view.vel_local_yaw *= 0.9;
@@ -199,7 +211,7 @@ pub fn apply_interaction(
     if view.meander_mode && !response.dragged() && view.local_mode {
         let t = ctx.input(|i| i.time) as f32;
         const PHI: f32 = 1.618_034;
-        const SQRT2: f32 = 1.414_213;
+        const SQRT2: f32 = std::f32::consts::SQRT_2;
         let s = view.meander_speed;
 
         // Slow yaw orbit — circles around the scene.
@@ -231,7 +243,7 @@ pub fn apply_interaction(
 
         // Incommensurate frequency multipliers.
         const PHI: f32 = 1.618_034; // golden ratio
-        const SQRT2: f32 = 1.414_213;
+        const SQRT2: f32 = std::f32::consts::SQRT_2;
 
         let s = view.meander_speed;
 
@@ -288,10 +300,12 @@ pub fn apply_interaction(
     // ── Apply velocity to position ───────────────────────────────────────────
     if view.local_mode {
         view.local_yaw += view.vel_local_yaw * dt;
-        view.local_pitch = (view.local_pitch + view.vel_local_pitch * dt).clamp(0.02, 1.55);
-        view.local_center.lat =
-            (view.local_center.lat + view.vel_local_lat * dt).clamp(-85.0, 85.0);
-        view.local_center.lon = normalize_lon(view.local_center.lon + view.vel_local_lon * dt);
+        let pitch = view.local_pitch + view.vel_local_pitch * dt;
+        view.local_pitch = pitch.clamp(0.0, LOCAL_MAX_TILT);
+        if pitch != view.local_pitch {
+            view.vel_local_pitch = 0.0;
+        }
+        pan_local(view, dt);
     } else {
         view.yaw += view.vel_yaw * dt;
         view.pitch =
@@ -316,37 +330,55 @@ pub fn apply_interaction(
     }
 }
 
-/// Convert a pixel-space delta (or velocity in px/s) into a lat/lon displacement
-/// (or velocity in deg/s) using the same coordinate mapping as the local-mode renderer.
-/// Passing `delta_px` (pixels) returns degrees of displacement.
-/// Passing `vel_px` (pixels/second) returns degrees/second velocity.
-fn local_pan_delta_to_latlon(
-    rect: egui::Rect,
-    view: &GlobeViewState,
-    delta_px: egui::Vec2,
-) -> (f32, f32) {
-    let half_extent_deg = local_terrain_scene::visual_half_extent_for_zoom(view.local_zoom);
-    let km_per_deg_lat = 111.32f32;
-    let km_per_deg_lon = km_per_deg_lat * view.local_center.lat.to_radians().cos().abs().max(0.2);
-    let extent_x_km = (half_extent_deg * km_per_deg_lon).max(1.0);
-    let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
-    let horizontal_scale = rect.width() * 0.31;
-    let ground_vertical_scale =
-        rect.height() * 0.74 * 0.55 * view.local_pitch.cos() - 48.0 * view.local_pitch.sin();
-    let vertical_scale = ground_vertical_scale.abs().max(18.0);
+/// Invert the same sea-level transform that paints this canvas.
+fn local_pan_delta(rect: egui::Rect, view: &GlobeViewState, delta_px: egui::Vec2) -> (f32, f32) {
+    let layout = local_terrain_scene::layout(rect);
+    let half = local_terrain_scene::visual_half_extent_for_zoom(view.local_zoom);
+    let center = view.local_center;
+    let lon_km = 111.32 * center.lat.to_radians().cos().abs().max(0.2);
+    let p = local_terrain_scene::projection::local_projection_params(
+        &layout,
+        view,
+        center,
+        (half * lon_km).max(1.0),
+        (half * 111.32).max(1.0),
+    );
+    let delta = p.chart_delta(-delta_px);
+    (delta.y, delta.x)
+}
 
-    let x_yaw_shift = -delta_px.x / horizontal_scale.max(1.0);
-    let y_yaw_shift = delta_px.y / vertical_scale;
-    let yaw_cos = view.local_yaw.cos();
-    let yaw_sin = view.local_yaw.sin();
-    let x_shift = x_yaw_shift * yaw_cos + y_yaw_shift * yaw_sin;
-    let y_shift = -x_yaw_shift * yaw_sin + y_yaw_shift * yaw_cos;
-
-    let east_km = x_shift * extent_x_km;
-    let north_km = y_shift * extent_y_km;
-    let dlat = north_km / km_per_deg_lat;
-    let dlon = east_km / km_per_deg_lon.max(8.0);
-    (dlat, dlon)
+fn pan_local(view: &mut GlobeViewState, dt: f32) {
+    let velocity = egui::vec2(view.vel_local_lon, view.vel_local_lat);
+    if velocity == egui::Vec2::ZERO {
+        return;
+    }
+    let center = view.local_center;
+    let pole = polar::pole_for(center.lat);
+    if pole != 0.0 {
+        let next = polar::location(pole, center, velocity * dt);
+        // Transport both heading and coasting velocity into the new meridian's
+        // basis. Crossing a pole changes longitude by 180° in a single step.
+        let turn = pole * (next.lon - center.lon).to_radians();
+        view.local_yaw += turn;
+        let (sin, cos) = turn.sin_cos();
+        view.vel_local_lon = velocity.x * cos + velocity.y * sin;
+        view.vel_local_lat = -velocity.x * sin + velocity.y * cos;
+        view.local_center = next;
+    } else {
+        view.local_center.lat += velocity.y * dt;
+        view.local_center.lon += velocity.x * dt;
+    }
+    let next_pole = polar::pole_for(view.local_center.lat);
+    if next_pole != pole {
+        // Convert eastward speed between degrees of longitude and chart arc.
+        let scale = (90.0 - view.local_center.lat.abs()).to_radians();
+        if pole == 0.0 {
+            view.vel_local_lon *= scale;
+        } else {
+            view.vel_local_lon /= scale;
+        }
+    }
+    view.local_center.lon = normalize_lon(view.local_center.lon);
 }
 
 fn lerp(a: f32, b: f32, t: f32) -> f32 {
@@ -401,5 +433,106 @@ pub fn lod(view: &GlobeViewState) -> GlobeLod {
             altitude_scale: 0.14,
             backface_alpha: 0.06,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::GeoPoint;
+    use local_terrain_scene::projection::local_projection_params;
+
+    #[test]
+    fn drag_tracks_the_same_ground_through_either_pole() {
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(2400., 1100.));
+        let layout = local_terrain_scene::layout(rect);
+        for sign in [-1., 1.] {
+            for tilt in [0., 0.75, LOCAL_MAX_TILT] {
+                let start = GeoPoint {
+                    lat: sign * 89.95,
+                    lon: 179.9,
+                };
+                let mut view = GlobeViewState::from_focus(start);
+                view.local_zoom = 1.;
+                view.local_pitch = tilt;
+                let half =
+                    local_terrain_scene::visual_half_extent_for_zoom(view.local_zoom) * 111.32;
+                let project = |v: &GlobeViewState| {
+                    let p = local_projection_params(&layout, v, v.local_center, half * 0.2, half);
+                    let (x, y, _) = p.project_logical(start, 0.);
+                    egui::pos2(x, y)
+                };
+                let before = project(&view);
+                let drag = egui::vec2(0., 32. * sign);
+                let (north, east) = local_pan_delta(rect, &view, drag);
+                view.vel_local_lat = north;
+                view.vel_local_lon = east;
+                pan_local(&mut view, 1.);
+                assert!((view.local_center.lon - start.lon).abs() > 179.);
+                assert!((project(&view) - before - drag).length() < 0.02);
+                // Release momentum carries on across the new central meridian.
+                pan_local(&mut view, 1.);
+                assert!((project(&view) - before - 2. * drag).length() < 0.03);
+                let side = egui::vec2(24., -11.);
+                (view.vel_local_lat, view.vel_local_lon) = local_pan_delta(rect, &view, side);
+                pan_local(&mut view, 1.);
+                assert!((project(&view) - before - 2. * drag - side).length() < 0.05);
+            }
+        }
+    }
+
+    #[test]
+    fn home_returns_the_local_canvas_to_true_overhead() {
+        let focus = GeoPoint {
+            lat: -88.,
+            lon: 170.,
+        };
+        let mut view = GlobeViewState::from_focus(focus);
+        assert_eq!(view.local_pitch, 0.);
+        view.local_mode = true;
+        view.local_yaw = 2.;
+        view.local_pitch = LOCAL_MAX_TILT;
+        view.meander_mode = true;
+        let ctx = egui::Context::default();
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280., 720.));
+        for frame in 0..2 {
+            let mut events = vec![egui::Event::PointerMoved(rect.center())];
+            if frame == 1 {
+                events.push(egui::Event::Key {
+                    key: egui::Key::Home,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Default::default(),
+                });
+            }
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(rect),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        let response = ui
+                            .allocate_response(ui.available_size(), egui::Sense::click_and_drag());
+                        if frame == 1 {
+                            assert!(manual_input(ctx, &response, true));
+                            assert!(!manual_input(ctx, &response, false));
+                            apply_interaction(ctx, &response, &mut view);
+                        }
+                    });
+                },
+            );
+        }
+        assert_eq!((view.local_yaw, view.local_pitch), (0., 0.));
+        assert_eq!(view.local_center, focus);
+        assert!(!view.meander_mode);
+        let p =
+            local_projection_params(&local_terrain_scene::layout(rect), &view, focus, 100., 500.);
+        let a = p.project_logical(focus, 0.);
+        let b = p.project_logical(focus, 4000.);
+        assert_eq!((a.0, a.1), (b.0, b.1));
+        assert_ne!(a.2, b.2);
     }
 }

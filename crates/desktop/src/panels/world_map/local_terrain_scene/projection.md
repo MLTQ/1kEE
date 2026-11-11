@@ -26,3 +26,10 @@ cached CPU projection parameters avoid repeating camera setup per point.
 Existing tests compare shared parameters with shader arithmetic and the CPU
 projector, including elevation, yaw and pitch. Removing fill depth does not
 change screen coordinates or shader uniforms.
+
+At 66 degrees latitude and beyond, desktop Local uses a polar azimuthal
+equidistant chart. Distances along meridians share the same screen scale as
+the local east–west axis at the pole. CPU and GPU layers use the same chart.
+The inverse transform supplies drag displacement, geographic culling and raster
+coverage, including full longitude coverage when the pole is on screen. The VR
+table requests its rectangular geographic capture explicitly.

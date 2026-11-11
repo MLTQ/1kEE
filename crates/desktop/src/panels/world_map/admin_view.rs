@@ -58,19 +58,7 @@ impl Request {
         let scale =
             p.horizontal_scale.abs().max(vertical.abs()) * p.x_factor.abs().max(p.y_factor.abs());
         let tier = tier_for_scale(1. / (scale * ppp));
-        let mut b = [
-            f32::INFINITY,
-            f32::INFINITY,
-            f32::NEG_INFINITY,
-            f32::NEG_INFINITY,
-        ];
-        for corner in corners(rect) {
-            let x = (corner.x - p.focus_center_x) / p.horizontal_scale;
-            let y = (corner.y - p.focus_center_y) / vertical;
-            let lon = p.focus_lon + (p.yaw_cos * x + p.yaw_sin * y) / p.x_factor;
-            let lat = p.focus_lat + (-p.yaw_sin * x + p.yaw_cos * y) / p.y_factor;
-            b = [b[0].min(lon), b[1].min(lat), b[2].max(lon), b[3].max(lat)];
-        }
+        let b = p.ground_bounds(rect).unwrap_or([-180., -90., 180., 90.]);
         Self {
             tier,
             window: Window::around(b),

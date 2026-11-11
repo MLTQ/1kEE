@@ -76,3 +76,37 @@ fn padded_windows_contain_date_line_equivalent_views() {
     assert!(!region.contains([-180.5, -0.5, -178.5, 0.5]));
     assert!(!region.contains([179.5, -0.5, f32::NAN, 0.5]));
 }
+
+#[test]
+fn a_visible_pole_includes_all_meridians_without_loading_unrelated_latitudes() {
+    let clip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280., 800.));
+    let layout = super::super::local_terrain_scene::layout(clip);
+    for sign in [-1., 1.] {
+        let focus = GeoPoint {
+            lat: sign * 89.9,
+            lon: 179.9,
+        };
+        let mut view = GlobeViewState::from_focus(focus);
+        view.local_yaw = 0.8;
+        let b = local_visible(clip, &layout, &view, focus, 0.5).unwrap();
+        assert_eq!((b[0], b[2]), (-180., 180.));
+        let padded = Region::padded(b).unwrap();
+        assert!(padded.contains(b));
+        assert!(padded.span()[1] < 5.);
+        let size = padded.size(15., 8192);
+        assert!(size[1] >= (padded.span()[1] * 240.).floor() as usize);
+        let p = local_projection_params(&layout, &view, focus, 10., 0.5 * 111.32);
+        for edge in 0..360 {
+            let geo = GeoPoint {
+                lat: sign * 89.96,
+                lon: edge as f32 - 180.,
+            };
+            let (x, y, _) = p.project_logical(geo, 0.);
+            assert!(clip.contains(egui::pos2(x, y)));
+        }
+        // A clipped sub-view can sit across the pole without enclosing it.
+        let sub = egui::Rect::from_min_size(clip.left_top(), egui::vec2(150., 90.));
+        let bounds = p.ground_bounds(sub).unwrap();
+        assert!(bounds[2] - bounds[0] < 40.);
+    }
+}

@@ -44,7 +44,11 @@ mod occlusion;
 #[path = "local_occlusion_geometry.rs"]
 mod occlusion_geometry;
 
-const LOCAL_CONTOUR_WGSL: &str = include_str!("local_contour_lines.wgsl");
+const LOCAL_CONTOUR_WGSL: &str = concat!(
+    include_str!("local_ground.wgsl"),
+    "\n",
+    include_str!("local_contour_lines.wgsl")
+);
 
 /// wgpu requires dynamic uniform offsets to be 256-aligned on most hardware.
 const UNIFORM_STRIDE: u64 = 256;
@@ -156,9 +160,10 @@ struct LocalContourUniforms {
     palette_enabled: f32,
     major_color: [f32; 4],
     minor_color: [f32; 4],
+    ground_chart: [f32; 4],
 }
 
-const _: () = assert!(std::mem::size_of::<LocalContourUniforms>() == 160);
+const _: () = assert!(std::mem::size_of::<LocalContourUniforms>() == 176);
 
 // ── Instance building ────────────────────────────────────────────────────────
 
@@ -584,6 +589,7 @@ impl LocalContourCallback {
                 palette_enabled: 0.0,
                 major_color: [0.0; 4],
                 minor_color: [0.0; 4],
+                ground_chart: [params.pole, 0.0, 0.0, 0.0],
             },
         }
     }
@@ -825,7 +831,7 @@ mod tests {
     #[test]
     fn the_uniform_block_matches_the_shader_layout() {
         // 40 f32s, and a multiple of 16 so it satisfies uniform alignment.
-        assert_eq!(std::mem::size_of::<LocalContourUniforms>(), 40 * 4);
+        assert_eq!(std::mem::size_of::<LocalContourUniforms>(), 44 * 4);
         assert_eq!(std::mem::size_of::<LocalContourUniforms>() % 16, 0);
         assert!(std::mem::size_of::<LocalContourUniforms>() as u64 <= UNIFORM_STRIDE);
     }
@@ -881,6 +887,7 @@ mod tests {
             "palette_enabled",
             "major_color",
             "minor_color",
+            "ground_chart",
         ];
         assert_eq!(shader_fields, rust_fields);
     }

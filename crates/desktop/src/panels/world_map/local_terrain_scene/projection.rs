@@ -1,4 +1,4 @@
-use crate::model::{GeoPoint, GlobeViewState};
+use crate::model::{GeoPoint, GlobeViewState, polar};
 use crate::osm_ingest::GeoBounds as OsmGeoBounds;
 
 use super::super::srtm_focus_cache;
@@ -18,6 +18,7 @@ struct ProjKey {
     local_yaw: f32,
     local_pitch: f32,
     local_layer_spread: f32,
+    geographic_capture: bool,
     extent_x_km: f32,
     extent_y_km: f32,
     focus_center_x: f32,
@@ -37,6 +38,7 @@ struct ProjKey {
 /// `local_projection_matches_the_shader` pins the arithmetic.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LocalProjectionParams {
+    pub pole: f32,
     pub focus_lat: f32,
     pub focus_lon: f32,
     /// `(lon - focus_lon) * x_factor` → normalized, extent-scaled x.
@@ -62,11 +64,36 @@ impl LocalProjectionParams {
     fn from_key(key: ProjKey) -> Self {
         let cos_clamp = key.focus_lat.to_radians().cos().abs().max(0.2);
         let reference_span_km = ((key.extent_x_km + key.extent_y_km) * 0.5).max(1.0);
+        let pole = if key.geographic_capture {
+            0.0
+        } else {
+            polar::pole_for(key.focus_lat)
+        };
+        // Ease into the polar chart's physical scale as the meridians converge.
+        let blend = if key.geographic_capture {
+            0.0
+        } else {
+            ((key.focus_lat.abs() - 55.0) / (polar::POLAR_LATITUDE - 55.0)).clamp(0.0, 1.0)
+        };
+        let vertical = key.height * 0.55;
+        let scale = key.horizontal_scale.min(vertical);
+        let y_factor = 111.32 / key.extent_y_km;
+        let x_factor = if pole != 0.0 {
+            y_factor
+        } else {
+            egui::lerp(
+                111.32 * cos_clamp / key.extent_x_km..=y_factor * key.focus_lat.to_radians().cos(),
+                blend,
+            )
+        };
+        let ground_scale = egui::lerp(vertical..=scale, blend);
+        let reference_span_km = egui::lerp(reference_span_km..=key.extent_y_km, blend);
         Self {
+            pole,
             focus_lat: key.focus_lat,
             focus_lon: key.focus_lon,
-            x_factor: 111.32 * cos_clamp / key.extent_x_km,
-            y_factor: 111.32 / key.extent_y_km,
+            x_factor,
+            y_factor,
             z_factor: BASE_VERTICAL_EXAGGERATION / (1000.0 * reference_span_km),
             yaw_cos: key.local_yaw.cos(),
             yaw_sin: key.local_yaw.sin(),
@@ -74,14 +101,111 @@ impl LocalProjectionParams {
             pitch_sin: key.local_pitch.sin(),
             focus_center_x: key.focus_center_x,
             focus_center_y: key.focus_center_y,
-            horizontal_scale: key.horizontal_scale,
-            ground_pitch_scale: key.height * 0.55,
-            // Must stay below `ground_pitch_scale / tan(max_pitch)`:
-            // max_pitch = 1.55 rad → tan ≈ 48 → threshold ≈ 0.0114. 0.01 for safety.
-            ground_depth_scale: key.height * 0.01,
+            horizontal_scale: egui::lerp(key.horizontal_scale..=scale, blend),
+            ground_pitch_scale: ground_scale,
+            ground_depth_scale: ground_scale * (0.01 / 0.55),
             elevation_pitch_scale: key.height * 0.55 * key.local_layer_spread,
-            elevation_depth_scale: key.height * 0.24 * key.local_layer_spread,
+            elevation_depth_scale: key.height
+                * 0.24
+                * key.local_layer_spread
+                * key.local_pitch.sin(),
         }
+    }
+
+    fn focus(&self) -> GeoPoint {
+        GeoPoint {
+            lat: self.focus_lat,
+            lon: self.focus_lon,
+        }
+    }
+
+    /// Inverse of the sea-level yaw, tilt and scale in `project_logical`.
+    pub(crate) fn chart_delta(&self, screen: egui::Vec2) -> egui::Vec2 {
+        let right = screen.x / self.horizontal_scale;
+        let forward = -screen.y
+            / (self.pitch_cos * self.ground_pitch_scale - self.pitch_sin * self.ground_depth_scale);
+        egui::vec2(
+            (right * self.yaw_cos + forward * self.yaw_sin) / self.x_factor,
+            (-right * self.yaw_sin + forward * self.yaw_cos) / self.y_factor,
+        )
+    }
+
+    /// Exact bounds on the ground. In the polar chart the nearest latitude
+    /// can lie on an edge or at the pole inside the screen rectangle.
+    pub(crate) fn ground_bounds(&self, clip: egui::Rect) -> Option<[f32; 4]> {
+        let origin = egui::pos2(self.focus_center_x, self.focus_center_y);
+        let corners = [
+            clip.left_top(),
+            clip.right_top(),
+            clip.right_bottom(),
+            clip.left_bottom(),
+        ]
+        .map(|p| self.chart_delta(p - origin));
+        if corners.iter().any(|p| !p.is_finite()) {
+            return None;
+        }
+        let mut b = [
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        let focus = self.focus();
+        let pole = self.pole;
+        let unwrap_at = if pole != 0.0 {
+            polar::location(pole, focus, self.chart_delta(clip.center() - origin)).lon
+        } else {
+            focus.lon
+        };
+        for d in corners {
+            let p = if pole == 0.0 {
+                GeoPoint {
+                    lat: focus.lat + d.y,
+                    lon: focus.lon + d.x,
+                }
+            } else {
+                let mut p = polar::location(pole, focus, d);
+                p.lon += ((unwrap_at - p.lon) / 360.0).round() * 360.0;
+                p
+            };
+            b = [
+                b[0].min(p.lon),
+                b[1].min(p.lat),
+                b[2].max(p.lon),
+                b[3].max(p.lat),
+            ];
+        }
+        if pole != 0.0 {
+            let pole_geo = GeoPoint {
+                lat: pole * 90.0,
+                lon: focus.lon,
+            };
+            let (x, y, _) = self.project_logical(pole_geo, 0.0);
+            if clip.contains(egui::pos2(x, y)) {
+                b[0] = -180.0;
+                b[2] = 180.0;
+                if pole > 0.0 {
+                    b[3] = 90.0;
+                } else {
+                    b[1] = -90.0;
+                }
+            } else {
+                let tip = egui::vec2(0.0, pole * 90.0 - focus.lat);
+                let mut nearest = f32::INFINITY;
+                for (a, b) in corners.iter().zip(corners.iter().cycle().skip(1)) {
+                    let edge = *b - *a;
+                    let t = ((tip - *a).dot(edge) / edge.length_sq().max(f32::MIN_POSITIVE))
+                        .clamp(0.0, 1.0);
+                    nearest = nearest.min((*a + t * edge - tip).length());
+                }
+                if pole > 0.0 {
+                    b[3] = 90.0 - nearest;
+                } else {
+                    b[1] = nearest - 90.0;
+                }
+            }
+        }
+        Some(b)
     }
 
     /// Screen position in logical points, without the CPU projector's
@@ -90,8 +214,13 @@ impl LocalProjectionParams {
     pub(crate) fn project_logical(&self, point: GeoPoint, elevation_m: f32) -> (f32, f32, f32) {
         // Standard orientation: positive y = north, mapped upward on screen by
         // negating the ground terms in the screen-y formula below.
-        let x = (point.lon - self.focus_lon) * self.x_factor;
-        let y = (point.lat - self.focus_lat) * self.y_factor;
+        let offset = if self.pole != 0.0 {
+            polar::offset(self.pole, self.focus(), point)
+        } else {
+            egui::vec2(point.lon - self.focus_lon, point.lat - self.focus_lat)
+        };
+        let x = offset.x * self.x_factor;
+        let y = offset.y * self.y_factor;
         let z = elevation_m * self.z_factor;
 
         let x_yaw = x * self.yaw_cos - y * self.yaw_sin;
@@ -186,6 +315,7 @@ fn proj_key(
         local_yaw: view.local_yaw,
         local_pitch: view.local_pitch,
         local_layer_spread: view.local_layer_spread,
+        geographic_capture: view.geographic_capture,
         extent_x_km,
         extent_y_km,
         focus_center_x: layout.focus_center.x,
@@ -225,6 +355,13 @@ pub(super) fn project_local(
     })
 }
 
+/// Geographic cull for a screen rectangle, including wrapped longitude.
+pub(crate) fn contains_point(bounds: [f32; 4], point: GeoPoint) -> bool {
+    let [west, south, east, north] = bounds;
+    let lon = point.lon + (((west + east) * 0.5 - point.lon) / 360.0).round() * 360.0;
+    (south..=north).contains(&point.lat) && (west..=east).contains(&lon)
+}
+
 pub(super) fn local_geo_bounds(center: GeoPoint, view_zoom: f32) -> OsmGeoBounds {
     let half_extent_deg = super::visual_half_extent_for_zoom(view_zoom);
     OsmGeoBounds {
@@ -261,6 +398,7 @@ mod tests {
     #[test]
     fn local_projection_matches_the_shader() {
         let params = LocalProjectionParams {
+            pole: 0.0,
             focus_lat: 40.0,
             focus_lon: -105.0,
             x_factor: 3.0,
@@ -317,6 +455,7 @@ mod tests {
             local_yaw: 0.3,
             local_pitch: 0.9,
             local_layer_spread: 1.0,
+            geographic_capture: false,
             extent_x_km: 3.0,
             extent_y_km: 4.0,
             focus_center_x: 400.0,

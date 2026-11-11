@@ -36,6 +36,7 @@ fn roads_and_contours_render_together_and_deferred_uploads_complete() {
     let ctx = egui::Context::default();
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(64.0, 64.0));
     let params = LocalProjectionParams {
+        pole: 0.0,
         focus_lat: 0.0,
         focus_lon: 0.0,
         x_factor: 1.0,

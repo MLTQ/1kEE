@@ -508,6 +508,9 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
 
     let stereo = painter.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("vr-local-capture")).unwrap_or(false));
+    let marker_bounds = projection
+        .ground_bounds(clip.expand(markers::EVENT_BEAM_HEIGHT * model.marker_scale()))
+        .unwrap_or([-180., -90., 180., 90.]);
     let event_markers: Vec<MapMarker> = if !should_show_local_event_indicators(
         model.active_body,
         model.show_event_markers,
@@ -517,13 +520,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         model
             .map_events()
             .filter_map(|event| {
-                // Cheap pre-cull: skip events well outside the viewport.
-                let dlat = (event.location.lat - viewport_center.lat).abs();
-                let dlon = {
-                    let d = (event.location.lon - viewport_center.lon).abs();
-                    d.min(360.0 - d)
-                };
-                if dlat > half_extent_deg * 2.5 || dlon > half_extent_deg * 2.5 {
+                if !projection::contains_point(marker_bounds, event.location) {
                     return None;
                 }
                 let elev = markers::marker_surface_elevation_m(
@@ -567,12 +564,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
                 .cameras
                 .iter()
                 .filter_map(|camera| {
-                    let dlat = (camera.location.lat - viewport_center.lat).abs();
-                    let dlon = {
-                        let delta = (camera.location.lon - viewport_center.lon).abs();
-                        delta.min(360.0 - delta)
-                    };
-                    if dlat > half_extent_deg * 2.5 || dlon > half_extent_deg * 2.5 {
+                    if !projection::contains_point(marker_bounds, camera.location) {
                         return None;
                     }
                     let elev = markers::marker_surface_elevation_m(
@@ -783,18 +775,20 @@ fn project_landing_points_local(
     let Some(catalog) = crate::submarine_cables::catalog() else {
         return Vec::new();
     };
-    // Same generous cull box the overlay renderer uses.
-    let half_deg_lat = extent_y_km / 111.32 * 1.5;
-    let half_deg_lon =
-        (extent_x_km / (111.32 * viewport_center.lat.to_radians().cos().abs().max(0.2))) * 1.5;
+    let bounds = projection::local_projection_params(
+        layout,
+        view,
+        viewport_center,
+        extent_x_km,
+        extent_y_km,
+    )
+    .ground_bounds(painter.clip_rect().expand(8.))
+    .unwrap_or([-180., -90., 180., 90.]);
     let markers: Vec<_> = catalog
         .landings
         .iter()
         .enumerate()
-        .filter(|(_, landing)| {
-            (landing.location.lat - viewport_center.lat).abs() <= half_deg_lat
-                && (landing.location.lon - viewport_center.lon).abs() <= half_deg_lon
-        })
+        .filter(|(_, landing)| projection::contains_point(bounds, landing.location))
         .filter_map(|(index, landing)| {
             projection::project_local(
                 layout,
@@ -1356,16 +1350,10 @@ fn draw_geojson_layers_local(
 ) {
     use crate::model::{GeoJsonGeometry, ring_centroid};
 
-    // Coarse viewport cull bounds (generous margin for lines crossing the border)
-    let half_deg_lat = extent_y_km / 111.32 * 1.5;
-    let half_deg_lon = (extent_x_km / (111.32 * focus.lat.to_radians().cos().abs().max(0.2))) * 1.5;
-    let min_lat = focus.lat - half_deg_lat;
-    let max_lat = focus.lat + half_deg_lat;
-    let min_lon = focus.lon - half_deg_lon;
-    let max_lon = focus.lon + half_deg_lon;
-
-    let in_view_pt =
-        |p: &GeoPoint| p.lat >= min_lat && p.lat <= max_lat && p.lon >= min_lon && p.lon <= max_lon;
+    let bounds = projection::local_projection_params(layout, view, focus, extent_x_km, extent_y_km)
+        .ground_bounds(painter.clip_rect().expand(8.))
+        .unwrap_or([-180., -90., 180., 90.]);
+    let in_view_pt = |p: &GeoPoint| projection::contains_point(bounds, *p);
 
     for (layer_index, layer) in layers.iter().enumerate() {
         if !layer.visible {

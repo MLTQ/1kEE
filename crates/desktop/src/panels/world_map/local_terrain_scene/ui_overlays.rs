@@ -27,7 +27,7 @@ pub(super) fn draw_legend(
         egui::pos2(rect.left() + 24.0, rect.bottom() - 86.0),
         egui::Align2::LEFT_TOP,
         format!(
-            "{title}\nFIXED OBLIQUE CAMERA\n{interval_label}M CONTOURS · {half_extent_km:.0}KM HALF-SPAN"
+            "{title}\nDRAG TO PAN · SHIFT+DRAG TO ORBIT · HOME FOR OVERHEAD\n{interval_label}M CONTOURS · {half_extent_km:.0}KM HALF-SPAN"
         ),
         egui::FontId::monospace(12.0),
         theme::text_muted(),

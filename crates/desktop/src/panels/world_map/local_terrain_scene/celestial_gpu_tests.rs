@@ -51,6 +51,7 @@ fn draw_ready(
 
 fn parameters() -> projection::LocalProjectionParams {
     projection::LocalProjectionParams {
+        pole: 0.0,
         focus_lon: 0.0,
         focus_lat: 0.0,
         x_factor: 1.0,

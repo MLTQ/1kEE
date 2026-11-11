@@ -142,5 +142,5 @@ instances, prepared by the same worker. Both buffers share the upload budget
 and publish atomically; residency and byte accounting include both.
 `local_occlusion` renders a separate cached depth target during prepare. Surface
 fragments sample it when enabled; roads/staging keep occlusion off. Uniforms
-are now 160 bytes including the live palette, matched by the WGSL layout regression. No UI depth attachment
+are 176 bytes including the live palette and polar chart, matched by the WGSL layout regression. No UI depth attachment
 is introduced. The hidden frame residency callback also releases depth images.

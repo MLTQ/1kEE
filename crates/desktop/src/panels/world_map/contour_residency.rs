@@ -40,6 +40,24 @@ pub(crate) struct Viewport {
 
 impl Viewport {
     pub(crate) fn intersects(self, bounds: Bounds) -> bool {
+        if self.projection.pole != 0.0 {
+            // A polar tile is an annular sector. Invert the screen once at each
+            // height limit to conservatively cover its entire geographic arc.
+            let p = self.projection;
+            let lift = p.z_factor
+                * (p.pitch_sin * p.elevation_pitch_scale + p.pitch_cos * p.elevation_depth_scale);
+            let rect = self
+                .rect
+                .translate(egui::vec2(0., bounds.min[2] * lift))
+                .union(self.rect.translate(egui::vec2(0., bounds.max[2] * lift)));
+            let Some([w, s, e, n]) = p.ground_bounds(rect) else {
+                return true;
+            };
+            let shift = (((w + e) - (bounds.min[0] + bounds.max[0])) / 720.).round() * 360.;
+            return bounds.max[1] >= s
+                && bounds.min[1] <= n
+                && (e - w >= 360. || (bounds.min[0] + shift <= e && bounds.max[0] + shift >= w));
+        }
         // The local transform is affine. The eight projected box corners
         // enclose every contour, including elevated terrain and crossing lines.
         let points: [egui::Pos2; 8] = std::array::from_fn(|i| {

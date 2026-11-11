@@ -1,3 +1,7 @@
+#[path = "polar.rs"]
+pub(crate) mod polar;
+
+pub const LOCAL_MAX_TILT: f32 = 75.0_f32.to_radians();
 pub const GLOBE_PITCH_LIMIT_RAD: f32 = 1.53;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -20,6 +24,8 @@ pub struct GlobeViewState {
     pub local_zoom: f32,
     /// Explicit GLOBE / LOCAL mode switch (not derived from zoom).
     pub local_mode: bool,
+    /// The VR table consumes a rectangular longitude/latitude texture.
+    pub(crate) geographic_capture: bool,
     pub auto_spin: bool,
     /// Enable cinematic meander (smooth random-walk camera drift).
     pub meander_mode: bool,
@@ -30,7 +36,7 @@ pub struct GlobeViewState {
     /// Globe rotation velocity (rad/s).
     pub vel_yaw: f32,
     pub vel_pitch: f32,
-    /// Local-mode pan velocity (deg/s in lat/lon space).
+    /// Local pan velocity in chart degrees/s (north/east arc in a polar chart).
     pub vel_local_lat: f32,
     pub vel_local_lon: f32,
     /// Local-mode camera-angle rotation velocity (rad/s).
@@ -53,6 +59,7 @@ impl GlobeViewState {
             zoom: 1.0,
             local_zoom: 25.0,
             local_mode: false,
+            geographic_capture: false,
             auto_spin: false,
             meander_mode: false,
             meander_speed: 0.30,
@@ -92,8 +99,19 @@ impl GlobeViewState {
     }
 
     pub fn reset_local_camera(&mut self) {
-        self.local_yaw = -0.65;
-        self.local_pitch = 0.98;
+        if polar::pole_for(self.local_center.lat) != 0.0 {
+            self.look_down();
+        } else {
+            self.local_yaw = -0.65;
+            self.local_pitch = 0.98;
+        }
+    }
+
+    pub fn look_down(&mut self) {
+        self.local_yaw = 0.0;
+        self.local_pitch = 0.0;
+        self.vel_local_pitch = 0.0;
+        self.vel_local_yaw = 0.0;
     }
 
     /// Returns the lat/lon at the center of the current globe viewport.

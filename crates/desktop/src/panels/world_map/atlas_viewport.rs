@@ -14,18 +14,22 @@ impl Region {
         {
             return None;
         }
-        let span = (bounds[2] - bounds[0]).max(bounds[3] - bounds[1]);
-        let step = (2f32.powf((span * 3600.0 / 16.0).log2().floor())).max(1.0);
-        let margin = span * 0.12 * 3600.0 + step;
-        let floor = |v: f32| ((v * 3600.0 - margin) / step).floor() as i32 * step as i32;
-        let ceil = |v: f32| ((v * 3600.0 + margin) / step).ceil() as i32 * step as i32;
-        let west = floor(bounds[0]);
-        Some(Self([
-            west,
-            floor(bounds[1]).max(-324000),
-            ceil(bounds[2]).min(west + 1296000),
-            ceil(bounds[3]).min(324000),
-        ]))
+        let pad = |lo: f32, hi: f32| {
+            let span = (hi - lo) * 3600.0;
+            let step = 2f32.powf((span / 16.0).log2().floor()).max(1.0);
+            let margin = span * 0.12 + step;
+            [
+                ((lo * 3600.0 - margin) / step).floor() as i32 * step as i32,
+                ((hi * 3600.0 + margin) / step).ceil() as i32 * step as i32,
+            ]
+        };
+        let [mut west, mut east] = pad(bounds[0], bounds[2]);
+        if east - west >= 1296000 {
+            west = -648000;
+            east = 648000;
+        }
+        let [south, north] = pad(bounds[1], bounds[3]);
+        Some(Self([west, south.max(-324000), east, north.min(324000)]))
     }
     pub fn contains(self, mut bounds: [f32; 4]) -> bool {
         let [w, south, e, north] = self.bounds();
@@ -33,8 +37,7 @@ impl Region {
         bounds[0] += shift;
         bounds[2] += shift;
         bounds.iter().all(|v| v.is_finite())
-            && bounds[0] >= w
-            && bounds[2] <= e
+            && (e - w >= 360.0 || (bounds[0] >= w && bounds[2] <= e))
             && bounds[1] >= south
             && bounds[3] <= north
     }
@@ -49,11 +52,21 @@ impl Region {
     }
     /// Read native posts when they fit. Bound peak image memory and GPU edge size.
     pub fn size(self, native_arcseconds: f32, max_edge: usize) -> [usize; 2] {
-        let raw = [
+        let mut raw = [
             (self.0[2] - self.0[0]) as f64 / native_arcseconds as f64,
             (self.0[3] - self.0[1]) as f64 / native_arcseconds as f64,
         ];
         let edge = max_edge.clamp(16, 8192) as f64;
+        // Meridians converge across a polar cap. When the native window is
+        // too large, allocate pixels by ground distance so that a full turn
+        // of longitude does not reduce north–south relief to a few rows.
+        let [_, south, _, north] = self.bounds();
+        let nearest_equator = south.max(-north);
+        if nearest_equator >= crate::model::polar::POLAR_LATITUDE
+            && (raw[0] > edge || raw[0] * raw[1] > 32_000_000.)
+        {
+            raw[0] *= (nearest_equator as f64).to_radians().cos();
+        }
         let factor = (edge / raw[0])
             .min(edge / raw[1])
             .min((32_000_000.0 / (raw[0] * raw[1])).sqrt())
@@ -153,38 +166,7 @@ pub(super) fn local_visible(
 ) -> Option<[f32; 4]> {
     let ex = (half * 111.32 * focus.lat.to_radians().cos().abs().max(0.2)).max(1.0);
     let projection = local_projection_params(layout, view, focus, ex, (half * 111.32).max(1.0));
-    let project = |lat, lon| {
-        let (x, y, _) = projection.project_logical(GeoPoint { lat, lon }, 0.0);
-        egui::pos2(x, y)
-    };
-    let origin = project(focus.lat, focus.lon);
-    let u = project(focus.lat, focus.lon + 1.0) - origin;
-    let v = project(focus.lat + 1.0, focus.lon) - origin;
-    let det = u.x * v.y - u.y * v.x;
-    if !det.is_finite() || det.abs() < 1e-6 {
-        return None;
-    }
-    let mut bounds = [
-        f32::INFINITY,
-        f32::INFINITY,
-        f32::NEG_INFINITY,
-        f32::NEG_INFINITY,
-    ];
-    for p in [
-        clip.left_top(),
-        clip.right_top(),
-        clip.left_bottom(),
-        clip.right_bottom(),
-    ] {
-        let d = p - origin;
-        let lon = focus.lon + (d.x * v.y - d.y * v.x) / det;
-        let lat = focus.lat + (u.x * d.y - u.y * d.x) / det;
-        bounds[0] = bounds[0].min(lon);
-        bounds[1] = bounds[1].min(lat);
-        bounds[2] = bounds[2].max(lon);
-        bounds[3] = bounds[3].max(lat);
-    }
-    Some(bounds)
+    projection.ground_bounds(clip)
 }
 
 #[cfg(test)]

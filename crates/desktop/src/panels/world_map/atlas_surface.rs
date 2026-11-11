@@ -114,6 +114,14 @@ impl Uniforms {
                     hi = hi.max(g);
                 }
             }
+            if self.globe[0] != 0.0 {
+                // Full latitude rings can attain their extremum between corners.
+                let pole = self.globe[0];
+                let radius = (90.0 - pole * r.bounds[1]).max(90.0 - pole * r.bounds[3]);
+                let center = (pole * 90.0 - self.a[1]) * self.a[3] * self.b[1];
+                lo = center - radius * self.a[3];
+                hi = center + radius * self.a[3];
+            }
             self.grid[2] = (hi + lo) * 0.5;
             self.grid[3] = 0.9 / (hi - lo).max(1.0);
         }
@@ -191,20 +199,8 @@ impl Callback {
             p.elevation_depth_scale,
         ];
         u.extra[0] = 1.0;
-        let shift = ((focus.lon - (data.bounds[0] + data.bounds[2]) * 0.5) / 360.0).round() * 360.0;
-        u.extra[1] = shift;
-        let mut lo = f32::INFINITY;
-        let mut hi = f32::NEG_INFINITY;
-        for lon in [data.bounds[0] + shift, data.bounds[2] + shift] {
-            for lat in [data.bounds[1], data.bounds[3]] {
-                let ground = (lon - focus.lon) * p.x_factor * p.yaw_sin
-                    + (lat - focus.lat) * p.y_factor * p.yaw_cos;
-                lo = lo.min(ground);
-                hi = hi.max(ground);
-            }
-        }
-        u.grid[2] = (hi + lo) * 0.5;
-        u.grid[3] = 0.9 / (hi - lo).max(1.0);
+        u.globe[0] = p.pole;
+        u = u.reframe(&data);
         Self {
             data: vec![data],
             uniforms: vec![u],
@@ -303,7 +299,8 @@ impl Callback {
 }
 pub(super) fn shader_source() -> String {
     format!(
-        "{}\n{}",
+        "{}\n{}\n{}",
+        include_str!("local_ground.wgsl"),
         include_str!("atlas_surface.wgsl"),
         include_str!("atlas_lighting.wgsl")
     )

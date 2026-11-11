@@ -36,6 +36,7 @@ pub(crate) fn paint(
     if local {
         // Render a north-up map. Stereo displacement is applied once by the headset.
         contour_asset::globe_residency::set_viewport(None, None);
+        model.globe_view.geographic_capture = true;
         model.globe_view.local_pitch = 0.;
         model.globe_view.local_yaw = 0.;
         model.globe_view.local_layer_spread = 0.;

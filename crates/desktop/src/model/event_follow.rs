@@ -207,9 +207,20 @@ fn pose(view: &GlobeViewState) -> Pose {
 
 fn view_velocity(view: &GlobeViewState) -> Pose {
     if view.local_mode {
+        let center = view.local_center;
+        let pole = super::polar::pole_for(center.lat);
+        // Estimate angular motion over one second in the local ground chart.
+        // The instantaneous longitude derivative is undefined at the pole.
+        let (lat_rate, lon_rate) = if pole == 0.0 {
+            (view.vel_local_lat, view.vel_local_lon)
+        } else {
+            let next = super::polar::location(
+                pole, center, egui::vec2(view.vel_local_lon, view.vel_local_lat));
+            (next.lat - center.lat, next.lon - center.lon)
+        };
         [
-            view.vel_local_lat as f64,
-            view.vel_local_lon as f64,
+            lat_rate as f64,
+            lon_rate as f64,
             0.0,
             view.vel_local_yaw as f64,
             view.vel_local_pitch as f64,
@@ -227,7 +238,11 @@ fn view_velocity(view: &GlobeViewState) -> Pose {
 
 fn apply(view: &mut GlobeViewState, p: Pose) {
     let center = GeoPoint {
-        lat: p[0].clamp(-85.0, 85.0) as f32,
+        lat: if view.local_mode {
+            p[0].clamp(-90.0, 90.0)
+        } else {
+            p[0].clamp(-85.0, 85.0)
+        } as f32,
         lon: wrap(p[1]) as f32,
     };
     view.local_center = center;
@@ -236,7 +251,7 @@ fn apply(view: &mut GlobeViewState, p: Pose) {
     if view.local_mode {
         view.local_zoom = p[2].exp().clamp(1.0, 60.0) as f32;
         view.local_yaw = p[3] as f32;
-        view.local_pitch = p[4].clamp(0.02, 1.55) as f32;
+        view.local_pitch = (p[4] as f32).clamp(0.0, super::LOCAL_MAX_TILT);
     } else {
         view.zoom = p[2].exp().clamp(0.6, 50.0) as f32;
     }
@@ -251,7 +266,11 @@ impl Flight {
         let start = pose(view);
         let local = view.local_mode;
         let center = GeoPoint {
-            lat: location.lat.clamp(-84.0, 84.0),
+            lat: if local {
+                location.lat
+            } else {
+                location.lat.clamp(-84.0, 84.0)
+            },
             lon: location.lon,
         };
         let lat = center.lat as f64;

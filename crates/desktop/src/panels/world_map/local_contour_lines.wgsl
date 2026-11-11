@@ -9,7 +9,7 @@
 // scalar half of it.
 //
 // The Rust `LocalContourUniforms` struct in local_contour_pass.rs must stay
-// byte-for-byte in sync with `Uniforms` below (160 bytes).
+// byte-for-byte in sync with `Uniforms` below (176 bytes).
 
 struct Uniforms {
     focus_lon: f32,
@@ -51,6 +51,7 @@ struct Uniforms {
     palette_enabled: f32,
     major_color: vec4<f32>,
     minor_color: vec4<f32>,
+    ground_chart: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -79,8 +80,9 @@ struct VsOut {
 // Returns (x_px, y_px, valid); valid < 0 means the point projected to a
 // degenerate or wildly out-of-range position.
 fn project(geo: vec3<f32>) -> vec3<f32> {
-    let x = (geo.x - u.focus_lon) * u.x_factor;
-    let y = (geo.y - u.focus_lat) * u.y_factor;
+    let offset = local_ground(geo.xy, vec2<f32>(u.focus_lon,u.focus_lat), u.ground_chart.x);
+    let x = offset.x * u.x_factor;
+    let y = offset.y * u.y_factor;
     let z = geo.z * u.z_factor;
 
     let x_yaw = x * u.yaw_cos - y * u.yaw_sin;
@@ -208,8 +210,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 // Ground distance remains constant down a vertical contour curtain. For the
 // affine local view this is a valid depth ordering without inventing a DEM.
 fn depth(geo: vec3<f32>) -> f32 {
-    let ground = (geo.x-u.focus_lon)*u.x_factor*u.yaw_sin
-        + (geo.y-u.focus_lat)*u.y_factor*u.yaw_cos;
+    let offset = local_ground(geo.xy, vec2<f32>(u.focus_lon,u.focus_lat), u.ground_chart.x);
+    let ground = offset.x*u.x_factor*u.yaw_sin + offset.y*u.y_factor*u.yaw_cos;
     return 0.5 + (ground-u.depth_center)*u.depth_scale;
 }
 @vertex
