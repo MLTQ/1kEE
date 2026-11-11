@@ -39,7 +39,11 @@ fn placemark_features(placemark: Node<'_, '_>) -> Vec<GeoJsonFeature> {
 }
 
 /// ArcGIS exports use KML folders for independently displayable map layers.
-pub(super) fn folder_layers(xml: &str, export: &str) -> Result<Vec<super::GeoJsonLayer>, String> {
+pub(super) fn folder_layers(
+    xml: &str,
+    export: &str,
+    mut on_placemark: impl FnMut(&str, Node<'_, '_>, &[GeoJsonFeature]),
+) -> Result<Vec<super::GeoJsonLayer>, String> {
     use std::collections::BTreeMap;
     let document = Document::parse(xml).map_err(|e| format!("KML XML parse error: {e}"))?;
     if !document.root_element().has_tag_name("kml") {
@@ -64,6 +68,7 @@ pub(super) fn folder_layers(xml: &str, export: &str) -> Result<Vec<super::GeoJso
         } else {
             names.join(" / ")
         };
+        on_placemark(&name, placemark, &features);
         let layer = folders
             .entry(name.clone())
             .or_insert_with(|| super::GeoJsonLayer {

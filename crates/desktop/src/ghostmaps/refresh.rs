@@ -1,7 +1,7 @@
 //! The tree is the daily index. A blob SHA identifies the exact KMZ to fetch,
 //! even if main moves between the index request and the download.
 use super::export_name;
-use crate::model::GeoJsonLayer;
+use crate::model::{EventRecord, GeoJsonLayer};
 use reqwest::{
     StatusCode,
     blocking::Client,
@@ -41,6 +41,7 @@ impl Catalog {
 pub(super) struct Product {
     pub sha: String,
     pub layers: Vec<GeoJsonLayer>,
+    pub reports: BTreeMap<String, Vec<EventRecord>>,
 }
 
 fn now() -> u64 {
@@ -154,16 +155,22 @@ fn valid_sha(sha: &str) -> bool {
     sha.len() == 40 && sha.bytes().all(|c| c.is_ascii_hexdigit())
 }
 
-fn decode(path: &str, sha: &str, bytes: &[u8]) -> Result<Product> {
+pub(super) fn decode(path: &str, sha: &str, bytes: &[u8]) -> Result<Product> {
     let mut hash = Sha1::new();
     hash.update(format!("blob {}\0", bytes.len()));
     hash.update(bytes);
     if format!("{:x}", hash.finalize()) != sha {
         return Err("KMZ did not match its published Git blob SHA".into());
     }
+    let mut reports = BTreeMap::new();
+    let layers =
+        GeoJsonLayer::kmz_folder_layers(&export_name(path), bytes, |folder, node, features| {
+            super::reports::collect(&mut reports, folder, node, features)
+        })?;
     Ok(Product {
         sha: sha.to_owned(),
-        layers: GeoJsonLayer::kmz_folder_layers(&export_name(path), bytes)?,
+        layers,
+        reports,
     })
 }
 

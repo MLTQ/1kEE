@@ -33,6 +33,7 @@ flate2 = "1"
 rayon = "1.11.0"
 lyon_tessellation = "1"
 one-thousand-electric-eye-cache-builder = { path = "../cache_builder" }
+scraper = { version = "0.24", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

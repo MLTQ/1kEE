@@ -16,7 +16,7 @@ impl ActiveFlare {
         let fade_duration = match event.severity {
             EventSeverity::Critical => 8.0,
             EventSeverity::Elevated => 4.5,
-            EventSeverity::Advisory => 2.0,
+            EventSeverity::Advisory | EventSeverity::Unrated => 2.0,
         };
         Self {
             event,

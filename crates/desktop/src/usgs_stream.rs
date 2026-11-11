@@ -256,6 +256,7 @@ fn parse_feature(raw: &Value) -> Option<EventRecord> {
         EventSeverity::Critical => 4,
         EventSeverity::Elevated => 2,
         EventSeverity::Advisory => 1,
+        EventSeverity::Unrated => 0,
     };
     let id = format!("{USGS_EVENT_PREFIX}{feature_id}");
 

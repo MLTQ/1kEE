@@ -2,6 +2,12 @@ use super::{Job, PROJECT_URL, Source, export_name};
 use crate::model::AppModel;
 
 pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
+    let report_count = model
+        .events
+        .iter()
+        .filter(|event| event.is_ghostmaps())
+        .count();
+    let mut locate = false;
     let source = &mut model.ghostmaps;
     let mut changed = ui
         .checkbox(&mut source.settings.enabled, "GhostMaps events")
@@ -23,6 +29,18 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
             }
             if let Some(warning) = &source.catalog_warning {
                 ui.small(format!("{warning} · retry in 1h"));
+            }
+            if report_count > 0 {
+                ui.small(format!("{report_count} reports in Event Queue"));
+                locate = ui
+                    .add_enabled(
+                        model.active_body == crate::model::ActiveBody::Earth,
+                        egui::Button::new("Show nearest report").small(),
+                    )
+                    .on_hover_text(
+                        "Center the Earth map on the GhostMaps report closest to the current view",
+                    )
+                    .clicked();
             }
             changed |= choose_exports(ui, source);
             changed |= ui
@@ -86,8 +104,32 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
             .products
             .retain(|p, _| source.settings.selected.contains(p));
         source.apply_visibility();
+        model.sync_ghostmaps_reports();
         if let Err(error) = model.save_settings() {
             model.push_log(format!("Could not save GhostMaps settings: {error}"));
+        }
+    }
+    if locate {
+        let center = if model.globe_view.local_mode {
+            model.globe_view.local_center
+        } else {
+            model.globe_view.globe_center_latlon()
+        };
+        let nearest = model
+            .events
+            .iter()
+            .filter(|e| e.is_ghostmaps())
+            .map(|e| (crate::model::haversine_km(center, e.location), e))
+            .min_by(|(a, _), (b, _)| a.total_cmp(b));
+        if let Some((_, event)) = nearest {
+            let (id, location) = (event.id.clone(), event.location);
+            if model.replay_mode {
+                model.toggle_replay();
+            }
+            model.show_event_markers = true;
+            model.select_event(&id);
+            // A previously selected report may have been panned out of view.
+            model.globe_view.focus_on(location);
         }
     }
 }

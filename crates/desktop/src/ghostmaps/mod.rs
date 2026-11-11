@@ -1,9 +1,10 @@
 mod refresh;
+mod reports;
 #[cfg(test)]
 mod tests;
 mod view;
 
-use crate::model::GeoJsonLayer;
+use crate::model::{EventRecord, GeoJsonLayer};
 use refresh::{Catalog, Product, WithWarning};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -93,6 +94,7 @@ pub(crate) struct Source {
     errors: BTreeMap<String, (Instant, String)>,
     worker: Option<(Job, mpsc::Receiver<Reply>)>,
     search: String,
+    reports_dirty: bool,
 }
 
 impl Source {
@@ -107,6 +109,7 @@ impl Source {
             errors: BTreeMap::new(),
             worker: None,
             search: String::new(),
+            reports_dirty: true,
         }
     }
 
@@ -123,7 +126,31 @@ impl Source {
             .map(|product| product.layers.as_slice())
     }
 
+    pub fn take_updated_reports(&mut self) -> Option<Vec<EventRecord>> {
+        if !std::mem::take(&mut self.reports_dirty) {
+            return None;
+        }
+        let mut seen = BTreeSet::new();
+        let mut events = Vec::new();
+        if self.settings.enabled {
+            for product in self.products.values() {
+                for layer in product.layers.iter().filter(|layer| layer.visible) {
+                    if let Some(reports) = product.reports.get(&layer.name) {
+                        events.extend(
+                            reports
+                                .iter()
+                                .filter(|e| seen.insert(e.id.as_str()))
+                                .cloned(),
+                        );
+                    }
+                }
+            }
+        }
+        Some(events)
+    }
+
     fn apply_visibility(&mut self) {
+        self.reports_dirty = true;
         for (path, product) in &mut self.products {
             for layer in &mut product.layers {
                 layer.visible = !self
@@ -187,7 +214,9 @@ impl Source {
         let warning = match reply {
             Ok((Data::Catalog(catalog), warning)) => {
                 self.catalog_due = now + catalog.remaining();
+                let before = self.products.len();
                 self.products.retain(|p, _| catalog.files.contains_key(p));
+                self.reports_dirty |= before != self.products.len();
                 self.catalog = Some(catalog);
                 warning
             }

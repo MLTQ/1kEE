@@ -218,6 +218,7 @@ fn severity_tick_color(sev: &EventSeverity) -> egui::Color32 {
         EventSeverity::Critical => egui::Color32::from_rgba_unmultiplied(210, 55, 55, 210),
         EventSeverity::Elevated => egui::Color32::from_rgba_unmultiplied(210, 140, 30, 180),
         EventSeverity::Advisory => egui::Color32::from_rgba_unmultiplied(75, 115, 165, 140),
+        EventSeverity::Unrated => sev.color(),
     }
 }
 

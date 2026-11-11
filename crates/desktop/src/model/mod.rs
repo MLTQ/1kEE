@@ -810,13 +810,12 @@ impl AppModel {
 
     pub fn replace_factal_events(&mut self, events: Vec<EventRecord>) {
         self.event_follow.observe(&events);
-        // USGS quake events arrive on an independent poll and must survive a
-        // Factal refresh; everything else is replaced wholesale.
+        // Preserve records from the independently refreshed public sources.
         let mut merged = events;
         merged.extend(
             self.events
                 .drain(..)
-                .filter(|event| event.id.starts_with(USGS_EVENT_PREFIX)),
+                .filter(|event| event.id.starts_with(USGS_EVENT_PREFIX) || event.is_ghostmaps()),
         );
         self.replace_events(merged);
     }
@@ -831,6 +830,19 @@ impl AppModel {
             .collect();
         merged.extend(events);
         self.replace_events(merged);
+    }
+
+    pub(crate) fn sync_ghostmaps_reports(&mut self) {
+        let Some(reports) = self.ghostmaps.take_updated_reports() else {
+            return;
+        };
+        if reports.is_empty() && !self.events.iter().any(EventRecord::is_ghostmaps) {
+            return;
+        }
+        let mut events = std::mem::take(&mut self.events);
+        events.retain(|e| !e.is_ghostmaps());
+        events.extend(reports);
+        self.replace_events(events);
     }
 
     fn replace_events(&mut self, events: Vec<EventRecord>) {

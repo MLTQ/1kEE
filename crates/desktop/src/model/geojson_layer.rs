@@ -108,10 +108,14 @@ impl GeoJsonLayer {
         Self::parse_kml(name, xml.trim_start_matches('\u{feff}'))
     }
 
-    pub(crate) fn kmz_folder_layers(name: &str, bytes: &[u8]) -> Result<Vec<Self>, String> {
+    pub(crate) fn kmz_folder_layers(
+        name: &str,
+        bytes: &[u8],
+        on_placemark: impl FnMut(&str, roxmltree::Node<'_, '_>, &[GeoJsonFeature]),
+    ) -> Result<Vec<Self>, String> {
         // A KMZ can expand far beyond its compressed size.
         let xml = Self::kmz_document(bytes, 128 * 1024 * 1024)?;
-        super::kml_layer::folder_layers(xml.trim_start_matches('\u{feff}'), name)
+        super::kml_layer::folder_layers(xml.trim_start_matches('\u{feff}'), name, on_placemark)
     }
 
     fn kmz_document(bytes: &[u8], limit: u64) -> Result<String, String> {

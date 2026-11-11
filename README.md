@@ -59,6 +59,9 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
   Earth map. The default is the rolling 30-day Common Intelligence Picture.
   Use **Choose KMZ exports** to add the 90-day picture or a dated snapshot.
   Each populated KML folder has its own visibility control in Globe and Local.
+  Visible point reports appear as selectable purple event beams and in the Event Queue.
+  **Show nearest report** centers the map on one. Hover a beam for the source
+  notes and reported date, when available.
   While enabled, 1kEE checks the repository catalog once every 24 hours and
   downloads selected files only when their Git blob hashes change or the cached
   copy needs repair. Dated snapshots stay pinned to the chosen filename.

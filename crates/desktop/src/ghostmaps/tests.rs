@@ -10,7 +10,12 @@ fn archive(label: &str) -> Vec<u8> {
     zip.start_file("doc.kml", zip::write::SimpleFileOptions::default())
         .unwrap();
     write!(zip, r#"<kml xmlns="http://www.opengis.net/kml/2.2"><Document><Folder><name>Incidents</name>
-        <Folder><name>Reports</name><Placemark><name>{label}</name><Point><coordinates>-75.5,41.2,0</coordinates></Point>
+        <Folder><name>Reports</name><Placemark><name>{label}</name>
+        <description><![CDATA[<html><body><table><tr><td><table>
+        <tr><td>Date of Event</td><td>10/21/2026</td></tr>
+        <tr><td>Notes</td><td>Road &amp; bridge closure</td></tr>
+        <tr><td>FullStreetAddress</td><td>&lt;Null&gt;</td></tr>
+        </table></td></tr></table></body></html>]]></description><Point><coordinates>-75.5,41.2,0</coordinates></Point>
         </Placemark></Folder></Folder></Document></kml>"#).unwrap();
     zip.finish().unwrap().into_inner()
 }
@@ -127,7 +132,8 @@ fn listener_respects_selection_visibility_and_upstream_removals() {
     let mut source = Source::new(Settings::default(), PathBuf::new());
     source.tick();
     assert!(source.worker.is_none());
-    let sha = "2".repeat(40);
+    let bytes = archive("Report");
+    let sha = blob_sha(&bytes);
     let mut catalog = Catalog::default();
     catalog.files.insert(LAST_30.into(), sha.clone());
     catalog.files.insert("other.kmz".into(), "9".repeat(40));
@@ -140,8 +146,8 @@ fn listener_respects_selection_visibility_and_upstream_removals() {
     );
     let job = source.next_job(Instant::now()).unwrap();
     assert!(matches!(&job, Job::Export { path, .. } if path == LAST_30));
-    let layers = GeoJsonLayer::kmz_folder_layers(LAST_30, &archive("Report")).unwrap();
-    source.finish(job, Ok((Data::Export(Product { sha, layers }), None)));
+    let product = refresh::decode(LAST_30, &sha, &bytes).unwrap();
+    source.finish(job, Ok((Data::Export(product), None)));
     assert!(!source.layers().next().unwrap()[0].visible);
     assert!(source.next_job(Instant::now()).is_none());
     source.finish(Job::Catalog, Ok((Data::Catalog(Catalog::default()), None)));
@@ -172,12 +178,76 @@ fn live_default_export() {
 }
 
 #[test]
-#[ignore = "exercises the production map scenes with isolated renderer state"]
+fn visible_reports_survive_feed_polls_and_overlapping_exports() {
+    use crate::model::AppModel;
+    let mut model = AppModel::new();
+    let mut settings = Settings {
+        enabled: true,
+        ..Default::default()
+    };
+    settings.selected.insert("90-days.kmz".into());
+    model.ghostmaps = Source::new(settings.clone(), PathBuf::new());
+    let bytes = archive("Closure");
+    let sha = blob_sha(&bytes);
+    for path in &settings.selected {
+        let job = Job::Export {
+            path: path.clone(),
+            sha: sha.clone(),
+        };
+        model.ghostmaps.finish(
+            job,
+            Ok((
+                Data::Export(refresh::decode(path, &sha, &bytes).unwrap()),
+                None,
+            )),
+        );
+    }
+    model.sync_ghostmaps_reports();
+    assert_eq!(model.events.len(), 1);
+    let event = model.events[0].clone();
+    assert_eq!(event.occurred_at, "10/21/2026");
+    assert_eq!(event.summary, "Road & bridge closure");
+    assert!(event.location_name.contains("Incidents / Reports"));
+    let mut factal = event.clone();
+    factal.id = "factal-1".into();
+    let mut quake = event.clone();
+    quake.id = "usgs-1".into();
+    model.replace_usgs_events(vec![quake]);
+    model.replace_factal_events(vec![factal]);
+    model.select_event(&event.id);
+    assert_eq!(model.events.len(), 3);
+    assert_eq!(model.selected_event().unwrap().id, event.id);
+    settings.selected.remove("90-days.kmz");
+    settings.hidden_folders.insert(
+        LAST_30.into(),
+        BTreeSet::from(["Incidents / Reports".into()]),
+    );
+    model.ghostmaps.set_settings(settings.clone());
+    model.sync_ghostmaps_reports();
+    assert_eq!(model.events.len(), 2);
+    assert!(!model.selected_event().unwrap().is_ghostmaps());
+    settings.hidden_folders.clear();
+    model.ghostmaps.set_settings(settings.clone());
+    model.sync_ghostmaps_reports();
+    assert!(model.map_events().any(|e| e.id == event.id));
+    settings.enabled = false;
+    model.ghostmaps.set_settings(settings);
+    model.sync_ghostmaps_reports();
+    assert!(!model.map_events().any(|e| e.id == event.id));
+}
+
+#[path = "../panels/world_map/admin_test_screen.rs"]
+mod screen;
+
+#[test]
+#[ignore = "exercises the production map scenes on an offscreen GPU"]
 fn cached_event_reaches_both_map_views() {
-    use crate::model::{AppModel, GeoPoint};
+    use crate::model::{AppModel, EventSeverity};
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("layers.sqlite");
-    let bytes = archive("GhostMaps test event");
+    let bytes = std::env::var_os("ONEKEE_GHOSTMAPS_TEST_KMZ")
+        .map(|path| std::fs::read(path).unwrap())
+        .unwrap_or_else(|| archive("GhostMaps test event"));
     let sha = blob_sha(&bytes);
     let mut catalog = Catalog::default();
     catalog.checked = std::time::UNIX_EPOCH.elapsed().unwrap().as_secs();
@@ -198,7 +268,7 @@ fn cached_event_reaches_both_map_views() {
     model.ghostmaps = Source::new(
         Settings {
             enabled: true,
-            labels: true,
+            labels: false,
             ..Default::default()
         },
         file,
@@ -213,10 +283,12 @@ fn cached_event_reaches_both_map_views() {
         std::thread::sleep(Duration::from_millis(5));
     }
 
-    model.globe_view.focus_on(GeoPoint {
-        lat: 41.2,
-        lon: -75.5,
-    });
+    model.sync_ghostmaps_reports();
+    eprintln!(
+        "{} unique GhostMaps reports in the queue",
+        model.events.len()
+    );
+    model.globe_view.focus_on(model.events[0].location);
     model.globe_view.stop_motion();
     model.obs_view = true;
     model.selected_root = Some(dir.path().into());
@@ -224,29 +296,86 @@ fn cached_event_reaches_both_map_views() {
     model.show_coastlines = false;
     model.show_bathymetry = false;
     let ctx = egui::Context::default();
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024.0, 640.0));
+    let frame = |model: &mut AppModel, events| {
+        ctx.run(
+            egui::RawInput {
+                screen_rect: Some(rect),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default()
+                    .show(ctx, |ui| crate::panels::render_world_map(ui, model));
+            },
+        )
+    };
+    let mut gpu = screen::Screen::new([1024, 640]);
+    gpu.install_globe();
     for local in [false, true] {
         model.globe_view.local_mode = local;
-        for enabled in [true, false] {
-            model.ghostmaps.settings.enabled = enabled;
-            let output = ctx.run(
-                egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(1000.0, 700.0),
-                    )),
-                    ..Default::default()
-                },
-                |ctx| {
-                    egui::CentralPanel::default()
-                        .show(ctx, |ui| crate::panels::render_world_map(ui, &mut model));
-                },
-            );
+        model.selected_event_id = None;
+        let mut baseline = 0;
+        let mut marker = None;
+        for enabled in [false, true] {
+            model.show_event_markers = enabled;
+            let output = frame(&mut model, Vec::new());
+            marker = output
+                .shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::Shape::Circle(c)
+                        if c.fill == EventSeverity::Unrated.color()
+                            && rect.shrink(10.0).contains(c.center) =>
+                    {
+                        Some(c.center)
+                    }
+                    _ => None,
+                })
+                .min_by(|a, b| {
+                    a.distance(rect.center())
+                        .total_cmp(&b.distance(rect.center()))
+                });
             assert_eq!(
+                marker.is_some(),
                 enabled,
-                output.shapes.iter().any(|s| matches!(&s.shape,
-                egui::Shape::Text(t) if t.galley.text() == "GhostMaps test event")),
-                "local={local}"
+                "native event strike, local={local}"
             );
+            let pixels = gpu.render(&ctx, output, true).unwrap();
+            let purple = pixels
+                .chunks_exact(4)
+                .filter(|p| {
+                    p[0] > 70 && p[2].saturating_sub(p[0]) > 12 && p[0].saturating_sub(p[1]) > 18
+                })
+                .count();
+            if enabled {
+                assert!(
+                    purple > baseline,
+                    "native beam did not reach framebuffer: {purple} vs {baseline}, local={local}"
+                );
+            } else {
+                baseline = purple;
+            }
         }
+        let pos = marker.unwrap();
+        for pressed in [true, false] {
+            let output = frame(
+                &mut model,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    },
+                ],
+            );
+            gpu.render(&ctx, output, false);
+        }
+        assert!(
+            model.selected_event().is_some_and(|e| e.is_ghostmaps()),
+            "click did not select a GhostMaps report, local={local}"
+        );
     }
 }

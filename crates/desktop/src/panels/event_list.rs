@@ -14,10 +14,10 @@ pub fn render_event_list(ctx: &egui::Context, model: &mut AppModel, radio: &mut 
             );
             ui.add_space(8.0);
 
-            let events = model.events.clone();
+            let mut focus = None;
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-                for event in events {
+                for event in &model.events {
                     let is_selected = model.selected_event_id.as_deref() == Some(event.id.as_str());
 
                     egui::Frame::group(ui.style())
@@ -50,13 +50,16 @@ pub fn render_event_list(ctx: &egui::Context, model: &mut AppModel, radio: &mut 
                                 )
                                 .clicked()
                             {
-                                model.select_event(&event.id);
+                                focus = Some(event.id.clone());
                             }
-                            if is_selected { radio.button(ui, &event); }
+                            if is_selected { radio.button(ui, event); }
                         });
 
                     ui.add_space(8.0);
                 }
             });
+            if let Some(id) = focus {
+                model.select_event(&id);
+            }
         });
 }

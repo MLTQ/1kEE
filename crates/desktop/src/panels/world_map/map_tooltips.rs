@@ -29,9 +29,16 @@ pub(super) fn draw_event_hover_tooltip(
                 .corner_radius(8.0)
                 .inner_margin(egui::Margin::same(8))
                 .show(ui, |ui| {
+                    ui.set_max_width(320.0);
                     ui.colored_label(event.severity.color(), event.severity.label());
                     ui.strong(event.title.as_str());
                     ui.small(event.location_name.as_str());
+                    if event.is_ghostmaps() {
+                        ui.small(format!("{} · {}", event.source, event.occurred_at));
+                        if !event.summary.is_empty() {
+                            ui.label(&event.summary);
+                        }
+                    }
                 });
         });
 }

@@ -136,6 +136,7 @@ fn severity(event: &EventRecord) -> i64 {
             EventSeverity::Critical => 4,
             EventSeverity::Elevated => 2,
             EventSeverity::Advisory => 1,
+            EventSeverity::Unrated => 0,
         })
 }
 
