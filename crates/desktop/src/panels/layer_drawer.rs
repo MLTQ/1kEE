@@ -291,6 +291,9 @@ pub(crate) fn map_controls(ui: &mut egui::Ui, model: &mut AppModel) {
     });
     ui.add_space(4.0);
 
+    crate::lidar_catalog::controls(ui, model);
+    ui.add_space(4.0);
+
     crate::ghostmaps::controls(ui, model);
     ui.add_space(4.0);
 

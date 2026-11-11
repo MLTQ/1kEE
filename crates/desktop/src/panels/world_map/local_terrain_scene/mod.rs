@@ -697,6 +697,10 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         );
     }
     if model.active_body == crate::model::ActiveBody::Earth {
+        if let Some(layer) = &model.lidar.footprint {
+            draw_geojson_layers_local(painter, &layout, &model.globe_view, viewport_center,
+                extent_x_km, extent_y_km, std::slice::from_ref(layer), None);
+        }
         for layers in model.ghostmaps.layers() {
             draw_geojson_layers_local(
                 painter, &layout, &model.globe_view, viewport_center, extent_x_km, extent_y_km,

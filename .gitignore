@@ -1,6 +1,7 @@
 /target
 /Derived
 /Data/GhostMaps/
+/Data/Lidar/
 /.beads/*.db-shm
 /.beads/*.db-wal
 

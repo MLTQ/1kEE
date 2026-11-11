@@ -102,6 +102,7 @@ impl DashboardApp {
         fire_source::tick(&mut self.model);
         self.model.buildout.tick();
         self.model.ghostmaps.tick();
+        crate::lidar_catalog::tick(ctx, &mut self.model);
         self.model.sync_ghostmaps_reports();
         self.model.tick_event_follow(ctx.input(|i| i.time));
 

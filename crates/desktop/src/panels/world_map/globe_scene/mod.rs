@@ -274,6 +274,9 @@ pub(super) fn paint_with_layout(
     }
 
     if model.active_body == crate::model::ActiveBody::Earth {
+        if let Some(layer) = &model.lidar.footprint {
+            geography::draw_geojson_layers(painter, &layout, &model.globe_view, std::slice::from_ref(layer), None);
+        }
         for layers in model.ghostmaps.layers() {
             geography::draw_geojson_layers(painter, &layout, &model.globe_view, layers, None);
         }

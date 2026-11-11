@@ -19,6 +19,7 @@ mod flock_source;
 mod factal_stream;
 mod flight_tracks;
 mod ghostmaps;
+mod lidar_catalog;
 mod gruve;
 mod gpu_config;
 mod model;
