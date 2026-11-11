@@ -1,5 +1,6 @@
 /target
 /Derived
+/Data/GhostMaps/
 /.beads/*.db-shm
 /.beads/*.db-wal
 

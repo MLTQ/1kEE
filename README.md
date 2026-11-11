@@ -55,6 +55,15 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
   bundled TeleGeography snapshot (`submarine_cables.rs`, works offline) and live
   NASA FIRMS active-fire detections (`fire_source.rs`, rendered by
   `panels/world_map/fire_layer.rs`, cached locally). Both default to off.
+- **GhostMaps events** — enable **Layers → Public Data → GhostMaps events** on the
+  Earth map. The default is the rolling 30-day Common Intelligence Picture.
+  Use **Choose KMZ exports** to add the 90-day picture or a dated snapshot.
+  Each populated KML folder has its own visibility control in Globe and Local.
+  While enabled, 1kEE checks the repository catalog once every 24 hours and
+  downloads selected files only when their Git blob hashes change or the cached
+  copy needs repair. Dated snapshots stay pinned to the chosen filename.
+  Validated exports remain available offline in `GhostMaps/layers.sqlite` under
+  the data root. [S2 Underground / S2A1, CC BY-NC-SA 4.0](https://github.com/s2underground/GhostMaps)
 - **AI data center buildout** — enable **Layers → Public Data → AI data center buildout**.
   1kEE checks [Zack’s Lab](https://www.zackslab.com/buildout) daily while running,
   and keeps the last successful snapshot for offline use. Filled dots mark campus

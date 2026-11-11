@@ -101,6 +101,7 @@ impl DashboardApp {
         submarine_cables::tick(&mut self.model);
         fire_source::tick(&mut self.model);
         self.model.buildout.tick();
+        self.model.ghostmaps.tick();
         self.model.tick_event_follow(ctx.input(|i| i.time));
 
         // The Atlas UI follows the solar clock even when terrain uses studio light.

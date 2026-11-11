@@ -159,6 +159,7 @@ pub struct AppModel {
     /// User-downloaded Flock positions, with their own provenance and filters.
     pub flock: crate::flock_source::Source,
     pub buildout: crate::buildout::Source,
+    pub(crate) ghostmaps: crate::ghostmaps::Source,
     /// Optional public ALPR overlay. It remains off until the operator enables it.
     pub show_deflock_alprs: bool,
     /// Human-readable cache/refresh state for the public ALPR source.
@@ -368,6 +369,10 @@ impl AppModel {
             selected_arcgis_feature: None,
             deflock_alpr_locations: Arc::new(Vec::new()),
             flock: crate::flock_source::Source::default(),
+            ghostmaps: crate::ghostmaps::Source::new(
+                app_settings.ghostmaps,
+                crate::ghostmaps::cache_path(app_settings.data_root.as_deref(), selected_root.as_deref()),
+            ),
             buildout: crate::buildout::Source::new(
                 app_settings.ai_buildout_enabled,
                 crate::buildout::cache_path(
@@ -578,6 +583,7 @@ impl AppModel {
             ny511_api_key: self.ny511_api_key.trim().to_owned(),
             eyes_on_enabled: self.eyes_on_enabled,
             ai_buildout_enabled: self.buildout.enabled,
+            ghostmaps: self.ghostmaps.settings.clone(),
             global_weather: self.global_weather.settings(),
             eyes_on_country_code: settings_store::normalize_eyes_on_country_code(
                 &self.eyes_on_country_code,
@@ -614,6 +620,9 @@ impl AppModel {
         self.global_weather.set_cache_path(global_weather::cache_path(
             data_root.as_deref(), self.selected_root.as_deref(),
         ));
+        self.ghostmaps.set_path(crate::ghostmaps::cache_path(
+            data_root.as_deref(), self.selected_root.as_deref(),
+        ));
         self.buildout.set_path(crate::buildout::cache_path(
             data_root.as_deref(),
             self.selected_root.as_deref(),
@@ -630,8 +639,12 @@ impl AppModel {
             .map(|path| path.display().to_string())
             .unwrap_or_default();
         self.buildout.enabled = settings.ai_buildout_enabled;
+        self.ghostmaps.set_settings(settings.ghostmaps);
         self.global_weather.set_settings(settings.global_weather);
         self.global_weather.set_cache_path(global_weather::cache_path(
+            settings.data_root.as_deref(), self.selected_root.as_deref(),
+        ));
+        self.ghostmaps.set_path(crate::ghostmaps::cache_path(
             settings.data_root.as_deref(), self.selected_root.as_deref(),
         ));
         self.buildout.set_path(crate::buildout::cache_path(

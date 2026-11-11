@@ -696,6 +696,14 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             model,
         );
     }
+    if model.active_body == crate::model::ActiveBody::Earth {
+        for layers in model.ghostmaps.layers() {
+            draw_geojson_layers_local(
+                painter, &layout, &model.globe_view, viewport_center, extent_x_km, extent_y_km,
+                layers, None,
+            );
+        }
+    }
     if !model.geojson_layers.is_empty() {
         draw_geojson_layers_local(
             painter,

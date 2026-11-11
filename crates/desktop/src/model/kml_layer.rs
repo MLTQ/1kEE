@@ -6,18 +6,8 @@ pub(super) fn parse_kml_features(xml: &str) -> Result<Vec<GeoJsonFeature>, Strin
     let document = Document::parse(xml).map_err(|e| format!("KML XML parse error: {e}"))?;
     let mut features = Vec::new();
 
-    for placemark in document
-        .descendants()
-        .filter(|node| node.is_element() && node.tag_name().name() == "Placemark")
-    {
-        let label = direct_child_text(placemark, "name");
-        if let Ok(geometries) = parse_placemark_geometries(placemark) {
-            features.extend(geometries.into_iter().map(|geometry| GeoJsonFeature {
-                geometry,
-                label: label.clone(),
-                color: None,
-            }));
-        }
+    for placemark in placemarks(&document) {
+        features.extend(placemark_features(placemark));
     }
 
     if features.is_empty() {
@@ -27,6 +17,73 @@ pub(super) fn parse_kml_features(xml: &str) -> Result<Vec<GeoJsonFeature>, Strin
     }
 
     Ok(features)
+}
+
+fn placemarks<'a>(document: &'a Document<'_>) -> impl Iterator<Item = Node<'a, 'a>> {
+    document
+        .descendants()
+        .filter(|node| node.has_tag_name("Placemark"))
+}
+
+fn placemark_features(placemark: Node<'_, '_>) -> Vec<GeoJsonFeature> {
+    let label = direct_child_text(placemark, "name");
+    parse_placemark_geometries(placemark)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|geometry| GeoJsonFeature {
+            geometry,
+            label: label.clone(),
+            color: None,
+        })
+        .collect()
+}
+
+/// ArcGIS exports use KML folders for independently displayable map layers.
+pub(super) fn folder_layers(xml: &str, export: &str) -> Result<Vec<super::GeoJsonLayer>, String> {
+    use std::collections::BTreeMap;
+    let document = Document::parse(xml).map_err(|e| format!("KML XML parse error: {e}"))?;
+    if !document.root_element().has_tag_name("kml") {
+        return Err("Expected a KML document".into());
+    }
+    let mut folders = BTreeMap::new();
+    let mut has_placemarks = false;
+    for placemark in placemarks(&document) {
+        has_placemarks = true;
+        let features = placemark_features(placemark);
+        if features.is_empty() {
+            continue;
+        }
+        let mut names: Vec<_> = placemark
+            .ancestors()
+            .filter(|n| n.has_tag_name("Folder"))
+            .filter_map(|n| direct_child_text(n, "name"))
+            .collect();
+        names.reverse();
+        let name = if names.is_empty() {
+            export.to_owned()
+        } else {
+            names.join(" / ")
+        };
+        let layer = folders
+            .entry(name.clone())
+            .or_insert_with(|| super::GeoJsonLayer {
+                color: super::geojson_layer::palette_color(&name),
+                name,
+                features: Vec::new(),
+                visible: true,
+                show_labels: false,
+            });
+        layer.features.extend(features);
+    }
+    if folders.is_empty()
+        && (has_placemarks
+            || document
+                .descendants()
+                .any(|n| n.has_tag_name("NetworkLink") || n.has_tag_name("GroundOverlay")))
+    {
+        return Err("KMZ has no supported placemark geometry".into());
+    }
+    Ok(folders.into_values().collect())
 }
 
 fn parse_placemark_geometries(node: Node<'_, '_>) -> Result<Vec<GeoJsonGeometry>, String> {

@@ -104,6 +104,18 @@ impl GeoJsonLayer {
     /// Parse a KMZ archive by loading `doc.kml` (or the first `.kml` entry)
     /// and delegating to the KML parser.
     pub fn parse_kmz(name: String, bytes: &[u8]) -> Result<Self, String> {
+        let xml = Self::kmz_document(bytes, u64::MAX)?;
+        Self::parse_kml(name, xml.trim_start_matches('\u{feff}'))
+    }
+
+    pub(crate) fn kmz_folder_layers(name: &str, bytes: &[u8]) -> Result<Vec<Self>, String> {
+        // A KMZ can expand far beyond its compressed size.
+        let xml = Self::kmz_document(bytes, 128 * 1024 * 1024)?;
+        super::kml_layer::folder_layers(xml.trim_start_matches('\u{feff}'), name)
+    }
+
+    fn kmz_document(bytes: &[u8], limit: u64) -> Result<String, String> {
+        use std::io::Read;
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
             .map_err(|e| format!("KMZ archive error: {e}"))?;
         let mut kml_entry_name = None;
@@ -129,19 +141,26 @@ impl GeoJsonLayer {
         }
 
         let entry_name = kml_entry_name.ok_or("KMZ archive does not contain a KML document")?;
-        let mut file = archive
+        let file = archive
             .by_name(&entry_name)
             .map_err(|e| format!("KMZ archive error: {e}"))?;
         let mut xml = String::new();
-        std::io::Read::read_to_string(&mut file, &mut xml)
+        if file.size() > limit {
+            return Err("KMZ document exceeds the size limit".into());
+        }
+        file.take(limit.saturating_add(1))
+            .read_to_string(&mut xml)
             .map_err(|e| format!("KMZ KML read error: {e}"))?;
-        Self::parse_kml(name, xml.trim_start_matches('\u{feff}'))
+        if xml.len() as u64 > limit {
+            return Err("KMZ document exceeds the size limit".into());
+        }
+        Ok(xml)
     }
 }
 
 // ── Colour palette ────────────────────────────────────────────────────────────
 
-fn palette_color(seed: &str) -> [u8; 4] {
+pub(super) fn palette_color(seed: &str) -> [u8; 4] {
     let h: u32 = seed.bytes().fold(5381u32, |acc, b| {
         acc.wrapping_mul(33).wrapping_add(b as u32)
     });

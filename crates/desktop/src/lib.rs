@@ -18,6 +18,7 @@ mod fire_source;
 mod flock_source;
 mod factal_stream;
 mod flight_tracks;
+mod ghostmaps;
 mod gruve;
 mod gpu_config;
 mod model;

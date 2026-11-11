@@ -273,6 +273,12 @@ pub(super) fn paint_with_layout(
         landing_point_markers = project_landing_points(painter, &layout, &model.globe_view, model);
     }
 
+    if model.active_body == crate::model::ActiveBody::Earth {
+        for layers in model.ghostmaps.layers() {
+            geography::draw_geojson_layers(painter, &layout, &model.globe_view, layers, None);
+        }
+    }
+
     // ── GeoJSON user overlay layers ────────────────────────────────────────
     if !model.geojson_layers.is_empty() {
         geography::draw_geojson_layers(painter, &layout, &model.globe_view, &model.geojson_layers, None);

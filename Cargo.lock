@@ -2576,6 +2576,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha1",
  "tempfile",
  "tile-archive",
  "tungstenite",
