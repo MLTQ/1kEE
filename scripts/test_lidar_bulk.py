@@ -3,6 +3,8 @@ import hashlib
 from pathlib import Path
 import shutil
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -88,3 +90,17 @@ class BulkTests(unittest.TestCase):
     def test_geographic_assignment(self):
         self.assertEqual(region("opentopoID:test", (-92,17,-91,18)), ("North America", "Mexico"))
         self.assertEqual(region("eba-archives", (None,)*4), ("South America", "Brazil"))
+
+    def test_wrong_volume_rejected_before_any_write(self):
+        catalog = self.root / "catalog.sqlite"
+        catalog.touch()
+        before = set(self.root.iterdir())
+        result = subprocess.run([sys.executable, "-B", bulk.__file__, "--db", str(catalog),
+                                 "--volume-uuid", "wrong-volume"], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be on volume wrong-volume", result.stderr)
+        self.assertEqual(set(self.root.iterdir()), before)
+
+    def test_unmounted_removable_path_rejected(self):
+        with patch.object(Path, "is_mount", return_value=False), self.assertRaisesRegex(OSError, "not mounted"):
+            bulk.catalog.check_removable_mount(Path("/run/media/m/Minkowski/Data/Lidar/catalog.sqlite"))

@@ -442,9 +442,27 @@ def requested_restores(root, space, finished):
             return failed
 
 
+def pin_volume(db_path, expected_uuid):
+    catalog.check_removable_mount(db_path)
+    # Relative writes from this directory remain on its mount even after a lazy unmount.
+    # Resolve the catalog first so a symlink cannot select a different disk unnoticed.
+    path = db_path.resolve(strict=True)
+    os.chdir(path.parent)
+    if expected_uuid:
+        dev = os.stat(".").st_dev
+        identity = subprocess.check_output(
+            ["findmnt", "--noheadings", "--raw", "--output", "MAJ:MIN,UUID", "--target", "."],
+            text=True).split()
+        if (len(identity) != 2 or identity[0] != f"{os.major(dev)}:{os.minor(dev)}"
+                or identity[1].casefold() != expected_uuid.casefold()):
+            raise ValueError(f"Lidar catalog must be on volume {expected_uuid}, found {' '.join(identity)}")
+    return Path(path.name)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--db", type=Path, required=True, help="Existing Lidar/catalog.sqlite on the target drive")
+    p.add_argument("--volume-uuid", help="Require this filesystem UUID before writing or downloading")
     p.add_argument("--source", choices=SOURCES, action="append", help="Repeat to limit providers")
     p.add_argument("--per-source", type=int, default=2, help="Simultaneous transfers per provider")
     p.add_argument("--reserve-gb", type=float, default=100, help="Space to leave free for maps and other disk users")
@@ -452,6 +470,10 @@ def main():
     args = p.parse_args()
     if not args.db.is_file() or not 1 <= args.per_source <= 8 or not math.isfinite(args.reserve_gb) or args.reserve_gb < 0:
         p.error("Supply an existing catalog, 1–8 workers per source, and a nonnegative reserve")
+    try:
+        args.db = pin_volume(args.db, args.volume_uuid)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        p.error(str(exc))
     sources = sorted(set(args.source or SOURCES))
     with (args.db.parent / "bulk.lock").open("a") as lock:
         try:
@@ -463,6 +485,8 @@ def main():
                 db.execute("INSERT OR IGNORE INTO restores VALUES(?)", (args.restore_country,))
             print("Queued country restore: " + args.restore_country)
             return 0
+        pinned = Path(f"/proc/{os.getpid()}/cwd") if sys.platform.startswith("linux") else args.db.parent
+        catalog.set_scratch(pinned)
         with sqlite3.connect(args.db.parent / "bulk.sqlite") as db:
             db.executescript(SCHEMA)
             migrate(db, args.db.parent)

@@ -57,8 +57,10 @@ Use **--netrc** with your own curl/Earthdata login configuration for protected N
 On Linux, the bulk downloader uses the existing catalog, Python 3.11+, requests, and GDAL. It acquires actual scan files and elevation products across NOAA, OpenTopography, LINZ, INFOMAR, swisstopo and the Brazilian EBA archive. It rotates between geographic areas and runs two transfers per provider by default. Coverage depends on the contributing surveys. Earthdata login products are available separately through the catalog download command above.
 
 ~~~sh
-python3 scripts/lidar_bulk.py --db /run/media/m/Minkowski/Data/Lidar/catalog.sqlite
+python3 scripts/lidar_bulk.py --volume-uuid 6FEF-269A --db /run/media/m/Minkowski/Data/Lidar/catalog.sqlite
 ~~~
+
+These examples use Minkowski’s filesystem UUID, `6FEF-269A`. For a different volume, check its UUID with `lsblk -f`. The job verifies the UUID before opening its lock or writing data. It pins its working directory to the volume and keeps temporary scan data under **Lidar/scratch**.
 
 The default reserve is **100 GB** (100,000,000,000 bytes). The downloader checks the destination volume, accounts for simultaneous transfers, and reuses completed files. Interrupted transfers resume when the publisher supplies a checksum or supports validated byte ranges.
 
@@ -69,12 +71,14 @@ Delete a country directory to reclaim its scan storage. Keep **Lidar/bulk.sqlite
 To download a previously saved country again, use its folder name. The command also works while the worldwide job is running. A country with territory in multiple continent directories is restored across those directories.
 
 ~~~sh
-python3 scripts/lidar_bulk.py --db /run/media/m/Minkowski/Data/Lidar/catalog.sqlite --restore-country Brazil
+python3 scripts/lidar_bulk.py --volume-uuid 6FEF-269A --db /run/media/m/Minkowski/Data/Lidar/catalog.sqlite --restore-country Brazil
 ~~~
 
 For the running Minkowski job, follow progress with `journalctl --user -fu 1kee-lidar-bulk`. Stop it with `systemctl --user stop 1kee-lidar-bulk`. To resume after stopping or rebooting, rerun the bulk command above, or start it detached from the terminal with the following command from the checkout.
 
 ~~~sh
 systemd-run --user --unit=1kee-lidar-bulk --working-directory="$PWD" \
-  /usr/bin/python3 -Bu scripts/lidar_bulk.py --db /run/media/m/Minkowski/Data/Lidar/catalog.sqlite
+  --property=ProtectSystem=strict --property=ProtectHome=read-only \
+  --property=ReadWritePaths=/run/media/m/Minkowski/Data/Lidar \
+  /usr/bin/python3 -Bu scripts/lidar_bulk.py --volume-uuid 6FEF-269A --db /run/media/m/Minkowski/Data/Lidar/catalog.sqlite
 ~~~

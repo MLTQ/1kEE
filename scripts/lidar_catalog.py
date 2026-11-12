@@ -48,6 +48,27 @@ CREATE TABLE IF NOT EXISTS resources (url TEXT PRIMARY KEY, etag TEXT, modified 
 """
 
 
+def check_removable_mount(path):
+    # UDisks leaves the parent directory accessible after a drive is ejected.
+    parts = path.absolute().parts
+    if parts[:3] == ("/", "run", "media") and len(parts) >= 5:
+        volume = Path(*parts[:5])
+        if not volume.is_mount():
+            raise OSError(f"Lidar volume is not mounted: {volume}")
+
+
+def set_scratch(root):
+    scratch = root / "scratch"
+    scratch.mkdir(exist_ok=True)
+    if scratch.stat().st_dev != root.stat().st_dev:
+        raise OSError(f"Lidar scratch is on another filesystem: {scratch}")
+    # tempfile can fall back to the working directory when TMPDIR is unavailable.
+    # Set the directory explicitly for Python and pass it to GDAL and SQLite.
+    location = str(scratch.absolute())
+    tempfile.tempdir = location
+    os.environ.update(TMPDIR=location, CPL_TMPDIR=location, SQLITE_TMPDIR=location)
+
+
 def request(url, headers=None):
     req = Request(url, headers={"User-Agent": "1kEE-lidar-catalog/1", **(headers or {})})
     with urlopen(req, timeout=60) as response:
@@ -619,7 +640,9 @@ def main():
         download(None, args)
         return 0
     if args.action == "refresh":
+        check_removable_mount(args.db)
         args.db.parent.mkdir(parents=True, exist_ok=True)
+        set_scratch(args.db.parent)
     elif not args.db.is_file():
         parser.error("Refresh the catalog first")
     with sqlite3.connect(args.db) as db:

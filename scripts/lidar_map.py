@@ -452,12 +452,14 @@ def main():
     global ACTIVE
     ACTIVE = a.active
     check_view()
+    catalog.check_removable_mount(a.db)
     with sqlite3.connect(a.db.resolve().as_uri() + "?mode=ro", uri=True) as db:
         db.row_factory = sqlite3.Row
         box = tile_bounds(a.z, a.x, a.y)
         if a.kind == "paths":
             image, credits = paths(db, box), []
         else:
+            catalog.set_scratch(a.db.parent)
             image, credits = measurements(db, box, a.db.parent / "map-source-cache", a.preferred)
         if a.empty and not image.getbbox():
             a.empty.parent.mkdir(parents=True, exist_ok=True)
