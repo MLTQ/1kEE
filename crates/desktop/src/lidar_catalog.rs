@@ -11,7 +11,9 @@ use std::{
 
 mod directory;
 mod geography;
+mod map_pick;
 mod picker;
+pub(crate) use map_pick::{PickRegion, map_interaction};
 pub(crate) use picker::show as picker;
 
 const HARVESTER: &str = include_str!("../../../scripts/lidar_catalog.py");
@@ -79,12 +81,35 @@ pub(crate) struct Browser {
     more: bool,
     results: Vec<Survey>,
     selected: Option<Survey>,
+    automatic: bool,
+    map_pick: map_pick::MapPick,
     picker: picker::Picker,
     pub(crate) footprint: Option<GeoJsonLayer>,
     status: String,
 }
 
 impl Browser {
+    pub(crate) fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if !enabled {
+            self.boundaries_only();
+        }
+    }
+
+    fn boundaries_only(&mut self) {
+        self.selected = None;
+        self.automatic = false;
+        self.selection_job = None;
+        self.footprint = None;
+        self.map_pick = Default::default();
+    }
+
+    fn pin(&mut self, survey: Survey) {
+        self.boundaries_only();
+        self.selected = Some(survey);
+        self.search_error.clear();
+    }
+
     pub(crate) fn new(path: PathBuf) -> Self {
         Self {
             path,
@@ -335,53 +360,10 @@ fn covers(rings: &[Vec<GeoPoint>], point: GeoPoint) -> bool {
 }
 
 fn overlapping(path: &Path, at: GeoPoint) -> Result<Vec<Survey>, String> {
-    let db = connection(path)?;
-    let bulk = connection(&path.with_file_name("bulk.sqlite")).ok();
-    // Sort the matching footprints in the directory. SQL name ordering can force a
-    // scan of the worldwide name index instead of a lookup in the extent index.
-    let sql = format!(
-        "SELECT id,name,product,date,page,asset,source,geometry FROM surveys
-        WHERE west<=?1 AND east>=?1 AND south<=?2 AND north>=?2 AND {}",
-        directory::MAPPABLE
-    );
-    let mut q = db.prepare(&sql).map_err(|e| e.to_string())?;
-    let mut rows = q
-        .query(params![at.lon, at.lat])
-        .map_err(|e| e.to_string())?;
-    let mut surveys = Vec::new();
-    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-        let geometry: String = row.get(7).map_err(|e| e.to_string())?;
-        let shape = GeoJsonLayer::parse(String::new(), &geometry)?;
-        let hit = shape.features.iter().any(|f| match &f.geometry {
-            GeoJsonGeometry::Polygon(rings) => covers(rings, at),
-            GeoJsonGeometry::MultiPolygon(parts) => parts.iter().any(|rings| covers(rings, at)),
-            GeoJsonGeometry::Point(point) => *point == at,
-            _ => false,
-        });
-        if hit {
-            let mut survey = directory::survey_row(row).map_err(|e| e.to_string())?;
-            if survey.id.starts_with("EBA:")
-                && !bulk.as_ref().is_some_and(|db| {
-                    db.query_row(
-                        "SELECT 1 FROM transects WHERE survey=? LIMIT 1",
-                        [&survey.id],
-                        |_| Ok(()),
-                    )
-                    .is_ok()
-                })
-            {
-                continue;
-            }
-            if let Some((id, name)) = directory::collection(&survey.id, &survey.name) {
-                survey.id = id;
-                survey.name = name;
-            }
-            if !surveys.iter().any(|s: &Survey| s.id == survey.id) {
-                surveys.push(survey);
-            }
-        }
-    }
-    Ok(surveys)
+    Ok(map_pick::lookup(path, PickRegion::point(at), false)?
+        .into_iter()
+        .map(|hit| hit.survey)
+        .collect())
 }
 
 pub(crate) fn tick(ctx: &egui::Context, model: &mut AppModel) {
@@ -409,6 +391,7 @@ pub(crate) fn tick(ctx: &egui::Context, model: &mut AppModel) {
     let force_check = refreshed.is_some();
     if let Some(result) = refreshed {
         b.picker.invalidate();
+        b.map_pick.invalidate();
         b.status = result.unwrap_or_else(|error| error);
         if b.searched {
             b.request_search(ctx, focus);
@@ -416,6 +399,7 @@ pub(crate) fn tick(ctx: &egui::Context, model: &mut AppModel) {
     }
     if !b.enabled || !earth {
         b.selection_job = None;
+        b.map_pick = Default::default();
         if !earth {
             b.picker.close();
         }
@@ -429,7 +413,11 @@ pub(crate) fn tick(ctx: &egui::Context, model: &mut AppModel) {
         check(ctx, b);
     }
     if b.tiles.poll_catalog(ctx, &b.path, force_check) {
-        let preferred = b.selected.as_ref().map_or("", |survey| survey.id.as_str());
+        let preferred = b
+            .selected
+            .as_ref()
+            .map(|survey| survey.id.as_str())
+            .or(b.automatic.then_some(""));
         b.tiles.tick(ctx, &b.path, preferred);
     }
 }
@@ -438,10 +426,14 @@ pub(crate) fn toggle(ui: &mut egui::Ui, model: &mut AppModel) {
     if model.active_body != ActiveBody::Earth {
         return;
     }
-    ui.checkbox(&mut model.lidar.enabled, "Lidar")
-        .on_hover_text(
-            "Zoom into teal survey paths to load and save lidar. Gray paths mark archive coverage.",
-        );
+    let mut enabled = model.lidar.enabled;
+    if ui
+        .checkbox(&mut enabled, "Lidar")
+        .on_hover_text("Show survey boundaries. Right-click a boundary to load lidar.")
+        .changed()
+    {
+        model.lidar.set_enabled(enabled);
+    }
     if model.lidar.enabled {
         if !model.lidar.tiles.status.is_empty() {
             ui.small(&model.lidar.tiles.status)
@@ -518,6 +510,7 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
                         let path = b.path.clone();
                         let survey = row.clone();
                         b.enabled = true;
+                        b.map_pick = Default::default();
                         b.selection_job =
                             Some(read_in_background(ui.ctx(), move || select(&path, survey)));
                     }
@@ -546,9 +539,7 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
                 );
             }
             if ui.small_button("Clear selection").clicked() {
-                b.selection_job = None;
-                b.selected = None;
-                b.footprint = None;
+                b.boundaries_only();
             }
         }
     });

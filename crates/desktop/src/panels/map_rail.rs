@@ -170,10 +170,10 @@ fn record_buttons(ui: &mut egui::Ui, model: &mut AppModel) {
     }
     if model.active_body == ActiveBody::Earth
         && button(ui, "Lidar", model.lidar.enabled)
-            .on_hover_text("Show / hide lidar survey paths and measurements")
+            .on_hover_text("Show survey boundaries. Right-click a trace to load its lidar.")
             .clicked()
     {
-        model.lidar.enabled = !model.lidar.enabled;
+        model.lidar.set_enabled(!model.lidar.enabled);
     }
 }
 fn focus_button(ui: &mut egui::Ui, model: &mut AppModel) {

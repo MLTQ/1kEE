@@ -153,6 +153,14 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         };
         contour_pass::end_frame();
 
+        if model.active_body == crate::model::ActiveBody::Earth && model.lidar.enabled && !model.obs_view {
+            let pointer = response
+                .hover_pos()
+                .filter(|_| !response.dragged())
+                .and_then(|pos| lidar_pick_region(rect, &model.globe_view, local_terrain_mode, pos));
+            crate::lidar_catalog::map_interaction(ui, &response, model, pointer);
+        }
+
         if local_terrain_mode && !model.obs_view {
             ui.add_space(10.0);
             draw_local_footer(ui, model, scene.beam_elevation_m);
@@ -251,6 +259,28 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
             }
         }
     });
+}
+
+fn lidar_pick_region(
+    rect: egui::Rect,
+    view: &crate::model::GlobeViewState,
+    local: bool,
+    pos: egui::Pos2,
+) -> Option<crate::lidar_catalog::PickRegion> {
+    if local {
+        let projection = raster_mesh::ground_projection(
+            &local_terrain_scene::layout(rect),
+            view,
+            view.local_center,
+            local_terrain_scene::visual_half_extent_for_zoom(view.local_zoom),
+        );
+        crate::lidar_catalog::PickRegion::from_screen(pos, |p| projection.ground_location(p))
+    } else {
+        let layout = globe_scene::globe_layout(rect, view);
+        crate::lidar_catalog::PickRegion::from_screen(pos, |p| {
+            globe_scene::latlon_in_layout(&layout, view, p)
+        })
+    }
 }
 
 fn poll_map_sources(ui: &egui::Ui, model:&mut AppModel) {

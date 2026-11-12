@@ -86,6 +86,51 @@ fn imported_satellite_pixels_reach_both_earth_scenes() {
     }
 }
 
+#[test]
+fn lidar_picking_inverts_the_rendered_globe_and_oblique_local_ground() {
+    use super::super::{globe_scene, lidar_pick_region, local_terrain_scene};
+    let rect = egui::Rect::from_min_size(egui::pos2(30., 72.), egui::vec2(1024., 640.));
+    for center in [
+        GeoPoint {
+            lon: -75.09,
+            lat: 38.33,
+        },
+        GeoPoint {
+            lon: 179.99,
+            lat: -84.,
+        },
+    ] {
+        let mut view = GlobeViewState::from_focus(center);
+        view.local_zoom = 20.;
+        view.local_pitch = 0.8;
+        view.local_yaw = 1.2;
+        let point = GeoPoint {
+            lon: (center.lon + 0.02 + 180.).rem_euclid(360.) - 180.,
+            lat: center.lat + 0.012,
+        };
+        let layout = globe_scene::globe_layout(rect, &view);
+        let globe = globe_scene::project_surface(&layout, &view, point)
+            .unwrap()
+            .pos;
+        let local = raster_mesh::ground_projection(
+            &local_terrain_scene::layout(rect),
+            &view,
+            center,
+            local_terrain_scene::visual_half_extent_for_zoom(view.local_zoom),
+        );
+        let (x, y, _) = local.project_logical(point, 0.);
+        for (local, pos) in [(false, globe), (true, egui::pos2(x, y))] {
+            let picked = lidar_pick_region(rect, &view, local, pos).unwrap().at;
+            let lon_error = (picked.lon - point.lon + 180.).rem_euclid(360.) - 180.;
+            assert!(
+                lon_error.abs() < 0.001 && (picked.lat - point.lat).abs() < 0.001,
+                "{picked:?}, {point:?}"
+            );
+        }
+        assert!(lidar_pick_region(rect, &view, false, rect.left_top()).is_none());
+    }
+}
+
 /// Run against a catalog restricted to NOAAID:38 to check both the actual survey and the viewport
 /// that each scene requests. A second run reads the saved tile set with the network disabled.
 #[test]
@@ -139,7 +184,7 @@ fn lidar_zoom_paints_measured_pixels_in_both_earth_views() {
         gpu.render(&ctx, frame(&model), false);
         let start = Instant::now();
         loop {
-            model.lidar.tiles.tick(&ctx, &db, "");
+            model.lidar.tiles.tick(&ctx, &db, Some("NOAAID:38"));
             if model.lidar.tiles.visible_tiles_loaded()
                 && model.lidar.tiles.sources.contains("Winter ATM")
             {
@@ -160,9 +205,12 @@ fn lidar_zoom_paints_measured_pixels_in_both_earth_views() {
             "local={local}: measured texture absent from scene");
         drop(textures);
         let actual = gpu.render(&ctx, output, true).unwrap();
-        model.lidar.enabled = false;
+        model.lidar.tiles.tick(&ctx, &db, None);
         let background = gpu.render(&ctx, frame(&model), true).unwrap();
-        assert_ne!(actual, background, "local={local}: no visible lidar");
+        assert!(
+            actual != background,
+            "local={local}: measurements did not add pixels to the survey outlines"
+        );
         if let Some(dir) = std::env::var_os("ONEKEE_LIDAR_PREVIEWS") {
             let name = if local {
                 "ocean-city-local.png"

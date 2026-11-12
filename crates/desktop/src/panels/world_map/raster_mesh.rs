@@ -1,6 +1,9 @@
 //! Geographic raster projection shared by satellite imagery and gravity overlays.
 use super::globe_scene::{GlobeLayout, project_surface};
-use super::local_terrain_scene::{LocalLayout, projection::local_projection_params};
+use super::local_terrain_scene::{
+    LocalLayout,
+    projection::{LocalProjectionParams, local_projection_params},
+};
 use crate::model::{GeoPoint, GlobeViewState};
 
 pub(super) fn globe(
@@ -60,6 +63,17 @@ pub(super) fn globe(
     mesh
 }
 
+pub(super) fn ground_projection(
+    layout: &LocalLayout,
+    view: &GlobeViewState,
+    focus: GeoPoint,
+    half: f32,
+) -> LocalProjectionParams {
+    let extent_y = (half * 111.32).max(1.0);
+    let extent_x = (half * 111.32 * focus.lat.to_radians().cos().abs().max(0.2)).max(1.0);
+    local_projection_params(layout, view, focus, extent_x, extent_y)
+}
+
 pub(super) fn local(
     layout: &LocalLayout,
     view: &GlobeViewState,
@@ -71,9 +85,7 @@ pub(super) fn local(
 ) -> egui::Mesh {
     let mut mesh = egui::Mesh::with_texture(texture);
     let [mut west, south, mut east, north] = bounds;
-    let extent_y = (half * 111.32).max(1.0);
-    let extent_x = (half * 111.32 * focus.lat.to_radians().cos().abs().max(0.2)).max(1.0);
-    let projection = local_projection_params(layout, view, focus, extent_x, extent_y);
+    let projection = ground_projection(layout, view, focus, half);
     let project = |lat, lon| {
         let (x, y, _) = projection.project_logical(GeoPoint { lat, lon }, 0.0);
         egui::pos2(x, y)

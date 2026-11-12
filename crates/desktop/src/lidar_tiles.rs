@@ -91,6 +91,7 @@ pub(crate) struct Tiles {
     stable: Vec<Tile>,
     moved: Option<Instant>,
     preferred: String,
+    measurements: bool,
     generation: u32,
     catalog_job: Option<ReadJob<CatalogSnapshot>>,
     last_catalog_check: Option<Instant>,
@@ -127,15 +128,7 @@ impl Tiles {
         for detail in [true, false] {
             let mut shown = Vec::new();
             for &tile in &tiles {
-                if !detail
-                    && tile.z >= DETAIL_ZOOM
-                    && (!self.preferred.is_empty()
-                        || matches!(
-                            self.loaded
-                                .get(&key(tile, true, self.generation, &self.preferred)),
-                            Some(Some(_))
-                        ))
-                {
+                if detail && (!self.measurements || tile.z < DETAIL_ZOOM) {
                     continue;
                 }
                 let mut candidate = tile;
@@ -149,8 +142,7 @@ impl Tiles {
                             break;
                         }
                         Some(None) => break,
-                        None if (detail || tile.z < DETAIL_ZOOM)
-                            && tile.z - candidate.z < 2
+                        None if tile.z - candidate.z < 2
                             && candidate.z > if detail { DETAIL_ZOOM } else { 0 } =>
                         {
                             candidate = Tile {
@@ -178,7 +170,7 @@ impl Tiles {
         !self.stable.is_empty()
             && self.stable.iter().all(|&t| {
                 [false, true].into_iter().all(|detail| {
-                    (detail && t.z < DETAIL_ZOOM)
+                    (detail && (!self.measurements || t.z < DETAIL_ZOOM))
                         || self.loaded.contains_key(&key(
                             t,
                             detail,
@@ -190,6 +182,7 @@ impl Tiles {
     }
 
     pub(crate) fn stop(&mut self) {
+        self.measurements = false;
         for job in self.jobs.iter_mut().flatten() {
             job.active = None;
         }
@@ -250,7 +243,17 @@ impl Tiles {
         self.catalog_ready
     }
 
-    pub(crate) fn tick(&mut self, ctx: &egui::Context, path: &Path, preferred: &str) {
+    pub(crate) fn at_overview(&self) -> bool {
+        self.view
+            .borrow()
+            .first()
+            .is_some_and(|t| t.z < DETAIL_ZOOM)
+    }
+
+    /// None browses outlines; an empty ID enables the automatic mosaic.
+    pub(crate) fn tick(&mut self, ctx: &egui::Context, path: &Path, selection: Option<&str>) {
+        self.measurements = selection.is_some();
+        let preferred = selection.unwrap_or_default();
         self.preferred = preferred.to_owned();
         let view = self.view.get_mut();
         if self.stable != *view {
@@ -260,7 +263,8 @@ impl Tiles {
         for slot in 0..2 {
             if let Some(job) = &mut self.jobs[slot] {
                 if let Some(k) = job.key.get()
-                    && (!self.stable.contains(&k.tile)
+                    && ((k.detail && !self.measurements)
+                        || !self.stable.contains(&k.tile)
                         || (k.detail && *k != key(k.tile, true, self.generation, preferred)))
                 {
                     job.active = None;
@@ -303,6 +307,9 @@ impl Tiles {
                 continue;
             }
             let detail = slot == 1;
+            if detail && !self.measurements {
+                continue;
+            }
             let candidates: Vec<_> = self
                 .stable
                 .iter()
@@ -360,7 +367,19 @@ impl Tiles {
                 Err(e) => self.status = e.to_string(),
             }
         }
+        self.retry
+            .retain(|_, at| at.elapsed() < Duration::from_secs(60));
         self.sources.clear();
+        if !self.measurements {
+            if !self
+                .retry
+                .keys()
+                .any(|k| !k.detail && self.stable.contains(&k.tile))
+            {
+                self.status = "Right-click a survey boundary to load lidar".into();
+            }
+            return;
+        }
         let mut blanks = 0;
         for &tile in &self.stable {
             match self
@@ -387,8 +406,6 @@ impl Tiles {
         } else if blanks > 0 && blanks == self.stable.len() {
             self.status = "Coverage only · no measured image here".into();
         }
-        self.retry
-            .retain(|_, at| at.elapsed() < Duration::from_secs(60));
     }
 }
 
@@ -645,6 +662,43 @@ mod tests {
             egui::Color32::from_rgb(200, 130, 70)
         );
         assert_eq!(reopened.pixels[(0, 0)], egui::Color32::TRANSPARENT);
+    }
+
+    #[test]
+    fn boundaries_only_shows_paths_at_detail_zoom_and_does_not_request_measurements() {
+        let ctx = egui::Context::default();
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("catalog.sqlite");
+        let bounds = Some([10., 10., 11., 11.]);
+        let mut tiles = Tiles::default();
+        tiles.draw(bounds, |_| {});
+        tiles.stable = tiles.view.borrow().clone();
+        for &tile in &tiles.stable {
+            for (detail, name) in [(false, "outline"), (true, "1998")] {
+                let image = SatelliteImage {
+                    bounds: tile.bounds(),
+                    pixels: egui::ColorImage::new([1, 1], egui::Color32::WHITE),
+                };
+                tiles.loaded.insert(
+                    key(tile, detail, 0, "flight"),
+                    Some(SatelliteLayer::new(&ctx, name.into(), image)),
+                );
+            }
+        }
+        let painted = |tiles: &Tiles| {
+            let mut names = Vec::new();
+            tiles.draw(bounds, |image| names.push(image.name().to_owned()));
+            names.dedup();
+            names
+        };
+        tiles.tick(&ctx, &db, None);
+        assert!(tiles.jobs.iter().all(Option::is_none));
+        assert!(tiles.visible_tiles_loaded());
+        assert_eq!(painted(&tiles), ["outline"]);
+        tiles.tick(&ctx, &db, Some("flight"));
+        assert_eq!(painted(&tiles), ["1998", "outline"]);
+        tiles.tick(&ctx, &db, None);
+        assert_eq!(painted(&tiles), ["outline"]);
     }
 
     #[test]

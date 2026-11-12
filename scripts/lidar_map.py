@@ -56,16 +56,27 @@ PUBLISHED = """(id LIKE 'NOAAID:%' OR id LIKE 'USGS_3DEP_ID:%' OR stac IS NOT NU
                OR (source='infomar-lidar' AND id LIKE '%:SR_URL'))"""
 
 
+def survey_filter(column, preferred):
+    if not preferred:
+        return "", ()
+    # A selected LINZ collection includes all of its individual COG tiles.
+    if preferred.startswith("LINZ:") and preferred.endswith("/"):
+        return f" AND instr({column}, ?) = 1", (preferred,)
+    return f" AND {column} = ?", (preferred,)
+
+
 def matching(db, box, measurements=False, preferred="", local=False):
     w, s, e, n = box
     fields = "id,source,name,geometry,asset,stac,page" if measurements else f"geometry, {PUBLISHED} AS available"
     sql = f"SELECT {fields} FROM surveys WHERE west<? AND east>=? AND south<? AND north>=?"
+    clause, args = survey_filter("id", preferred)
+    sql += clause
     if measurements:
         sql += f""" AND ({PUBLISHED} OR product='NASA lidar raster' OR product='Lidar raster'
                     OR (source='eba' AND {int(local)}))
-                    ORDER BY id=? DESC, source='linz-coastal' DESC, source='infomar-lidar' DESC,
+                    ORDER BY source='linz-coastal' DESC, source='infomar-lidar' DESC,
                     stac IS NOT NULL DESC, date DESC, id"""
-    return db.execute(sql, (e, w, n, s, preferred) if measurements else (e, w, n, s))
+    return db.execute(sql, (e, w, n, s, *args))
 
 
 
@@ -303,21 +314,23 @@ def survey_image(row, box, folder):
         return raster_image([url], box)
 
 
-def offline_assets(root, box):
+def offline_assets(root, box, preferred=""):
     result = defaultdict(list)
     index = root / "bulk.sqlite"
     if index.is_file():
         with sqlite3.connect(index.resolve().as_uri() + "?mode=ro", uri=True) as db:
             w, s, e, n = box
             query = "SELECT survey,kind,path,url FROM files WHERE west<? AND east>=? AND south<? AND north>=?"
-            for survey, kind, path, url in db.execute(query, (e, w, n, s)):
+            clause, args = survey_filter("survey", preferred)
+            for survey, kind, path, url in db.execute(query + clause, (e, w, n, s, *args)):
                 file = root / path
                 result[survey].append((kind, file if file.is_file() else url, None))
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='transects'").fetchone():
+                clause, args = survey_filter("t.survey", preferred)
                 for survey, path, member, url in db.execute(
                         "SELECT t.survey,t.path,t.member,f.url FROM transects t JOIN files f ON t.path=f.path "
-                        "WHERE t.west<? AND t.east>=? AND t.south<? AND t.north>=?",
-                        (e, w, n, s)):
+                        "WHERE t.west<? AND t.east>=? AND t.south<? AND t.north>=?" + clause,
+                        (e, w, n, s, *args)):
                     file = root / path
                     result[survey].append(("laz", file if file.is_file() else url, member))
     return result
@@ -384,11 +397,11 @@ def offline_image(files, box):
 
 
 def measurements(db, box, folder, preferred):
-    local = offline_assets(folder.parent, box)
+    local = offline_assets(folder.parent, box, preferred)
     rows = matching(db, box, True, preferred, bool(local))
     if local:
         on_disk = {survey for survey, files in local.items() if any(isinstance(path, Path) for _, path, _ in files)}
-        rows = sorted(rows, key=lambda r: (r["id"] != preferred, r["id"] not in on_disk))
+        rows = sorted(rows, key=lambda r: r["id"] not in on_disk)
     result = Image.new("RGBA", (SIZE, SIZE))
     credits = []
     covered = Image.new("L", result.size)
@@ -396,10 +409,6 @@ def measurements(db, box, folder, preferred):
     tried_swiss = False
     for row in rows:
         check_view()
-        collection = preferred.startswith("LINZ:") and preferred.endswith("/")
-        selected = row["id"].startswith(preferred) if collection else row["id"] == preferred
-        if preferred and not selected:
-            continue
         files = local.get(row["id"])
         if not files and (row["source"] == "eba" or (row["source"] == "swisssurface3d" and tried_swiss)):
             continue
@@ -410,7 +419,7 @@ def measurements(db, box, folder, preferred):
         if not files and row["source"] == "swisssurface3d":
             tried_swiss = True
         try:
-            if selected and not files and row["source"] == "swisssurface3d" and row["asset"].endswith(".copc.laz"):
+            if preferred and not files and row["source"] == "swisssurface3d" and row["asset"].endswith(".copc.laz"):
                 files = [("copc", row["asset"], None)]
             image = offline_image(files, box) if files else survey_image(row, box, folder)
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:

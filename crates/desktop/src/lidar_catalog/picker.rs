@@ -231,23 +231,28 @@ pub(super) fn button(ui: &mut egui::Ui, model: &mut AppModel, title: &'static st
         ui.set_width((ui.ctx().screen_rect().width() - 24.).clamp(1., 360.));
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
         if ui
-            .selectable_label(b.selected.is_none(), "Automatic")
+            .selectable_label(b.selected.is_none() && !b.automatic, "Boundaries only")
             .clicked()
         {
-            b.selection_job = None;
-            b.selected = None;
-            b.footprint = None;
+            b.boundaries_only();
+            ui.close_menu();
+        }
+        if ui
+            .selectable_label(b.selected.is_none() && b.automatic, "Automatic")
+            .clicked()
+        {
+            b.boundaries_only();
+            b.automatic = true;
             ui.close_menu();
         }
         if let Some(entry) = b.picker.menu(ui, &b.path, at, b.selected.as_ref()) {
             b.enabled = true;
             b.search_error.clear();
             if let Some(survey) = entry.local {
-                b.selection_job = None;
-                b.selected = Some(survey);
-                b.footprint = None;
+                b.pin(survey);
             } else {
                 let path = b.path.clone();
+                b.map_pick = Default::default();
                 b.selection_job = Some(read_in_background(ui.ctx(), move || {
                     directory::open(&path, &entry.id)
                 }));

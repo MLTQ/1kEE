@@ -60,6 +60,12 @@ class LidarMapTests(unittest.TestCase):
         self.assertIsNotNone(result.getbbox())
         self.assertEqual(credits[0][1], "NOAAID:2")
 
+    def test_selected_linz_collection_only_reads_its_tiles(self):
+        for key in ["LINZ:coast/one", "LINZ:coast/two", "LINZ:coastal/one"]:
+            self.add(key, "linz-coastal", self.box)
+        rows = maps.matching(self.db, self.box, True, "LINZ:coast/")
+        self.assertEqual([r["id"] for r in rows], ["LINZ:coast/one", "LINZ:coast/two"])
+
     def test_gap_in_selected_year_stays_empty_when_another_year_covers_it(self):
         self.add("NOAAID:38", "opentopography", self.box)
         self.add("NOAAID:42", "opentopography", self.box)

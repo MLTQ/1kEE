@@ -130,6 +130,19 @@ impl LocalProjectionParams {
         )
     }
 
+    pub(crate) fn ground_location(&self, pixel: egui::Pos2) -> Option<GeoPoint> {
+        let delta = self.chart_delta(pixel - egui::pos2(self.focus_center_x, self.focus_center_y));
+        let p = if self.pole == 0. {
+            GeoPoint {
+                lat: self.focus_lat + delta.y,
+                lon: (self.focus_lon + delta.x + 180.).rem_euclid(360.) - 180.,
+            }
+        } else {
+            polar::location(self.pole, self.focus(), delta)
+        };
+        (delta.is_finite() && p.lon.is_finite() && (-90. ..=90.).contains(&p.lat)).then_some(p)
+    }
+
     /// Exact bounds on the ground. In the polar chart the nearest latitude
     /// can lie on an edge or at the pole inside the screen rectangle.
     pub(crate) fn ground_bounds(&self, clip: egui::Rect) -> Option<[f32; 4]> {

@@ -58,7 +58,7 @@ pub(super) fn open(path: &Path, id: &str) -> Result<(Survey, GeoJsonLayer, GeoPo
     Ok((survey, layer, focus))
 }
 
-fn label(name: &str, date: Option<&str>) -> String {
+pub(super) fn label(name: &str, date: Option<&str>) -> String {
     // Many publishers bake the flight year into the start of the title.
     let (title, prefix) = name
         .split_once(' ')
