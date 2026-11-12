@@ -9,6 +9,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod directory;
+mod geography;
+mod picker;
+pub(crate) use picker::show as picker;
+
 const HARVESTER: &str = include_str!("../../../scripts/lidar_catalog.py");
 const PAGE_SIZE: usize = 12;
 
@@ -16,23 +21,11 @@ const PAGE_SIZE: usize = 12;
 struct Survey {
     id: String,
     name: String,
+    source: String,
     product: String,
     date: Option<String>,
     page: String,
     asset: Option<String>,
-}
-
-impl Survey {
-    fn dated_name(&self) -> String {
-        let date = self
-            .date
-            .as_deref()
-            .unwrap_or("")
-            .split('T')
-            .next()
-            .unwrap_or("");
-        format!("{date}  {}", self.name)
-    }
 }
 
 pub(super) type ReadJob<T> = mpsc::Receiver<Result<T, String>>;
@@ -86,11 +79,7 @@ pub(crate) struct Browser {
     more: bool,
     results: Vec<Survey>,
     selected: Option<Survey>,
-    picker_target: Option<GeoPoint>,
-    picker_center: Option<GeoPoint>,
-    picker_job: Option<ReadJob<Vec<Survey>>>,
-    picker_results: Vec<Survey>,
-    picker_error: String,
+    picker: picker::Picker,
     pub(crate) footprint: Option<GeoJsonLayer>,
     status: String,
 }
@@ -127,7 +116,8 @@ fn connection(path: &Path) -> Result<Connection, String> {
 
 fn search(path: &Path, request: Search) -> Result<Vec<Survey>, String> {
     let db = connection(path)?;
-    let mut sql = String::from("SELECT id,name,product,date,page,asset FROM surveys WHERE 1");
+    let mut sql =
+        String::from("SELECT id,name,product,date,page,asset,source FROM surveys WHERE 1");
     if !request.query.trim().is_empty() {
         sql.push_str(" AND instr(lower(name||' '||product||' '||id||' '||source),lower(?1))>0");
     }
@@ -156,16 +146,7 @@ fn search(path: &Path, request: Search) -> Result<Vec<Survey>, String> {
                 PAGE_SIZE + 1,
                 request.offset
             ],
-            |row| {
-                Ok(Survey {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    product: row.get(2)?,
-                    date: row.get(3)?,
-                    page: row.get(4)?,
-                    asset: row.get(5)?,
-                })
-            },
+            directory::survey_row,
         )
         .map_err(|e| e.to_string())?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -242,7 +223,10 @@ fn interior(rings: &[Vec<GeoPoint>]) -> Option<GeoPoint> {
 }
 
 fn select(path: &Path, survey: Survey) -> Result<(Survey, GeoJsonLayer, GeoPoint), String> {
-    let db = connection(path)?;
+    footprint(&connection(path)?, survey)
+}
+
+fn footprint(db: &Connection, survey: Survey) -> Result<(Survey, GeoJsonLayer, GeoPoint), String> {
     let geometry: String = db
         .query_row(
             "SELECT geometry FROM surveys WHERE id=?",
@@ -353,22 +337,20 @@ fn covers(rings: &[Vec<GeoPoint>], point: GeoPoint) -> bool {
 fn overlapping(path: &Path, at: GeoPoint) -> Result<Vec<Survey>, String> {
     let db = connection(path)?;
     let bulk = connection(&path.with_file_name("bulk.sqlite")).ok();
-    let mut q = db
-        .prepare(
-            "SELECT id,name,product,date,page,asset,geometry FROM surveys
-        WHERE west<=?1 AND east>=?1 AND south<=?2 AND north>=?2
-        AND (id LIKE 'NOAAID:%' OR id LIKE 'USGS_3DEP_ID:%' OR stac IS NOT NULL
-             OR source IN ('linz-coastal','eba') OR id LIKE 'INFOMAR:%:SR_URL'
-             OR (source='swisssurface3d' AND asset LIKE '%.copc.laz') OR product='Lidar raster')
-             ORDER BY date DESC,name,id",
-        )
-        .map_err(|e| e.to_string())?;
+    // Sort the matching footprints in the directory. SQL name ordering can force a
+    // scan of the worldwide name index instead of a lookup in the extent index.
+    let sql = format!(
+        "SELECT id,name,product,date,page,asset,source,geometry FROM surveys
+        WHERE west<=?1 AND east>=?1 AND south<=?2 AND north>=?2 AND {}",
+        directory::MAPPABLE
+    );
+    let mut q = db.prepare(&sql).map_err(|e| e.to_string())?;
     let mut rows = q
         .query(params![at.lon, at.lat])
         .map_err(|e| e.to_string())?;
     let mut surveys = Vec::new();
     while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-        let geometry: String = row.get(6).map_err(|e| e.to_string())?;
+        let geometry: String = row.get(7).map_err(|e| e.to_string())?;
         let shape = GeoJsonLayer::parse(String::new(), &geometry)?;
         let hit = shape.features.iter().any(|f| match &f.geometry {
             GeoJsonGeometry::Polygon(rings) => covers(rings, at),
@@ -377,15 +359,7 @@ fn overlapping(path: &Path, at: GeoPoint) -> Result<Vec<Survey>, String> {
             _ => false,
         });
         if hit {
-            let read = |i| row.get::<_, String>(i).map_err(|e| e.to_string());
-            let mut survey = Survey {
-                id: read(0)?,
-                name: read(1)?,
-                product: read(2)?,
-                date: row.get(3).map_err(|e| e.to_string())?,
-                page: read(4)?,
-                asset: row.get(5).map_err(|e| e.to_string())?,
-            };
+            let mut survey = directory::survey_row(row).map_err(|e| e.to_string())?;
             if survey.id.starts_with("EBA:")
                 && !bulk.as_ref().is_some_and(|db| {
                     db.query_row(
@@ -398,13 +372,9 @@ fn overlapping(path: &Path, at: GeoPoint) -> Result<Vec<Survey>, String> {
             {
                 continue;
             }
-            if survey.id.starts_with("LINZ:")
-                && let Some(slash) = survey.id.rfind('/')
-            {
-                survey.id.truncate(slash + 1);
-                if let Some((collection, _)) = survey.name.split_once(" · ") {
-                    survey.name = collection.to_owned();
-                }
+            if let Some((id, name)) = directory::collection(&survey.id, &survey.name) {
+                survey.id = id;
+                survey.name = name;
             }
             if !surveys.iter().any(|s: &Survey| s.id == survey.id) {
                 surveys.push(survey);
@@ -412,93 +382,6 @@ fn overlapping(path: &Path, at: GeoPoint) -> Result<Vec<Survey>, String> {
         }
     }
     Ok(surveys)
-}
-
-pub(crate) fn picker(ui: &mut egui::Ui, model: &mut AppModel) {
-    if !model.lidar.enabled || model.active_body != ActiveBody::Earth {
-        return;
-    }
-    let at = center(model);
-    let b = &mut model.lidar;
-    ui.horizontal(|ui| {
-        let mut menu_visible = false;
-        ui.menu_button("Surveys at map center ▾", |ui| {
-            menu_visible = true;
-            // Keep the point the user opened the menu on while the globe is moving.
-            let target = *b.picker_target.get_or_insert(at);
-            if let Some(found) = completed(&mut b.picker_job) {
-                match found {
-                    Ok(rows) => b.picker_results = rows,
-                    Err(e) => b.picker_error = e,
-                }
-            }
-            if b.picker_job.is_none() && b.picker_center != Some(target) {
-                let path = b.path.clone();
-                b.picker_job = Some(read_in_background(ui.ctx(), move || {
-                    overlapping(&path, target)
-                }));
-                b.picker_center = Some(target);
-                b.picker_results.clear();
-                b.picker_error.clear();
-            }
-            if ui
-                .selectable_label(b.selected.is_none(), "Automatic")
-                .clicked()
-            {
-                b.selection_job = None;
-                b.selected = None;
-                b.footprint = None;
-                ui.close_menu();
-            }
-            if b.picker_job.is_some() {
-                ui.small("Finding surveys…");
-            } else if !b.picker_error.is_empty() {
-                ui.small(&b.picker_error);
-            } else if b.picker_results.is_empty() {
-                ui.small("No surveys cover the map center");
-            } else {
-                let width = (ui.ctx().screen_rect().width() - 24.).clamp(1., 360.);
-                ui.set_width(width);
-                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-                let height = ui.spacing().interact_size.y.max(
-                    ui.text_style_height(&egui::TextStyle::Button)
-                        + 2. * ui.spacing().button_padding.y,
-                );
-                egui::ScrollArea::vertical().max_height(280.).show_rows(
-                    ui,
-                    height,
-                    b.picker_results.len(),
-                    |ui, visible| {
-                        for s in &b.picker_results[visible] {
-                            if ui
-                                .selectable_label(
-                                    b.selected.as_ref().is_some_and(|v| v.id == s.id),
-                                    s.dated_name(),
-                                )
-                                .on_hover_text(&s.name)
-                                .clicked()
-                            {
-                                b.selection_job = None;
-                                b.selected = Some(s.clone());
-                                b.footprint = None;
-                                ui.close_menu();
-                            }
-                        }
-                    },
-                );
-            }
-        });
-        if !menu_visible {
-            b.picker_target = None;
-            if !b.picker_error.is_empty() {
-                b.picker_center = None;
-            }
-        }
-        if let Some(s) = &b.selected {
-            ui.add(egui::Label::new(&s.name).truncate())
-                .on_hover_text(&s.name);
-        }
-    });
 }
 
 pub(crate) fn tick(ctx: &egui::Context, model: &mut AppModel) {
@@ -525,7 +408,7 @@ pub(crate) fn tick(ctx: &egui::Context, model: &mut AppModel) {
     let refreshed = completed(&mut b.work);
     let force_check = refreshed.is_some();
     if let Some(result) = refreshed {
-        b.picker_center = None;
+        b.picker.invalidate();
         b.status = result.unwrap_or_else(|error| error);
         if b.searched {
             b.request_search(ctx, focus);
@@ -533,7 +416,9 @@ pub(crate) fn tick(ctx: &egui::Context, model: &mut AppModel) {
     }
     if !b.enabled || !earth {
         b.selection_job = None;
-        b.picker_target = None;
+        if !earth {
+            b.picker.close();
+        }
         b.tiles.stop();
         return;
     }
@@ -572,6 +457,7 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
         return;
     }
     ui.collapsing("Lidar surveys", |ui| {
+        picker::button(ui, model, "Browse by region ▾");
         let focus = center(model);
         let b = &mut model.lidar;
         if ui
@@ -589,7 +475,7 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
             .checkbox(&mut b.near, "100 km box at map center")
             .changed();
         let searching = b.search_job.is_some();
-        let mut query = !b.searched;
+        let mut query = false;
         if ui.small_button("Search surveys").clicked() || changed || submitted {
             b.offset = 0;
             query = true;
@@ -617,7 +503,7 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
             ui.small("Searching surveys…");
         } else if !b.search_error.is_empty() {
             ui.small(&b.search_error);
-        } else if b.results.is_empty() {
+        } else if b.searched && b.results.is_empty() {
             ui.small("No matching surveys");
         } else {
             ui.add_enabled_ui(b.selection_job.is_none(), |ui| {
@@ -731,6 +617,17 @@ mod tests {
         }
     }
 
+    fn wait_label(ctx: &egui::Context, model: &mut AppModel, text: &str) {
+        let start = Instant::now();
+        while label(&frame(ctx, model, vec![]), text).is_none() {
+            assert!(
+                start.elapsed() < Duration::from_secs(60),
+                "missing menu item {text}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     #[test]
     fn survey_menus_remain_interactive_while_catalog_is_locked() {
         let dir = tempfile::tempdir().unwrap();
@@ -754,7 +651,8 @@ mod tests {
         };
         model.globe_view.local_center = coast;
 
-        let open = click(&ctx, &mut model, "Lidar surveys");
+        click(&ctx, &mut model, "Lidar surveys");
+        let open = click(&ctx, &mut model, "Search surveys");
         assert!(label(&open, "Searching surveys…").is_some());
         let closed = click(&ctx, &mut model, "Lidar surveys");
         assert!(label(&closed, "Search surveys").is_none());
@@ -764,22 +662,68 @@ mod tests {
 
         model.lidar.enabled = true;
         model.lidar.last_check = Some(Instant::now());
-        let menu = click(&ctx, &mut model, "Surveys at map center ▾");
+        let menu = click(&ctx, &mut model, "Lidar surveys ▾");
         assert!(label(&menu, "Finding surveys…").is_some());
+        click(&ctx, &mut model, "At map center");
         model.globe_view.local_center = GeoPoint { lat: 20., lon: 10. };
-        frame(&ctx, &mut model, vec![]);
-        assert_eq!(model.lidar.picker_target, Some(coast));
 
         db.execute_batch("COMMIT").unwrap();
-        wait_for(&ctx, &mut model, |b| {
-            b.search_job.is_none() && b.picker_job.is_none()
-        });
+        wait_for(&ctx, &mut model, |b| b.search_job.is_none());
         assert_eq!(model.lidar.results.len(), 1);
         assert_eq!(model.lidar.results[0].name, "Inland flight");
-        assert_eq!(model.lidar.picker_results.len(), 1);
-        click(&ctx, &mut model, "1998  Coastal flight");
+        wait_label(&ctx, &mut model, "North America");
+        click(&ctx, &mut model, "North America");
+        click(&ctx, &mut model, "United States");
+        click(&ctx, &mut model, "Coastal flight · 1998");
         assert_eq!(model.lidar.selected.unwrap().id, "NOAAID:1");
         assert_eq!(model.globe_view.local_center.lon, 10.);
+    }
+
+    #[test]
+    fn worldwide_picker_opens_offshore_survey_from_the_layer_drawer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.sqlite");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(r#"CREATE TABLE surveys(id,source,name,product,date,page,asset,stac,geometry,west,south,east,north);
+            INSERT INTO surveys VALUES('a','demo','2012 Zulu flight','Lidar raster','2012','','',NULL,
+                '{"type":"Point","coordinates":[-90,25]}',-90,25,-90,25);
+            INSERT INTO surveys VALUES('b','demo','1999 Alpha flight','Lidar raster','1999','','',NULL,
+                '{"type":"Point","coordinates":[-90,25]}',-90,25,-90,25);
+            INSERT INTO surveys VALUES('c','demo','Forest scan','Lidar raster',NULL,'','',NULL,
+                '{"type":"Point","coordinates":[-60,-3]}',-60,-3,-60,-3);"#).unwrap();
+        let ctx = egui::Context::default();
+        ctx.style_mut(|s| s.animation_time = 0.);
+        let mut model = AppModel::new();
+        model.lidar = Browser::new(path);
+        model.lidar.last_check = Some(Instant::now());
+        click(&ctx, &mut model, "Lidar surveys");
+        click(&ctx, &mut model, "Browse by region ▾");
+        wait_label(&ctx, &mut model, "South America");
+        click(&ctx, &mut model, "South America");
+        click(&ctx, &mut model, "Brazil");
+        wait_label(&ctx, &mut model, "Forest scan");
+        click(&ctx, &mut model, "‹ South America");
+        click(&ctx, &mut model, "‹ All regions");
+        click(&ctx, &mut model, "Oceans");
+        let menu = click(&ctx, &mut model, "Gulf of Mexico");
+        assert!(
+            label(&menu, "Alpha flight · 1999").unwrap().y
+                < label(&menu, "Zulu flight · 2012").unwrap().y
+        );
+        click(&ctx, &mut model, "Alpha flight · 1999");
+        wait_for(&ctx, &mut model, |b| b.selection_job.is_none());
+        assert_eq!(model.lidar.selected.as_ref().unwrap().id, "b");
+        assert!(model.lidar.enabled && model.globe_view.local_mode);
+        assert_eq!(
+            model.globe_view.local_center,
+            GeoPoint {
+                lat: 25.,
+                lon: -90.
+            }
+        );
+        click(&ctx, &mut model, "Lidar surveys ▾");
+        click(&ctx, &mut model, "Automatic");
+        assert!(model.lidar.selected.is_none());
     }
 
     #[test]
@@ -796,25 +740,29 @@ mod tests {
         };
 
         click(&ctx, &mut model, "Lidar surveys");
+        click(&ctx, &mut model, "Search surveys");
         wait_for(&ctx, &mut model, |b| b.search_job.is_none());
         assert_eq!(model.lidar.results.len(), PAGE_SIZE);
         click(&ctx, &mut model, "Lidar surveys");
         model.lidar.enabled = true;
         model.lidar.last_check = Some(Instant::now());
-        click(&ctx, &mut model, "Surveys at map center ▾");
-        wait_for(&ctx, &mut model, |b| b.picker_job.is_none());
-        assert!(
-            model
-                .lidar
-                .picker_results
-                .iter()
-                .any(|s| s.id == "NOAAID:38")
-        );
-        let newest = &model.lidar.picker_results[0];
-        let id = newest.id.clone();
-        let title = newest.dated_name();
-        click(&ctx, &mut model, &title);
-        assert_eq!(model.lidar.selected.unwrap().id, id);
+        click(&ctx, &mut model, "Lidar surveys ▾");
+        wait_label(&ctx, &mut model, "Oceans");
+        click(&ctx, &mut model, "Oceans");
+        wait_label(&ctx, &mut model, "North Atlantic Ocean");
+        click(&ctx, &mut model, "‹ All regions");
+        click(&ctx, &mut model, "Europe");
+        wait_label(&ctx, &mut model, "Ireland");
+        click(&ctx, &mut model, "At map center");
+        wait_label(&ctx, &mut model, "North America");
+        click(&ctx, &mut model, "North America");
+        click(&ctx, &mut model, "United States");
+        let nearby =
+            directory::at_center(&model.lidar.path, model.globe_view.local_center).unwrap();
+        let rows = &nearby["North America"]["United States"];
+        assert!(rows.iter().any(|s| s.id == "NOAAID:38"));
+        click(&ctx, &mut model, &rows[0].label);
+        assert_eq!(model.lidar.selected.unwrap().id, rows[0].id);
     }
 
     #[test]
@@ -860,7 +808,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             choices.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
-            ["NOAAID:2", "NOAAID:1"]
+            ["NOAAID:1", "NOAAID:2"]
         );
         assert!(
             overlapping(

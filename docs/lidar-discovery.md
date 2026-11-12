@@ -2,7 +2,9 @@
 
 Turn on **Lidar** in the Earth map toolbar or under **Layers → Base**. On narrow screens the toolbar switch is in **View**. Survey paths appear in Globe and Local. Zoom into a teal path and pause briefly. 1kEE requests the visible map tiles and displays relief from the available measurements. At country scale the map shows a measured preview. Local reveals finer detail and adjacent survey strips. Gray outlines indicate archive coverage. Transparent pixels are gaps in the source. Hover the layer status to see the names of the surveys on screen.
 
-With the layer enabled, open **Surveys at map center** to switch between overlapping acquisitions by date while keeping the same camera position and zoom. Choose **Automatic** to resume browsing across surveys.
+Open **Lidar surveys** on the map toolbar or **Browse by region** in the Lidar surveys drawer. In **Worldwide**, pick a continent and country, or open **Oceans** and pick a named sea, gulf or ocean basin. Select a survey to open its footprint in Local view. Within each location surveys are alphabetical, with acquisition dates beside their names. Larger lists have a name or ID filter.
+
+Choose **At map center** in the same picker to switch between overlapping surveys while keeping your position and zoom. **Automatic** restores automatic source selection. The worldwide directory uses the center of each survey’s catalog extent and known national collections. Coastal surveys can appear under both a country and a marine region. The local list uses the actual survey footprint at the point where you opened the menu. The app ships the country outlines and marine regions for offline lookup. [Natural Earth marine regions](https://www.naturalearthdata.com/downloads/110m-physical-vectors/110m-physical-labels/)
 
 To find a survey elsewhere, open **Layers → Public Data → Lidar surveys**. Search by part of a name or ID, such as **NOAAID:38**, and select the result. This enables the layer and opens a close Local view. **Clear selection** restores automatic source priority. The survey record and download links open the publisher's material.
 
