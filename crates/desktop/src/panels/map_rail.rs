@@ -20,6 +20,7 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
             let density = if ui.available_width() >= 1050.0 { Density::Full }
                 else if ui.available_width() >= 800.0 { Density::Compact } else { Density::Minimal };
             ui.horizontal(|ui| {
+                if ui.available_width() < 1200.0 { ui.spacing_mut().item_spacing.x = 3.0; }
                 view_buttons(ui, model);
                 body_button(ui, model);
                 ui.separator();
@@ -166,6 +167,13 @@ fn record_buttons(ui: &mut egui::Ui, model: &mut AppModel) {
         .clicked()
     {
         model.show_camera_markers = !model.show_camera_markers;
+    }
+    if model.active_body == ActiveBody::Earth
+        && button(ui, "Lidar", model.lidar.enabled)
+            .on_hover_text("Show / hide lidar survey paths and measurements")
+            .clicked()
+    {
+        model.lidar.enabled = !model.lidar.enabled;
     }
 }
 fn focus_button(ui: &mut egui::Ui, model: &mut AppModel) {

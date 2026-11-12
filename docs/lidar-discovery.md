@@ -1,10 +1,12 @@
 # Worldwide lidar survey discovery
 
-On Earth, turn on **Layers → Base → Lidar**. Survey paths appear in Globe and Local. Zoom into a teal path and pause briefly. 1kEE requests the visible map tiles and displays relief from the available measurements. At country scale the map shows a measured preview. Local reveals finer detail and adjacent survey strips. Gray outlines indicate archive coverage. Transparent pixels are gaps in the source. Hover the layer status to see the names of the surveys on screen.
+Turn on **Lidar** in the Earth map toolbar or under **Layers → Base**. On narrow screens the toolbar switch is in **View**. Survey paths appear in Globe and Local. Zoom into a teal path and pause briefly. 1kEE requests the visible map tiles and displays relief from the available measurements. At country scale the map shows a measured preview. Local reveals finer detail and adjacent survey strips. Gray outlines indicate archive coverage. Transparent pixels are gaps in the source. Hover the layer status to see the names of the surveys on screen.
 
-For a particular acquisition, open **Layers → Public Data → Lidar surveys**. Search by part of a name or ID, such as **NOAAID:38**, and select the result. This enables the layer and opens a close Local view. **Clear selection** restores automatic source priority. The survey record and download links open the publisher's material.
+With the layer enabled, open **Surveys at map center** to switch between overlapping acquisitions by date while keeping the same camera position and zoom. Choose **Automatic** to resume browsing across surveys.
 
-1kEE saves each completed 512 × 512 map tile under **Lidar/maps/v1** in the configured Data directory. Both views reuse that cache across launches and offline. Tiles use a north-up longitude/latitude grid. PNG metadata records the contributing surveys. Point-cloud blocks and service responses are reused from **Lidar/map-source-cache**. Catalog changes invalidate saved path outlines and empty results. Turning the layer off hides it and keeps the files. The on/off setting survives restarting the app.
+To find a survey elsewhere, open **Layers → Public Data → Lidar surveys**. Search by part of a name or ID, such as **NOAAID:38**, and select the result. This enables the layer and opens a close Local view. **Clear selection** restores automatic source priority. The survey record and download links open the publisher's material.
+
+1kEE saves each completed 512 × 512 map tile under **Lidar/maps/v1** in the configured Data directory. Both views reuse that cache across launches and offline. Tiles use a north-up longitude/latitude grid. PNG metadata records the contributing surveys. Point-cloud blocks and service responses are reused from **Lidar/map-source-cache**. Catalog changes invalidate saved path outlines and empty results. Lidar and webcam markers start hidden on each launch. Turning either layer on lasts for the current session. Saved lidar tiles remain available on disk.
 
 ## Catalogs
 
@@ -49,3 +51,30 @@ python3 scripts/lidar_catalog.py --db Data/Lidar/catalog.sqlite download \
 For protected NASA terrain GeoTIFFs, choose **Data/Lidar/scans** as the download directory to make a locally acquired raster available to the map worker.
 
 Use **--netrc** with your own curl/Earthdata login configuration for protected NASA files. **--all** selects all individually linked files. **--eba-archives --directory scans** downloads the Brazilian regional ZIPs. OpenTopography records with publisher-mediated access retain their survey links in the export. For other public collections, pass a lidar publisher’s HTTPS STAC collection **items** URL to **refresh --stac-items URL**, or a NASA lidar collection concept ID to **refresh --cmr-collection ID**. Repeat those arguments on subsequent refreshes to update those additional collections.
+
+## Worldwide bulk downloads
+
+On Linux, the bulk downloader uses the existing catalog, Python 3.11+, requests, and GDAL. It acquires actual scan files and elevation products across NOAA, OpenTopography, LINZ, INFOMAR, swisstopo and the Brazilian EBA archive. It rotates between geographic areas and runs two transfers per provider by default. Coverage depends on the contributing surveys. Earthdata login products are available separately through the catalog download command above.
+
+~~~sh
+python3 scripts/lidar_bulk.py --db /run/media/m/Minkowski/Data/Lidar/catalog.sqlite
+~~~
+
+The default reserve is **100 GB** (100,000,000,000 bytes). The downloader checks the destination volume, accounts for simultaneous transfers, and reuses completed files. Interrupted transfers resume when the publisher supplies a checksum or supports validated byte ranges.
+
+Open **Data/Lidar/scans** to manage storage. The first two directories are the continent and country, for example **South America/Brazil** or **Oceania/New Zealand**. For cross-border and coastal files the downloader uses the tile center and nearby coastline. National surveys and Brazilian regional archives use their published country. Each filename includes a short identifier so different acquisitions with the same publisher filename can coexist.
+
+Delete a country directory to reclaim its scan storage. Keep **Lidar/bulk.sqlite** and **Lidar/catalog.sqlite**. They retain source URLs, geographic extents and Brazilian ZIP member names. The worldwide job skips country directories you removed. Existing rendered tiles stay available under **Lidar/maps**. When a new view needs an evicted scan, 1kEE reads it from the publisher and saves the resulting tile. Availability then depends on the publisher and your connection.
+
+To download a previously saved country again, use its folder name. The command also works while the worldwide job is running. A country with territory in multiple continent directories is restored across those directories.
+
+~~~sh
+python3 scripts/lidar_bulk.py --db /run/media/m/Minkowski/Data/Lidar/catalog.sqlite --restore-country Brazil
+~~~
+
+For the running Minkowski job, follow progress with `journalctl --user -fu 1kee-lidar-bulk`. Stop it with `systemctl --user stop 1kee-lidar-bulk`. To resume after stopping or rebooting, rerun the bulk command above, or start it detached from the terminal with the following command from the checkout.
+
+~~~sh
+systemd-run --user --unit=1kee-lidar-bulk --working-directory="$PWD" \
+  /usr/bin/python3 -Bu scripts/lidar_bulk.py --db /run/media/m/Minkowski/Data/Lidar/catalog.sqlite
+~~~

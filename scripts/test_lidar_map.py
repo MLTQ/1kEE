@@ -60,6 +60,15 @@ class LidarMapTests(unittest.TestCase):
         self.assertIsNotNone(result.getbbox())
         self.assertEqual(credits[0][1], "NOAAID:2")
 
+    def test_gap_in_selected_year_stays_empty_when_another_year_covers_it(self):
+        self.add("NOAAID:38", "opentopography", self.box)
+        self.add("NOAAID:42", "opentopography", self.box)
+        with patch.object(maps, "survey_image", return_value=None) as get:
+            image, credits = maps.measurements(self.db, self.box, Path("."), "NOAAID:38")
+        self.assertEqual(get.call_count, 1)
+        self.assertIsNone(image.getbbox())
+        self.assertEqual(credits, [])
+
     def test_linz_reuses_unchanged_metadata_and_rejects_invalid_checksum(self):
         import hashlib
         body = b'{"type":"Collection"}'

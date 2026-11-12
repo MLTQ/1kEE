@@ -37,24 +37,28 @@ pub(crate) struct Browser {
     more: bool,
     results: Vec<Survey>,
     selected: Option<Survey>,
+    picker_center: Option<GeoPoint>,
+    picker_job: Option<mpsc::Receiver<Result<Vec<Survey>, String>>>,
+    picker_results: Vec<Survey>,
+    picker_error: String,
     pub(crate) footprint: Option<GeoJsonLayer>,
     status: String,
 }
 
 impl Browser {
-    pub(crate) fn new(enabled: bool, path: PathBuf) -> Self {
-        let mut browser = Self {
-            enabled,
+    pub(crate) fn new(path: PathBuf) -> Self {
+        Self {
             path,
             ..Default::default()
-        };
-        browser.tiles.catalog_changed(&browser.path);
-        browser
+        }
     }
 
     pub(crate) fn set_path(&mut self, path: PathBuf) {
         if self.path != path {
-            *self = Self::new(self.enabled, path);
+            *self = Self {
+                enabled: self.enabled,
+                ..Self::new(path)
+            };
         }
     }
 }
@@ -260,6 +264,166 @@ fn center(model: &AppModel) -> GeoPoint {
     }
 }
 
+fn covers(rings: &[Vec<GeoPoint>], point: GeoPoint) -> bool {
+    let Some(first) = rings.first().and_then(|r| r.first()) else {
+        return false;
+    };
+    let unwrap = |lon: f32| first.lon + (lon - first.lon + 180.).rem_euclid(360.) - 180.;
+    let x = unwrap(point.lon);
+    let mut inside = false;
+    for edge in rings.iter().flat_map(|ring| ring.windows(2)) {
+        let (a, b) = (edge[0], edge[1]);
+        if (a.lat > point.lat) != (b.lat > point.lat)
+            && x < unwrap(a.lon)
+                + (point.lat - a.lat) / (b.lat - a.lat) * (unwrap(b.lon) - unwrap(a.lon))
+        {
+            inside = !inside;
+        }
+    }
+    inside
+}
+
+fn overlapping(path: &Path, at: GeoPoint) -> Result<Vec<Survey>, String> {
+    let db = connection(path)?;
+    let bulk = connection(&path.with_file_name("bulk.sqlite")).ok();
+    let mut q = db
+        .prepare(
+            "SELECT id,name,product,date,page,asset,geometry FROM surveys
+        WHERE west<=?1 AND east>=?1 AND south<=?2 AND north>=?2
+        AND (id LIKE 'NOAAID:%' OR id LIKE 'USGS_3DEP_ID:%' OR stac IS NOT NULL
+             OR source IN ('linz-coastal','eba') OR id LIKE 'INFOMAR:%:SR_URL'
+             OR (source='swisssurface3d' AND asset LIKE '%.copc.laz') OR product='Lidar raster')
+             ORDER BY date DESC,name,id",
+        )
+        .map_err(|e| e.to_string())?;
+    let mut rows = q
+        .query(params![at.lon, at.lat])
+        .map_err(|e| e.to_string())?;
+    let mut surveys = Vec::new();
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let geometry: String = row.get(6).map_err(|e| e.to_string())?;
+        let shape = GeoJsonLayer::parse(String::new(), &geometry)?;
+        let hit = shape.features.iter().any(|f| match &f.geometry {
+            GeoJsonGeometry::Polygon(rings) => covers(rings, at),
+            GeoJsonGeometry::MultiPolygon(parts) => parts.iter().any(|rings| covers(rings, at)),
+            GeoJsonGeometry::Point(point) => *point == at,
+            _ => false,
+        });
+        if hit {
+            let read = |i| row.get::<_, String>(i).map_err(|e| e.to_string());
+            let mut survey = Survey {
+                id: read(0)?,
+                name: read(1)?,
+                product: read(2)?,
+                date: row.get(3).map_err(|e| e.to_string())?,
+                page: read(4)?,
+                asset: row.get(5).map_err(|e| e.to_string())?,
+            };
+            if survey.id.starts_with("EBA:")
+                && !bulk.as_ref().is_some_and(|db| {
+                    db.query_row(
+                        "SELECT 1 FROM transects WHERE survey=? LIMIT 1",
+                        [&survey.id],
+                        |_| Ok(()),
+                    )
+                    .is_ok()
+                })
+            {
+                continue;
+            }
+            if survey.id.starts_with("LINZ:")
+                && let Some(slash) = survey.id.rfind('/')
+            {
+                survey.id.truncate(slash + 1);
+                if let Some((collection, _)) = survey.name.split_once(" · ") {
+                    survey.name = collection.to_owned();
+                }
+            }
+            if !surveys.iter().any(|s: &Survey| s.id == survey.id) {
+                surveys.push(survey);
+            }
+        }
+    }
+    Ok(surveys)
+}
+
+pub(crate) fn picker(ui: &mut egui::Ui, model: &mut AppModel) {
+    if !model.lidar.enabled || model.active_body != ActiveBody::Earth {
+        return;
+    }
+    let at = center(model);
+    let b = &mut model.lidar;
+    ui.horizontal(|ui| {
+        ui.menu_button("Surveys at map center ▾", |ui| {
+            if b.picker_job.is_none() && b.picker_center != Some(at) {
+                let path = b.path.clone();
+                let (tx, rx) = mpsc::channel();
+                let ctx = ui.ctx().clone();
+                std::thread::spawn(move || {
+                    let _ = tx.send(overlapping(&path, at));
+                    ctx.request_repaint();
+                });
+                b.picker_center = Some(at);
+                b.picker_job = Some(rx);
+                b.picker_results.clear();
+                b.picker_error.clear();
+            }
+            if let Some(rx) = &b.picker_job
+                && let Ok(found) = rx.try_recv()
+            {
+                match found {
+                    Ok(rows) => b.picker_results = rows,
+                    Err(e) => b.picker_error = e,
+                }
+                b.picker_job = None;
+            }
+            if ui
+                .selectable_label(b.selected.is_none(), "Automatic")
+                .clicked()
+            {
+                b.selected = None;
+                b.footprint = None;
+                ui.close_menu();
+            }
+            egui::ScrollArea::vertical()
+                .max_height(280.)
+                .show(ui, |ui| {
+                    for s in &b.picker_results {
+                        let date = s
+                            .date
+                            .as_deref()
+                            .unwrap_or("")
+                            .split('T')
+                            .next()
+                            .unwrap_or("");
+                        if ui
+                            .selectable_label(
+                                b.selected.as_ref().is_some_and(|v| v.id == s.id),
+                                format!("{date}  {}", s.name),
+                            )
+                            .clicked()
+                        {
+                            b.selected = Some(s.clone());
+                            b.footprint = None;
+                            ui.close_menu();
+                        }
+                    }
+                    if b.picker_job.is_some() {
+                        ui.small("Finding surveys…");
+                    } else if !b.picker_error.is_empty() {
+                        ui.small(&b.picker_error);
+                    } else if b.picker_results.is_empty() {
+                        ui.small("No surveys cover the map center");
+                    }
+                });
+        });
+        if let Some(s) = &b.selected {
+            ui.add(egui::Label::new(&s.name).truncate())
+                .on_hover_text(&s.name);
+        }
+    });
+}
+
 pub(crate) fn tick(ctx: &egui::Context, model: &mut AppModel) {
     if !model.lidar.enabled || model.active_body != ActiveBody::Earth {
         model.lidar.tiles.stop();
@@ -280,6 +444,7 @@ pub(crate) fn tick(ctx: &egui::Context, model: &mut AppModel) {
         };
         if let Some(result) = result {
             b.work = None;
+            b.picker_center = None;
             b.status = result.unwrap_or_else(|error| error);
             b.tiles.catalog_changed(&b.path);
             if b.searched
@@ -313,16 +478,10 @@ pub(crate) fn toggle(ui: &mut egui::Ui, model: &mut AppModel) {
     if model.active_body != ActiveBody::Earth {
         return;
     }
-    if ui
-        .checkbox(&mut model.lidar.enabled, "Lidar")
+    ui.checkbox(&mut model.lidar.enabled, "Lidar")
         .on_hover_text(
             "Zoom into teal survey paths to load and save lidar. Gray paths mark archive coverage.",
-        )
-        .changed()
-        && let Err(error) = model.save_settings()
-    {
-        model.push_log(format!("Lidar setting save failed: {error}"));
-    }
+        );
     if model.lidar.enabled {
         if !model.lidar.tiles.status.is_empty() {
             ui.small(&model.lidar.tiles.status)
@@ -337,7 +496,6 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
     if model.active_body != ActiveBody::Earth {
         return;
     }
-    let mut save = false;
     ui.collapsing("Lidar surveys", |ui| {
         let focus = center(model);
         let b = &mut model.lidar;
@@ -397,7 +555,6 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
         if let Some(row) = chosen {
             match select(b, row) {
                 Ok(point) => {
-                    save = !b.enabled;
                     b.enabled = true;
                     model.globe_view.stop_motion();
                     model.globe_view.focus_on(point);
@@ -431,9 +588,6 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
             }
         }
     });
-    if save && let Err(e) = model.save_settings() {
-        model.push_log(format!("Lidar setting save failed: {e}"));
-    }
 }
 
 #[cfg(test)]
@@ -469,5 +623,34 @@ mod tests {
         let strip = browser.results[0].clone();
         assert_eq!(select(&mut browser, strip).unwrap().lon, -54.25);
         assert!(browser.footprint.unwrap().visible);
+        db.execute(
+            "UPDATE surveys SET id='NOAAID:1',date='1998' WHERE id='a'",
+            [],
+        )
+        .unwrap();
+        db.execute("INSERT INTO surveys SELECT 'NOAAID:2',source,name,product,'2018',page,asset,stac,geometry,west,south,east,north FROM surveys WHERE id='NOAAID:1'", []).unwrap();
+        let choices = overlapping(
+            &browser.path,
+            GeoPoint {
+                lat: -3.6,
+                lon: -54.2,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            choices.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            ["NOAAID:2", "NOAAID:1"]
+        );
+        assert!(
+            overlapping(
+                &browser.path,
+                GeoPoint {
+                    lat: -3.1,
+                    lon: -54.9
+                }
+            )
+            .unwrap()
+            .is_empty()
+        );
     }
 }

@@ -67,8 +67,6 @@ pub struct AppSettings {
     #[serde(default)]
     pub(crate) ghostmaps: crate::ghostmaps::Settings,
     #[serde(default)]
-    pub(crate) lidar_enabled: bool,
-    #[serde(default)]
     pub global_weather: crate::panels::world_map::global_weather::Settings,
     /// Optional ISO alpha-2 country code used to scope directory discovery.
     #[serde(default)]
@@ -139,7 +137,6 @@ impl Default for AppSettings {
             eyes_on_enabled: false,
             ai_buildout_enabled: false,
             ghostmaps: Default::default(),
-            lidar_enabled: false,
             global_weather: Default::default(),
             eyes_on_country_code: String::new(),
             eyes_on_requests_per_minute: DEFAULT_EYES_ON_REQUESTS_PER_MINUTE,

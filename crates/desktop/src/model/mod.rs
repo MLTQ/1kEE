@@ -302,7 +302,7 @@ impl AppModel {
             map_theme: crate::theme::MapTheme::Topo,
             atlas_style: app_settings.atlas_style,
             show_event_markers: true,
-            show_camera_markers: true,
+            show_camera_markers: false,
             show_camera_links: false,
             marker_scale: app_settings.marker_scale,
             show_coastlines: true,
@@ -358,7 +358,7 @@ impl AppModel {
             show_planet_trails: false,
             planet_trail_years: 0.0,
             geojson_layers: Vec::new(),
-            lidar: crate::lidar_catalog::Browser::new(app_settings.lidar_enabled,
+            lidar: crate::lidar_catalog::Browser::new(
                 crate::lidar_catalog::db_path(app_settings.data_root.as_deref(), selected_root.as_deref())),
             satellite_layers: Vec::new(),
             global_weather: global_weather::GlobalWeather::new(
@@ -587,7 +587,6 @@ impl AppModel {
             eyes_on_enabled: self.eyes_on_enabled,
             ai_buildout_enabled: self.buildout.enabled,
             ghostmaps: self.ghostmaps.settings.clone(),
-            lidar_enabled: self.lidar.enabled,
             global_weather: self.global_weather.settings(),
             eyes_on_country_code: settings_store::normalize_eyes_on_country_code(
                 &self.eyes_on_country_code,
@@ -643,7 +642,6 @@ impl AppModel {
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_default();
-        self.lidar.enabled = settings.lidar_enabled;
         self.buildout.enabled = settings.ai_buildout_enabled;
         self.ghostmaps.set_settings(settings.ghostmaps);
         self.global_weather.set_settings(settings.global_weather);

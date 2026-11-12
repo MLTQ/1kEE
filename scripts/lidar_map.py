@@ -1,6 +1,7 @@
 """Render a georeferenced map tile from the local survey index or published measurements."""
 import argparse
-from collections import deque
+from collections import defaultdict, deque
+from contextlib import ExitStack
 import hashlib
 import io
 import json
@@ -12,6 +13,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
+import zipfile
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -54,12 +56,13 @@ PUBLISHED = """(id LIKE 'NOAAID:%' OR id LIKE 'USGS_3DEP_ID:%' OR stac IS NOT NU
                OR (source='infomar-lidar' AND id LIKE '%:SR_URL'))"""
 
 
-def matching(db, box, measurements=False, preferred=""):
+def matching(db, box, measurements=False, preferred="", local=False):
     w, s, e, n = box
     fields = "id,source,name,geometry,asset,stac,page" if measurements else f"geometry, {PUBLISHED} AS available"
     sql = f"SELECT {fields} FROM surveys WHERE west<? AND east>=? AND south<? AND north>=?"
     if measurements:
-        sql += f""" AND ({PUBLISHED} OR product='NASA lidar raster' OR product='Lidar raster')
+        sql += f""" AND ({PUBLISHED} OR product='NASA lidar raster' OR product='Lidar raster'
+                    OR (source='eba' AND {int(local)}))
                     ORDER BY id=? DESC, source='linz-coastal' DESC, source='infomar-lidar' DESC,
                     stac IS NOT NULL DESC, date DESC, id"""
     return db.execute(sql, (e, w, n, s, preferred) if measurements else (e, w, n, s))
@@ -223,7 +226,7 @@ def ept_returns(row, box, folder):
     return elevation_image(values.reshape(SIZE, SIZE), box)
 
 
-def raster_image(urls, box):
+def raster_image(urls, box, src_crs=None, depth=False):
     import rasterio
     from rasterio.transform import from_bounds
     from rasterio.enums import Resampling
@@ -234,23 +237,29 @@ def raster_image(urls, box):
     with rasterio.Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", GDAL_HTTP_TIMEOUT="45"):
         for url in urls:
             check_view()
-            with rasterio.open(url) as ds, WarpedVRT(ds, crs="EPSG:4326", transform=transform,
+            with rasterio.open(url) as ds, WarpedVRT(ds, src_crs=src_crs or ds.crs, crs="EPSG:4326", transform=transform,
                     width=SIZE, height=SIZE, resampling=Resampling.bilinear, dtype="float32",
                     nodata=float("nan")) as vrt:
                 data = vrt.read(1, masked=True).filled(np.nan)
                 np.copyto(values, data, where=np.isfinite(data))
-    return elevation_image(values, box)
+    return elevation_image(-values if depth else values, box)
 
 
-def irish_relief(asset, box):
-    archive = "/vsizip/{/vsicurl/" + asset + "}"
+def irish_relief(asset, box, soundings=False):
+    archive = "/vsizip/{" + ("/vsicurl/" if asset.startswith("https://") else "") + asset + "}"
     env = dict(os.environ, GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR", GDAL_HTTP_TIMEOUT="45")
     listing = subprocess.check_output(["gdal", "vsi", "list", "-f", "text", "--recursive", archive],
                                       text=True, env=env, timeout=60)
+    extensions = (".xyz",) if soundings else (".tif", ".tiff")
     files = [archive + "/" + p.strip().lstrip("/") for p in listing.splitlines()
-             if p.strip().lower().endswith((".tif", ".tiff"))]
+             if p.strip().lower().endswith(extensions)]
+    if not files and listing.strip().rstrip("/") == archive:
+        # GDAL opens a single-member ZIP directly as a dataset.
+        files = [archive]
     if not files:
-        raise ValueError("No shaded GeoTIFF in the INFOMAR archive")
+        raise ValueError("Missing survey data in the INFOMAR archive")
+    if soundings:
+        return raster_image(files, box, src_crs="EPSG:4326", depth=True)
     with tempfile.TemporaryDirectory() as tmp:
         out, png = Path(tmp, "relief.tif"), Path(tmp, "relief.png")
         subprocess.run(["gdalwarp", "-q", "-t_srs", "EPSG:4326", "-te", *map(str, box),
@@ -294,8 +303,92 @@ def survey_image(row, box, folder):
         return raster_image([url], box)
 
 
+def offline_assets(root, box):
+    result = defaultdict(list)
+    index = root / "bulk.sqlite"
+    if index.is_file():
+        with sqlite3.connect(index.resolve().as_uri() + "?mode=ro", uri=True) as db:
+            w, s, e, n = box
+            query = "SELECT survey,kind,path,url FROM files WHERE west<? AND east>=? AND south<? AND north>=?"
+            for survey, kind, path, url in db.execute(query, (e, w, n, s)):
+                file = root / path
+                result[survey].append((kind, file if file.is_file() else url, None))
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='transects'").fetchone():
+                for survey, path, member, url in db.execute(
+                        "SELECT t.survey,t.path,t.member,f.url FROM transects t JOIN files f ON t.path=f.path "
+                        "WHERE t.west<? AND t.east>=? AND t.south<? AND t.north>=?",
+                        (e, w, n, s)):
+                    file = root / path
+                    result[survey].append(("laz", file if file.is_file() else url, member))
+    return result
+
+
+def local_cloud(files, box):
+    import laspy
+    from laspy.copc import Bounds
+    from pyproj import Transformer
+    w, s, e, n = box
+    sums = np.zeros(SIZE*SIZE)
+    counts = np.zeros(SIZE*SIZE, dtype=np.uint32)
+    for kind, path, member in files:
+        check_view()
+        with ExitStack() as stack:
+            if kind == "copc":
+                reader = stack.enter_context(laspy.CopcReader.open(path, http_num_threads=4))
+            elif isinstance(path, str):
+                tmp = stack.enter_context(tempfile.TemporaryDirectory())
+                scan = Path(tmp, "transect.laz")
+                subprocess.run(["gdal", "vsi", "copy", "-q", "/vsizip/{/vsicurl/" + path + "}/" + member,
+                                str(scan)], check=True, timeout=600)
+                reader = stack.enter_context(laspy.open(scan))
+            else:
+                archive = stack.enter_context(zipfile.ZipFile(path))
+                stream = stack.enter_context(archive.open(member))
+                reader = stack.enter_context(laspy.open(stream))
+            crs = reader.header.parse_crs()
+            if crs is None:
+                raise ValueError(f"Missing point-cloud coordinate system in {member or path}")
+            crs = crs.to_2d()
+            native = Transformer.from_crs(4326, crs, always_xy=True).transform_bounds(*box)
+            to_map = Transformer.from_crs(crs, 4326, always_xy=True)
+            x0, y0, x1, y1 = native
+            if kind == "copc":
+                bounds = Bounds(np.array([x0, y0]), np.array([x1, y1]))
+                spacing = max(x1-x0, y1-y0) / SIZE
+                chunks = [reader.query(bounds=bounds, resolution=spacing)]
+            else:
+                chunks = reader.chunk_iterator(250_000)
+            for points in chunks:
+                check_view()
+                x, y = np.asarray(points.x), np.asarray(points.y)
+                keep = ((x >= x0) & (x <= x1) & (y >= y0) & (y <= y1)
+                        & ~np.isin(points.classification, [7, 18]) & (np.asarray(points.withheld) == 0))
+                lon, lat = to_map.transform(x[keep], y[keep])
+                col = np.floor((lon-w)*SIZE/(e-w)).astype(int)
+                line = np.floor((n-lat)*SIZE/(n-s)).astype(int)
+                ok = (col >= 0) & (col < SIZE) & (line >= 0) & (line < SIZE)
+                indices = line[ok]*SIZE + col[ok]
+                np.add.at(sums, indices, np.asarray(points.z)[keep][ok])
+                np.add.at(counts, indices, 1)
+    values = np.divide(sums, counts, out=np.full_like(sums, np.nan), where=counts>0)
+    return elevation_image(values.reshape(SIZE, SIZE), box)
+
+
+def offline_image(files, box):
+    kind, path, _ = files[0]
+    if kind in ("relief", "soundings"):
+        return irish_relief(str(path), box, soundings=kind == "soundings")
+    if kind == "raster":
+        return raster_image([str(path) for _, path, _ in files], box)
+    return local_cloud(files, box)
+
+
 def measurements(db, box, folder, preferred):
-    rows = matching(db, box, True, preferred)
+    local = offline_assets(folder.parent, box)
+    rows = matching(db, box, True, preferred, bool(local))
+    if local:
+        on_disk = {survey for survey, files in local.items() if any(isinstance(path, Path) for _, path, _ in files)}
+        rows = sorted(rows, key=lambda r: (r["id"] != preferred, r["id"] not in on_disk))
     result = Image.new("RGBA", (SIZE, SIZE))
     credits = []
     covered = Image.new("L", result.size)
@@ -303,16 +396,23 @@ def measurements(db, box, folder, preferred):
     tried_swiss = False
     for row in rows:
         check_view()
-        if row["source"] == "swisssurface3d" and tried_swiss:
+        collection = preferred.startswith("LINZ:") and preferred.endswith("/")
+        selected = row["id"].startswith(preferred) if collection else row["id"] == preferred
+        if preferred and not selected:
+            continue
+        files = local.get(row["id"])
+        if not files and (row["source"] == "eba" or (row["source"] == "swisssurface3d" and tried_swiss)):
             continue
         mask = Image.new("L", result.size)
         draw_geometry(ImageDraw.Draw(mask), json.loads(row["geometry"]), box, 255, filled=True)
         if not ImageChops.subtract(mask, covered).getbbox():
             continue
-        if row["source"] == "swisssurface3d":
+        if not files and row["source"] == "swisssurface3d":
             tried_swiss = True
         try:
-            image = survey_image(row, box, folder)
+            if selected and not files and row["source"] == "swisssurface3d" and row["asset"].endswith(".copc.laz"):
+                files = [("copc", row["asset"], None)]
+            image = offline_image(files, box) if files else survey_image(row, box, folder)
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
             errors.append(f"{row['name']}: {exc}")
             if row["id"] == preferred:
@@ -322,7 +422,7 @@ def measurements(db, box, folder, preferred):
             continue
         result = Image.alpha_composite(image, result)
         credit = (row["name"], row["id"], row["page"])
-        if row["source"] == "swisssurface3d":
+        if not files and row["source"] == "swisssurface3d":
             credit = ("swisstopo · swissSURFACE3D Raster shaded surface", SWISS_LAYER,
                       "https://www.swisstopo.admin.ch/en/height-model-swisssurface3d-raster")
         credits.append(credit)

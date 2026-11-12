@@ -533,23 +533,29 @@ def download(db, args):
         raise ValueError("No direct scan files in this selection")
 
 
-def ground_assets(collection, lon, lat, km):
-    """Select published bare-earth COGs that intersect this small display window."""
+def ground_rasters(collection):
+    """Iterate georeferenced bare-earth COGs from a publisher collection."""
     body, _ = request(collection)
-    dy = km / 2 / 110
-    dx = min(180, dy / max(.001, math.cos(math.radians(min(89.99, abs(lat) + dy)))))
-    assets = []
     for link in json.loads(body)["links"]:
         if link["rel"] != "item" or not urlsplit(link["href"]).path.endswith("_be.json"):
             continue
-        item, _ = request(link["href"])
+        item, _ = request(urljoin(collection, link["href"]))
         for a in json.loads(item)["assets"].values():
-            if "cloud-optimized" not in a.get("type", "") or "data" not in a.get("roles", []):
-                continue
-            w, s, e, n = a["bbox"]
-            intersects = any(w <= lon + dx + offset and e >= lon - dx + offset for offset in (0, 360, -360))
-            if intersects and n >= lat - dy and s <= lat + dy and a["href"].startswith("https://"):
-                assets.append("/vsicurl/" + a["href"])
+            if ("cloud-optimized" in a.get("type", "") and "data" in a.get("roles", [])
+                    and a["href"].startswith("https://")):
+                yield a
+
+
+def ground_assets(collection, lon, lat, km):
+    """Select published bare-earth COGs that intersect this small display window."""
+    dy = km / 2 / 110
+    dx = min(180, dy / max(.001, math.cos(math.radians(min(89.99, abs(lat) + dy)))))
+    assets = []
+    for a in ground_rasters(collection):
+        w, s, e, n = a["bbox"]
+        intersects = any(w <= lon + dx + offset and e >= lon - dx + offset for offset in (0, 360, -360))
+        if intersects and n >= lat - dy and s <= lat + dy:
+            assets.append("/vsicurl/" + a["href"])
     return assets
 
 

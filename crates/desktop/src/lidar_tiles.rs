@@ -82,6 +82,8 @@ pub(crate) struct Tiles {
     moved: Option<Instant>,
     preferred: String,
     generation: u32,
+    bulk_sequence: i64,
+    bulk_versions: HashMap<Key, i64>,
     loaded: HashMap<Key, Option<SatelliteLayer>>,
     order: VecDeque<Key>,
     jobs: [Option<Job>; 2],
@@ -112,6 +114,17 @@ impl Tiles {
         for detail in [true, false] {
             let mut shown = Vec::new();
             for &tile in &tiles {
+                if !detail
+                    && tile.z >= DETAIL_ZOOM
+                    && (!self.preferred.is_empty()
+                        || matches!(
+                            self.loaded
+                                .get(&key(tile, true, self.generation, &self.preferred)),
+                            Some(Some(_))
+                        ))
+                {
+                    continue;
+                }
                 let mut candidate = tile;
                 loop {
                     let k = key(candidate, detail, self.generation, &self.preferred);
@@ -123,7 +136,8 @@ impl Tiles {
                             break;
                         }
                         Some(None) => break,
-                        None if tile.z - candidate.z < 2
+                        None if (detail || tile.z < DETAIL_ZOOM)
+                            && tile.z - candidate.z < 2
                             && candidate.z > if detail { DETAIL_ZOOM } else { 0 } =>
                         {
                             candidate = Tile {
@@ -180,6 +194,30 @@ impl Tiles {
             self.order.clear();
             self.retry.clear();
             self.jobs = [None, None];
+        }
+        if let Some(bulk) = bulk_index(path)
+            && let Ok(sequence) =
+                bulk.query_row("SELECT coalesce(max(rowid),0) FROM files", [], |r| r.get(0))
+            && sequence != self.bulk_sequence
+        {
+            self.bulk_sequence = sequence;
+            let mut changed = Vec::new();
+            for &tile in &self.stable {
+                let k = key(tile, true, self.generation, &self.preferred);
+                if self.loaded.contains_key(&k) {
+                    let version = bulk_revision(&bulk, tile, &self.preferred);
+                    if self.bulk_versions.insert(k.clone(), version).unwrap_or(0) != version {
+                        changed.push(k);
+                    }
+                }
+            }
+            for k in changed {
+                self.loaded.remove(&k);
+                self.order.retain(|old| old != &k);
+                self.retry.remove(&k);
+            }
+            self.bulk_versions
+                .retain(|k, _| self.stable.contains(&k.tile));
         }
     }
 
@@ -324,6 +362,37 @@ fn tile_path(db: &Path, k: &Key) -> PathBuf {
         .join(format!("{y}.png"))
 }
 
+fn bulk_index(catalog: &Path) -> Option<rusqlite::Connection> {
+    rusqlite::Connection::open_with_flags(
+        catalog.with_file_name("bulk.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .ok()
+}
+
+fn bulk_revision(db: &rusqlite::Connection, tile: Tile, preferred: &str) -> i64 {
+    let [w, s, e, n] = tile.bounds();
+    let args = rusqlite::params![e, w, n, s, preferred];
+    let direct: i64 = db
+        .query_row(
+            "SELECT coalesce(max(rowid),0) FROM files WHERE west<?1
+        AND east>=?2 AND south<?3 AND north>=?4 AND (?5='' OR survey=?5 OR
+        (substr(?5,-1)='/' AND instr(survey,?5)=1))",
+            args,
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let archive = db
+        .query_row(
+            "SELECT coalesce(max(f.rowid),0) FROM transects t JOIN files f ON f.path=t.path
+        WHERE t.west<?1 AND t.east>=?2 AND t.south<?3 AND t.north>=?4 AND (?5='' OR t.survey=?5)",
+            args,
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    direct.max(archive)
+}
+
 fn load(
     db: &Path,
     k: &Key,
@@ -332,7 +401,13 @@ fn load(
     active: &Path,
 ) -> Result<Option<MapImage>, String> {
     let Tile { z, x, y } = k.tile;
-    let mut output = tile_path(db, k);
+    let target = tile_path(db, k);
+    let mut output = target.clone();
+    let revision = if k.detail {
+        bulk_index(db).map_or(0, |b| bulk_revision(&b, k.tile, preferred))
+    } else {
+        0
+    };
     // A selected acquisition is also a valid offline map in automatic mode.
     // Look it up across the saved variants without copying data on external drives.
     if k.detail && preferred.is_empty() && !output.is_file() {
@@ -354,8 +429,18 @@ fn load(
             }
         }
     }
-    let empty = output.with_extension(format!("empty-{generation}"));
-    if !output.is_file() && !empty.is_file() {
+    let empty = target.with_extension(if revision == 0 {
+        format!("empty-{generation}")
+    } else {
+        format!("empty-{generation}-{revision}")
+    });
+    let stamp = target.with_extension("revision");
+    let stale = revision > 0
+        && std::fs::read_to_string(&stamp)
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            != Some(revision);
+    if (!output.is_file() || stale) && !empty.is_file() {
         let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
         for (name, contents) in [("lidar_map.py", MAP), ("lidar_catalog.py", SURVEYS)] {
             std::fs::write(tmp.path().join(name), contents).map_err(|e| e.to_string())?;
@@ -368,6 +453,8 @@ fn load(
             "laspy[lazrs]==2.7.0",
             "--with",
             "pyproj",
+            "--with",
+            "requests",
             "--with",
             "pillow",
             "--with",
@@ -383,7 +470,7 @@ fn load(
             z.to_string().into(),
             x.to_string().into(),
             y.to_string().into(),
-            output.clone(),
+            target.clone(),
             preferred.into(),
             "--empty".into(),
             empty.clone(),
@@ -398,7 +485,12 @@ fn load(
             other => other,
         }
         .map_err(|e| format!("Cannot start lidar map worker: {e}"))?;
-        if !result.status.success() {
+        if result.status.success() && target.is_file() && !empty.is_file() {
+            output = target;
+            if revision > 0 {
+                let _ = std::fs::write(stamp, revision.to_string());
+            }
+        } else if !result.status.success() && !output.is_file() {
             let err = String::from_utf8_lossy(&result.stderr);
             return Err(format!(
                 "Lidar tile: {}",

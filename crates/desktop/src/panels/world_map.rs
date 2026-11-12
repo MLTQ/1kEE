@@ -105,6 +105,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
 
         if !model.obs_view {
             super::map_rail::render(ui, model);
+            crate::lidar_catalog::picker(ui, model);
             ui.add_space(8.0);
         }
         let local_terrain_mode = local_terrain_scene::is_active(model);
