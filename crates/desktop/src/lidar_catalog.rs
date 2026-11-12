@@ -22,6 +22,52 @@ struct Survey {
     asset: Option<String>,
 }
 
+impl Survey {
+    fn dated_name(&self) -> String {
+        let date = self
+            .date
+            .as_deref()
+            .unwrap_or("")
+            .split('T')
+            .next()
+            .unwrap_or("");
+        format!("{date}  {}", self.name)
+    }
+}
+
+pub(super) type ReadJob<T> = mpsc::Receiver<Result<T, String>>;
+
+pub(super) fn read_in_background<T: Send + 'static>(
+    ctx: &egui::Context,
+    read: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> ReadJob<T> {
+    let (tx, rx) = mpsc::channel();
+    let ctx = ctx.clone();
+    let _ = std::thread::Builder::new()
+        .name("lidar-catalog".into())
+        .spawn(move || {
+            let _ = tx.send(read());
+            ctx.request_repaint();
+        });
+    rx
+}
+
+pub(super) fn completed<T>(job: &mut Option<ReadJob<T>>) -> Option<Result<T, String>> {
+    let result = match job.as_ref()?.try_recv() {
+        Ok(result) => result,
+        Err(mpsc::TryRecvError::Empty) => return None,
+        Err(mpsc::TryRecvError::Disconnected) => Err("Lidar catalog worker stopped".into()),
+    };
+    *job = None;
+    Some(result)
+}
+
+struct Search {
+    query: String,
+    near: Option<GeoPoint>,
+    offset: usize,
+}
+
 #[derive(Default)]
 pub(crate) struct Browser {
     pub(crate) enabled: bool,
@@ -29,16 +75,20 @@ pub(crate) struct Browser {
     searched: bool,
     path: PathBuf,
     last_check: Option<Instant>,
-    last_generation_check: Option<Instant>,
-    work: Option<mpsc::Receiver<Result<String, String>>>,
+    work: Option<ReadJob<String>>,
+    search_job: Option<ReadJob<Vec<Survey>>>,
+    next_search: Option<Search>,
+    search_error: String,
+    selection_job: Option<ReadJob<(Survey, GeoJsonLayer, GeoPoint)>>,
     query: String,
     near: bool,
     offset: usize,
     more: bool,
     results: Vec<Survey>,
     selected: Option<Survey>,
+    picker_target: Option<GeoPoint>,
     picker_center: Option<GeoPoint>,
-    picker_job: Option<mpsc::Receiver<Result<Vec<Survey>, String>>>,
+    picker_job: Option<ReadJob<Vec<Survey>>>,
     picker_results: Vec<Survey>,
     picker_error: String,
     pub(crate) footprint: Option<GeoJsonLayer>,
@@ -75,15 +125,16 @@ fn connection(path: &Path) -> Result<Connection, String> {
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| e.to_string())
 }
 
-fn search(browser: &mut Browser, center: GeoPoint) -> Result<(), String> {
-    let db = connection(&browser.path)?;
-    let mut sql = String::from(
-        "SELECT id,name,product,date,page,asset FROM surveys
-         WHERE instr(lower(name||' '||product||' '||id||' '||source),lower(?1))>0",
-    );
+fn search(path: &Path, request: Search) -> Result<Vec<Survey>, String> {
+    let db = connection(path)?;
+    let mut sql = String::from("SELECT id,name,product,date,page,asset FROM surveys WHERE 1");
+    if !request.query.trim().is_empty() {
+        sql.push_str(" AND instr(lower(name||' '||product||' '||id||' '||source),lower(?1))>0");
+    }
+    let center = request.near.unwrap_or(GeoPoint { lat: 0., lon: 0. });
     let half_lat = 50. / 110.;
     let half_lon = (half_lat / f64::from(center.lat).to_radians().cos().abs().max(0.001)).min(180.);
-    if browser.near {
+    if request.near.is_some() {
         sql.push_str(
             " AND north >= ?2 AND south <= ?3 AND
             ((east >= ?4 AND west <= ?5) OR (east >= ?4+360 AND west <= ?5+360)
@@ -97,13 +148,13 @@ fn search(browser: &mut Browser, center: GeoPoint) -> Result<(), String> {
     let rows = stmt
         .query_map(
             params![
-                browser.query.trim(),
+                request.query.trim(),
                 lat - half_lat,
                 lat + half_lat,
                 lon - half_lon,
                 lon + half_lon,
                 PAGE_SIZE + 1,
-                browser.offset
+                request.offset
             ],
             |row| {
                 Ok(Survey {
@@ -117,14 +168,46 @@ fn search(browser: &mut Browser, center: GeoPoint) -> Result<(), String> {
             },
         )
         .map_err(|e| e.to_string())?;
-    let mut results = rows
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e| e.to_string())?;
-    browser.more = results.len() > PAGE_SIZE;
-    results.truncate(PAGE_SIZE);
-    browser.results = results;
-    browser.searched = true;
-    Ok(())
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())
+}
+
+impl Browser {
+    fn request_search(&mut self, ctx: &egui::Context, center: GeoPoint) {
+        self.searched = true;
+        self.next_search = Some(Search {
+            query: self.query.clone(),
+            near: self.near.then_some(center),
+            offset: self.offset,
+        });
+        self.search_error.clear();
+        self.poll_search(ctx);
+    }
+
+    fn poll_search(&mut self, ctx: &egui::Context) {
+        if let Some(done) = completed(&mut self.search_job)
+            && self.next_search.is_none()
+        {
+            match done {
+                Ok(mut rows) => {
+                    self.more = rows.len() > PAGE_SIZE;
+                    rows.truncate(PAGE_SIZE);
+                    self.results = rows;
+                }
+                Err(error) => {
+                    self.search_error = error;
+                    self.results.clear();
+                    self.more = false;
+                }
+            }
+        }
+        if self.search_job.is_none()
+            && let Some(request) = self.next_search.take()
+        {
+            let path = self.path.clone();
+            self.search_job = Some(read_in_background(ctx, move || search(&path, request)));
+        }
+    }
 }
 
 fn interior(rings: &[Vec<GeoPoint>]) -> Option<GeoPoint> {
@@ -158,8 +241,8 @@ fn interior(rings: &[Vec<GeoPoint>]) -> Option<GeoPoint> {
         .or(Some(first))
 }
 
-fn select(browser: &mut Browser, survey: Survey) -> Result<GeoPoint, String> {
-    let db = connection(&browser.path)?;
+fn select(path: &Path, survey: Survey) -> Result<(Survey, GeoJsonLayer, GeoPoint), String> {
+    let db = connection(path)?;
     let geometry: String = db
         .query_row(
             "SELECT geometry FROM surveys WHERE id=?",
@@ -189,26 +272,7 @@ fn select(browser: &mut Browser, survey: Survey) -> Result<GeoPoint, String> {
         label: Some(survey.name.clone()),
         color: None,
     });
-    browser.footprint = Some(layer);
-    browser.selected = Some(survey);
-    Ok(focus)
-}
-
-fn start(
-    browser: &mut Browser,
-    job: impl FnOnce(PathBuf) -> Result<String, String> + Send + 'static,
-) {
-    let db = browser.path.clone();
-    let (tx, rx) = mpsc::channel();
-    match std::thread::Builder::new()
-        .name("lidar-surveys".into())
-        .spawn(move || {
-            let _ = tx.send(job(db));
-            crate::app::request_repaint();
-        }) {
-        Ok(_) => browser.work = Some(rx),
-        Err(e) => browser.status = e.to_string(),
-    }
+    Ok((survey, layer, focus))
 }
 
 fn python(db: &Path) -> Command {
@@ -250,10 +314,13 @@ fn run(cmd: &mut Command) -> Result<String, String> {
     }
 }
 
-fn check(browser: &mut Browser) {
+fn check(ctx: &egui::Context, browser: &mut Browser) {
     browser.last_check = Some(Instant::now());
     browser.status = "Checking survey catalogs…".into();
-    start(browser, |db| run(python(&db).arg("refresh")));
+    let db = browser.path.clone();
+    browser.work = Some(read_in_background(ctx, move || {
+        run(python(&db).arg("refresh"))
+    }));
 }
 
 fn center(model: &AppModel) -> GeoPoint {
@@ -354,69 +421,79 @@ pub(crate) fn picker(ui: &mut egui::Ui, model: &mut AppModel) {
     let at = center(model);
     let b = &mut model.lidar;
     ui.horizontal(|ui| {
+        let mut menu_visible = false;
         ui.menu_button("Surveys at map center ▾", |ui| {
-            if b.picker_job.is_none() && b.picker_center != Some(at) {
-                let path = b.path.clone();
-                let (tx, rx) = mpsc::channel();
-                let ctx = ui.ctx().clone();
-                std::thread::spawn(move || {
-                    let _ = tx.send(overlapping(&path, at));
-                    ctx.request_repaint();
-                });
-                b.picker_center = Some(at);
-                b.picker_job = Some(rx);
-                b.picker_results.clear();
-                b.picker_error.clear();
-            }
-            if let Some(rx) = &b.picker_job
-                && let Ok(found) = rx.try_recv()
-            {
+            menu_visible = true;
+            // Keep the point the user opened the menu on while the globe is moving.
+            let target = *b.picker_target.get_or_insert(at);
+            if let Some(found) = completed(&mut b.picker_job) {
                 match found {
                     Ok(rows) => b.picker_results = rows,
                     Err(e) => b.picker_error = e,
                 }
-                b.picker_job = None;
+            }
+            if b.picker_job.is_none() && b.picker_center != Some(target) {
+                let path = b.path.clone();
+                b.picker_job = Some(read_in_background(ui.ctx(), move || {
+                    overlapping(&path, target)
+                }));
+                b.picker_center = Some(target);
+                b.picker_results.clear();
+                b.picker_error.clear();
             }
             if ui
                 .selectable_label(b.selected.is_none(), "Automatic")
                 .clicked()
             {
+                b.selection_job = None;
                 b.selected = None;
                 b.footprint = None;
                 ui.close_menu();
             }
-            egui::ScrollArea::vertical()
-                .max_height(280.)
-                .show(ui, |ui| {
-                    for s in &b.picker_results {
-                        let date = s
-                            .date
-                            .as_deref()
-                            .unwrap_or("")
-                            .split('T')
-                            .next()
-                            .unwrap_or("");
-                        if ui
-                            .selectable_label(
-                                b.selected.as_ref().is_some_and(|v| v.id == s.id),
-                                format!("{date}  {}", s.name),
-                            )
-                            .clicked()
-                        {
-                            b.selected = Some(s.clone());
-                            b.footprint = None;
-                            ui.close_menu();
+            if b.picker_job.is_some() {
+                ui.small("Finding surveys…");
+            } else if !b.picker_error.is_empty() {
+                ui.small(&b.picker_error);
+            } else if b.picker_results.is_empty() {
+                ui.small("No surveys cover the map center");
+            } else {
+                let width = (ui.ctx().screen_rect().width() - 24.).clamp(1., 360.);
+                ui.set_width(width);
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                let height = ui.spacing().interact_size.y.max(
+                    ui.text_style_height(&egui::TextStyle::Button)
+                        + 2. * ui.spacing().button_padding.y,
+                );
+                egui::ScrollArea::vertical().max_height(280.).show_rows(
+                    ui,
+                    height,
+                    b.picker_results.len(),
+                    |ui, visible| {
+                        for s in &b.picker_results[visible] {
+                            if ui
+                                .selectable_label(
+                                    b.selected.as_ref().is_some_and(|v| v.id == s.id),
+                                    s.dated_name(),
+                                )
+                                .on_hover_text(&s.name)
+                                .clicked()
+                            {
+                                b.selection_job = None;
+                                b.selected = Some(s.clone());
+                                b.footprint = None;
+                                ui.close_menu();
+                            }
                         }
-                    }
-                    if b.picker_job.is_some() {
-                        ui.small("Finding surveys…");
-                    } else if !b.picker_error.is_empty() {
-                        ui.small(&b.picker_error);
-                    } else if b.picker_results.is_empty() {
-                        ui.small("No surveys cover the map center");
-                    }
-                });
+                    },
+                );
+            }
         });
+        if !menu_visible {
+            b.picker_target = None;
+            if !b.picker_error.is_empty() {
+                b.picker_center = None;
+            }
+        }
         if let Some(s) = &b.selected {
             ui.add(egui::Label::new(&s.name).truncate())
                 .on_hover_text(&s.name);
@@ -425,52 +502,50 @@ pub(crate) fn picker(ui: &mut egui::Ui, model: &mut AppModel) {
 }
 
 pub(crate) fn tick(ctx: &egui::Context, model: &mut AppModel) {
-    if !model.lidar.enabled || model.active_body != ActiveBody::Earth {
-        model.lidar.tiles.stop();
-        if model.lidar.work.is_none() {
-            return;
-        }
-    }
-    let focus = center(model);
     let earth = model.active_body == ActiveBody::Earth;
+    let focus = center(model);
     let b = &mut model.lidar;
-    if let Some(rx) = &b.work {
-        let result = match rx.try_recv() {
-            Ok(r) => Some(r),
-            Err(mpsc::TryRecvError::Empty) => None,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                Some(Err("Lidar catalog worker stopped".into()))
+    b.poll_search(ctx);
+    if let Some(done) = completed(&mut b.selection_job)
+        && b.enabled
+        && earth
+    {
+        match done {
+            Ok((survey, layer, point)) => {
+                b.selected = Some(survey);
+                b.footprint = Some(layer);
+                model.globe_view.stop_motion();
+                model.globe_view.focus_on(point);
+                model.globe_view.local_mode = true;
+                model.globe_view.local_zoom = model.globe_view.local_zoom.max(20.);
             }
-        };
-        if let Some(result) = result {
-            b.work = None;
-            b.picker_center = None;
-            b.status = result.unwrap_or_else(|error| error);
-            b.tiles.catalog_changed(&b.path);
-            if b.searched
-                && let Err(e) = search(b, focus)
-            {
-                b.status.push_str(&format!("\n{e}"));
-            }
+            Err(e) => b.search_error = e,
         }
     }
-    if b.enabled && earth {
-        if b.work.is_none()
-            && b.last_check
-                .is_none_or(|t| t.elapsed() >= Duration::from_secs(86400))
-        {
-            check(b);
+    let refreshed = completed(&mut b.work);
+    let force_check = refreshed.is_some();
+    if let Some(result) = refreshed {
+        b.picker_center = None;
+        b.status = result.unwrap_or_else(|error| error);
+        if b.searched {
+            b.request_search(ctx, focus);
         }
-        if b.path.is_file() {
-            if b.last_generation_check
-                .is_none_or(|t| t.elapsed() >= Duration::from_secs(10))
-            {
-                b.tiles.catalog_changed(&b.path);
-                b.last_generation_check = Some(Instant::now());
-            }
-            let preferred = b.selected.as_ref().map_or("", |survey| survey.id.as_str());
-            b.tiles.tick(ctx, &b.path, preferred);
-        }
+    }
+    if !b.enabled || !earth {
+        b.selection_job = None;
+        b.picker_target = None;
+        b.tiles.stop();
+        return;
+    }
+    if b.work.is_none()
+        && b.last_check
+            .is_none_or(|t| t.elapsed() >= Duration::from_secs(86400))
+    {
+        check(ctx, b);
+    }
+    if b.tiles.poll_catalog(ctx, &b.path, force_check) {
+        let preferred = b.selected.as_ref().map_or("", |survey| survey.id.as_str());
+        b.tiles.tick(ctx, &b.path, preferred);
     }
 }
 
@@ -503,7 +578,7 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
             .add_enabled(b.work.is_none(), egui::Button::new("Refresh catalogs"))
             .clicked()
         {
-            check(b);
+            check(ui.ctx(), b);
         }
         ui.small(&b.status);
         let edit = ui
@@ -513,6 +588,7 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
         let changed = ui
             .checkbox(&mut b.near, "100 km box at map center")
             .changed();
+        let searching = b.search_job.is_some();
         let mut query = !b.searched;
         if ui.small_button("Search surveys").clicked() || changed || submitted {
             b.offset = 0;
@@ -520,49 +596,50 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
         }
         ui.horizontal(|ui| {
             if ui
-                .add_enabled(b.offset > 0, egui::Button::new("Previous"))
+                .add_enabled(!searching && b.offset > 0, egui::Button::new("Previous"))
                 .clicked()
             {
                 b.offset = b.offset.saturating_sub(PAGE_SIZE);
                 query = true;
             }
-            if ui.add_enabled(b.more, egui::Button::new("Next")).clicked() {
+            if ui
+                .add_enabled(!searching && b.more, egui::Button::new("Next"))
+                .clicked()
+            {
                 b.offset += PAGE_SIZE;
                 query = true;
             }
         });
-        if query
-            && b.path.is_file()
-            && let Err(e) = search(b, focus)
-        {
-            b.status = e;
+        if query {
+            b.request_search(ui.ctx(), focus);
         }
-        if b.results.is_empty() && b.work.is_none() {
+        if b.search_job.is_some() {
+            ui.small("Searching surveys…");
+        } else if !b.search_error.is_empty() {
+            ui.small(&b.search_error);
+        } else if b.results.is_empty() {
             ui.small("No matching surveys");
-        }
-        let mut chosen = None;
-        for row in &b.results {
-            if ui
-                .selectable_label(
-                    b.selected.as_ref().is_some_and(|s| s.id == row.id),
-                    &row.name,
-                )
-                .clicked()
-            {
-                chosen = Some(row.clone());
-            }
-        }
-        if let Some(row) = chosen {
-            match select(b, row) {
-                Ok(point) => {
-                    b.enabled = true;
-                    model.globe_view.stop_motion();
-                    model.globe_view.focus_on(point);
-                    model.globe_view.local_mode = true;
-                    model.globe_view.local_zoom = model.globe_view.local_zoom.max(20.);
+        } else {
+            ui.add_enabled_ui(b.selection_job.is_none(), |ui| {
+                for row in &b.results {
+                    if ui
+                        .selectable_label(
+                            b.selected.as_ref().is_some_and(|s| s.id == row.id),
+                            &row.name,
+                        )
+                        .clicked()
+                    {
+                        let path = b.path.clone();
+                        let survey = row.clone();
+                        b.enabled = true;
+                        b.selection_job =
+                            Some(read_in_background(ui.ctx(), move || select(&path, survey)));
+                    }
                 }
-                Err(e) => b.status = e,
-            }
+            });
+        }
+        if b.selection_job.is_some() {
+            ui.small("Opening survey…");
         }
         if let Some(s) = &b.selected {
             ui.separator();
@@ -583,6 +660,7 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
                 );
             }
             if ui.small_button("Clear selection").clicked() {
+                b.selection_job = None;
                 b.selected = None;
                 b.footprint = None;
             }
@@ -594,6 +672,151 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
 mod tests {
     use super::*;
 
+    fn frame(
+        ctx: &egui::Context,
+        model: &mut AppModel,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        ctx.run(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                tick(ctx, model);
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    picker(ui, model);
+                    controls(ui, model);
+                });
+            },
+        )
+    }
+
+    fn label(frame: &egui::FullOutput, text: &str) -> Option<egui::Pos2> {
+        frame.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(t) if t.galley.text() == text => Some(t.pos + t.galley.size() / 2.),
+            _ => None,
+        })
+    }
+
+    fn click(ctx: &egui::Context, model: &mut AppModel, text: &str) -> egui::FullOutput {
+        let at = label(&frame(ctx, model, vec![]), text).expect(text);
+        for pressed in [true, false] {
+            frame(
+                ctx,
+                model,
+                vec![
+                    egui::Event::PointerMoved(at),
+                    egui::Event::PointerButton {
+                        pos: at,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    },
+                ],
+            );
+        }
+        frame(ctx, model, vec![])
+    }
+
+    fn wait_for(ctx: &egui::Context, model: &mut AppModel, done: impl Fn(&Browser) -> bool) {
+        let start = Instant::now();
+        while !done(&model.lidar) {
+            assert!(
+                start.elapsed() < Duration::from_secs(60),
+                "catalog read did not complete"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+            frame(ctx, model, vec![]);
+        }
+    }
+
+    #[test]
+    fn survey_menus_remain_interactive_while_catalog_is_locked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.sqlite");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(r#"CREATE TABLE surveys(id,source,name,product,date,page,asset,stac,geometry,west,south,east,north);
+            INSERT INTO surveys VALUES('NOAAID:1','noaa','Coastal flight','Lidar','1998','','',NULL,
+                '{"type":"Point","coordinates":[-75,38]}',-75,38,-75,38);
+            INSERT INTO surveys VALUES('b','demo','Inland flight','Lidar',NULL,'','',NULL,
+                '{"type":"Point","coordinates":[10,20]}',10,20,10,20);
+            BEGIN EXCLUSIVE;"#).unwrap();
+
+        let ctx = egui::Context::default();
+        ctx.style_mut(|s| s.animation_time = 0.);
+        let mut model = AppModel::new();
+        model.lidar = Browser::new(path);
+        model.globe_view.local_mode = true;
+        let coast = GeoPoint {
+            lat: 38.,
+            lon: -75.,
+        };
+        model.globe_view.local_center = coast;
+
+        let open = click(&ctx, &mut model, "Lidar surveys");
+        assert!(label(&open, "Searching surveys…").is_some());
+        let closed = click(&ctx, &mut model, "Lidar surveys");
+        assert!(label(&closed, "Search surveys").is_none());
+        assert!(model.lidar.search_job.is_some());
+        model.lidar.query = "Inland".into();
+        model.lidar.request_search(&ctx, coast);
+
+        model.lidar.enabled = true;
+        model.lidar.last_check = Some(Instant::now());
+        let menu = click(&ctx, &mut model, "Surveys at map center ▾");
+        assert!(label(&menu, "Finding surveys…").is_some());
+        model.globe_view.local_center = GeoPoint { lat: 20., lon: 10. };
+        frame(&ctx, &mut model, vec![]);
+        assert_eq!(model.lidar.picker_target, Some(coast));
+
+        db.execute_batch("COMMIT").unwrap();
+        wait_for(&ctx, &mut model, |b| {
+            b.search_job.is_none() && b.picker_job.is_none()
+        });
+        assert_eq!(model.lidar.results.len(), 1);
+        assert_eq!(model.lidar.results[0].name, "Inland flight");
+        assert_eq!(model.lidar.picker_results.len(), 1);
+        click(&ctx, &mut model, "1998  Coastal flight");
+        assert_eq!(model.lidar.selected.unwrap().id, "NOAAID:1");
+        assert_eq!(model.globe_view.local_center.lon, 10.);
+    }
+
+    #[test]
+    #[ignore = "requires the Ocean City surveys in ONEKEE_TEST_LIDAR_DB"]
+    fn open_both_survey_menus_on_live_catalog() {
+        let ctx = egui::Context::default();
+        ctx.style_mut(|s| s.animation_time = 0.);
+        let mut model = AppModel::new();
+        model.lidar = Browser::new(std::env::var_os("ONEKEE_TEST_LIDAR_DB").unwrap().into());
+        model.globe_view.local_mode = true;
+        model.globe_view.local_center = GeoPoint {
+            lat: 38.33,
+            lon: -75.0883,
+        };
+
+        click(&ctx, &mut model, "Lidar surveys");
+        wait_for(&ctx, &mut model, |b| b.search_job.is_none());
+        assert_eq!(model.lidar.results.len(), PAGE_SIZE);
+        click(&ctx, &mut model, "Lidar surveys");
+        model.lidar.enabled = true;
+        model.lidar.last_check = Some(Instant::now());
+        click(&ctx, &mut model, "Surveys at map center ▾");
+        wait_for(&ctx, &mut model, |b| b.picker_job.is_none());
+        assert!(
+            model
+                .lidar
+                .picker_results
+                .iter()
+                .any(|s| s.id == "NOAAID:38")
+        );
+        let newest = &model.lidar.picker_results[0];
+        let id = newest.id.clone();
+        let title = newest.dated_name();
+        click(&ctx, &mut model, &title);
+        assert_eq!(model.lidar.selected.unwrap().id, id);
+    }
+
     #[test]
     fn discover_and_select_polygon_or_point_without_network() {
         let dir = tempfile::tempdir().unwrap();
@@ -604,25 +827,23 @@ mod tests {
                 '{\"type\":\"Polygon\",\"coordinates\":[[[-55,-4],[-54,-4],[-54,-3],[-55,-4]]]}',-55,-4,-54,-3);
             INSERT INTO surveys VALUES('b','nasa-brazil','Amazon point','NASA',NULL,'https://example.org','https://example.org/f.laz',NULL,
                 '{\"type\":\"Point\",\"coordinates\":[-60,-6]}',-60,-6,-60,-6);").unwrap();
-        let mut browser = Browser {
-            path,
-            query: "Amazon".into(),
-            ..Default::default()
-        };
         let at = GeoPoint {
             lat: -3.5,
             lon: -54.5,
         };
-        search(&mut browser, at).unwrap();
-        assert_eq!(browser.results.len(), 2);
-        let point = browser.results[0].clone();
-        assert_eq!(select(&mut browser, point).unwrap().lon, -60.);
-        browser.near = true;
-        search(&mut browser, at).unwrap();
-        assert_eq!(browser.results.len(), 1);
-        let strip = browser.results[0].clone();
-        assert_eq!(select(&mut browser, strip).unwrap().lon, -54.25);
-        assert!(browser.footprint.unwrap().visible);
+        let request = |near| Search {
+            query: "Amazon".into(),
+            near,
+            offset: 0,
+        };
+        let all = search(&path, request(None)).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(select(&path, all[0].clone()).unwrap().2.lon, -60.);
+        let nearby = search(&path, request(Some(at))).unwrap();
+        assert_eq!(nearby.len(), 1);
+        let (_, footprint, focus) = select(&path, nearby[0].clone()).unwrap();
+        assert_eq!(focus.lon, -54.25);
+        assert!(footprint.visible);
         db.execute(
             "UPDATE surveys SET id='NOAAID:1',date='1998' WHERE id='a'",
             [],
@@ -630,7 +851,7 @@ mod tests {
         .unwrap();
         db.execute("INSERT INTO surveys SELECT 'NOAAID:2',source,name,product,'2018',page,asset,stac,geometry,west,south,east,north FROM surveys WHERE id='NOAAID:1'", []).unwrap();
         let choices = overlapping(
-            &browser.path,
+            &path,
             GeoPoint {
                 lat: -3.6,
                 lon: -54.2,
@@ -643,7 +864,7 @@ mod tests {
         );
         assert!(
             overlapping(
-                &browser.path,
+                &path,
                 GeoPoint {
                     lat: -3.1,
                     lon: -54.9

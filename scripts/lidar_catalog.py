@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS surveys (
 );
 CREATE INDEX IF NOT EXISTS surveys_extent ON surveys(west,east,south,north);
 CREATE INDEX IF NOT EXISTS surveys_source ON surveys(source);
+CREATE INDEX IF NOT EXISTS surveys_name ON surveys(name,id);
 CREATE TABLE IF NOT EXISTS refreshes (source TEXT PRIMARY KEY, checked REAL, version TEXT);
 CREATE TABLE IF NOT EXISTS resources (url TEXT PRIMARY KEY, etag TEXT, modified TEXT, body BLOB);
 """

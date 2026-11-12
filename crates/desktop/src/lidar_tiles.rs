@@ -1,4 +1,5 @@
 //! Viewport-driven survey paths and measured raster overlays in both Earth views.
+use crate::lidar_catalog::{ReadJob, completed, read_in_background};
 use crate::panels::world_map::satellite_layer::SatelliteLayer;
 use crate::satellite_image::SatelliteImage;
 use std::{
@@ -6,7 +7,10 @@ use std::{
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
     process::Command,
-    sync::mpsc::{self, Receiver},
+    sync::{
+        Arc, OnceLock,
+        mpsc::{self, Receiver},
+    },
     time::{Duration, Instant},
 };
 
@@ -68,8 +72,14 @@ struct Key {
     variant: String,
 }
 type MapImage = (SatelliteImage, String);
+struct CatalogSnapshot {
+    generation: u32,
+    sequence: Option<i64>,
+    revisions: Vec<(Key, i64)>,
+}
+
 struct Job {
-    key: Key,
+    key: Arc<OnceLock<Key>>,
     rx: Receiver<Result<Option<MapImage>, String>>,
     // The Python renderer checks this marker between source requests.
     active: Option<tempfile::NamedTempFile>,
@@ -82,6 +92,9 @@ pub(crate) struct Tiles {
     moved: Option<Instant>,
     preferred: String,
     generation: u32,
+    catalog_job: Option<ReadJob<CatalogSnapshot>>,
+    last_catalog_check: Option<Instant>,
+    catalog_ready: bool,
     bulk_sequence: i64,
     bulk_versions: HashMap<Key, i64>,
     loaded: HashMap<Key, Option<SatelliteLayer>>,
@@ -183,42 +196,58 @@ impl Tiles {
         self.view.get_mut().clear();
     }
 
-    pub(crate) fn catalog_changed(&mut self, path: &Path) {
-        if let Ok(db) =
-            rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            && let Ok(generation) = db.query_row("PRAGMA user_version", [], |r| r.get(0))
-            && self.generation != generation
-        {
-            self.generation = generation;
-            self.loaded.clear();
-            self.order.clear();
-            self.retry.clear();
-            self.jobs = [None, None];
+    pub(crate) fn poll_catalog(&mut self, ctx: &egui::Context, path: &Path, force: bool) -> bool {
+        if force {
+            self.last_catalog_check = None;
         }
-        if let Some(bulk) = bulk_index(path)
-            && let Ok(sequence) =
-                bulk.query_row("SELECT coalesce(max(rowid),0) FROM files", [], |r| r.get(0))
-            && sequence != self.bulk_sequence
-        {
-            self.bulk_sequence = sequence;
-            let mut changed = Vec::new();
-            for &tile in &self.stable {
-                let k = key(tile, true, self.generation, &self.preferred);
-                if self.loaded.contains_key(&k) {
-                    let version = bulk_revision(&bulk, tile, &self.preferred);
-                    if self.bulk_versions.insert(k.clone(), version).unwrap_or(0) != version {
-                        changed.push(k);
+        if let Some(result) = completed(&mut self.catalog_job) {
+            self.catalog_ready = result.is_ok();
+            match result {
+                Ok(snapshot) => {
+                    if self.generation != snapshot.generation {
+                        self.generation = snapshot.generation;
+                        self.loaded.clear();
+                        self.order.clear();
+                        self.bulk_versions.clear();
+                        self.retry.clear();
+                        self.jobs = [None, None];
                     }
+                    if let Some(sequence) = snapshot.sequence {
+                        self.bulk_sequence = sequence;
+                    }
+                    for (k, version) in snapshot.revisions {
+                        if self.bulk_versions.insert(k.clone(), version).unwrap_or(0) != version {
+                            self.loaded.remove(&k);
+                            self.order.retain(|old| old != &k);
+                            self.retry.remove(&k);
+                        }
+                    }
+                    self.bulk_versions
+                        .retain(|k, _| self.stable.contains(&k.tile));
                 }
+                Err(error) => self.status = error,
             }
-            for k in changed {
-                self.loaded.remove(&k);
-                self.order.retain(|old| old != &k);
-                self.retry.remove(&k);
-            }
-            self.bulk_versions
-                .retain(|k, _| self.stable.contains(&k.tile));
         }
+        if self.catalog_job.is_none()
+            && self
+                .last_catalog_check
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(10))
+        {
+            self.last_catalog_check = Some(Instant::now());
+            let path = path.to_owned();
+            let previous = self.bulk_sequence;
+            let preferred = self.preferred.clone();
+            let keys: Vec<_> = self
+                .stable
+                .iter()
+                .map(|&t| key(t, true, self.generation, &preferred))
+                .filter(|k| self.loaded.contains_key(k))
+                .collect();
+            self.catalog_job = Some(read_in_background(ctx, move || {
+                catalog_snapshot(&path, previous, &preferred, keys)
+            }));
+        }
+        self.catalog_ready
     }
 
     pub(crate) fn tick(&mut self, ctx: &egui::Context, path: &Path, preferred: &str) {
@@ -230,15 +259,16 @@ impl Tiles {
         }
         for slot in 0..2 {
             if let Some(job) = &mut self.jobs[slot] {
-                if !self.stable.contains(&job.key.tile)
-                    || (job.key.detail
-                        && job.key != key(job.key.tile, true, self.generation, preferred))
+                if let Some(k) = job.key.get()
+                    && (!self.stable.contains(&k.tile)
+                        || (k.detail && *k != key(k.tile, true, self.generation, preferred)))
                 {
                     job.active = None;
                 }
-                let k = job.key.clone();
+
                 match job.rx.try_recv() {
                     Ok(Ok(image)) => {
+                        let k = job.key.get().expect("completed tile has a key").clone();
                         self.loaded.insert(
                             k.clone(),
                             image.map(|(pixels, name)| SatelliteLayer::new(ctx, name, pixels)),
@@ -253,7 +283,9 @@ impl Tiles {
                     Ok(Err(_)) if job.active.is_none() => {}
                     Ok(Err(e)) => {
                         self.status = e;
-                        self.retry.insert(k, Instant::now());
+                        if let Some(k) = job.key.get() {
+                            self.retry.insert(k.clone(), Instant::now());
+                        }
                     }
                     Err(mpsc::TryRecvError::Empty) => continue,
                     Err(mpsc::TryRecvError::Disconnected) => {
@@ -271,7 +303,7 @@ impl Tiles {
                 continue;
             }
             let detail = slot == 1;
-            let next = self
+            let candidates: Vec<_> = self
                 .stable
                 .iter()
                 .copied()
@@ -284,8 +316,10 @@ impl Tiles {
                             .get(k)
                             .is_some_and(|t| t.elapsed() < Duration::from_secs(60))
                 })
-                .min_by_key(|k| !tile_path(path, k).is_file());
-            let Some(k) = next else { continue };
+                .collect();
+            if candidates.is_empty() {
+                continue;
+            }
             let (tx, rx) = mpsc::channel();
             let db = path.to_owned();
             let selected = preferred.to_owned();
@@ -301,17 +335,24 @@ impl Tiles {
                 }
             };
             let marker = active.path().to_owned();
-            let requested = k.clone();
+            let chosen = Arc::new(OnceLock::new());
+            let worker_key = Arc::clone(&chosen);
             match std::thread::Builder::new()
                 .name("lidar-map-tile".into())
                 .spawn(move || {
-                    let result = load(&db, &requested, &selected, generation, &marker);
+                    // Prefer saved maps without probing the external drive in the UI frame.
+                    let requested = candidates
+                        .iter()
+                        .find(|k| tile_path(&db, k).is_file())
+                        .unwrap_or(&candidates[0]);
+                    let _ = worker_key.set(requested.clone());
+                    let result = load(&db, requested, &selected, generation, &marker);
                     let _ = tx.send(result);
                     crate::app::request_repaint();
                 }) {
                 Ok(_) => {
                     self.jobs[slot] = Some(Job {
-                        key: k,
+                        key: chosen,
                         rx,
                         active: Some(active),
                     })
@@ -360,6 +401,40 @@ fn tile_path(db: &Path, k: &Key) -> PathBuf {
         .join(z.to_string())
         .join(x.to_string())
         .join(format!("{y}.png"))
+}
+
+fn catalog_snapshot(
+    path: &Path,
+    previous: i64,
+    preferred: &str,
+    keys: Vec<Key>,
+) -> Result<CatalogSnapshot, String> {
+    let db =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| e.to_string())?;
+    let generation = db
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
+    let mut snapshot = CatalogSnapshot {
+        generation,
+        sequence: None,
+        revisions: Vec::new(),
+    };
+    if let Some(bulk) = bulk_index(path) {
+        snapshot.sequence = bulk
+            .query_row("SELECT coalesce(max(rowid),0) FROM files", [], |r| r.get(0))
+            .ok();
+        if snapshot.sequence.is_some_and(|seq| seq != previous) {
+            snapshot.revisions = keys
+                .into_iter()
+                .map(|k| {
+                    let version = bulk_revision(&bulk, k.tile, preferred);
+                    (k, version)
+                })
+                .collect();
+        }
+    }
+    Ok(snapshot)
 }
 
 fn bulk_index(catalog: &Path) -> Option<rusqlite::Connection> {
