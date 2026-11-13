@@ -242,7 +242,7 @@ function drawPin() {
 }
 
 function frame() {
-  draw();
+  if (!surfaceMode) draw();
   requestAnimationFrame(frame);
 }
 
@@ -414,6 +414,104 @@ for (const key of ["events", "cameras", "tracks", "flights"]) {
   const box = document.getElementById("lyr-" + key);
   box.addEventListener("change", () => { state.layers[key] = box.checked; });
 }
+
+// The shared map is the rendered host window. Keep the companion canvas and
+// its picking coordinates independent of this image.
+let surfaceMode = false;
+let surfaceRun = 0;
+let surfaceURL = null;
+let gesture = null;
+const surface = document.getElementById("surface-image");
+const surfaceStatus = document.getElementById("surface-status");
+const toggle = document.getElementById("surface-toggle");
+const viewerAddress = document.getElementById("viewer-address");
+viewerAddress.value = new URL(API || "/", location.origin).href;
+viewerAddress.addEventListener("click", () => viewerAddress.select());
+
+function clearSurface() {
+  gesture = null;
+  surface.hidden = true;
+  surface.removeAttribute("src");
+  if (surfaceURL) URL.revokeObjectURL(surfaceURL);
+  surfaceURL = null;
+}
+
+async function followSurface(run) {
+  let seen = null;
+  while (run === surfaceRun && surfaceMode) {
+    try {
+      const query = seen ? "?gen=" + encodeURIComponent(seen) : "";
+      const r = await fetch(API + "/map/frame" + query, { signal: AbortSignal.timeout(5000) });
+      if (run !== surfaceRun) return;
+      if (r.status === 200) {
+        const blob = await r.blob();
+        if (run !== surfaceRun) return;
+        const previous = surfaceURL;
+        surfaceURL = URL.createObjectURL(blob);
+        surface.src = surfaceURL;
+        surface.hidden = false;
+        if (previous) URL.revokeObjectURL(previous);
+        seen = r.headers.get("X-Gen");
+        surfaceStatus.textContent = "";
+      } else if (r.status !== 304) {
+        throw new Error(r.status === 403 ? "Enable sharing in host Settings → Overview."
+          : r.status === 409 ? "Paused while the host has Settings open."
+          : r.status === 202 ? "Waiting for the host window…" : "Host unavailable. Reconnecting…");
+      }
+    } catch (e) {
+      if (run !== surfaceRun) return;
+      clearSurface();
+      seen = null;
+      surfaceStatus.textContent = e.message;
+    }
+    await new Promise(resolve => setTimeout(resolve, seen ? 150 : 750));
+  }
+}
+
+toggle.addEventListener("click", () => {
+  surfaceMode = !surfaceMode;
+  surfaceRun++;
+  toggle.textContent = surfaceMode ? "Return to companion globe" : "View shared map";
+  toggle.setAttribute("aria-pressed", String(surfaceMode));
+  document.getElementById("surface-view").hidden = !surfaceMode;
+  for (const id of ["stage-overlay", "target-card", "layers-card"]) {
+    document.getElementById(id).hidden = surfaceMode;
+  }
+  canvas.style.visibility = surfaceMode ? "hidden" : "";
+  clearSurface();
+  if (surfaceMode) {
+    surfaceStatus.textContent = "Connecting…";
+    followSurface(surfaceRun);
+  }
+});
+
+async function steerSurface(action) {
+  try {
+    const r = await fetch(API + "/map/control", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(action) });
+    if (!r.ok) throw new Error();
+  } catch { surfaceStatus.textContent = "The host could not apply the map control."; }
+}
+
+surface.addEventListener("pointerdown", e => {
+  if (e.button !== 0 || gesture) return;
+  gesture = { id: e.pointerId, x: e.clientX, y: e.clientY };
+  surface.setPointerCapture(e.pointerId);
+});
+surface.addEventListener("pointerup", e => {
+  if (!gesture || e.pointerId !== gesture.id) return;
+  const rect = surface.getBoundingClientRect();
+  const clamp = x => Math.max(-1, Math.min(1, x));
+  const dx = clamp((e.clientX - gesture.x) / rect.width);
+  const dy = clamp((e.clientY - gesture.y) / rect.height);
+  gesture = null;
+  if (dx || dy) steerSurface({ type: "pan", dx, dy });
+});
+surface.addEventListener("lostpointercapture", () => { gesture = null; });
+surface.addEventListener("wheel", e => {
+  e.preventDefault();
+  const delta = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? surface.clientHeight : 1);
+  steerSurface({ type: "zoom", factor: Math.max(0.25, Math.min(4, Math.exp(-delta * 0.0055))) });
+}, { passive: false });
 
 // ── Boot ────────────────────────────────────────────────────────────────────
 document.getElementById("standalone-note").textContent =

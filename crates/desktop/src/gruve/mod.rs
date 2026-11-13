@@ -1,24 +1,11 @@
-//! Gruve mesh integration — the companion-web-view bridge.
-//!
-//! 1kEE is a native egui/wgpu app, so it can't be served over the mesh directly.
-//! This module gives it a path onto Gruve without a WASM port: a lightweight
-//! embedded HTTP server publishes the app's live situational picture (the host's
-//! globe centre, events, vessels, flights, cameras) and serves a companion web
-//! view that mirrors it. Friends open the lobby tile and see what the analyst sees;
-//! they can steer the host's globe ("look here") or select an event back on the
-//! host. The native console stays the source of truth.
-//!
-//! Lifecycle, all driven from `DashboardApp`:
-//!   * `GruveBridge::start(&model)` once — binds a port, serves, announces.
-//!   * `bridge.drain_commands(&mut model)` at the top of each frame — apply remote
-//!     viewer actions before the UI renders.
-//!   * `bridge.publish(&model)` at the end of each frame — refresh the snapshot.
-//!
-//! Everything degrades silently: no agent running, port taken, no viewers — the
-//! native app behaves exactly as it did before (contract resilience rule 1.2).
+//! The host serves the companion, a demand-driven window stream and map commands
+//! on one loopback port. Gruve handles discovery, peer transport and port forwarding.
+//! The native remote viewer runs separately from the host's model and data sources.
 
 mod server;
 mod snapshot;
+mod surface;
+pub(crate) mod viewer;
 
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,7 +16,7 @@ use crossbeam_channel::Receiver;
 use server::ServerShared;
 use snapshot::{Command, Snapshot};
 
-use crate::model::{AppModel, GeoPoint, GlobeViewState};
+use crate::model::{AppModel, GeoPoint};
 
 /// Stable lobby slug — matches `^[a-z0-9][a-z0-9-]{0,31}$` and the web view's
 /// announce/session id.
@@ -42,6 +29,8 @@ pub struct GruveBridge {
     shared: Arc<ServerShared>,
     commands_rx: Receiver<Command>,
     port: u16,
+    capture: surface::Capture,
+    map_rect: egui::Rect,
     // Heartbeats to the local agent from a background thread; withdraws on drop.
     _announce: gruve_sdk::AnnounceHandle,
 }
@@ -52,8 +41,11 @@ impl GruveBridge {
     pub fn start(model: &AppModel) -> Option<GruveBridge> {
         let (listener, port) = bind_in_range()?;
 
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let (tx, rx) = crossbeam_channel::bounded(64);
+        let surface = Arc::new(Mutex::new(surface::Surface::default()));
+        let capture = surface::Capture::new(surface.clone());
         let shared = Arc::new(ServerShared {
+            surface,
             snapshot: Mutex::new(Snapshot::from_model(model)),
             commands: tx,
             stop: AtomicBool::new(false),
@@ -66,12 +58,13 @@ impl GruveBridge {
         // `/apps/1kee/__gruve/api`.
         let announce = gruve_sdk::Announce::app(APP_ID, "1kEE", port)
             .blurb("live OSINT globe — events, vessels, flights, cameras")
+            .shared_state()
             .hue(190)
             .upstream("api", port)
             .start();
 
         eprintln!(
-            "gruve: companion web view on http://127.0.0.1:{port}/ — announced as '{APP_ID}' \
+            "gruve: companion web view on http://127.0.0.1:{port}/ — announcing as '{APP_ID}' \
              (open the Gruve lobby, or this URL standalone)"
         );
 
@@ -79,6 +72,8 @@ impl GruveBridge {
             shared,
             commands_rx: rx,
             port,
+            capture,
+            map_rect: egui::Rect::NOTHING,
             _announce: announce,
         })
     }
@@ -94,19 +89,46 @@ impl GruveBridge {
         }
     }
 
-    /// Apply any commands web viewers have sent since the last frame. These are the
-    /// only way the mesh writes into the host — explicit, one-shot, and idempotent
-    /// (they drive the store; they never replay input events — contract rule 6).
+    /// Apply a bounded batch on the UI thread before the map renders.
     pub fn drain_commands(&self, model: &mut AppModel) {
-        let mut applied = false;
-        while let Ok(cmd) = self.commands_rx.try_recv() {
-            apply_command(model, cmd);
-            applied = true;
+        for cmd in self.commands_rx.try_iter().take(64) {
+            match cmd {
+                Command::Navigate { action, epoch } => {
+                    if model.share_map
+                        && !model.settings_open
+                        && self.map_rect.is_positive()
+                        && self.shared.surface.lock().unwrap().live_epoch() == Some(epoch)
+                    {
+                        model.stop_event_follow();
+                        crate::panels::world_map::remote_navigation(
+                            &mut model.globe_view,
+                            self.map_rect,
+                            action,
+                        );
+                    }
+                }
+                Command::Focus { point } => focus_map(model, point),
+                Command::SelectEvent { id } => {
+                    if let Some(event) = model.events.iter().find(|e| e.id == id) {
+                        let point = event.location;
+                        model.selected_event_id = Some(id);
+                        focus_map(model, point);
+                    }
+                }
+            }
         }
-        if applied {
-            // Wake the event loop so a remote action shows up even when the host is idle.
-            crate::app::request_repaint();
-        }
+    }
+
+    pub fn update_surface(&mut self, ctx: &egui::Context, model: &AppModel, rect: egui::Rect) {
+        self.map_rect = rect;
+        let mode = if !model.share_map {
+            surface::Mode::Off
+        } else if model.settings_open {
+            surface::Mode::Paused
+        } else {
+            surface::Mode::Live
+        };
+        self.capture.update(ctx, mode);
     }
 
     pub fn port(&self) -> u16 {
@@ -121,27 +143,10 @@ impl Drop for GruveBridge {
     }
 }
 
-fn apply_command(model: &mut AppModel, cmd: Command) {
-    match cmd {
-        Command::Focus { point } => focus_globe(&mut model.globe_view, point),
-        Command::SelectEvent { id } => {
-            if let Some(ev) = model.events.iter().find(|e| e.id == id) {
-                let point = ev.location;
-                model.selected_event_id = Some(id);
-                focus_globe(&mut model.globe_view, point);
-            }
-        }
-    }
-}
-
-/// Point the host's globe at `point`, killing any drift so the camera actually
-/// settles there (a remote "look here" shouldn't fight an active auto-spin).
-fn focus_globe(view: &mut GlobeViewState, point: GeoPoint) {
-    view.auto_spin = false;
-    view.meander_mode = false;
-    view.vel_yaw = 0.0;
-    view.vel_pitch = 0.0;
-    view.focus_on(point);
+fn focus_map(model: &mut AppModel, point: GeoPoint) {
+    model.stop_event_follow();
+    model.globe_view.stop_motion();
+    model.globe_view.focus_on(point);
 }
 
 /// Bind the first free port in `PORT_RANGE` on localhost.
@@ -152,4 +157,26 @@ fn bind_in_range() -> Option<(TcpListener, u16)> {
         }
     }
     None
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum Navigation {
+    /// Fraction of the map width and height dragged since the previous command.
+    Pan {
+        dx: f32,
+        dy: f32,
+    },
+    Zoom {
+        factor: f32,
+    },
+}
+
+impl Navigation {
+    fn valid(self) -> bool {
+        match self {
+            Self::Pan { dx, dy } => dx.abs() <= 1.0 && dy.abs() <= 1.0,
+            Self::Zoom { factor } => (0.25..=4.0).contains(&factor),
+        }
+    }
 }

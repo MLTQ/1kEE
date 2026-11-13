@@ -113,3 +113,10 @@ button:disabled { opacity: 0.4; cursor: default; }
   #app { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
   #panel { border-left: none; border-top: 1px solid var(--line); max-height: 46vh; }
 }
+
+#surface-view { position: absolute; inset: 0; display: grid; place-items: center; }
+#surface-view[hidden], #surface-image[hidden], #stage-overlay[hidden], .card[hidden] { display: none; }
+#surface-image { max-width: 100%; max-height: 100%; min-height: 0; min-width: 0; cursor: grab; touch-action: none; user-select: none; }
+#surface-status { position: absolute; padding: 0.5em; background: var(--bg); }
+#surface-status:empty { display: none; }
+#viewer-address { width: 100%; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); }

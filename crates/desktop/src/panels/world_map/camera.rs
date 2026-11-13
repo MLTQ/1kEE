@@ -112,15 +112,7 @@ pub fn apply_interaction(
         }
     });
     if scroll_y.abs() > f32::EPSILON {
-        if view.local_mode {
-            view.local_zoom = (view.local_zoom * (scroll_y * 0.0055).exp())
-                .clamp(
-                    local_terrain_scene::LOCAL_ZOOM_MIN,
-                    local_terrain_scene::LOCAL_ZOOM_MAX,
-                );
-        } else {
-            view.zoom = (view.zoom * (scroll_y * 0.0055).exp()).clamp(0.6, 50.0);
-        }
+        zoom_by(view, (scroll_y * 0.0055).exp());
         view.auto_spin = false;
     }
 
@@ -327,6 +319,43 @@ pub fn apply_interaction(
     // so switching to local renders the area the user is looking at.
     if !view.local_mode {
         view.local_center = view.globe_center_latlon();
+    }
+}
+
+fn zoom_by(view: &mut GlobeViewState, factor: f32) {
+    if view.local_mode {
+        view.local_zoom = (view.local_zoom * factor)
+            .clamp(
+                local_terrain_scene::LOCAL_ZOOM_MIN,
+                local_terrain_scene::LOCAL_ZOOM_MAX,
+            );
+    } else {
+        view.zoom = (view.zoom * factor).clamp(0.6, 50.0);
+    }
+}
+
+/// Apply one viewer gesture using the host canvas and its current projection.
+pub(crate) fn remote_navigation(view: &mut GlobeViewState, rect: egui::Rect, action: crate::gruve::Navigation) {
+    use crate::gruve::Navigation;
+    view.stop_motion();
+    match action {
+        Navigation::Zoom { factor } => zoom_by(view, factor),
+        Navigation::Pan { dx, dy } => {
+            let delta = egui::vec2(dx * rect.width(), dy * rect.height());
+            if view.local_mode {
+                let (lat, lon) = local_pan_delta(rect, view, delta);
+                view.vel_local_lat = lat;
+                view.vel_local_lon = lon;
+                pan_local(view, 1.0);
+                view.stop_motion();
+            } else {
+                let scale = super::globe_scene::drag_sensitivity_scale(view);
+                view.yaw -= delta.x * 0.0055 * scale;
+                view.pitch = (view.pitch + delta.y * 0.004 * scale)
+                    .clamp(-GLOBE_PITCH_LIMIT_RAD, GLOBE_PITCH_LIMIT_RAD);
+                view.local_center = view.globe_center_latlon();
+            }
+        }
     }
 }
 

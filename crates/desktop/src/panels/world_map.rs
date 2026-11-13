@@ -73,7 +73,9 @@ pub(crate) fn invalidate_water_cache_pub() {
     local_terrain_scene::invalidate_water_cache();
 }
 
-pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
+pub(crate) use camera::remote_navigation;
+
+pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
     let panel_frame = if model.obs_view {
         egui::Frame::new().fill(theme::canvas_background())
     } else {
@@ -232,7 +234,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
         // The chyron and selected card remain in Focus. The app shell owns the
         // open Brief/live camera; other event cards never cover the map.
         if model.obs_view {
-            return;
+            return rect;
         }
         super::render_replay_controls(ui, model);
         if response.hover_pos().is_some_and(|pointer| scene.landing_point_markers.iter().any(|(_, p)| p.distance(pointer) <= 9.0)) {
@@ -258,7 +260,8 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) {
                 }
             }
         }
-    });
+        rect
+    }).inner
 }
 
 fn lidar_pick_region(

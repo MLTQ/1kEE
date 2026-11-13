@@ -22,8 +22,8 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -48,6 +48,7 @@ pub struct Announce {
     blurb: String,
     upstreams: Vec<(String, u16)>,
     service: bool,
+    shared_state: bool,
 }
 
 impl Announce {
@@ -62,6 +63,7 @@ impl Announce {
             blurb: String::new(),
             upstreams: Vec::new(),
             service: false,
+            shared_state: false,
         }
     }
 
@@ -70,6 +72,12 @@ impl Announce {
         let mut a = Self::app(id, id, port);
         a.service = true;
         a
+    }
+
+    /// Advertise ephemeral last-write-wins room state (e.g. shared map pins).
+    pub fn shared_state(mut self) -> Self {
+        self.shared_state = true;
+        self
     }
 
     pub fn blurb(mut self, b: &str) -> Self {
@@ -133,8 +141,9 @@ impl Announce {
             .map(|(n, p)| format!("{}:{}", json_str(n), p))
             .collect::<Vec<_>>()
             .join(",");
+        let state = if self.shared_state { "lww" } else { "none" };
         format!(
-            "{{\"id\":{},\"name\":{},\"port\":{},\"ttl\":{},\"hue\":{},\"blurb\":{},\"upstreams\":{{{}}},\"service\":{}}}",
+            "{{\"id\":{},\"name\":{},\"port\":{},\"ttl\":{},\"hue\":{},\"blurb\":{},\"upstreams\":{{{}}},\"service\":{},\"capabilities\":{{\"state\":\"{state}\",\"persistence\":\"none\"}}}}",
             json_str(&self.id),
             json_str(&self.name),
             self.port,
@@ -180,15 +189,40 @@ fn json_str(s: &str) -> String {
     out
 }
 
+fn registration_header() -> String {
+    let token = std::env::var("GRUVE_TOKEN").ok().or_else(|| {
+        let dir = std::env::var_os("GRUVE_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .or_else(|| std::env::var_os("USERPROFILE"))
+                    .map(|home| std::path::PathBuf::from(home).join(".gruve"))
+            })?;
+        std::fs::read_to_string(dir.join("registration.token")).ok()
+    });
+    match token.as_deref().map(str::trim) {
+        Some(t) if !t.is_empty() && t.bytes().all(|b| b.is_ascii_graphic()) => {
+            format!("Authorization: Bearer {t}\r\n")
+        }
+        _ => String::new(), // Older agents accept unauthenticated local registration.
+    }
+}
+
 /// Minimal HTTP/1.1 over localhost — returns the status code.
 fn http_request(method: &str, path: &str, body: Option<&str>) -> std::io::Result<u16> {
     let addr = agent_addr();
     let mut stream = TcpStream::connect(&addr)?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    // Only disclose the local installation credential to a loopback agent.
+    let auth = if stream.peer_addr()?.ip().is_loopback() {
+        registration_header()
+    } else {
+        String::new()
+    };
     let b = body.unwrap_or("");
     let req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}",
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\n{auth}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{b}",
         b.len()
     );
     stream.write_all(req.as_bytes())?;

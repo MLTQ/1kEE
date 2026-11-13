@@ -12,6 +12,10 @@
     <div id="app">
       <main id="stage">
         <canvas id="globe"></canvas>
+        <div id="surface-view" hidden>
+          <img id="surface-image" alt="Live 1kEE window" draggable="false" hidden />
+          <output id="surface-status" aria-live="polite"></output>
+        </div>
         <div id="stage-overlay">
           <div id="follow-badge">FOLLOWING HOST</div>
           <div id="readout"></div>
@@ -30,6 +34,9 @@
 
         <section class="card" id="host-card">
           <div class="card-head">HOST VIEW</div>
+          <button id="surface-toggle" aria-pressed="false">View shared map</button>
+          <label for="viewer-address">Native viewer address</label>
+          <input id="viewer-address" readonly />
           <div class="kv"><span>centre</span><b id="host-center">—</b></div>
           <div class="kv"><span>body</span><b id="host-body">—</b></div>
           <div class="kv"><span>theme</span><b id="host-theme">—</b></div>

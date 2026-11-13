@@ -1,12 +1,13 @@
 //! A tiny std-only HTTP/1.1 server that serves the companion web view and the
-//! JSON API the web view polls. Zero extra dependencies — like the Gruve agent
+//! JSON API and the opt-in shared window. Zero extra dependencies — like the Gruve agent
 //! itself, everything here is localhost traffic, so `std::net` is plenty.
 //!
 //! It serves two surfaces on one port (the contract's "one process, one port"
 //! shape):
 //!   * the UI    — `/`, `/app.js`, `/app.css`, `/gruve-sdk.js`
 //!   * the `api` — `/state`, `/events`, `/cameras`, `/tracks`, `/flights`,
-//!                 and `POST /command`
+//!     and `POST /command`
+//!   * the live window — `GET /map/frame` and `POST /map/control`
 //!
 //! When opened through a Gruve agent the UI lands at `/apps/1kee/` and the API at
 //! `/apps/1kee/__gruve/api/…`; the agent strips both prefixes before proxying here,
@@ -32,6 +33,7 @@ const GRUVE_SDK_JS: &str = include_str!("web/gruve-sdk.js");
 
 pub(super) struct ServerShared {
     pub snapshot: Mutex<Snapshot>,
+    pub surface: Arc<Mutex<super::surface::Surface>>,
     pub commands: Sender<Command>,
     pub stop: AtomicBool,
 }
@@ -70,6 +72,7 @@ pub(super) fn serve(listener: TcpListener, shared: Arc<ServerShared>) {
 fn handle(mut stream: TcpStream, shared: &ServerShared) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_nonblocking(false)?;
+    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
 
     let (method, path, headers, leftover) = read_request_head(&mut stream)?;
     let (route, query) = match path.split_once('?') {
@@ -77,14 +80,56 @@ fn handle(mut stream: TcpStream, shared: &ServerShared) -> std::io::Result<()> {
         None => (path.as_str(), ""),
     };
 
+    if route.starts_with("/map/") && header_value(&headers, "sec-fetch-site") == Some("cross-site") {
+        return surface_response(&mut stream, 403, "text/plain", b"Open the shared map through 1kEE or Gruve");
+    }
+
+    if method == "OPTIONS" && route.starts_with("/map/") {
+        return surface_response(&mut stream, 204, "text/plain", b"");
+    }
     if method == "OPTIONS" {
         return write_response(&mut stream, 204, "text/plain", b"");
+    }
+
+    if route == "/map/frame" && method == "GET" {
+        use super::surface::Reply;
+        let seen = query_u64(query, "gen");
+        let reply = shared.surface.lock().unwrap().poll(seen);
+        return match reply {
+            Reply::Off => surface_response(&mut stream, 403, "text/plain", b"Enable sharing in host Settings > Overview"),
+            Reply::Paused => surface_response(&mut stream, 409, "text/plain", b"Sharing paused while host Settings is open"),
+            Reply::Waiting => {
+                crate::app::request_repaint();
+                surface_response(&mut stream, 202, "text/plain", b"Waiting for the host window")
+            }
+            Reply::Current => surface_response(&mut stream, 304, "image/jpeg", b""),
+            Reply::Frame(seq, bytes) => {
+                let headers = format!("X-Gen: {seq}\r\nCross-Origin-Resource-Policy: same-origin\r\n");
+                write_response_with(&mut stream, 200, "image/jpeg", &headers, &bytes)
+            }
+        };
+    }
+
+    if method == "POST" && route == "/map/control" {
+        // Cross-origin HTML forms cannot submit a navigation command.
+        if header_value(&headers, "content-type").and_then(|h| h.split(';').next()) != Some("application/json") {
+            return surface_response(&mut stream, 415, "text/plain", b"Expected application/json");
+        }
+        let body = read_body(&mut stream, &headers, leftover)?;
+        let Some(action) = serde_json::from_slice::<super::Navigation>(&body).ok().filter(|a| a.valid()) else {
+            return surface_response(&mut stream, 400, "text/plain", b"Invalid map gesture");
+        };
+        let Some(epoch) = shared.surface.lock().unwrap().live_epoch() else {
+            return surface_response(&mut stream, 403, "text/plain", b"Map sharing is off or paused");
+        };
+        let status = enqueue(shared, Command::Navigate { action, epoch });
+        return surface_response(&mut stream, status, "text/plain", b"");
     }
 
     if method == "POST" && route == "/command" {
         let body = read_body(&mut stream, &headers, leftover)?;
         let status = apply_command(&body, shared);
-        return write_response(&mut stream, status, "application/json", br#"{"ok":true}"#);
+        return write_response(&mut stream, status, "application/json", if status == 200 { br#"{"ok":true}"# } else { br#"{"ok":false}"# });
     }
 
     if method != "GET" {
@@ -187,8 +232,12 @@ fn apply_command(body: &[u8], shared: &ServerShared) -> u16 {
         },
         _ => return 400,
     };
-    // Drop = the UI thread isn't draining; not fatal, just nothing happens.
-    let _ = shared.commands.try_send(cmd);
+    enqueue(shared, cmd)
+}
+
+fn enqueue(shared: &ServerShared, cmd: Command) -> u16 {
+    if shared.commands.try_send(cmd).is_err() { return 503; }
+    crate::app::request_repaint();
     200
 }
 
@@ -264,13 +313,21 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|w| w == needle)
 }
 
+// The existing companion JSON API permits cross-origin reads. Pixels and new
+// controls are for the same-origin tile and native clients only.
+fn surface_response(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8]) -> std::io::Result<()> {
+    write_response_with(stream, status, content_type, "Cross-Origin-Resource-Policy: same-origin\r\n", body)
+}
+
+const COMPANION_CORS: &str = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: content-type\r\n";
+
 fn write_response(
     stream: &mut TcpStream,
     status: u16,
     content_type: &str,
     body: &[u8],
 ) -> std::io::Result<()> {
-    write_response_with(stream, status, content_type, "", body)
+    write_response_with(stream, status, content_type, COMPANION_CORS, body)
 }
 
 /// JSON API responses carry the slice's generation counter in `X-Gen` (exposed
@@ -281,7 +338,7 @@ fn write_api_response(
     slice_gen: u64,
     body: &[u8],
 ) -> std::io::Result<()> {
-    let extra = format!("X-Gen: {slice_gen}\r\nAccess-Control-Expose-Headers: X-Gen\r\n");
+    let extra = format!("{COMPANION_CORS}X-Gen: {slice_gen}\r\nAccess-Control-Expose-Headers: X-Gen\r\n");
     write_response_with(stream, status, "application/json", &extra, body)
 }
 
@@ -294,6 +351,11 @@ fn write_response_with(
 ) -> std::io::Result<()> {
     let reason = match status {
         200 => "OK",
+        202 => "Accepted",
+        403 => "Forbidden",
+        409 => "Conflict",
+        415 => "Unsupported Media Type",
+        503 => "Service Unavailable",
         204 => "No Content",
         304 => "Not Modified",
         400 => "Bad Request",
@@ -306,9 +368,6 @@ fn write_response_with(
          Content-Type: {content_type}\r\n\
          Content-Length: {}\r\n\
          {extra_headers}\
-         Access-Control-Allow-Origin: *\r\n\
-         Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
-         Access-Control-Allow-Headers: content-type\r\n\
          Cache-Control: no-store\r\n\
          Connection: close\r\n\r\n",
         body.len()

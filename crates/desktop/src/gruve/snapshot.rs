@@ -30,6 +30,7 @@ pub struct ViewDto {
     pub body: &'static str,
     pub theme: &'static str,
     pub local_mode: bool,
+    pub zoom: f32,
 }
 
 #[derive(Clone, PartialEq, Serialize)]
@@ -155,14 +156,16 @@ pub struct Snapshot {
 impl Snapshot {
     /// Build the per-frame snapshot from the live model. Cheap by construction.
     pub fn from_model(model: &AppModel) -> Self {
-        let centre = model.globe_view.globe_center_latlon();
+        let view = &model.globe_view;
+        let centre = if view.local_mode { view.local_center } else { view.globe_center_latlon() };
         Snapshot {
             view: ViewDto {
                 lat: centre.lat,
                 lon: centre.lon,
                 body: body_str(model.active_body),
                 theme: model.map_theme.label(),
-                local_mode: model.globe_view.local_mode,
+                local_mode: view.local_mode,
+                zoom: if view.local_mode { view.local_zoom } else { view.zoom },
             },
             show: ShowFlags {
                 events: model.show_event_markers,
@@ -356,4 +359,5 @@ pub enum Command {
     Focus { point: GeoPoint },
     /// Select an event by id on the host (and focus it).
     SelectEvent { id: String },
+    Navigate { action: super::Navigation, epoch: u64 },
 }

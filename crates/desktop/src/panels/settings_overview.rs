@@ -5,6 +5,21 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
     ui.heading("Overview");
     ui.colored_label(theme::text_muted(), "Live sources and local data");
     ui.add_space(10.0);
+    if let Some(port) = model.shared_map_port {
+        ui.checkbox(&mut model.share_map, "Share this 1kEE window over Gruve")
+            .on_hover_text("Viewers can steer this map. Frames pause while Settings is open.");
+        ui.small(format!("Local control port {port}"));
+
+        if ui.button("Join a shared map…").clicked() {
+            let result = std::env::current_exe().and_then(|exe| {
+                std::process::Command::new(exe).arg("--connect").spawn()
+            });
+            if let Err(error) = result {
+                model.push_log(format!("Could not open the shared map viewer: {error}"));
+            }
+        }
+        ui.separator();
+    }
     egui::Grid::new("source-status")
         .spacing([24.0, 10.0])
         .show(ui, |ui| {

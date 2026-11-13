@@ -1,14 +1,30 @@
 # gruve/
 
 ## Purpose
-Puts 1kEE on a [Gruve](../../../../gruve-kit/README.md) mesh so friends can open it
-from their lobby and collaborate. 1kEE is a native egui/wgpu app and can't be served
-over the mesh as-is, so this module is a **companion web view** rather than a port:
-a small embedded HTTP server publishes the app's live situational picture and serves
-a thin web UI that mirrors the host's globe and can steer it. The native console
-stays the source of truth.
+Friends can open 1kEE in their Gruve lobby or connect a native viewer to the
+host. The host owns the map, feeds and camera. The embedded HTTP server
+provides the companion globe, optional rendered window and map controls.
 
 Conformance: Gruve adapter protocol **L1 (announce) + L2 (dispatch) + L3 (session)**.
+
+## Shared host window
+
+The same port serves the native viewer and the browser tile. Gruve can proxy the
+app upstream or bridge the TCP port onto a guest's localhost. The native viewer
+starts before desktop model initialization when launched with `--connect`.
+
+- `GET /map/frame?gen=N` requests the latest JPEG. A successful frame carries
+  `X-Gen`. HTTP 304 means the guest already has it, 202 means a frame is pending,
+  403 means sharing is off and 409 means host Settings is open.
+- `POST /map/control` accepts JSON pan gestures with normalized `dx` and `dy`
+  or zoom gestures with a positive `factor`. The host applies validated gestures
+  on the UI thread with the current native map projection.
+- The host captures its own window on demand. An encoder worker publishes one
+  bounded-size image for all readers. Pause and stop invalidate in-flight frames
+  and navigation. Guests can see visible in-app overlays, including open briefs
+  and camera windows.
+- Gruve registration uses the agent's local credential and declares the
+  ephemeral shared state used by the existing companion pin.
 
 ## Components
 
@@ -71,5 +87,5 @@ Conformance: Gruve adapter protocol **L1 (announce) + L2 (dispatch) + L3 (sessio
 |-----------|---------|------------------|
 | `app.rs` | `start` → `Option<GruveBridge>`; `publish`/`drain_commands` are cheap, non-blocking, frame-safe | Making them block or panic; calling on a non-UI thread |
 | Web view (L2) | UI + `api` upstream share one port; routes resolve under `/apps/1kee/__gruve/api/…` | Splitting UI/API ports without re-declaring upstreams in the announce |
-| Mesh viewers | `/command` only accepts validated Focus/SelectEvent; appliers drive the store, never replay input (rule 6) | Adding commands that simulate events or trust unbounded input |
+| Mesh viewers | `/command` accepts validated Focus/SelectEvent; appliers drive the store, never replay input (rule 6) | Adding commands that simulate events or trust unbounded input |
 | Web assets | `web/` passes `gruve doctor` (no hardcoded localhost, relative assets) | Hardcoding agent/localhost URLs outside SDK fallbacks; absolute asset paths |

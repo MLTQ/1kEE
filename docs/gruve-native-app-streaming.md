@@ -1,6 +1,10 @@
 # Streaming native apps over Gruve — difficulties and paths forward
 
-**Status:** design note / proposal, written from a concrete integration attempt
+**Implementation update.** 1kEE now has an opt-in host window stream, a native
+viewer and a browser viewer with shared pan/zoom. See the [setup and controls](../README.md#multiplayer-over-gruve).
+The transport discussion below describes the original design investigation.
+
+**Original status:** design note / proposal, written from a concrete integration attempt
 (putting the native Rust app **1kEE** — an egui/wgpu desktop globe — onto a Gruve
 mesh). Intended to be lifted into the **gruve-kit** or **gruve agent**, not kept
 per-app.

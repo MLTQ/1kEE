@@ -201,22 +201,44 @@ See [OBS setup](docs/obs-streaming.md) for the macOS window-capture steps.
 
 ## Multiplayer over Gruve
 
-The app can put itself on a Gruve mesh (a local-network app-sharing/collaboration
-layer, not yet public) via a companion web view (`crates/desktop/src/gruve/`). Because 1kEE is a native egui/wgpu app it can't be
-served over the mesh directly, so the running app embeds a small HTTP server that:
+One 1kEE instance can share its rendered window and accept map navigation from other
+instances over Gruve. The host keeps the mapping data, layers and live feeds.
+Guests see the same map and can drag to pan (on release) or scroll to zoom.
+The native guest runs from the desktop executable alone.
 
-- **announces** itself to the local Gruve agent (a `1kEE` tile appears in the lobby),
-- serves a thin web globe that **mirrors the analyst's live view** — host camera centre,
-  events, vessels, flights, cameras, and the active theme, polled from the app, and
-- lets a viewer **steer the host** ("look here" / select an event) and drop a **shared
-  pin** that every viewer of the tile sees (Gruve session state).
+1. **Host:** Start the updated 1kEE. Under **Settings → Overview**, enable **Share
+   this 1kEE window over Gruve**, note the **Local control port**, then close
+   Settings. The first available port is usually 9766. To enable sharing at launch,
+   pass `--share-map` to the desktop executable.
+2. **Host:** In the desired Gruve network, choose **share a port**, enter the
+   control port from 1kEE and give it a name such as `1kEE map`.
+3. **Guest:** On that same network, click **connect** beside the host’s shared
+   port. Gruve displays a localhost address. Open **Settings → Overview → Join a
+   shared map…** in 1kEE and paste that address. For a data-free startup, launch
+   the desktop executable directly with the **guest’s local bridge port**, e.g.:
 
-It degrades silently: with no agent running, no free port, or no viewers, the desktop
-app behaves exactly as before. The feed-connection step stays on the host — camera
-*positions and reachability* go to the mesh, not feed URLs. The Gruve Rust SDK is
-vendored in `crates/gruve_sdk` and the JS SDK in the desktop crate's web assets, so
-the build has no external Gruve dependency; the Gruve agent itself is separate tooling
-and not part of this repo.
+   ```sh
+   ./one-thousand-electric-eye-desktop --connect 41215
+   ```
+
+The guest port is assigned by Gruve and can differ from the host port. Entering
+the host’s port directly works for a same-machine test. Keep the host running
+with its map window visible. Opening Settings pauses the frames. Clearing the
+sharing checkbox stops the stream and its pan/zoom controls. Sharing starts off
+on the next normal launch. **OBS VIEW** (F10) gives viewers the map with less
+operator chrome.
+
+**From the Gruve lobby:** Share the host’s **1kEE** app tile with the desired
+network, then open it on the guest machine. **View shared map** shows the live
+window in the browser. **Native viewer address** gives the guest a URL to paste
+into 1kEE or use with `--connect`. The companion globe also retains its live
+markers, event selection, host focus and shared pins.
+
+Map frames are JPEGs up to 1600 pixels on the long edge, requested about six
+times per second while viewers are present. All viewers share one host camera.
+Settings, layers and source configuration stay under host control. The native
+viewer reconnects to its configured address while open. If Gruve assigns a new
+bridge port, enter the new address and click **Connect**.
 
 ## Workspace
 

@@ -110,7 +110,8 @@ export function joinSession(opts = {}) {
   if (m) {
     const [, prefix, appId] = m
     const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const url = `${wsProto}//${location.host}${prefix}/gruve/session/${appId}`
+    const net = new URLSearchParams(location.search).get("gruve-net") || ""
+    const url = `${wsProto}//${location.host}${prefix}/gruve/session/${appId}?net=${encodeURIComponent(net)}`
     const requestSync = () => { if (ws?.readyState === 1) ws.send(JSON.stringify({ t: 'sync' })) }
     const connect = () => {
       if (closed) return

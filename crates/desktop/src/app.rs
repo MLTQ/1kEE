@@ -42,7 +42,7 @@ pub struct DashboardApp {
 }
 
 impl DashboardApp {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, share_map: bool) -> Self {
         if let Some(state) = &cc.wgpu_render_state {
             Self::register_passes(
                 &state.device,
@@ -50,7 +50,9 @@ impl DashboardApp {
                 &mut state.renderer.write(),
             );
         }
-        Self::initialize(&cc.egui_ctx, true)
+        let mut app = Self::initialize(&cc.egui_ctx, true);
+        app.model.share_map = share_map && app.gruve.is_some();
+        app
     }
 
     pub(crate) fn register_passes(
@@ -73,10 +75,11 @@ impl DashboardApp {
         theme::install(ctx);
         register_repaint_ctx(ctx);
         crate::event_store::open();
-        let model = AppModel::new();
+        let mut model = AppModel::new();
         let gruve = announce
             .then(|| crate::gruve::GruveBridge::start(&model))
             .flatten();
+        model.shared_map_port = gruve.as_ref().map(|bridge| bridge.port());
         Self {
             model,
             camera_feed_viewer: CameraFeedViewer::default(),
@@ -182,11 +185,11 @@ impl eframe::App for DashboardApp {
 
         panels::render_factal_brief(ctx, &mut self.model, &mut self.event_radio);
 
-        egui::CentralPanel::default()
+        let map_rect = egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::canvas_background()))
             .show(ctx, |ui| {
-                panels::render_world_map(ui, &mut self.model);
-            });
+                panels::render_world_map(ui, &mut self.model)
+            }).inner;
 
         if !self.model.obs_view {
             panels::render_settings(ctx, &mut self.model);
@@ -197,7 +200,8 @@ impl eframe::App for DashboardApp {
 
         // Refresh the snapshot the companion web view polls, now that this frame's
         // interaction has been folded into the model.
-        if let Some(bridge) = &self.gruve {
+        if let Some(bridge) = &mut self.gruve {
+            bridge.update_surface(ctx, &self.model, map_rect);
             bridge.publish(&self.model);
         }
     }

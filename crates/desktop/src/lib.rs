@@ -100,6 +100,18 @@ pub fn run_desktop() -> eframe::Result<()> {
         }
         return Ok(());
     }
+    if args.get(1).is_some_and(|arg| arg == "--connect") {
+        let address = args.get(2).cloned().unwrap_or_default();
+        let options = eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default().with_inner_size([1100., 720.]),
+            renderer: eframe::Renderer::Wgpu,
+            ..Default::default()
+        };
+        return eframe::run_native("1kEE | Shared map", options, Box::new(move |cc| {
+            Ok(Box::new(gruve::viewer::Viewer::new(&cc.egui_ctx, address)))
+        }));
+    }
+    let share_map = args.iter().any(|arg| arg == "--share-map");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1520.0, 920.0])
@@ -116,6 +128,6 @@ pub fn run_desktop() -> eframe::Result<()> {
     eframe::run_native(
         "1kEE",
         options,
-        Box::new(|cc| Ok(Box::new(DashboardApp::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(DashboardApp::new(cc, share_map)))),
     )
 }

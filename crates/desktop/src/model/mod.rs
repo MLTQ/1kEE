@@ -195,6 +195,9 @@ pub struct AppModel {
     nearby_camera_cache: RefCell<Option<NearbyCameraCache>>,
     pub selected_root: Option<PathBuf>,
     pub settings_open: bool,
+    /// Session-only host settings for the Gruve map surface.
+    pub shared_map_port: Option<u16>,
+    pub share_map: bool,
     pub factal_brief_open: bool,
     pub factal_api_key: String,
     pub windy_webcams_api_key: String,
@@ -398,6 +401,8 @@ impl AppModel {
             nearby_camera_cache: RefCell::new(None),
             selected_root,
             settings_open: false,
+            shared_map_port: None,
+            share_map: false,
             factal_brief_open: false,
             factal_api_key: factal_api_key.clone(),
             windy_webcams_api_key: windy_webcams_api_key.clone(),
