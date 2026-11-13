@@ -15,7 +15,10 @@ starts before desktop model initialization when launched with `--connect`.
 
 - `GET /map/frame?gen=N` requests the latest JPEG. A successful frame carries
   `X-Gen`. HTTP 304 means the guest already has it, 202 means a frame is pending,
-  403 means sharing is off and 409 means host Settings is open.
+  403 means sharing is off and 409 means host Settings is open. With `wait=1`,
+  the host can hold the request for up to 600 ms until a capture or sharing
+  state change wakes it. Identical images keep their generation. Slow viewers
+  receive the latest available frame.
 - `POST /map/control` accepts JSON pan gestures with normalized `dx` and `dy`
   or zoom gestures with a positive `factor`. The host applies validated gestures
   on the UI thread with the current native map projection.

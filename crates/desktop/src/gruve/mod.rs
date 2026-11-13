@@ -42,7 +42,7 @@ impl GruveBridge {
         let (listener, port) = bind_in_range()?;
 
         let (tx, rx) = crossbeam_channel::bounded(64);
-        let surface = Arc::new(Mutex::new(surface::Surface::default()));
+        let surface = Arc::new(surface::Surface::default());
         let capture = surface::Capture::new(surface.clone());
         let shared = Arc::new(ServerShared {
             surface,
@@ -97,7 +97,7 @@ impl GruveBridge {
                     if model.share_map
                         && !model.settings_open
                         && self.map_rect.is_positive()
-                        && self.shared.surface.lock().unwrap().live_epoch() == Some(epoch)
+                        && self.shared.surface.live_epoch() == Some(epoch)
                     {
                         model.stop_event_follow();
                         crate::panels::world_map::remote_navigation(
@@ -139,7 +139,8 @@ impl GruveBridge {
 impl Drop for GruveBridge {
     fn drop(&mut self) {
         // Stop the accept loop; the announce handle withdraws on its own drop.
-        self.shared.stop.store(true, Ordering::Relaxed);
+        self.shared.stop.store(true, Ordering::Release);
+        let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
     }
 }
 

@@ -33,7 +33,7 @@ const GRUVE_SDK_JS: &str = include_str!("web/gruve-sdk.js");
 
 pub(super) struct ServerShared {
     pub snapshot: Mutex<Snapshot>,
-    pub surface: Arc<Mutex<super::surface::Surface>>,
+    pub surface: Arc<super::surface::Surface>,
     pub commands: Sender<Command>,
     pub stop: AtomicBool,
 }
@@ -41,27 +41,18 @@ pub(super) struct ServerShared {
 /// Spawn the accept loop on a background thread. Never blocks or panics into the
 /// host app; if the port is taken the caller treats the companion as disabled.
 pub(super) fn serve(listener: TcpListener, shared: Arc<ServerShared>) {
-    // Non-blocking accept + short poll so `stop` is honoured promptly on shutdown.
-    listener
-        .set_nonblocking(true)
-        .expect("listener nonblocking");
     std::thread::Builder::new()
         .name("gruve-http".into())
         .spawn(move || loop {
-            if shared.stop.load(Ordering::Relaxed) {
-                return;
-            }
             match listener.accept() {
                 Ok((stream, _)) => {
+                    if shared.stop.load(Ordering::Acquire) {
+                        return;
+                    }
                     let s = shared.clone();
-                    // One short-lived thread per connection. Traffic is a handful of
-                    // viewers polling a few times a second — no pool needed.
                     std::thread::spawn(move || {
                         let _ = handle(stream, &s);
                     });
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(50));
                 }
                 Err(_) => std::thread::sleep(Duration::from_millis(200)),
             }
@@ -71,7 +62,7 @@ pub(super) fn serve(listener: TcpListener, shared: Arc<ServerShared>) {
 
 fn handle(mut stream: TcpStream, shared: &ServerShared) -> std::io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    stream.set_nonblocking(false)?;
+    stream.set_nodelay(true)?;
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
 
     let (method, path, headers, leftover) = read_request_head(&mut stream)?;
@@ -94,14 +85,11 @@ fn handle(mut stream: TcpStream, shared: &ServerShared) -> std::io::Result<()> {
     if route == "/map/frame" && method == "GET" {
         use super::surface::Reply;
         let seen = query_u64(query, "gen");
-        let reply = shared.surface.lock().unwrap().poll(seen);
+        let reply = shared.surface.poll(seen, query_u64(query, "wait") == Some(1));
         return match reply {
             Reply::Off => surface_response(&mut stream, 403, "text/plain", b"Enable sharing in host Settings > Overview"),
             Reply::Paused => surface_response(&mut stream, 409, "text/plain", b"Sharing paused while host Settings is open"),
-            Reply::Waiting => {
-                crate::app::request_repaint();
-                surface_response(&mut stream, 202, "text/plain", b"Waiting for the host window")
-            }
+            Reply::Waiting => surface_response(&mut stream, 202, "text/plain", b"Waiting for the host window"),
             Reply::Current => surface_response(&mut stream, 304, "image/jpeg", b""),
             Reply::Frame(seq, bytes) => {
                 let headers = format!("X-Gen: {seq}\r\nCross-Origin-Resource-Policy: same-origin\r\n");
@@ -119,7 +107,7 @@ fn handle(mut stream: TcpStream, shared: &ServerShared) -> std::io::Result<()> {
         let Some(action) = serde_json::from_slice::<super::Navigation>(&body).ok().filter(|a| a.valid()) else {
             return surface_response(&mut stream, 400, "text/plain", b"Invalid map gesture");
         };
-        let Some(epoch) = shared.surface.lock().unwrap().live_epoch() else {
+        let Some(epoch) = shared.surface.live_epoch() else {
             return surface_response(&mut stream, 403, "text/plain", b"Map sharing is off or paused");
         };
         let status = enqueue(shared, Command::Navigate { action, epoch });
@@ -192,8 +180,7 @@ fn handle(mut stream: TcpStream, shared: &ServerShared) -> std::io::Result<()> {
     }
 }
 
-/// Pull a `u64` value out of a query string (`a=1&b=2`). No percent-decoding —
-/// the only consumer is the numeric `gen` param.
+/// Read a numeric query parameter (`gen` or `wait`).
 fn query_u64(query: &str, name: &str) -> Option<u64> {
     query.split('&').find_map(|pair| {
         let (k, v) = pair.split_once('=')?;

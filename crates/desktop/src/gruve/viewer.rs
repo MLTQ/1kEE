@@ -1,14 +1,15 @@
 //! Lightweight native client. No AppModel, local datasets, feed workers or announcement.
 use super::{Navigation, surface::MAX_EDGE};
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{Sender, TrySendError};
 use reqwest::{Url, blocking::Client};
 use std::{
+    collections::VecDeque,
     io::{Cursor, Read},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 fn endpoint(input: &str) -> Result<String, String> {
@@ -62,11 +63,14 @@ fn endpoint(input: &str) -> Result<String, String> {
 struct Update {
     image: Option<egui::ColorImage>,
     live: bool,
+    epoch: u64,
     status: String,
 }
 struct Link {
     output: Arc<Mutex<Update>>,
-    commands: Sender<Navigation>,
+    commands: Sender<(u64, Navigation)>,
+    pending: VecDeque<Navigation>,
+    next_control: Instant,
     stopped: Arc<AtomicBool>,
 }
 
@@ -78,7 +82,7 @@ impl Link {
             .timeout(Duration::from_secs(3))
             .build()
             .map_err(|e| e.to_string())?;
-        let (commands, rx) = crossbeam_channel::bounded(16);
+        let (commands, rx) = crossbeam_channel::bounded::<(u64, Navigation)>(0);
         let output = Arc::new(Mutex::new(Update {
             status: "Connecting…".into(),
             ..Update::default()
@@ -86,12 +90,87 @@ impl Link {
         let shared = output.clone();
         let stopped = Arc::new(AtomicBool::new(false));
         let stop_worker = stopped.clone();
-        std::thread::spawn(move || run(client, &base, rx, &shared, &ctx, &stop_worker));
+        let controls = client.clone();
+        let control_url = format!("{base}/map/control");
+        let control_state = shared.clone();
+        let control_ctx = ctx.clone();
+        let control_stop = stopped.clone();
+        std::thread::spawn(move || {
+            for (epoch, action) in rx {
+                let state = control_state.lock().unwrap();
+                if control_stop.load(Ordering::Acquire) {
+                    break;
+                }
+                if !state.live || epoch != state.epoch {
+                    continue;
+                }
+                drop(state);
+                // A failed response can still mean the host applied the gesture.
+                let result = controls
+                    .post(&control_url)
+                    .header("Content-Type", "application/json")
+                    .body(serde_json::to_vec(&action).unwrap())
+                    .send()
+                    .and_then(|r| r.error_for_status());
+                if let Err(error) = result {
+                    control_state.lock().unwrap().status = format!("Control failed · {error}");
+                    control_ctx.request_repaint();
+                }
+            }
+        });
+        std::thread::spawn(move || run(client, &base, &shared, &ctx, &stop_worker));
         Ok(Self {
             output,
             commands,
+            pending: VecDeque::new(),
+            next_control: Instant::now(),
             stopped,
         })
+    }
+
+    fn queue(&mut self, action: Navigation) {
+        // Combine successive input samples while a control request is in flight.
+        // Keep pan and zoom in order because zoom affects pan sensitivity.
+        if let Some(last) = self.pending.back_mut() {
+            let merged = match (*last, action) {
+                (Navigation::Pan { dx, dy }, Navigation::Pan { dx: x, dy: y }) => {
+                    Some(Navigation::Pan {
+                        dx: dx + x,
+                        dy: dy + y,
+                    })
+                }
+                (Navigation::Zoom { factor }, Navigation::Zoom { factor: f }) => {
+                    Some(Navigation::Zoom { factor: factor * f })
+                }
+                _ => None,
+            };
+            if let Some(merged) = merged.filter(|n| n.valid()) {
+                *last = merged;
+                return;
+            }
+        }
+        if self.pending.len() < 16 {
+            self.pending.push_back(action);
+        }
+    }
+
+    fn send_pending(&mut self, ctx: &egui::Context, epoch: u64) {
+        if let Some(action) = self.pending.front().copied() {
+            let now = Instant::now();
+            if now >= self.next_control {
+                match self.commands.try_send((epoch, action)) {
+                    Ok(()) => {
+                        self.pending.pop_front();
+                    }
+                    Err(TrySendError::Full(_)) => {}
+                    Err(TrySendError::Disconnected(_)) => self.pending.clear(),
+                }
+                self.next_control = now + Duration::from_millis(40);
+            }
+            if !self.pending.is_empty() {
+                ctx.request_repaint_after(self.next_control.saturating_duration_since(now));
+            }
+        }
     }
 }
 
@@ -105,14 +184,13 @@ impl Drop for Link {
 fn run(
     client: Client,
     base: &str,
-    commands: Receiver<Navigation>,
     output: &Mutex<Update>,
     ctx: &egui::Context,
     stopped: &AtomicBool,
 ) {
     let mut seen = None;
-    let control = format!("{base}/map/control");
     while !stopped.load(Ordering::Acquire) {
+        let start = Instant::now();
         let frame = fetch(&client, base, seen);
         let mut update = output.lock().unwrap();
         match frame {
@@ -125,6 +203,9 @@ fn run(
             Ok(None) => {}
             Err(message) => {
                 seen = None;
+                if update.live {
+                    update.epoch += 1;
+                }
                 update.live = false;
                 update.image = None;
                 update.status = message;
@@ -133,26 +214,10 @@ fn run(
         let live = update.live;
         drop(update);
         ctx.request_repaint();
-        let delay = if live { 150 } else { 750 };
-        match commands.recv_timeout(Duration::from_millis(delay)) {
-            Ok(action) if live && !stopped.load(Ordering::Acquire) => {
-                // Never replay a gesture after an interrupted request. The host
-                // may already have applied it even if its response was lost.
-                let result = client
-                    .post(&control)
-                    .header("Content-Type", "application/json")
-                    .body(serde_json::to_vec(&action).unwrap())
-                    .send()
-                    .and_then(|r| r.error_for_status());
-                if let Err(error) = result {
-                    let mut state = output.lock().unwrap();
-                    state.status = format!("Control failed · {error}");
-                    ctx.request_repaint();
-                }
-            }
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-            _ => {}
-        }
+        // New hosts wait for the next capture. A minimum request interval also
+        // paces immediate replies from hosts which ignore the wait parameter.
+        let interval = Duration::from_millis(if live { 40 } else { 750 });
+        std::thread::sleep(interval.saturating_sub(start.elapsed()));
     }
 }
 
@@ -161,7 +226,7 @@ fn fetch(
     base: &str,
     seen: Option<u64>,
 ) -> Result<Option<(u64, egui::ColorImage)>, String> {
-    let mut request = client.get(format!("{base}/map/frame"));
+    let mut request = client.get(format!("{base}/map/frame?wait=1"));
     if let Some(seq) = seen {
         request = request.query(&[("gen", seq)]);
     }
@@ -212,7 +277,7 @@ pub(crate) struct Viewer {
     link: Option<Link>,
     texture: Option<egui::TextureHandle>,
     status: String,
-    drag: egui::Vec2,
+    control_epoch: u64,
 }
 
 impl Viewer {
@@ -222,7 +287,7 @@ impl Viewer {
             link: None,
             texture: None,
             status: String::new(),
-            drag: egui::Vec2::ZERO,
+            control_epoch: 0,
         };
         if !viewer.address.is_empty() {
             viewer.connect(ctx);
@@ -231,7 +296,7 @@ impl Viewer {
     }
     fn connect(&mut self, ctx: &egui::Context) {
         self.texture = None;
-        self.drag = egui::Vec2::ZERO;
+        self.control_epoch = 0;
         self.link = None;
         match endpoint(&self.address).and_then(|base| Link::connect(base, ctx.clone())) {
             Ok(link) => self.link = Some(link),
@@ -239,21 +304,22 @@ impl Viewer {
         }
     }
     fn steer(&mut self, action: Navigation) {
-        if let Some(link) = &self.link
-            && link.commands.try_send(action).is_err()
-        {
-            self.status = "Host is busy. Try that gesture again.".into();
+        if let Some(link) = &mut self.link {
+            link.queue(action);
         }
     }
 }
 
 impl eframe::App for Viewer {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
-        if let Some(link) = &self.link {
+        if let Some(link) = &mut self.link {
             let mut state = link.output.lock().unwrap();
             if !state.live {
                 self.texture = None;
-                self.drag = egui::Vec2::ZERO;
+            }
+            if !state.live || self.control_epoch != state.epoch {
+                link.pending.clear();
+                self.control_epoch = state.epoch;
             }
             if let Some(image) = state.image.take() {
                 if let Some(tex) = &mut self.texture {
@@ -299,14 +365,13 @@ impl eframe::App for Viewer {
                     .sense(egui::Sense::drag()),
             );
             if response.dragged() {
-                self.drag += response.drag_delta();
-            }
-            if response.drag_stopped() {
-                let drag = std::mem::take(&mut self.drag);
-                self.steer(Navigation::Pan {
-                    dx: (drag.x / rect.width()).clamp(-1., 1.),
-                    dy: (drag.y / rect.height()).clamp(-1., 1.),
-                });
+                let drag = response.drag_delta();
+                if drag != egui::Vec2::ZERO {
+                    self.steer(Navigation::Pan {
+                        dx: (drag.x / rect.width()).clamp(-1., 1.),
+                        dy: (drag.y / rect.height()).clamp(-1., 1.),
+                    });
+                }
             }
             if response.hovered() {
                 let scroll = ui.input(|i| i.raw_scroll_delta.y);
@@ -318,6 +383,9 @@ impl eframe::App for Viewer {
                 response.on_hover_cursor(egui::CursorIcon::Grab);
             }
         });
+        if let Some(link) = &mut self.link {
+            link.send_pending(ctx, self.control_epoch);
+        }
     }
 }
 

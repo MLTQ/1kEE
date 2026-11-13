@@ -203,7 +203,7 @@ See [OBS setup](docs/obs-streaming.md) for the macOS window-capture steps.
 
 One 1kEE instance can share its rendered window and accept map navigation from other
 instances over Gruve. The host keeps the mapping data, layers and live feeds.
-Guests see the same map and can drag to pan (on release) or scroll to zoom.
+Guests see the same map and can pan as they drag or scroll to zoom.
 The native guest runs from the desktop executable alone.
 
 1. **Host:** Start the updated 1kEE. Under **Settings → Overview**, enable **Share
@@ -234,9 +234,11 @@ window in the browser. **Native viewer address** gives the guest a URL to paste
 into 1kEE or use with `--connect`. The companion globe also retains its live
 markers, event selection, host focus and shared pins.
 
-Map frames are JPEGs up to 1600 pixels on the long edge, requested about six
-times per second while viewers are present. All viewers share one host camera.
-Settings, layers and source configuration stay under host control. The native
+The host captures up to 24 frames per second while viewers are present and sends
+JPEGs up to 1600 pixels on the long edge. Each guest requests the newest frame
+as it finishes the previous one, so a slower link can skip intermediate frames.
+All viewers share one host camera. Settings, layers and source configuration
+stay under host control. The native
 viewer reconnects to its configured address while open. If Gruve assigns a new
 bridge port, enter the new address and click **Connect**.
 

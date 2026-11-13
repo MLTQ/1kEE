@@ -421,6 +421,10 @@ let surfaceMode = false;
 let surfaceRun = 0;
 let surfaceURL = null;
 let gesture = null;
+let controlTimer;
+let controlBusy = false;
+let nextControl = 0;
+const pendingControls = [];
 const surface = document.getElementById("surface-image");
 const surfaceStatus = document.getElementById("surface-status");
 const toggle = document.getElementById("surface-toggle");
@@ -430,6 +434,8 @@ viewerAddress.addEventListener("click", () => viewerAddress.select());
 
 function clearSurface() {
   gesture = null;
+  clearTimeout(controlTimer);
+  pendingControls.length = 0;
   surface.hidden = true;
   surface.removeAttribute("src");
   if (surfaceURL) URL.revokeObjectURL(surfaceURL);
@@ -439,8 +445,9 @@ function clearSurface() {
 async function followSurface(run) {
   let seen = null;
   while (run === surfaceRun && surfaceMode) {
+    const start = performance.now();
     try {
-      const query = seen ? "?gen=" + encodeURIComponent(seen) : "";
+      const query = "?wait=1" + (seen ? "&gen=" + encodeURIComponent(seen) : "");
       const r = await fetch(API + "/map/frame" + query, { signal: AbortSignal.timeout(5000) });
       if (run !== surfaceRun) return;
       if (r.status === 200) {
@@ -464,7 +471,9 @@ async function followSurface(run) {
       seen = null;
       surfaceStatus.textContent = e.message;
     }
-    await new Promise(resolve => setTimeout(resolve, seen ? 150 : 750));
+    // Pace older hosts that return immediately when the guest is up to date.
+    const delay = (seen ? 40 : 750) - (performance.now() - start);
+    if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
   }
 }
 
@@ -485,11 +494,44 @@ toggle.addEventListener("click", () => {
   }
 });
 
-async function steerSurface(action) {
+function steerSurface(action) {
+  const last = pendingControls.at(-1);
+  if (last?.type === "pan" && action.type === "pan"
+      && Math.abs(last.dx + action.dx) <= 1 && Math.abs(last.dy + action.dy) <= 1) {
+    last.dx += action.dx;
+    last.dy += action.dy;
+  } else if (last?.type === "zoom" && action.type === "zoom"
+      && last.factor * action.factor >= 0.25 && last.factor * action.factor <= 4) {
+    last.factor *= action.factor;
+  } else if (pendingControls.length < 16) {
+    pendingControls.push(action);
+  }
+  sendControl();
+}
+
+async function sendControl() {
+  if (controlBusy || !pendingControls.length) return;
+  clearTimeout(controlTimer);
+  const delay = nextControl - performance.now();
+  if (delay > 0) {
+    controlTimer = setTimeout(sendControl, delay);
+    return;
+  }
+  controlBusy = true;
+  nextControl = performance.now() + 40;
+  const run = surfaceRun;
   try {
-    const r = await fetch(API + "/map/control", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(action) });
+    const r = await fetch(API + "/map/control", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(pendingControls.shift()), signal: AbortSignal.timeout(3000),
+    });
     if (!r.ok) throw new Error();
-  } catch { surfaceStatus.textContent = "The host could not apply the map control."; }
+  } catch {
+    if (run === surfaceRun && !surface.hidden) surfaceStatus.textContent = "The host could not apply the map control.";
+  } finally {
+    controlBusy = false;
+    sendControl();
+  }
 }
 
 surface.addEventListener("pointerdown", e => {
@@ -497,14 +539,21 @@ surface.addEventListener("pointerdown", e => {
   gesture = { id: e.pointerId, x: e.clientX, y: e.clientY };
   surface.setPointerCapture(e.pointerId);
 });
-surface.addEventListener("pointerup", e => {
+function panTo(e) {
   if (!gesture || e.pointerId !== gesture.id) return;
   const rect = surface.getBoundingClientRect();
   const clamp = x => Math.max(-1, Math.min(1, x));
   const dx = clamp((e.clientX - gesture.x) / rect.width);
   const dy = clamp((e.clientY - gesture.y) / rect.height);
-  gesture = null;
+  gesture.x = e.clientX;
+  gesture.y = e.clientY;
   if (dx || dy) steerSurface({ type: "pan", dx, dy });
+}
+surface.addEventListener("pointermove", panTo);
+surface.addEventListener("pointerup", e => {
+  if (gesture?.id !== e.pointerId) return;
+  panTo(e);
+  gesture = null;
 });
 surface.addEventListener("lostpointercapture", () => { gesture = null; });
 surface.addEventListener("wheel", e => {
