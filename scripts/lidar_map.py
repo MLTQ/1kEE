@@ -2,6 +2,7 @@
 import argparse
 from collections import defaultdict, deque
 from contextlib import ExitStack
+import gzip
 import hashlib
 import io
 import json
@@ -11,11 +12,12 @@ from pathlib import Path
 import re
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import zipfile
 from urllib.error import HTTPError
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import quote, unquote, urlencode, urlsplit
 
 import numpy as np
 from PIL import Image, ImageChops, ImageDraw, PngImagePlugin
@@ -67,13 +69,16 @@ def survey_filter(column, preferred):
 
 def matching(db, box, measurements=False, preferred="", local=False):
     w, s, e, n = box
-    fields = "id,source,name,geometry,asset,stac,page" if measurements else f"geometry, {PUBLISHED} AS available"
+    nasa = "(product IN ('NASA lidar raster','NASA lidar point cloud') AND asset IS NOT NULL)"
+    fields = ("id,source,name,product,geometry,asset,stac,page,west,south,east,north" if measurements
+              else f"geometry, ({PUBLISHED} OR {nasa}) AS available")
     sql = f"SELECT {fields} FROM surveys WHERE west<? AND east>=? AND south<? AND north>=?"
     clause, args = survey_filter("id", preferred)
     sql += clause
     if measurements:
+        selected_nasa = f" OR {nasa}" if preferred else ""
         sql += f""" AND ({PUBLISHED} OR product='NASA lidar raster' OR product='Lidar raster'
-                    OR (source='eba' AND {int(local)}))
+                    OR (source='eba' AND {int(local)}){selected_nasa})
                     ORDER BY source='linz-coastal' DESC, source='infomar-lidar' DESC,
                     stac IS NOT NULL DESC, date DESC, id"""
     return db.execute(sql, (e, w, n, s, *args))
@@ -293,6 +298,32 @@ def swiss_relief(box, folder):
         return img.convert("RGBA")
 
 
+def nasa_image(row, box, folder, download):
+    url = row["asset"]
+    key = hashlib.sha256(url.encode()).hexdigest()[:20]
+    name = Path(unquote(urlsplit(url).path)).name
+    root = folder.parent
+    scans = root / "scans"
+    # Recognize granules already acquired with the catalog CLI.
+    path = scans / key / name
+    if not path.is_file() or not catalog.signature_ok(path, name):
+        if row["source"] == "nasa-brazil":
+            place = ("South America", "Brazil")
+        else:
+            from lidar_regions import region
+            place = region(row["id"], [row[k] for k in ("west", "south", "east", "north")])
+        path = scans.joinpath(*place, key + "-" + name)
+        if download:
+            catalog.check_removable_mount(root)
+            catalog.fetch_scan(url, path, netrc=True)
+        elif not path.is_file():
+            return None
+    check_view()
+    if row["product"] == "NASA lidar raster":
+        return raster_image([str(path)], box)
+    return local_cloud([("scan", path, None)], box)
+
+
 def survey_image(row, box, folder):
     if row["id"].startswith(("NOAAID:", "USGS_3DEP_ID:")):
         return ept_returns(row, box, folder)
@@ -348,6 +379,9 @@ def local_cloud(files, box):
         with ExitStack() as stack:
             if kind == "copc":
                 reader = stack.enter_context(laspy.CopcReader.open(path, http_num_threads=4))
+            elif kind == "scan":
+                stream = stack.enter_context(gzip.open(path, "rb")) if path.suffix.lower() == ".gz" else path
+                reader = stack.enter_context(laspy.open(stream))
             elif isinstance(path, str):
                 tmp = stack.enter_context(tempfile.TemporaryDirectory())
                 scan = Path(tmp, "transect.laz")
@@ -421,7 +455,12 @@ def measurements(db, box, folder, preferred):
         try:
             if preferred and not files and row["source"] == "swisssurface3d" and row["asset"].endswith(".copc.laz"):
                 files = [("copc", row["asset"], None)]
-            image = offline_image(files, box) if files else survey_image(row, box, folder)
+            if files:
+                image = offline_image(files, box)
+            elif row["product"] in ("NASA lidar raster", "NASA lidar point cloud") and row["asset"]:
+                image = nasa_image(row, box, folder, download=row["id"] == preferred)
+            else:
+                image = survey_image(row, box, folder)
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
             errors.append(f"{row['name']}: {exc}")
             if row["id"] == preferred:
@@ -478,4 +517,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except catalog.EarthdataAccessError as error:
+        print(error, file=sys.stderr)
+        sys.exit(77)  # EX_NOPERM: the UI can pause this selection until the user retries.

@@ -5,7 +5,7 @@ fn map_frame(
     model: &mut AppModel,
     events: Vec<egui::Event>,
 ) -> egui::FullOutput {
-    ctx.run(
+    let output = ctx.run(
         egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 Pos2::ZERO,
@@ -29,7 +29,15 @@ fn map_frame(
                 map_interaction(ui, &response, model, pointer);
             });
         },
-    )
+    );
+    assert!(
+        !output
+            .platform_output
+            .commands
+            .iter()
+            .any(|command| matches!(command, egui::OutputCommand::OpenUrl(_)))
+    );
+    output
 }
 
 fn click(ctx: &egui::Context, model: &mut AppModel, at: Pos2, button: egui::PointerButton) {
@@ -67,7 +75,7 @@ fn right_click_single_edge_and_choose_overlapping_acquisitions() {
     db.execute_batch(r#"CREATE TABLE surveys(id,source,name,product,date,page,asset,stac,geometry,west,south,east,north);
         INSERT INTO surveys VALUES('NOAAID:1','noaa','Coastal strip','Lidar','1998','','',NULL,
             '{"type":"Polygon","coordinates":[[[1,1],[3,1],[3,2],[1,2],[1,1]]]}',1,1,3,2);
-        INSERT INTO surveys VALUES('NOAAID:2','noaa','Coastal strip','Lidar','2018','','',NULL,
+        INSERT INTO surveys VALUES('G3012896672-ORNL_CLOUD:ST1.laz','nasa-brazil','Coastal strip','NASA lidar point cloud','2018','https://search.earthdata.nasa.gov/example','https://data.ornldaac.earthdata.nasa.gov/protected/example.laz',NULL,
             '{"type":"Polygon","coordinates":[[[2,1],[4,1],[4,2],[2,2],[2,1]]]}',2,1,4,2);"#).unwrap();
     let ctx = egui::Context::default();
     ctx.style_mut(|s| s.animation_time = 0.);
@@ -112,7 +120,10 @@ fn right_click_single_edge_and_choose_overlapping_acquisitions() {
         item("2018   Coastal strip"),
         egui::PointerButton::Primary,
     );
-    assert_eq!(model.lidar.selected.as_ref().unwrap().id, "NOAAID:2");
+    assert_eq!(
+        model.lidar.selected.as_ref().unwrap().id,
+        "G3012896672-ORNL_CLOUD:ST1.laz"
+    );
     assert_eq!(model.globe_view.local_center, focus);
     assert_eq!(model.globe_view.local_zoom, zoom);
     assert!(model.lidar.map_pick.click.is_none());

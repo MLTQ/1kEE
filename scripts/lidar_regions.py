@@ -9,7 +9,10 @@ import lidar_catalog as catalog
 
 @lru_cache(maxsize=1)
 def boundaries():
-    path = Path(__file__).resolve().parents[1] / "crates/cache_builder/assets/ne_110m_countries.json"
+    # The desktop bundles the same country data alongside this worker.
+    path = Path(__file__).with_name("ne_110m_countries.json")
+    if not path.is_file():
+        path = Path(__file__).resolve().parents[1] / "crates/cache_builder/assets/ne_110m_countries.json"
     result = []
     for f in json.loads(path.read_bytes())["features"]:
         props = f["properties"]

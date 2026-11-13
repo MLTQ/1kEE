@@ -30,6 +30,12 @@ struct Survey {
     asset: Option<String>,
 }
 
+impl Survey {
+    fn is_nasa(&self) -> bool {
+        self.product.starts_with("NASA lidar ") || self.source.starts_with("nasa-")
+    }
+}
+
 pub(super) type ReadJob<T> = mpsc::Receiver<Result<T, String>>;
 
 pub(super) fn read_in_background<T: Send + 'static>(
@@ -106,6 +112,7 @@ impl Browser {
 
     fn pin(&mut self, survey: Survey) {
         self.boundaries_only();
+        self.tiles.retry_selection();
         self.selected = Some(survey);
         self.search_error.clear();
     }
@@ -527,16 +534,18 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
             if let Some(date) = &s.date {
                 ui.small(date);
             }
-            ui.hyperlink_to("Survey record", &s.page);
-            if let Some(asset) = &s.asset {
-                ui.hyperlink_to(
-                    if s.id.starts_with("EBA:") {
-                        "Regional scan archives"
-                    } else {
-                        "Download scan file"
-                    },
-                    asset,
-                );
+            if !s.is_nasa() {
+                ui.hyperlink_to("Survey record", &s.page);
+                if let Some(asset) = &s.asset {
+                    ui.hyperlink_to(
+                        if s.id.starts_with("EBA:") {
+                            "Regional scan archives"
+                        } else {
+                            "Download scan file"
+                        },
+                        asset,
+                    );
+                }
             }
             if ui.small_button("Clear selection").clicked() {
                 b.boundaries_only();

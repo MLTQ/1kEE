@@ -72,6 +72,19 @@ struct Key {
     variant: String,
 }
 type MapImage = (SatelliteImage, String);
+
+#[derive(Debug)]
+enum TileError {
+    Render(String),
+    AccessDenied(String),
+}
+
+impl From<String> for TileError {
+    fn from(error: String) -> Self {
+        Self::Render(error)
+    }
+}
+
 struct CatalogSnapshot {
     generation: u32,
     sequence: Option<i64>,
@@ -80,7 +93,7 @@ struct CatalogSnapshot {
 
 struct Job {
     key: Arc<OnceLock<Key>>,
-    rx: Receiver<Result<Option<MapImage>, String>>,
+    rx: Receiver<Result<Option<MapImage>, TileError>>,
     // The Python renderer checks this marker between source requests.
     active: Option<tempfile::NamedTempFile>,
 }
@@ -104,12 +117,14 @@ pub(crate) struct Tiles {
     retry: HashMap<Key, Instant>,
     pub(crate) status: String,
     pub(crate) sources: String,
+    pub(crate) load_error: Option<String>,
+    access_denied: bool,
 }
 
 fn key(tile: Tile, detail: bool, generation: u32, preferred: &str) -> Key {
     use sha1::{Digest, Sha1};
     let variant = if !detail {
-        format!("paths-{generation}")
+        format!("paths-v2-{generation}")
     } else if preferred.is_empty() {
         "detail-auto".into()
     } else {
@@ -243,6 +258,12 @@ impl Tiles {
         self.catalog_ready
     }
 
+    pub(super) fn retry_selection(&mut self) {
+        self.access_denied = false;
+        self.retry.retain(|k, _| !k.detail);
+        self.load_error = None;
+    }
+
     pub(crate) fn at_overview(&self) -> bool {
         self.view
             .borrow()
@@ -254,6 +275,10 @@ impl Tiles {
     pub(crate) fn tick(&mut self, ctx: &egui::Context, path: &Path, selection: Option<&str>) {
         self.measurements = selection.is_some();
         let preferred = selection.unwrap_or_default();
+        if self.preferred != preferred || selection.is_none() {
+            self.access_denied = false;
+            self.load_error = None;
+        }
         self.preferred = preferred.to_owned();
         let view = self.view.get_mut();
         if self.stable != *view {
@@ -273,6 +298,12 @@ impl Tiles {
                 match job.rx.try_recv() {
                     Ok(Ok(image)) => {
                         let k = job.key.get().expect("completed tile has a key").clone();
+                        if k.detail
+                            && k.variant == key(k.tile, true, self.generation, preferred).variant
+                            && image.is_some()
+                        {
+                            self.load_error = None;
+                        }
                         self.loaded.insert(
                             k.clone(),
                             image.map(|(pixels, name)| SatelliteLayer::new(ctx, name, pixels)),
@@ -286,8 +317,18 @@ impl Tiles {
                     }
                     Ok(Err(_)) if job.active.is_none() => {}
                     Ok(Err(e)) => {
-                        self.status = e;
+                        let denied = matches!(&e, TileError::AccessDenied(_));
+                        let message = match e {
+                            TileError::Render(message) | TileError::AccessDenied(message) => {
+                                message
+                            }
+                        };
+                        self.status = message.clone();
                         if let Some(k) = job.key.get() {
+                            if k.detail && !preferred.is_empty() {
+                                self.access_denied = denied;
+                                self.load_error = Some(message);
+                            }
                             self.retry.insert(k.clone(), Instant::now());
                         }
                     }
@@ -307,7 +348,7 @@ impl Tiles {
                 continue;
             }
             let detail = slot == 1;
-            if detail && !self.measurements {
+            if detail && (!self.measurements || self.access_denied) {
                 continue;
             }
             let candidates: Vec<_> = self
@@ -491,7 +532,7 @@ fn load(
     preferred: &str,
     generation: u32,
     active: &Path,
-) -> Result<Option<MapImage>, String> {
+) -> Result<Option<MapImage>, TileError> {
     let Tile { z, x, y } = k.tile;
     let target = tile_path(db, k);
     let mut output = target.clone();
@@ -521,10 +562,19 @@ fn load(
             }
         }
     }
-    let empty = target.with_extension(if revision == 0 {
-        format!("empty-{generation}")
+    // Older workers cached selected NASA granules as empty before they could read them.
+    let empty_prefix = if k.detail
+        && preferred.starts_with('G')
+        && preferred.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
+    {
+        "empty-granule"
     } else {
-        format!("empty-{generation}-{revision}")
+        "empty"
+    };
+    let empty = target.with_extension(if revision == 0 {
+        format!("{empty_prefix}-{generation}")
+    } else {
+        format!("{empty_prefix}-{generation}-{revision}")
     });
     let stamp = target.with_extension("revision");
     let stale = revision > 0
@@ -536,6 +586,18 @@ fn load(
         let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
         for (name, contents) in [("lidar_map.py", MAP), ("lidar_catalog.py", SURVEYS)] {
             std::fs::write(tmp.path().join(name), contents).map_err(|e| e.to_string())?;
+        }
+        if k.detail {
+            std::fs::write(
+                tmp.path().join("lidar_regions.py"),
+                include_bytes!("../../../scripts/lidar_regions.py"),
+            )
+            .map_err(|e| e.to_string())?;
+            std::fs::write(
+                tmp.path().join("ne_110m_countries.json"),
+                include_bytes!("../../cache_builder/assets/ne_110m_countries.json"),
+            )
+            .map_err(|e| e.to_string())?;
         }
         let mut cmd = Command::new("uv");
         cmd.args([
@@ -584,13 +646,15 @@ fn load(
             }
         } else if !result.status.success() && !output.is_file() {
             let err = String::from_utf8_lossy(&result.stderr);
-            return Err(format!(
-                "Lidar tile: {}",
-                err.lines()
-                    .rev()
-                    .find(|l| !l.is_empty())
-                    .unwrap_or("render failed")
-            ));
+            let message = err
+                .lines()
+                .rev()
+                .find(|l| !l.is_empty())
+                .unwrap_or("render failed");
+            if result.status.code() == Some(77) {
+                return Err(TileError::AccessDenied(message.to_owned()));
+            }
+            return Err(TileError::Render(format!("Lidar tile: {message}")));
         }
     }
     if !output.is_file() && empty.exists() {
@@ -606,7 +670,9 @@ fn load(
         || info.color_type != png::ColorType::Rgba
         || info.bit_depth != png::BitDepth::Eight
     {
-        return Err("Invalid cached lidar map dimensions or encoding".into());
+        return Err(TileError::Render(
+            "Invalid cached lidar map dimensions or encoding".into(),
+        ));
     }
     let name = info
         .uncompressed_latin1_text

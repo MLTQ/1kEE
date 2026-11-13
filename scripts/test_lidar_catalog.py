@@ -107,6 +107,7 @@ class LidarCatalogTests(unittest.TestCase):
                 def send(body):
                     def write(cmd, **_kwargs):
                         Path(cmd[cmd.index("--output") + 1]).write_bytes(body)
+                        return lidar.subprocess.CompletedProcess(cmd, 0, stderr="")
                     return write
                 with patch.object(lidar.subprocess, "run", send(b"<html>login")), self.assertRaises(ValueError):
                     lidar.download(None, args)

@@ -44,10 +44,12 @@ CREATE TABLE IF NOT EXISTS surveys (
 CREATE INDEX IF NOT EXISTS surveys_extent ON surveys(west,east,south,north);
 CREATE INDEX IF NOT EXISTS surveys_source ON surveys(source);
 CREATE INDEX IF NOT EXISTS surveys_name ON surveys(name,id);
-CREATE INDEX IF NOT EXISTS surveys_picker ON surveys(source,id,name,date,west,south,east,north)
+CREATE INDEX IF NOT EXISTS surveys_picker_v2 ON surveys(source,id,name,date,west,south,east,north)
     WHERE (id LIKE 'NOAAID:%' OR id LIKE 'USGS_3DEP_ID:%' OR stac IS NOT NULL
     OR source IN ('linz-coastal','eba') OR id LIKE 'INFOMAR:%:SR_URL'
-    OR (source='swisssurface3d' AND asset LIKE '%.copc.laz') OR product='Lidar raster');
+    OR (source='swisssurface3d' AND asset LIKE '%.copc.laz') OR product='Lidar raster'
+    OR (product IN ('NASA lidar raster','NASA lidar point cloud') AND asset IS NOT NULL));
+DROP INDEX IF EXISTS surveys_picker;
 CREATE TABLE IF NOT EXISTS refreshes (source TEXT PRIMARY KEY, checked REAL, version TEXT);
 CREATE TABLE IF NOT EXISTS resources (url TEXT PRIMARY KEY, etag TEXT, modified TEXT, body BLOB);
 """
@@ -511,6 +513,47 @@ def signature_ok(path, name):
     return sig in (b"II*\0", b"MM\0*", b"II+\0", b"MM\0+")
 
 
+class EarthdataAccessError(ValueError):
+    pass
+
+
+def fetch_scan(url, dest, *, netrc=False, size=None, checksum=None):
+    """Publish a complete scan atomically. Stage data and redirect cookies beside it."""
+    name = dest.name
+    if dest.is_file() and signature_ok(dest, name) and (size is None or dest.stat().st_size == size):
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=dest.parent) as tmp:
+        part = Path(tmp, "download")
+        cmd = ["curl", "--fail", "--location", "--silent", "--show-error", "--retry", "2",
+               "--connect-timeout", "20", "--speed-limit", "1", "--speed-time", "120"]
+        if netrc:
+            cmd.extend(["--netrc-optional", "--cookie", "", "--cookie-jar", str(Path(tmp, "cookies"))])
+        result = subprocess.run([*cmd, "--output", str(part), "--", url],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        if result.returncode:
+            error = result.stderr.strip().splitlines()
+            reason = error[-1] if error else f"curl exited {result.returncode}"
+            if netrc and any(code in reason for code in ("401", "403")):
+                raise EarthdataAccessError("NASA Earthdata access denied. Configure Earthdata Login in ~/.netrc and retry.")
+            raise OSError(f"Scan download failed: {reason}")
+        if not signature_ok(part, name):
+            if netrc and (urlsplit(url).hostname or "").endswith(".nasa.gov"):
+                with part.open("rb") as body:
+                    if body.read(256).lstrip().lower().startswith((b"<!doctype html", b"<html")):
+                        raise EarthdataAccessError("NASA returned a sign-in page. Configure Earthdata Login in ~/.netrc and retry.")
+            raise ValueError("Expected scan data; the publisher returned a different file format.")
+        if size is not None and part.stat().st_size != size:
+            raise ValueError(f"Incomplete download of {name}")
+        if checksum:
+            algorithm, digest = checksum.split(":", 1)
+            with part.open("rb") as f:
+                if hashlib.file_digest(f, algorithm).hexdigest() != digest:
+                    raise ValueError(f"Checksum mismatch for {name}")
+        os.replace(part, dest)
+    return True
+
+
 def download(db, args):
     if args.eba_archives and (args.bbox or args.source or args.id or args.all):
         raise ValueError("Regional EBA archives are a separate download selection")
@@ -529,29 +572,11 @@ def download(db, args):
         else:
             # Distinct assets sometimes have the same filename.
             folder = args.directory / hashlib.sha256(url.encode()).hexdigest()[:20]
-            folder.mkdir(parents=True, exist_ok=True)
             dest = folder / Path(name).name
-            if dest.is_file() and signature_ok(dest, name) and (size is None or dest.stat().st_size == size):
-                continue
-            with tempfile.TemporaryDirectory(dir=folder) as tmp:
-                part = Path(tmp, "download")
-                cmd = ["curl", "--fail", "--location", "--silent", "--show-error", "--retry", "2",
-                       "--connect-timeout", "20", "--speed-limit", "1", "--speed-time", "120"]
-                if args.netrc:
-                    cookies = str(Path(tmp, "cookies"))
-                    cmd.extend(["--netrc", "--cookie", "", "--cookie-jar", cookies])
-                subprocess.run([*cmd, "--output", str(part), "--", url], check=True)
-                if not signature_ok(part, name):
-                    raise ValueError(f"{name}: expected scan data; check publisher access or Earthdata login")
-                if size is not None and part.stat().st_size != size:
-                    raise ValueError(f"Incomplete download of {name}")
-                if checksum:
-                    algorithm, digest = checksum.split(":", 1)
-                    with part.open("rb") as f:
-                        if hashlib.file_digest(f, algorithm).hexdigest() != digest:
-                            raise ValueError(f"Checksum mismatch for {name}")
-                os.replace(part, dest)
+            if fetch_scan(url, dest, netrc=args.netrc, size=size, checksum=checksum):
                 print(dest, flush=True)
+            else:
+                continue
         count += 1
         if count == args.max_files:
             break

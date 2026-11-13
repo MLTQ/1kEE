@@ -205,11 +205,18 @@ pub(crate) fn show(ui: &mut egui::Ui, model: &mut AppModel) {
     }
     ui.horizontal(|ui| {
         button(ui, model, "Lidar surveys ▾");
-        let b = &model.lidar;
+        let b = &mut model.lidar;
         if b.selection_job.is_some() {
             ui.small("Opening survey…");
         } else if !b.search_error.is_empty() {
             ui.small(&b.search_error);
+        } else if let Some(error) = &b.tiles.load_error {
+            let retry = ui.small_button("Retry").clicked();
+            ui.add(egui::Label::new(error).truncate())
+                .on_hover_text(error);
+            if retry {
+                b.tiles.retry_selection();
+            }
         } else if let Some(s) = &b.selected {
             ui.add(egui::Label::new(&s.name).truncate())
                 .on_hover_text(&s.name);

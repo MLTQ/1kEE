@@ -282,9 +282,9 @@ pub(crate) fn map_interaction(
                         format!("{} overlapping surveys · right-click to choose", hits.len())
                     });
             } else if !hits.is_empty() {
-                response.clone().on_hover_text_at_pointer(
-                    "Archive coverage · right-click for the survey record",
-                );
+                response
+                    .clone()
+                    .on_hover_text_at_pointer("Archive coverage · no map download available");
             }
         }
         return;
@@ -354,8 +354,12 @@ pub(crate) fn map_interaction(
                                             choice = Some(h);
                                         }
                                     } else {
-                                        ui.hyperlink_to(title, &h.survey.page).on_hover_text(
-                                            format!("{}\nOpen archive record", h.label),
+                                        ui.add_enabled(
+                                            false,
+                                            egui::Button::new(title).frame(false),
+                                        )
+                                        .on_disabled_hover_text(
+                                            "No directly loadable scan in this record",
                                         );
                                     }
                                 }

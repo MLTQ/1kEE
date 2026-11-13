@@ -10,7 +10,8 @@ use std::{
 pub(super) const MAPPABLE: &str =
     "(id LIKE 'NOAAID:%' OR id LIKE 'USGS_3DEP_ID:%' OR stac IS NOT NULL
     OR source IN ('linz-coastal','eba') OR id LIKE 'INFOMAR:%:SR_URL'
-    OR (source='swisssurface3d' AND asset LIKE '%.copc.laz') OR product='Lidar raster')";
+    OR (source='swisssurface3d' AND asset LIKE '%.copc.laz') OR product='Lidar raster'
+    OR (product IN ('NASA lidar raster','NASA lidar point cloud') AND asset IS NOT NULL))";
 
 #[derive(Clone)]
 pub(super) struct Entry {
