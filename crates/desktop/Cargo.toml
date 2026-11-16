@@ -25,6 +25,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 cell-format = { path = "../cell_format" }
 tile-archive = { path = "../tile_archive" }
 gruve-sdk = { path = "../gruve_sdk" }
+lidar-pipeline = { path = "../lidar" }
 tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 crossbeam-channel = "0.5.15"
 csv = "1.4"
@@ -43,3 +44,6 @@ objc2-av-foundation = { version = "0.3", default-features = false, features = ["
 
 [build-dependencies]
 protobuf-codegen-pure = "2.28"
+
+[dev-dependencies]
+tiff = "0.11"

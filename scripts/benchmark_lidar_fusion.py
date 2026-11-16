@@ -22,7 +22,7 @@ from pyproj import Transformer
 import rasterio
 
 import lidar_map as maps
-from lidar_fused import grid, python_build
+from benchmarks.lidar_fusion_reference import grid, python_build
 
 
 def pdal_pipeline(path, output, spec):

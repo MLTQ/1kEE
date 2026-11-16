@@ -1,0 +1,446 @@
+{
+  "protocol": "One warmup and three alternating pairs. OS/drive caches uncontrolled. Native timings include executable startup and native library loading; Python functions run in the warmed harness. Native windowed TIFF reads are measured on the Python-written v1 archive to prove compatibility. Numeric equivalence includes all four bands. Final pass ran after compilation completed, with the prior conversion service stopped; other desktop activity was not isolated.",
+  "native_sha256": "dff006cffb89de92e3cbfa7ebd534bfee45e763c6471f997dae52b63e7a18cc2",
+  "runs": 3,
+  "fixtures": [
+    {
+      "name": "richmond-2025",
+      "path": "/run/media/m/Minkowski/Data/Lidar/scans/North America/United States/021c498853437065b324-20250214_7742_14NW.copc.laz",
+      "survey": "NOAAID:14835",
+      "bytes": 35884814,
+      "points": 5111898,
+      "z": 15,
+      "x": 18640,
+      "y": 9549,
+      "sha256": "55d40e790077c32764e641143de85637791c7123d8ddab733f468efc3cac42ca",
+      "builds": [
+        {
+          "repeat": -1,
+          "engine": "python",
+          "seconds": 3.3580418460041983
+        },
+        {
+          "repeat": -1,
+          "engine": "native",
+          "seconds": 3.4539342729985947
+        },
+        {
+          "repeat": 0,
+          "engine": "native",
+          "seconds": 3.5101320690009743
+        },
+        {
+          "repeat": 0,
+          "engine": "python",
+          "seconds": 3.114880249995622
+        },
+        {
+          "repeat": 1,
+          "engine": "python",
+          "seconds": 3.0920675709930947
+        },
+        {
+          "repeat": 1,
+          "engine": "native",
+          "seconds": 3.4279554140084656
+        },
+        {
+          "repeat": 2,
+          "engine": "native",
+          "seconds": 3.4149333189998288
+        },
+        {
+          "repeat": 2,
+          "engine": "python",
+          "seconds": 3.2082892000034917
+        }
+      ],
+      "reads": [
+        {
+          "repeat": -1,
+          "engine": "python",
+          "seconds": 0.05060411099111661
+        },
+        {
+          "repeat": -1,
+          "engine": "native",
+          "seconds": 0.058305261001805775
+        },
+        {
+          "repeat": 0,
+          "engine": "native",
+          "seconds": 0.055186519006383605
+        },
+        {
+          "repeat": 0,
+          "engine": "python",
+          "seconds": 0.0786975669907406
+        },
+        {
+          "repeat": 1,
+          "engine": "python",
+          "seconds": 0.06440608800039627
+        },
+        {
+          "repeat": 1,
+          "engine": "native",
+          "seconds": 0.06823685200652108
+        },
+        {
+          "repeat": 2,
+          "engine": "native",
+          "seconds": 0.0639965559967095
+        },
+        {
+          "repeat": 2,
+          "engine": "python",
+          "seconds": 0.05106095199880656
+        }
+      ],
+      "native_stats": {
+        "grid": {
+          "bounds": [
+            -77.60481447413378,
+            37.5394694966703,
+            -77.60022451068461,
+            37.54312403098807
+          ],
+          "height": 343,
+          "resolution": 1.0728836059570312e-05,
+          "s": 37.53945708274841,
+          "source_crs": "COMPD_CS[\"NAD83(HARN) / UTM zone 18N + NAVD88 height\",PROJCS[\"NAD83(HARN) / UTM zone 18N\",GEOGCS[\"NAD83(HARN)\",DATUM[\"NAD83_High_Accuracy_Reference_Network\",SPHEROID[\"GRS 1980\",6378137,298.257222101],AUTHORITY[\"EPSG\",\"6152\"]],PRIMEM[\"Greenwich\",0],UNIT[\"degree\",0.0174532925199433,AUTHORITY[\"EPSG\",\"9122\"]],AUTHORITY[\"EPSG\",\"4152\"]],PROJECTION[\"Transverse_Mercator\"],PARAMETER[\"latitude_of_origin\",0],PARAMETER[\"central_meridian\",-75],PARAMETER[\"scale_factor\",0.9996],PARAMETER[\"false_easting\",500000],PARAMETER[\"false_northing\",0],UNIT[\"metre\",1],AXIS[\"Easting\",EAST],AXIS[\"Northing\",NORTH],AUTHORITY[\"EPSG\",\"3748\"]],VERT_CS[\"NAVD88 height\",VERT_DATUM[\"North American Vertical Datum 1988\",2005],UNIT[\"metre\",1],AXIS[\"Gravity-related height\",UP],AUTHORITY[\"EPSG\",\"5703\"]]]",
+          "w": -77.60482549667358,
+          "width": 430
+        },
+        "stats": {
+          "points": 5111898,
+          "valid_cells": 129246,
+          "valid_points": 5111898
+        }
+      },
+      "parity": {
+        "grid_identical": true,
+        "coverage_mismatch": 0,
+        "count_mismatch": 0,
+        "max_mean_error": 0.0,
+        "max_extrema_error": 0.0,
+        "all_bands_exact": true
+      },
+      "raster_bytes": {
+        "python": 1309338,
+        "native": 1092323
+      },
+      "render_parity": {
+        "alpha_mismatch": 0,
+        "max_visible_rgb_error": 0
+      },
+      "builds_medians": {
+        "python": 3.114880249995622,
+        "native": 3.4279554140084656
+      },
+      "reads_medians": {
+        "python": 0.06440608800039627,
+        "native": 0.0639965559967095
+      }
+    },
+    {
+      "name": "ozarks-2024",
+      "path": "/run/media/m/Minkowski/Data/Lidar/scans/North America/United States/9a865afc2e82b1bf3de5-20230922_691500e_4058500n.copc.laz",
+      "survey": "NOAAID:13981",
+      "bytes": 30434727,
+      "points": 4507308,
+      "z": 15,
+      "x": 16228,
+      "y": 9711,
+      "sha256": "64ae8787097885d04e9aa7abbe713b09b186567b68f8c322bd97bbba77bbac5a",
+      "builds": [
+        {
+          "repeat": -1,
+          "engine": "python",
+          "seconds": 1.6572242390102474
+        },
+        {
+          "repeat": -1,
+          "engine": "native",
+          "seconds": 2.144060167003772
+        },
+        {
+          "repeat": 0,
+          "engine": "native",
+          "seconds": 1.8706725360098062
+        },
+        {
+          "repeat": 0,
+          "engine": "python",
+          "seconds": 1.6771019090083428
+        },
+        {
+          "repeat": 1,
+          "engine": "python",
+          "seconds": 1.6126627500052564
+        },
+        {
+          "repeat": 1,
+          "engine": "native",
+          "seconds": 1.859810597001342
+        },
+        {
+          "repeat": 2,
+          "engine": "native",
+          "seconds": 1.9465039909991901
+        },
+        {
+          "repeat": 2,
+          "engine": "python",
+          "seconds": 1.5859704739996232
+        }
+      ],
+      "reads": [
+        {
+          "repeat": -1,
+          "engine": "python",
+          "seconds": 0.04894973601039965
+        },
+        {
+          "repeat": -1,
+          "engine": "native",
+          "seconds": 0.06907627200416755
+        },
+        {
+          "repeat": 0,
+          "engine": "native",
+          "seconds": 0.05951870500575751
+        },
+        {
+          "repeat": 0,
+          "engine": "python",
+          "seconds": 0.06397007800114807
+        },
+        {
+          "repeat": 1,
+          "engine": "python",
+          "seconds": 0.06222445999446791
+        },
+        {
+          "repeat": 1,
+          "engine": "native",
+          "seconds": 0.057890059004421346
+        },
+        {
+          "repeat": 2,
+          "engine": "native",
+          "seconds": 0.06097670100280084
+        },
+        {
+          "repeat": 2,
+          "engine": "python",
+          "seconds": 0.08683925699733663
+        }
+      ],
+      "native_stats": {
+        "grid": {
+          "bounds": [
+            -90.85779747169707,
+            36.650409988061476,
+            -90.85181101474183,
+            36.65312355849465
+          ],
+          "height": 256,
+          "resolution": 1.0728836059570312e-05,
+          "s": 36.650390625,
+          "source_crs": "COMPD_CS[\"NAD83(2011) / UTM zone 14N + NAVD88 height\",PROJCS[\"NAD83(2011) / UTM zone 14N\",GEOGCS[\"NAD83(2011)\",DATUM[\"NAD83_National_Spatial_Reference_System_2011\",SPHEROID[\"GRS 1980\",6378137,298.257222101],AUTHORITY[\"EPSG\",\"1116\"]],PRIMEM[\"Greenwich\",0],UNIT[\"degree\",0.0174532925199433,AUTHORITY[\"EPSG\",\"9122\"]],AUTHORITY[\"EPSG\",\"6318\"]],PROJECTION[\"Transverse_Mercator\"],PARAMETER[\"latitude_of_origin\",0],PARAMETER[\"central_meridian\",-99],PARAMETER[\"scale_factor\",0.9996],PARAMETER[\"false_easting\",500000],PARAMETER[\"false_northing\",0],UNIT[\"metre\",1],AXIS[\"Easting\",EAST],AXIS[\"Northing\",NORTH],AUTHORITY[\"EPSG\",\"6343\"]],VERT_CS[\"NAVD88 height\",VERT_DATUM[\"North American Vertical Datum 1988\",2005],UNIT[\"metre\",1],AXIS[\"Gravity-related height\",UP],AUTHORITY[\"EPSG\",\"5703\"]]]",
+          "w": -90.85781335830688,
+          "width": 561
+        },
+        "stats": {
+          "points": 4507308,
+          "valid_cells": 95369,
+          "valid_points": 4507308
+        }
+      },
+      "parity": {
+        "grid_identical": true,
+        "coverage_mismatch": 0,
+        "count_mismatch": 0,
+        "max_mean_error": 0.0,
+        "max_extrema_error": 0.0,
+        "all_bands_exact": true
+      },
+      "raster_bytes": {
+        "python": 847327,
+        "native": 708290
+      },
+      "render_parity": {
+        "alpha_mismatch": 0,
+        "max_visible_rgb_error": 0
+      },
+      "builds_medians": {
+        "python": 1.6126627500052564,
+        "native": 1.8706725360098062
+      },
+      "reads_medians": {
+        "python": 0.06397007800114807,
+        "native": 0.05951870500575751
+      }
+    },
+    {
+      "name": "swiss-2026",
+      "path": "/run/media/m/Minkowski/Data/Lidar/scans/Europe/Switzerland/32de1ae71aba01a1a395-swisssurface3d_2026_2659-1237_2056_5728.copc.laz",
+      "survey": "swisssurface3d:swisssurface3d_2026_2659-1237:swisssurface3d_2026_2659-1237_2056_5728.copc.laz",
+      "bytes": 64242980,
+      "points": 13577020,
+      "z": 15,
+      "x": 34265,
+      "y": 7775,
+      "sha256": "cfc2909781859c4d758729396aa8679cf5f80ec3aba35023b949d2a147e2f060",
+      "builds": [
+        {
+          "repeat": -1,
+          "engine": "python",
+          "seconds": 8.51252744399244
+        },
+        {
+          "repeat": -1,
+          "engine": "native",
+          "seconds": 8.546194046997698
+        },
+        {
+          "repeat": 0,
+          "engine": "native",
+          "seconds": 8.445332540999516
+        },
+        {
+          "repeat": 0,
+          "engine": "python",
+          "seconds": 8.22501286699844
+        },
+        {
+          "repeat": 1,
+          "engine": "python",
+          "seconds": 8.255135915998835
+        },
+        {
+          "repeat": 1,
+          "engine": "native",
+          "seconds": 8.769272877994808
+        },
+        {
+          "repeat": 2,
+          "engine": "native",
+          "seconds": 8.548566466008197
+        },
+        {
+          "repeat": 2,
+          "engine": "python",
+          "seconds": 8.392967452004086
+        }
+      ],
+      "reads": [
+        {
+          "repeat": -1,
+          "engine": "python",
+          "seconds": 0.11404919299820904
+        },
+        {
+          "repeat": -1,
+          "engine": "native",
+          "seconds": 0.12507533299503848
+        },
+        {
+          "repeat": 0,
+          "engine": "native",
+          "seconds": 0.140400348987896
+        },
+        {
+          "repeat": 0,
+          "engine": "python",
+          "seconds": 0.11433062198921107
+        },
+        {
+          "repeat": 1,
+          "engine": "python",
+          "seconds": 0.11682888600626029
+        },
+        {
+          "repeat": 1,
+          "engine": "native",
+          "seconds": 0.13606614699529018
+        },
+        {
+          "repeat": 2,
+          "engine": "native",
+          "seconds": 0.12804628700541798
+        },
+        {
+          "repeat": 2,
+          "engine": "python",
+          "seconds": 0.11027754000679124
+        }
+      ],
+      "native_stats": {
+        "grid": {
+          "bounds": [
+            8.219411373124034,
+            47.2811697145657,
+            8.231816661595028,
+            47.29024738824468
+          ],
+          "height": 849,
+          "resolution": 1.0728836059570312e-05,
+          "s": 47.28115439414978,
+          "source_crs": "COMPD_CS[\"Projected coordinate system with elevation\",PROJCS[\"CH1903+ / LV95\",GEOGCS[\"CH1903+\",DATUM[\"CH1903+\",SPHEROID[\"Bessel 1841\",6377397.155,299.1528128,AUTHORITY[\"EPSG\",\"7004\"]],AUTHORITY[\"EPSG\",\"6150\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.0174532925199433,AUTHORITY[\"EPSG\",\"9122\"]],AUTHORITY[\"EPSG\",\"4150\"]],PROJECTION[\"Hotine_Oblique_Mercator_Azimuth_Center\"],PARAMETER[\"latitude_of_center\",46.9524055555556],PARAMETER[\"longitude_of_center\",7.43958333333333],PARAMETER[\"azimuth\",90],PARAMETER[\"rectified_grid_angle\",90],PARAMETER[\"scale_factor\",1],PARAMETER[\"false_easting\",2600000],PARAMETER[\"false_northing\",1200000],UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"Easting\",EAST],AXIS[\"Northing\",NORTH],AUTHORITY[\"EPSG\",\"2056\"]],VERT_CS[\"LN02 height\",VERT_DATUM[\"Landesnivellement 1902\",2005,AUTHORITY[\"EPSG\",\"5127\"]],UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"Gravity-related height\",UP],AUTHORITY[\"EPSG\",\"5728\"]]]",
+          "w": 8.219393491744995,
+          "width": 1159
+        },
+        "stats": {
+          "points": 13577020,
+          "valid_cells": 796578,
+          "valid_points": 13577020
+        }
+      },
+      "parity": {
+        "grid_identical": true,
+        "coverage_mismatch": 0,
+        "count_mismatch": 0,
+        "max_mean_error": 0.0,
+        "max_extrema_error": 0.0,
+        "all_bands_exact": true
+      },
+      "raster_bytes": {
+        "python": 4418946,
+        "native": 3597728
+      },
+      "render_parity": {
+        "alpha_mismatch": 0,
+        "max_visible_rgb_error": 0
+      },
+      "builds_medians": {
+        "python": 8.255135915998835,
+        "native": 8.548566466008197
+      },
+      "reads_medians": {
+        "python": 0.11433062198921107,
+        "native": 0.13606614699529018
+      }
+    }
+  ],
+  "date": "2026-11-16",
+  "native_gdal": "3.13.3",
+  "native_proj": "9.9.0",
+  "archive_audit": {
+    "failures": [],
+    "raster_bytes": 1159491790,
+    "source_bytes": 17817243589,
+    "verified": 154
+  },
+  "desktop_native_link_check": "ldd shows no GDAL, PROJ or Python libraries",
+  "runtime_path_check": "Prepared Richmond render succeeded with PATH=/nonexistent",
+  "implementation_sha256": {
+    "crates/lidar/src/builder.rs": "26a26f02a50f587a4f7bef7cbd12a4b60a27eda48db683892678eb39b3aee578",
+    "crates/lidar/src/geo.rs": "8bbdc353d31764502dff388a79ca701b9b7ee9365a8e2fd3cbf4cb2f287e9f19",
+    "crates/lidar/src/lib.rs": "457f36c058399241755ffb88e55f5d364ccb7c9185b59eabfcfdbe1ea0ac0ad0",
+    "crates/lidar/src/main.rs": "ec7ee19addcc97c35435f3454f39fc3668a8278e7f2eddcf31b85601aeab1fec",
+    "crates/lidar/src/render.rs": "0b1d490262d3c96db3eadf28935aeed24efc1c5ef075ceda21f5095b046a96bd",
+    "crates/lidar/src/tests.rs": "d9bd18decbac91a4b94a8d31fb6996a1e41d8c83a5047410eb6863c9cee472e3"
+  }
+}

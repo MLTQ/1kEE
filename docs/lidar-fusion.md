@@ -1,6 +1,12 @@
 # Fused LiDAR elevation layer
 
 The LiDAR map can read compact numeric rasters prepared from downloaded scans.
+Preparation, archive auditing and fusion of prepared views run in Rust through
+`crates/lidar`. The desktop reads TIFF chunks directly without Python, GDAL or
+PROJ. Its existing source worker still handles views whose downloaded sources
+are not all prepared; catalog discovery and downloads retain their existing
+tools. The Python prototype is a benchmark-only reference under
+`scripts/benchmarks/lidar_fusion_reference.py`.
 Automatic mode composites acquisitions in descending catalog-date order. A newer
 scan wins only at measured pixels; an older acquisition can fill its gaps. An
 explicit survey selection still shows that acquisition. Automatic maps have a
@@ -35,7 +41,7 @@ Ryzen 5 5600X, RTX 4090 available, NVIDIA 615.78.08; three real COPC scans total
 
 Fused reads were 8–45× faster on these windows. The production three-source audit found 130,562,521 raw bytes represented by 6,585,142 derived bytes (19.8× smaller), with every raster checksum and point count passing. This is a sample, not an inventory-wide storage forecast.
 
-GPUPDAL provided no clear build advantage: it was slower on Richmond/Ozarks and effectively tied on Switzerland. Its ordinary raster pipeline also assigned some returns to different grid cells: Richmond had 280 count-cell differences (maximum shared-cell mean difference 0.77 m); Ozarks matched; Switzerland had 43 coverage differences and a 0.015 m 95th-percentile shared-cell mean difference (maximum 2.15 m). No cause is asserted without a separate reprojection/binning investigation. The Python path was selected.
+GPUPDAL provided no clear build advantage: it was slower on Richmond/Ozarks and effectively tied on Switzerland. Its ordinary raster pipeline also assigned some returns to different grid cells: Richmond had 280 count-cell differences (maximum shared-cell mean difference 0.77 m); Ozarks matched; Switzerland had 43 coverage differences and a 0.015 m 95th-percentile shared-cell mean difference (maximum 2.15 m). No cause is asserted without a separate reprojection/binning investigation. These measurements selected the initial prototype; production processing has since moved to Rust.
 
 Full-density means differ from the old COPC LOD preview: shared-cell 95th-percentile height differences were 6.07 m in Richmond, 2.39 m in the Ozarks and 1.01 m in Switzerland. These are sampling/product differences, not a claim of measured ground accuracy. Fused coverage increased by 9, 55 and 30,654 pixels respectively.
 
@@ -47,14 +53,34 @@ Example outputs:
 - ozarks-2024: [sampled preview](benchmarks/lidar-fusion-views/ozarks-2024-current.png), [full-density fused tile](benchmarks/lidar-fusion-views/ozarks-2024-fused.png)
 - swiss-2026: [sampled preview](benchmarks/lidar-fusion-views/swiss-2026-current.png), [full-density fused tile](benchmarks/lidar-fusion-views/swiss-2026-fused.png)
 
+## Rust migration validation, 2026-11-16
+
+All three fixtures match the Python oracle exactly in all four raster bands, geographic grids, rendered coverage and visible RGB values. Native TIFF files are 17–19% smaller because bands are compressed separately. The converter retains compatibility with the original pixel-interleaved files.
+
+| Scan | Python / Rust build | Python / Rust read and PNG write | Native raster |
+|---|---:|---:|---:|
+| richmond-2025 | 3.11 / 3.43 s | 64 / 64 ms | 1.09 MB |
+| ozarks-2024 | 1.61 / 1.87 s | 64 / 60 ms | 0.71 MB |
+| swiss-2026 | 8.26 / 8.55 s | 114 / 136 ms | 3.60 MB |
+
+These read timings include PNG encoding in both paths and executable/native-library startup for Rust. They differ from the initial raster-read-only table above. The desktop calls the Rust reader directly and does not load GDAL/PROJ; its direct-call latency is not measured by this CLI comparison. There is no general Rust speedup claim: native builds were 4–16% slower in this run, in exchange for removing the additional production processing runtime.
+
+The native verifier accepted all 154 previously completed rasters (17,817,243,589 source bytes represented by 1,159,491,790 raster bytes), with no failures. Completed receipts are reused, and raw scans remain intact. Native unit/CLI tests cover independent statistics, noise/withheld flags, LAS/LAZ, failed decode, resume/corruption/date changes, latest acquisitions and gaps, TIFF layouts and edge chunks, viewport cancellation, Unicode provenance and volume identity. The desktop integration test exercises its actual prepared-view load entry point.
+
+The desktop release was rebuilt; its dynamic dependency check shows no GDAL, PROJ or Python libraries. A prepared-source render also succeeded with `PATH=/nonexistent`. Existing catalog/download and unprepared-source helpers still use their prior Python path.
+
+[Raw migration measurements](benchmarks/lidar-native-2026-11-16.json).
+
 ## Build and resume
 
-Use the LiDAR Python dependencies (NumPy, Pillow, laspy with lazrs, pyproj,
-rasterio, requests). Inspect the existing completed-scan inventory first:
+Build the native processor with GDAL development headers, pkg-config and
+libclang available. The converter uses GDAL/PROJ for projection and GeoTIFF
+publication; these libraries are excluded from the desktop reader dependency.
+Inspect the existing completed-scan inventory first:
 
 ```sh
-uv run --no-project --with numpy --with pillow --with 'laspy[lazrs]' \
-  --with pyproj --with rasterio --with requests python scripts/lidar_fused.py \
+cargo build --release -p lidar-pipeline --features builder
+target/release/one-thousand-electric-eye-lidar \
   --root /run/media/m/Minkowski/Data/Lidar --volume-uuid 6FEF-269A --plan
 ```
 
@@ -74,8 +100,7 @@ plus its bounded raster scratch free. This uses some of the raw downloader's
 deleted by this command. Verify published output with:
 
 ```sh
-uv run --no-project --with numpy --with pillow --with 'laspy[lazrs]' \
-  --with pyproj --with rasterio --with requests python scripts/lidar_fused.py \
+target/release/one-thousand-electric-eye-lidar \
   --root /run/media/m/Minkowski/Data/Lidar --volume-uuid 6FEF-269A --verify
 ```
 
@@ -90,7 +115,7 @@ success on three test scans does not authorize treating every raw asset as
 redundant. Old content-versioned rasters are retained for active readers and
 need a later reclamation pass.
 
-The 2026-11-16 rollout is running as the transient user service
+The 2026-11-16 rollout uses the native processor as the transient user service
 `1kee-lidar-fusion`, covering 5,225 present COPC receipts (311.7 GB of raw
 scans), newest first. It runs at low CPU/I/O priority with a 4 GiB memory cap;
 its sandbox permits data-drive writes only under `Lidar/fused`. Raw inputs are
@@ -128,5 +153,15 @@ Python/GPUPDAL full-density raster comparison. Float32 masks are read using each
 GeoTIFF's nodata metadata; zero counts are empty cells. Claims about full-density
 numeric parity must not be inferred from similarity to the sampled preview.
 
-The [measured results](benchmarks/lidar-fusion-2026-11-16.json) retain input hashes,
+The [initial measured results](benchmarks/lidar-fusion-2026-11-16.json) retain input hashes,
 machine/dependency details, individual timings, storage sizes and numeric checks.
+
+For native/Python migration comparisons, run:
+
+```sh
+uv run --no-project --with numpy --with pillow --with 'laspy[lazrs]' \
+  --with pyproj --with rasterio python scripts/benchmark_native_lidar.py \
+  --manifest docs/benchmarks/lidar-fusion-fixtures-2026-11-16.json \
+  --native target/release/one-thousand-electric-eye-lidar \
+  --output /tmp/native-lidar-benchmark
+```

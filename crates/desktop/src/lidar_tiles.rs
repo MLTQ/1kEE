@@ -126,9 +126,9 @@ fn key(tile: Tile, detail: bool, generation: u32, preferred: &str) -> Key {
     let variant = if !detail {
         format!("paths-v2-{generation}")
     } else if preferred.is_empty() {
-        "detail-auto-fused-v1".into()
+        "detail-auto-native-v1".into()
     } else {
-        format!("detail-fused-v1-{:x}", Sha1::digest(preferred.as_bytes()))
+        format!("detail-native-v1-{:x}", Sha1::digest(preferred.as_bytes()))
     };
     Key {
         tile,
@@ -601,6 +601,34 @@ fn load(
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
             != Some(revision);
+    if k.detail && (!output.is_file() || stale) && !empty.is_file() {
+        let span = 180. / (1u32 << z) as f64;
+        let w = -180. + x as f64 * span;
+        let n = 90. - y as f64 * span;
+        if let Some(rendered) =
+            lidar_pipeline::render::render(db, [w, n - span, w + span, n], preferred, Some(active))
+                .map_err(TileError::Render)?
+        {
+            if rendered.rgba.chunks_exact(4).any(|pixel| pixel[3] > 0) {
+                lidar_pipeline::render::save_png(&target, &rendered).map_err(TileError::Render)?;
+                output = target.clone();
+                if revision > 0 {
+                    let _ = std::fs::write(&stamp, revision.to_string());
+                }
+            } else {
+                if let Some(parent) = empty.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                std::fs::write(&empty, "").map_err(|e| e.to_string())?;
+                return Ok(None);
+            }
+        }
+    }
+    let stale = revision > 0
+        && std::fs::read_to_string(&stamp)
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            != Some(revision);
     if (!output.is_file() || stale) && !empty.is_file() {
         let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
         for (name, contents) in [("lidar_map.py", MAP), ("lidar_catalog.py", SURVEYS)] {
@@ -722,6 +750,64 @@ fn load(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn prepared_view_loads_through_native_reader_and_keeps_source_credit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let catalog = tmp.path().join("catalog.sqlite");
+        let db = rusqlite::Connection::open(&catalog).unwrap();
+        db.execute_batch("CREATE TABLE surveys (id TEXT,name TEXT,page TEXT); INSERT INTO surveys VALUES ('scan','Native scan','https://example.org');").unwrap();
+        let tile = Tile {
+            z: 12,
+            x: 2387,
+            y: 1175,
+        };
+        let span = 180. / (1u32 << tile.z) as f64;
+        let w = -180. + tile.x as f64 * span;
+        let n = 90. - tile.y as f64 * span;
+        let folder = tmp.path().join("fused/v1");
+        std::fs::create_dir_all(&folder).unwrap();
+        let index = rusqlite::Connection::open(folder.join("index.sqlite")).unwrap();
+        index.execute_batch("CREATE TABLE rasters (id INTEGER,url TEXT,survey TEXT,date TEXT,path TEXT,west REAL,south REAL,east REAL,north REAL);").unwrap();
+        index.execute("INSERT INTO rasters VALUES(1,'https://example.org/scan','scan','2026','fused/v1/scan.tif',?1,?2,?3,?4)",
+            rusqlite::params![w,n-span,w+span,n]).unwrap();
+        {
+            use tiff::{
+                encoder::{TiffEncoder, colortype::RGBA32Float},
+                tags::Tag,
+            };
+            let mut encoder =
+                TiffEncoder::new(std::fs::File::create(folder.join("scan.tif")).unwrap()).unwrap();
+            let mut image = encoder.new_image::<RGBA32Float>(2, 2).unwrap();
+            image
+                .encoder()
+                .write_tag(Tag::ModelPixelScaleTag, &[span / 2., span / 2., 0.][..])
+                .unwrap();
+            image
+                .encoder()
+                .write_tag(Tag::ModelTiepointTag, &[0., 0., 0., w, n, 0.][..])
+                .unwrap();
+            image
+                .encoder()
+                .write_tag(
+                    Tag::GeoKeyDirectoryTag,
+                    &[1u16, 1, 0, 1, 2048, 0, 1, 4326][..],
+                )
+                .unwrap();
+            image
+                .write_data(&[
+                    10f32, 20., 15., 2., 10., 20., 15., 2., 10., 20., 15., 2., 10., 20., 15., 2.,
+                ])
+                .unwrap();
+        }
+        let active = tempfile::NamedTempFile::new().unwrap();
+        let selected = key(tile, true, 0, "scan");
+        let (image, credit) = load(&catalog, &selected, "scan", 0, active.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(credit, "Native scan");
+        assert_eq!(image.pixels[(0, 0)].a(), 255);
+        assert!(tile_path(&catalog, &selected).is_file());
+    }
     #[test]
     fn automatic_revisit_does_not_reuse_an_arbitrary_selected_survey() {
         let tmp = tempfile::tempdir().unwrap();
