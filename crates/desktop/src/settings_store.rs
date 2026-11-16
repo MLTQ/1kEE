@@ -49,6 +49,8 @@ pub(crate) const MAX_THREEDEP_CACHE_BUDGET_GB: f32 = 512.0;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppSettings {
+    #[serde(default = "default_show_loading_animation")]
+    pub show_loading_animation: bool,
     #[serde(default)]
     pub atlas_style: crate::atlas_style::AtlasStyle,
     #[serde(default)]
@@ -130,6 +132,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            show_loading_animation: true,
             atlas_style: crate::atlas_style::AtlasStyle::default(),
             factal_api_key: String::new(),
             windy_webcams_api_key: String::new(),
@@ -163,6 +166,10 @@ impl Default for AppSettings {
 
 fn default_marker_scale() -> f32 {
     1.0
+}
+
+fn default_show_loading_animation() -> bool {
+    true
 }
 
 fn default_event_follow_dwell_seconds() -> u32 {
@@ -618,6 +625,18 @@ mod tests {
         );
     }
     use super::*;
+
+    #[test]
+    fn loading_animation_defaults_on_and_saved_off_survives_serialization() {
+        let legacy: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(legacy.show_loading_animation);
+        let mut settings = AppSettings::default();
+        settings.show_loading_animation = false;
+        let restored = normalize_settings(
+            serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap(),
+        );
+        assert!(!restored.show_loading_animation);
+    }
 
     #[test]
     fn event_follow_dwell_survives_serialization_and_normalizes_legacy_and_bounds() {

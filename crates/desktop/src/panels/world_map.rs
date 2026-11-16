@@ -89,9 +89,11 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
         if model.event_follow.moving() || model.globe_view.auto_spin || model.globe_view.meander_mode {
             ui.ctx().request_repaint();
         } else if local_terrain_scene::has_pending_cache(model) {
-            // Faster repaint while tile pulse animation is running (~30 fps)
+            // Faster repaint only while the operator allows loading pulses.
             ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(33));
+                .request_repaint_after(std::time::Duration::from_millis(
+                    if model.show_loading_animation {33} else {180}
+                ));
         } else if (model.show_coastlines
                 && contour_asset::global_coastlines_pending(model.selected_root.as_deref()))
             || ((model.show_major_roads || model.show_minor_roads || model.show_water)

@@ -105,7 +105,12 @@ struct Job {
 
 enum Update {
     Preview(MapImage),
-    Complete(Result<Option<MapImage>, TileError>),
+    Complete(Result<Loaded, TileError>),
+}
+
+struct Loaded {
+    image: Option<MapImage>,
+    revision: i64,
 }
 
 fn remember(
@@ -143,6 +148,7 @@ pub(crate) struct Tiles {
     bulk_versions: HashMap<Key, i64>,
     loaded: HashMap<Key, Option<SatelliteLayer>>,
     provisional: HashSet<Key>,
+    dirty: HashSet<Key>,
     order: VecDeque<Key>,
     jobs: [Option<Job>; 2],
     retry: HashMap<Key, Instant>,
@@ -267,29 +273,30 @@ impl Tiles {
                 Ok(snapshot) => {
                     if self.generation != snapshot.generation {
                         self.generation = snapshot.generation;
-                        self.loaded.clear();
-                        self.provisional.clear();
-                        self.order.clear();
-                        self.bulk_versions.clear();
-                        self.retry.clear();
-                        self.jobs = [None, None];
+                        // Survey metadata updates invalidate boundary images,
+                        // not the independently prepared Local measurements.
+                        self.loaded.retain(|k, _| k.detail);
+                        self.provisional.retain(|k| k.detail);
+                        self.dirty.retain(|k| k.detail);
+                        self.order.retain(|k| k.detail);
+                        self.bulk_versions.retain(|k, _| k.detail);
+                        self.retry.retain(|k, _| k.detail);
+                        for job in &mut self.jobs {
+                            if job.as_ref().is_some_and(|job| {
+                                job.key.get().map_or(!self.measurements, |k| !k.detail)
+                            }) {
+                                *job = None;
+                            }
+                        }
                     }
                     if let Some(sequence) = snapshot.sequence {
                         self.bulk_sequence = sequence;
                     }
                     for (k, version) in snapshot.revisions {
                         if self.bulk_versions.insert(k.clone(), version).unwrap_or(0) != version {
-                            // Keep an intermediate image visible while its
-                            // worker publishes the finer source rasters.
-                            if !self
-                                .jobs
-                                .iter()
-                                .flatten()
-                                .any(|job| job.key.get() == Some(&k))
-                            {
-                                self.loaded.remove(&k);
-                                self.order.retain(|old| old != &k);
-                            }
+                            // Refresh in the background. A source receipt is
+                            // not a replacement texture ready for display.
+                            self.dirty.insert(k.clone());
                             self.retry.remove(&k);
                         }
                     }
@@ -353,16 +360,37 @@ impl Tiles {
                     Ok(Update::Preview(image)) => {
                         if job.active.is_some() {
                             let k = job.key.get().expect("preview tile has a key").clone();
-                            self.provisional.insert(k.clone());
-                            remember(&mut self.loaded, &mut self.order, ctx, k, Some(image));
+                            // Keep completed detail rather than downgrade it
+                            // to an overview during an overlapping refresh.
+                            if !matches!(self.loaded.get(&k), Some(Some(_)))
+                                || self.provisional.contains(&k)
+                            {
+                                self.provisional.insert(k.clone());
+                                remember(&mut self.loaded, &mut self.order, ctx, k, Some(image));
+                            }
                         }
                         continue;
                     }
-                    Ok(Update::Complete(Ok(image))) => {
+                    Ok(Update::Complete(Ok(loaded))) => {
                         let k = job.key.get().expect("completed tile has a key").clone();
                         self.retry.remove(&k);
+                        if self
+                            .bulk_versions
+                            .get(&k)
+                            .is_some_and(|version| *version > loaded.revision)
+                        {
+                            self.dirty.insert(k.clone());
+                        } else {
+                            self.bulk_versions.insert(k.clone(), loaded.revision);
+                            self.dirty.remove(&k);
+                        }
+                        let keep_old = loaded.image.is_none()
+                            && !self.provisional.contains(&k)
+                            && matches!(self.loaded.get(&k), Some(Some(_)));
                         self.provisional.remove(&k);
-                        remember(&mut self.loaded, &mut self.order, ctx, k, image);
+                        if !keep_old {
+                            remember(&mut self.loaded, &mut self.order, ctx, k, loaded.image);
+                        }
                     }
                     Ok(Update::Complete(Err(_))) if job.active.is_none() => {}
                     Ok(Update::Complete(Err(e))) => {
@@ -405,7 +433,9 @@ impl Tiles {
                 .filter(|t| !detail || t.z >= DETAIL_ZOOM)
                 .map(|t| key(t, detail, self.generation, preferred))
                 .filter(|k| {
-                    (!self.loaded.contains_key(k) || self.provisional.contains(k))
+                    (!self.loaded.contains_key(k)
+                        || self.provisional.contains(k)
+                        || self.dirty.contains(k))
                         && !self
                             .jobs
                             .iter()
@@ -473,6 +503,7 @@ impl Tiles {
         self.retry
             .retain(|k, at| self.loaded.contains_key(k) || at.elapsed() < Duration::from_secs(60));
         self.provisional.retain(|k| self.loaded.contains_key(k));
+        self.dirty.retain(|k| self.loaded.contains_key(k));
         self.sources.clear();
         if !self.measurements {
             if !self
@@ -509,7 +540,7 @@ impl Tiles {
             self.status = if self.jobs.iter().any(Option::is_some) {
                 "Showing lidar; preparing nearby tiles…".into()
             } else if self.retry.keys().any(|k| self.stable.contains(&k.tile)) {
-                "Showing overview; retrying lidar detail…".into()
+                "Showing lidar; retrying update…".into()
             } else {
                 "Showing fused lidar".into()
             };
@@ -590,10 +621,11 @@ fn fused_revision(catalog: &Path, tile: Option<Tile>, preferred: &str) -> i64 {
         };
         revision += if let Some(tile) = tile {
             let [w, s, e, n] = tile.bounds();
+            let edge = if table == "tiles" { ">" } else { ">=" };
             db.query_row(
                 &format!(
-                    "SELECT coalesce(max(id),0) FROM {table} WHERE west<?1 AND east>=?2
-            AND south<?3 AND north>=?4 AND (?5='' OR survey=?5 OR
+                    "SELECT coalesce(max(id),0) FROM {table} WHERE west<?1 AND east{edge}?2
+            AND south<?3 AND north{edge}?4 AND (?5='' OR survey=?5 OR
             (substr(?5,-1)='/' AND instr(survey,?5)=1))"
                 ),
                 rusqlite::params![e, w, n, s, preferred],
@@ -653,7 +685,7 @@ fn load(
     generation: u32,
     active: &Path,
 ) -> Result<Option<MapImage>, TileError> {
-    load_with_preview(db, k, preferred, generation, active, |_| {})
+    load_with_preview(db, k, preferred, generation, active, |_| {}).map(|loaded| loaded.image)
 }
 
 fn as_map(image: &lidar_pipeline::render::Rendered, bounds: [f32; 4]) -> MapImage {
@@ -698,7 +730,7 @@ fn load_with_preview(
     generation: u32,
     active: &Path,
     mut preview: impl FnMut(MapImage),
-) -> Result<Option<MapImage>, TileError> {
+) -> Result<Loaded, TileError> {
     let Tile { z, x, y } = k.tile;
     let target = tile_path(db, k);
     let mut output = target.clone();
@@ -781,7 +813,10 @@ fn load_with_preview(
                     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
                 }
                 std::fs::write(&empty, "").map_err(|e| e.to_string())?;
-                return Ok(None);
+                return Ok(Loaded {
+                    image: None,
+                    revision,
+                });
             }
         } else {
             // The existing catalog-boundary renderer is independent of raw scan loading.
@@ -836,7 +871,10 @@ fn load_with_preview(
         }
     }
     if !output.is_file() && empty.exists() {
-        return Ok(None);
+        return Ok(Loaded {
+            image: None,
+            revision,
+        });
     }
     let file = std::fs::File::open(&output).map_err(|e| e.to_string())?;
     let mut png = png::Decoder::new(std::io::BufReader::new(file))
@@ -869,18 +907,205 @@ fn load_with_preview(
     let mut rgba = vec![0; 512 * 512 * 4];
     png.next_frame(&mut rgba).map_err(|e| e.to_string())?;
     let pixels = egui::ColorImage::from_rgba_unmultiplied([512, 512], &rgba);
-    Ok(Some((
-        SatelliteImage {
-            bounds: k.tile.bounds(),
-            pixels,
-        },
-        name,
-    )))
+    Ok(Loaded {
+        image: Some((
+            SatelliteImage {
+                bounds: k.tile.bounds(),
+                pixels,
+            },
+            name,
+        )),
+        revision,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn neighboring_arrivals_and_catalog_refresh_keep_completed_tiles_visible() {
+        let ctx = egui::Context::default();
+        let root = tempfile::tempdir().unwrap();
+        let catalog = root.path().join("catalog.sqlite");
+        let a = Tile {
+            z: 12,
+            x: 4096,
+            y: 2047,
+        };
+        let b = Tile { x: a.x + 1, ..a };
+        let ka = key(a, true, 7, "");
+        let kb = key(b, true, 7, "");
+        let bounds = Some([a.bounds()[0], a.bounds()[1], b.bounds()[2], a.bounds()[3]]);
+        let mut tiles = Tiles {
+            generation: 7,
+            measurements: true,
+            stable: vec![a, b],
+            view: RefCell::new(vec![a, b]),
+            moved: Some(Instant::now()),
+            ..Default::default()
+        };
+        let picture = |tile: Tile, name: &str| {
+            (
+                SatelliteImage {
+                    bounds: tile.bounds(),
+                    pixels: egui::ColorImage::new([2, 2], egui::Color32::RED),
+                },
+                name.into(),
+            )
+        };
+        remember(
+            &mut tiles.loaded,
+            &mut tiles.order,
+            &ctx,
+            ka.clone(),
+            Some(picture(a, "A")),
+        );
+        remember(
+            &mut tiles.loaded,
+            &mut tiles.order,
+            &ctx,
+            kb.clone(),
+            Some(picture(b, "B")),
+        );
+        let names = |tiles: &Tiles| {
+            let mut shown = Vec::new();
+            tiles.draw(bounds, View::Fused, |image| {
+                shown.push(image.name().to_owned())
+            });
+            shown.sort();
+            shown
+        };
+        let publish = |tiles: &mut Tiles, generation, revisions| {
+            let (tx, rx) = mpsc::channel();
+            tx.send(Ok(CatalogSnapshot {
+                generation,
+                sequence: Some(2),
+                revisions,
+            }))
+            .unwrap();
+            tiles.catalog_job = Some(rx);
+            tiles.last_catalog_check = Some(Instant::now());
+            assert!(tiles.poll_catalog(&ctx, &catalog, false));
+        };
+        publish(&mut tiles, 7, vec![(ka.clone(), 2), (kb.clone(), 2)]);
+        assert_eq!(
+            names(&tiles),
+            ["A", "B"],
+            "new receipts must not erase existing textures"
+        );
+        assert!(tiles.dirty.contains(&ka) && tiles.dirty.contains(&kb));
+        let job = |k: Key| {
+            let (tx, rx) = mpsc::channel();
+            let chosen = Arc::new(OnceLock::new());
+            assert!(chosen.set(k).is_ok());
+            (
+                Job {
+                    key: chosen,
+                    rx,
+                    active: Some(tempfile::NamedTempFile::new().unwrap()),
+                },
+                tx,
+            )
+        };
+        let (pending_a, tx_a) = job(ka.clone());
+        let (pending_b, tx_b) = job(kb.clone());
+        tiles.jobs = [Some(pending_a), Some(pending_b)];
+        publish(&mut tiles, 8, vec![]);
+        assert_eq!(names(&tiles), ["A", "B"]);
+        assert!(
+            tiles.jobs.iter().all(Option::is_some),
+            "catalog metadata must not cancel Local refreshes"
+        );
+        tx_a.send(Update::Preview(picture(a, "Coarse A"))).unwrap();
+        tiles.tick(&ctx, &catalog, View::Fused);
+        assert_eq!(
+            names(&tiles),
+            ["A", "B"],
+            "completed detail must not be replaced with an overview"
+        );
+        tx_a.send(Update::Complete(Ok(Loaded {
+            image: Some(picture(a, "New A")),
+            revision: 2,
+        })))
+        .unwrap();
+        tiles.tick(&ctx, &catalog, View::Fused);
+        assert_eq!(names(&tiles), ["B", "New A"]);
+        assert!(!tiles.dirty.contains(&ka) && tiles.dirty.contains(&kb));
+        tx_b.send(Update::Complete(Err(TileError::Render(
+            "Source temporarily offline".into(),
+        ))))
+        .unwrap();
+        tiles.tick(&ctx, &catalog, View::Fused);
+        assert_eq!(
+            names(&tiles),
+            ["B", "New A"],
+            "a failed update must keep both previous images visible"
+        );
+        let (pending_b, tx_b) = job(kb.clone());
+        tiles.jobs[1] = Some(pending_b);
+        tx_b.send(Update::Complete(Ok(Loaded {
+            image: None,
+            revision: 2,
+        })))
+        .unwrap();
+        tiles.tick(&ctx, &catalog, View::Fused);
+        assert_eq!(
+            names(&tiles),
+            ["B", "New A"],
+            "an empty update is not a replacement for completed imagery"
+        );
+        let (pending_a, tx_a) = job(ka.clone());
+        tiles.jobs[0] = Some(pending_a);
+        publish(&mut tiles, 8, vec![(ka.clone(), 3)]);
+        tx_a.send(Update::Complete(Ok(Loaded {
+            image: Some(picture(a, "New A")),
+            revision: 2,
+        })))
+        .unwrap();
+        tiles.tick(&ctx, &catalog, View::Fused);
+        assert!(
+            tiles.dirty.contains(&ka),
+            "an in-flight older result must not swallow a newer receipt"
+        );
+        assert_eq!(names(&tiles), ["B", "New A"]);
+    }
+
+    #[test]
+    fn touching_preview_edges_do_not_invalidate_neighboring_tiles() {
+        let root = tempfile::tempdir().unwrap();
+        let catalog = root.path().join("catalog.sqlite");
+        let folder = root.path().join("fused/v1");
+        std::fs::create_dir_all(&folder).unwrap();
+        let db = rusqlite::Connection::open(folder.join("previews.sqlite")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE tiles(id INTEGER,survey TEXT,west REAL,south REAL,east REAL,north REAL);",
+        )
+        .unwrap();
+        let tile = Tile {
+            z: 12,
+            x: 4096,
+            y: 2047,
+        };
+        let [w, s, e, n] = tile.bounds();
+        db.execute(
+            "INSERT INTO tiles VALUES(1,'scan',?1,?2,?3,?4)",
+            rusqlite::params![w - (e - w), s, w, n],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO tiles VALUES(2,'scan',?1,?2,?3,?4)",
+            rusqlite::params![w, s - (n - s), e, s],
+        )
+        .unwrap();
+        assert_eq!(fused_revision(&catalog, Some(tile), ""), 0);
+        db.execute(
+            "INSERT INTO tiles VALUES(3,'scan',?1,?2,?3,?4)",
+            rusqlite::params![w, s, e, n],
+        )
+        .unwrap();
+        assert_eq!(fused_revision(&catalog, Some(tile), ""), 3);
+    }
+
     #[test]
     fn opaque_coarse_overview_is_shown_as_preview_and_requests_refinement() {
         let tmp = tempfile::tempdir().unwrap();
@@ -950,7 +1175,7 @@ mod tests {
             "complete coverage must not suppress finer-detail preparation"
         );
         assert!(
-            result.is_none(),
+            result.image.is_none(),
             "a coarse overview must not be saved as completed detail"
         );
     }
@@ -995,10 +1220,10 @@ mod tests {
         assert!(tiles.jobs[0].is_some());
         assert!(tiles.provisional.contains(&k));
         assert_eq!(tiles.loaded[&k].as_ref().unwrap().name(), "Overview");
-        tx.send(Update::Complete(Ok(Some(make_image(
-            "Detail",
-            egui::Color32::BLUE,
-        )))))
+        tx.send(Update::Complete(Ok(Loaded {
+            image: Some(make_image("Detail", egui::Color32::BLUE)),
+            revision: 0,
+        })))
         .unwrap();
         tiles.tick(&ctx, &tmp.path().join("catalog.sqlite"), View::Fused);
         assert!(tiles.jobs[0].is_none());
@@ -1024,11 +1249,12 @@ mod tests {
         .unwrap();
         tiles.tick(&ctx, &tmp.path().join("catalog.sqlite"), View::Fused);
         tiles.stop();
-        assert!(
-            tiles.provisional.contains(&k),
-            "cancelling a preview must not mark it as completed detail"
+        assert!(!tiles.provisional.contains(&k));
+        assert_eq!(
+            tiles.loaded[&k].as_ref().unwrap().name(),
+            "Detail",
+            "refresh previews must not replace completed detail"
         );
-        assert_eq!(tiles.loaded[&k].as_ref().unwrap().name(), "New overview");
     }
 
     #[test]
@@ -1058,6 +1284,7 @@ mod tests {
             |_| previews += 1,
         )
         .unwrap()
+        .image
         .unwrap();
         if needs_refinement {
             assert!(previews > 0);

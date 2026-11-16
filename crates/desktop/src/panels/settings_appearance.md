@@ -12,3 +12,8 @@ the surface and optional attached contours together.
 Sun with hour offset, relief contrast, color richness and reset. Changes affect
 the current surface immediately; the existing explicit Settings save persists
 them. Choosing a light never changes camera, clock, source or layer visibility.
+
+**Loading animation** applies immediately to the terrain dissolve grid, loading
+outlines and lunar/Mars loading ring. Turning it off keeps data preparation and
+static progress cards active and reduces loading-only repaint requests. Save
+Settings retains the choice after restarting. Existing settings default to on.

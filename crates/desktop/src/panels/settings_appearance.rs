@@ -41,6 +41,12 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
         ui.small("Contours stay independently selectable and follow the 3D surface. Layer Spread moves terrain and contours together. Colors describe height and depth, not geology.");
         atlas_controls(ui, &mut model.atlas_style);
     }
+    ui.add_space(12.0);
+    ui.separator();
+    ui.strong("Loading");
+    ui.checkbox(&mut model.show_loading_animation, "Loading animation")
+        .on_hover_text("Animate the terrain loading grid and loading outlines. Downloads and progress information remain active when disabled.");
+    ui.small("Changes apply immediately. Save settings to keep this choice after restarting.");
 }
 
 pub(crate) fn atlas_controls(ui: &mut egui::Ui, style: &mut crate::atlas_style::AtlasStyle) {

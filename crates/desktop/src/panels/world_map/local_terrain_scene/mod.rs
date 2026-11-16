@@ -196,7 +196,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 
     // The grid tracks build, decode, and publication; disk presence alone is not completion.
     let still_loading = !atlas_terrain && contour_load.status.ready_assets < contour_load.status.total_assets;
-    if still_loading && !model.obs_view {
+    if still_loading && !model.obs_view && model.show_loading_animation {
         match model.active_body {
             crate::model::ActiveBody::Moon => {
                 let half_extent = srtm_focus_cache::lunar_half_extent_for_zoom(contour_load.source_zoom);
@@ -485,7 +485,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             model.show_surveillance,
         );
 
-        if !model.obs_view {
+        if !model.obs_view && model.show_loading_animation {
             draw_loading_boxes(painter, &layout, &model.globe_view, viewport_center);
         }
     }

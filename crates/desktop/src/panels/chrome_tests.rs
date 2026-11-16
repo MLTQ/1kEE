@@ -186,6 +186,20 @@ fn chrome_rail_stays_one_row_with_primary_controls_at_narrow_widths() {
     }
 }
 #[test]
+fn settings_loading_animation_switch_changes_the_live_model() {
+    let ctx = egui::Context::default();
+    let mut model = model();
+    model.map_theme = crate::theme::MapTheme::Topo;
+    model.show_loading_animation = true;
+    click(&ctx, &mut model, 1536., "Settings");
+    click(&ctx, &mut model, 1536., "Appearance");
+    click(&ctx, &mut model, 1536., "Loading animation");
+    assert!(!model.show_loading_animation);
+    click(&ctx, &mut model, 1536., "Loading animation");
+    assert!(model.show_loading_animation);
+}
+
+#[test]
 fn chrome_settings_and_embedded_terrain_remain_accessible() {
     let ctx = context();
     let mut model = model();

@@ -561,6 +561,7 @@ pub(super) fn paint_with_layout(
                 time,
                 "SLDEM",
                 egui::Color32::from_rgb(155, 200, 248),
+                model.show_loading_animation,
             );
         }
     } else if !model.obs_view && model.active_body == crate::model::ActiveBody::Mars {
@@ -582,6 +583,7 @@ pub(super) fn paint_with_layout(
                 time,
                 "CTX",
                 theme::camera_color(),
+                model.show_loading_animation,
             );
         }
     }
@@ -1145,6 +1147,7 @@ fn draw_build_overlay(
     time: f64,
     label_prefix: &str,
     accent: egui::Color32,
+    animate: bool,
 ) {
     // ── Progress card (bottom-right) ──────────────────────────────────────
     const CARD_W: f32 = 220.0;
@@ -1184,6 +1187,7 @@ fn draw_build_overlay(
         painter.rect_filled(filled, 3.0, accent);
     }
 
+    if !animate { return; }
     // ── Pulsing ring centred on the reticle ──────────────────────────────
     // Project view.local_center (the reticle position) so the ring is
     // always concentric with the red crosshair, regardless of orbit angle.

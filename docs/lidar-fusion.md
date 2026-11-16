@@ -161,6 +161,11 @@ Completed detailed renders exclude coarser overviews, so a newer survey's broad
 preview cells cannot mask finer measured data or extend its apparent footprint.
 Cached PNGs retain their contributing overview zoom and are regenerated if it
 is too coarse for the requested display tile.
+New source receipts queue a background refresh while the last completed texture
+stays visible. Lower-detail previews and empty/failed refreshes do not replace
+completed imagery. Catalog footprint updates preserve Local tiles and their
+active workers. Matching-resolution preview rasters must overlap an area, not
+merely share its edge, to invalidate that area's display tile.
 This corrects the regular square pattern seen when a z12 view reused z6 data;
 it does not add height displacement to the flat image layer.
 The reported cached tile had about 8 × 8 effective height samples; the corrected

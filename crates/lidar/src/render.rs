@@ -238,8 +238,9 @@ fn render_impl(
         }
         let db =
             Connection::open_with_flags(index, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;
-        let mut query = db.prepare(&format!("SELECT {url},survey,path,date,{rank} FROM {table} WHERE west<?1 AND east>=?2
-        AND south<?3 AND north>=?4 AND (?5='' OR survey=?5 OR (substr(?5,-1)='/' AND instr(survey,?5)=1))
+        let edge = if table == "tiles" { ">" } else { ">=" };
+        let mut query = db.prepare(&format!("SELECT {url},survey,path,date,{rank} FROM {table} WHERE west<?1 AND east{edge}?2
+        AND south<?3 AND north{edge}?4 AND (?5='' OR survey=?5 OR (substr(?5,-1)='/' AND instr(survey,?5)=1))
         ORDER BY date DESC,survey,{url}")).map_err(err)?;
         let found = query
             .query_map(params![e, w, n, s, preferred], |row| {
