@@ -11,7 +11,7 @@ use crate::settings_store;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[path = "threedep_raster.rs"]
 mod raster;
@@ -33,6 +33,9 @@ const MAX_REQUEST_PX: u32 = 2400;
 /// The catalog reports exactly 1.0 for 1 m projects; the tolerance absorbs
 /// the handful of near-metre products (e.g. 3 ft ≈ 0.914 m).
 const FINE_PIXEL_SIZE_M: f64 = 1.5;
+// A cell can only partially overlap fine coverage. Leave the rest nodata
+// rather than upsample a 10/30 m grid into half-metre contour intervals.
+const FINE_MOSAIC_RULE: &str = r#"{"mosaicMethod":"esriMosaicAttribute","where":"LowPS > 0 AND LowPS <= 1.5","sortField":"Best","sortValue":0,"ascending":true,"mosaicOperation":"MT_FIRST"}"#;
 
 const CACHE_DIR_NAME: &str = "3dep_1m";
 /// Written next to a chunk that the service answered with nothing but nodata,
@@ -66,8 +69,18 @@ pub enum Coverage {
     Coarse,
 }
 
-fn coverage_cache() -> &'static Mutex<HashMap<(i32, i32), Coverage>> {
-    static CACHE: OnceLock<Mutex<HashMap<(i32, i32), Coverage>>> = OnceLock::new();
+struct CoverageEntry {
+    value: Coverage,
+    checked: Instant,
+}
+impl CoverageEntry {
+    fn cached(&self) -> Option<Coverage> {
+        (self.value != Coverage::Unknown || self.checked.elapsed() < Duration::from_secs(15))
+            .then_some(self.value)
+    }
+}
+fn coverage_cache() -> &'static Mutex<HashMap<(i32, i32), CoverageEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<(i32, i32), CoverageEntry>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -100,7 +113,7 @@ pub fn coverage_at(point: GeoPoint) -> Coverage {
     }
     let cell = coverage_cell(point);
     if let Ok(guard) = coverage_cache().lock()
-        && let Some(&known) = guard.get(&cell)
+        && let Some(known) = guard.get(&cell).and_then(CoverageEntry::cached)
     {
         return known;
     }
@@ -122,13 +135,19 @@ pub fn coverage_at_blocking(point: GeoPoint) -> Coverage {
     }
     let cell = coverage_cell(point);
     if let Ok(guard) = coverage_cache().lock()
-        && let Some(&known) = guard.get(&cell)
+        && let Some(known) = guard.get(&cell).and_then(CoverageEntry::cached)
     {
         return known;
     }
     let result = probe_cell(cell);
     if let Ok(mut guard) = coverage_cache().lock() {
-        guard.insert(cell, result);
+        guard.insert(
+            cell,
+            CoverageEntry {
+                value: result,
+                checked: Instant::now(),
+            },
+        );
     }
     result
 }
@@ -145,7 +164,13 @@ fn schedule_probe(cell: (i32, i32)) {
     std::thread::spawn(move || {
         let result = probe_cell(cell);
         if let Ok(mut guard) = coverage_cache().lock() {
-            guard.insert(cell, result);
+            guard.insert(
+                cell,
+                CoverageEntry {
+                    value: result,
+                    checked: Instant::now(),
+                },
+            );
         }
         if let Ok(mut guard) = probing_set().lock() {
             guard.remove(&cell);
@@ -154,54 +179,76 @@ fn schedule_probe(cell: (i32, i32)) {
     });
 }
 
-/// Ask the image service's catalog which source rasters intersect the cell
-/// centre and keep the finest pixel size any of them reports.
+/// Probe the entire cell so a partial survey at its edge is not missed.
+fn coverage_geometry(cell: (i32, i32)) -> String {
+    let lat = cell.0 as f64 * 0.05;
+    let lon = cell.1 as f64 * 0.05;
+    serde_json::json!({"xmin":lon,"ymin":lat,"xmax":lon+0.05,"ymax":lat+0.05,
+        "spatialReference":{"wkid":4326}})
+    .to_string()
+}
+
+fn classify_coverage(parsed: &serde_json::Value) -> Coverage {
+    if parsed.get("error").is_some() {
+        return Coverage::Unknown;
+    }
+    let Some(features) = parsed.get("features").and_then(|v| v.as_array()) else {
+        return Coverage::Unknown;
+    };
+    if features.iter().any(|feature| {
+        feature
+            .get("attributes")
+            .and_then(|a| a.get("LowPS"))
+            .and_then(|v| v.as_f64())
+            .is_some_and(|ps| ps > 0. && ps <= FINE_PIXEL_SIZE_M)
+    }) {
+        return Coverage::Fine;
+    }
+    if parsed
+        .get("exceededTransferLimit")
+        .and_then(|v| v.as_bool())
+        == Some(true)
+        || features.iter().any(|feature| {
+            feature
+                .get("attributes")
+                .and_then(|a| a.get("LowPS"))
+                .and_then(|v| v.as_f64())
+                .is_none()
+        })
+    {
+        return Coverage::Unknown;
+    }
+    Coverage::Coarse
+}
+
 fn probe_cell(cell: (i32, i32)) -> Coverage {
-    let lat = (cell.0 as f32 + 0.5) * 0.05;
-    let lon = (cell.1 as f32 + 0.5) * 0.05;
-    let geometry =
-        format!(r#"{{"x":{lon},"y":{lat},"spatialReference":{{"wkid":4326}}}}"#);
+    let geometry = coverage_geometry(cell);
 
     let response = http_client()
         .get(format!("{SERVICE}/query"))
+        .timeout(Duration::from_secs(20))
         .query(&[
             ("geometry", geometry.as_str()),
-            ("geometryType", "esriGeometryPoint"),
+            ("geometryType", "esriGeometryEnvelope"),
             ("spatialRel", "esriSpatialRelIntersects"),
             ("returnGeometry", "false"),
-            ("outFields", "LowPS"),
+            ("outFields", "Name,LowPS"),
+            ("where", "LowPS > 0 AND LowPS <= 1.5"),
             ("f", "json"),
         ])
-        .send();
+        .send()
+        .and_then(|r| r.error_for_status());
 
     let Ok(response) = response else {
-        return Coverage::Coarse;
+        return Coverage::Unknown;
     };
     let Ok(body) = response.text() else {
-        return Coverage::Coarse;
+        return Coverage::Unknown;
     };
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) else {
-        return Coverage::Coarse;
+        return Coverage::Unknown;
     };
-    let has_fine = parsed
-        .get("features")
-        .and_then(|f| f.as_array())
-        .map(|features| {
-            features.iter().any(|feature| {
-                feature
-                    .get("attributes")
-                    .and_then(|a| a.get("LowPS"))
-                    .and_then(|v| v.as_f64())
-                    .is_some_and(|ps| ps > 0.0 && ps <= FINE_PIXEL_SIZE_M)
-            })
-        })
-        .unwrap_or(false);
-
-    if has_fine {
-        Coverage::Fine
-    } else {
-        Coverage::Coarse
-    }
+    classify_coverage(&parsed)
 }
 
 // ── Chunk cache ──────────────────────────────────────────────────────────────
@@ -336,7 +383,7 @@ fn download_chunk(derived_root: &Path, key: ChunkKey) -> Option<PathBuf> {
 
     let (width, height) = request_size(key);
     let raw_path = root.join(format!("lat{}_lon{}.raw.tif", key.lat, key.lon));
-    if crate::elevation_sources::possible_at(key.center()) {
+    let source_ready = if crate::elevation_sources::possible_at(key.center()) {
         let bounds = crate::elevation_sources::Bounds {
             min_lon: key.min_lon().into(),
             min_lat: key.min_lat().into(),
@@ -344,7 +391,12 @@ fn download_chunk(derived_root: &Path, key: ChunkKey) -> Option<PathBuf> {
             max_lat: key.max_lat().into(),
         };
         match crate::elevation_sources::fetch(bounds, width, height, &raw_path, |_, _| {}) {
-            Ok(_) => {}
+            Ok(_) => true,
+            Err(crate::elevation_sources::Error::NoCoverage)
+                if crate::elevation_sources::Provider::NorthCarolina.contains(key.center()) =>
+            {
+                false
+            }
             Err(crate::elevation_sources::Error::NoCoverage) => {
                 let _ = std::fs::write(empty_marker_path(derived_root, key), b"");
                 return None;
@@ -355,6 +407,9 @@ fn download_chunk(derived_root: &Path, key: ChunkKey) -> Option<PathBuf> {
             }
         }
     } else {
+        false
+    };
+    if !source_ready {
         let bbox = format!(
             "{},{},{},{}",
             key.min_lon(),
@@ -373,6 +428,7 @@ fn download_chunk(derived_root: &Path, key: ChunkKey) -> Option<PathBuf> {
                 ("size", size.as_str()),
                 ("format", "tiff"),
                 ("pixelType", "F32"),
+                ("mosaicRule", FINE_MOSAIC_RULE),
                 ("noData", "-999999"),
                 ("interpolation", "RSP_BilinearInterpolation"),
                 ("f", "image"),
@@ -654,8 +710,8 @@ fn request_sample_preload(derived_root: &Path, key: ChunkKey) {
     if std::thread::Builder::new()
         .name("threedep-elevation-preload".into())
         .spawn(move || {
-            let tile = ensure_chunk(&derived_root, key)
-                .and_then(|path| load_sample_tile(&path, key));
+            let tile =
+                ensure_chunk(&derived_root, key).and_then(|path| load_sample_tile(&path, key));
             if let Ok(mut guard) = sample_cache().lock() {
                 guard.loading.remove(&key);
                 match tile {
@@ -802,10 +858,8 @@ fn load_raw_f32(path: &Path, key: ChunkKey) -> Option<SampleTile> {
 /// budget. Eviction is safe at any time: a discarded chunk is simply
 /// re-downloaded the next time it is needed.
 pub fn enforce_cache_budget(derived_root: &Path) {
-    let budget_bytes = (settings_store::threedep_cache_budget_gb() as f64
-        * 1024.0
-        * 1024.0
-        * 1024.0) as u64;
+    let budget_bytes =
+        (settings_store::threedep_cache_budget_gb() as f64 * 1024.0 * 1024.0 * 1024.0) as u64;
     let root = cache_root(derived_root);
     let Ok(entries) = std::fs::read_dir(&root) else {
         return;
@@ -826,8 +880,7 @@ pub fn enforce_cache_budget(derived_root: &Path) {
         // A chunk's cost includes its decoded sampling sidecar, which is
         // evicted with it.
         let sidecar = path.with_extension("f32raw");
-        let size = meta.len()
-            + std::fs::metadata(&sidecar).map(|m| m.len()).unwrap_or(0);
+        let size = meta.len() + std::fs::metadata(&sidecar).map(|m| m.len()).unwrap_or(0);
         total += size;
         chunks.push((path, size, accessed));
     }
@@ -867,7 +920,6 @@ fn touch(path: &Path) {
         let _ = file.set_modified(std::time::SystemTime::now());
     }
 }
-
 
 // ── Direct tile rasters ──────────────────────────────────────────────────────
 
@@ -925,6 +977,7 @@ pub fn fetch_tile_raster_with_progress(
             ("size", size.as_str()),
             ("format", "tiff"),
             ("pixelType", "F32"),
+            ("mosaicRule", FINE_MOSAIC_RULE),
             ("noData", "-999999"),
             ("interpolation", "RSP_BilinearInterpolation"),
             ("f", "image"),
@@ -1011,6 +1064,51 @@ fn http_client() -> &'static reqwest::blocking::Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn coverage_errors_stay_retryable_and_edge_surveys_are_included() {
+        use serde_json::json;
+        assert_eq!(
+            classify_coverage(&json!({"error":{"code":503}})),
+            Coverage::Unknown
+        );
+        assert_eq!(classify_coverage(&json!({})), Coverage::Unknown);
+        assert_eq!(
+            classify_coverage(&json!({"features":[{"attributes":{}}]})),
+            Coverage::Unknown
+        );
+        assert_eq!(classify_coverage(&json!({"features":[]})), Coverage::Coarse);
+        assert_eq!(
+            classify_coverage(&json!({"features":[{"attributes":{"LowPS":10.}}]})),
+            Coverage::Coarse
+        );
+        assert_eq!(
+            classify_coverage(&json!({"features":[{"attributes":{"LowPS":1.}}]})),
+            Coverage::Fine
+        );
+        let entry = CoverageEntry {
+            value: Coverage::Unknown,
+            checked: Instant::now(),
+        };
+        assert_eq!(entry.cached(), Some(Coverage::Unknown));
+        let expired = CoverageEntry {
+            value: Coverage::Unknown,
+            checked: Instant::now() - Duration::from_secs(16),
+        };
+        assert_eq!(expired.cached(), None);
+        let cell = coverage_cell(GeoPoint {
+            lat: 35.26,
+            lon: -77.58,
+        });
+        let geometry: serde_json::Value = serde_json::from_str(&coverage_geometry(cell)).unwrap();
+        assert!(
+            geometry["xmin"].as_f64().unwrap() <= -77.58
+                && geometry["xmax"].as_f64().unwrap() > -77.58
+        );
+        assert!(
+            geometry["ymin"].as_f64().unwrap() <= 35.26
+                && geometry["ymax"].as_f64().unwrap() > 35.26
+        );
+    }
 
     #[test]
     fn chunk_keys_tile_the_grid_without_gaps() {
@@ -1048,10 +1146,22 @@ mod tests {
 
     #[test]
     fn service_area_screens_out_the_rest_of_the_world() {
-        assert!(within_service_area(GeoPoint { lat: 40.7, lon: -74.0 }));
-        assert!(within_service_area(GeoPoint { lat: 61.2, lon: -149.9 }));
-        assert!(!within_service_area(GeoPoint { lat: 48.85, lon: 2.35 }));
-        assert!(!within_service_area(GeoPoint { lat: -33.9, lon: 151.2 }));
+        assert!(within_service_area(GeoPoint {
+            lat: 40.7,
+            lon: -74.0
+        }));
+        assert!(within_service_area(GeoPoint {
+            lat: 61.2,
+            lon: -149.9
+        }));
+        assert!(!within_service_area(GeoPoint {
+            lat: 48.85,
+            lon: 2.35
+        }));
+        assert!(!within_service_area(GeoPoint {
+            lat: -33.9,
+            lon: 151.2
+        }));
     }
 
     // ── Live service smoke tests ─────────────────────────────────────────
@@ -1088,7 +1198,9 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         // Boulder foothills: strong relief, solid 1 m coverage.
-        assert!(fetch_tile_raster(40.014, -105.296, 40.026, -105.284, 1792, &path));
+        assert!(fetch_tile_raster(
+            40.014, -105.296, 40.026, -105.284, 1792, &path
+        ));
 
         let output = std::process::Command::new("gdalinfo")
             .args(["-stats", "-json"])

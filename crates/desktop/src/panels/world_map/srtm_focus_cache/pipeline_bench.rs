@@ -149,8 +149,10 @@ fn benchmark_live_threedep_pipeline() {
                 let _old_job = old_job;
                 let tile = TileKey {
                     zoom_bucket: spec.zoom_bucket,
-                    lat_bucket: (index / columns) as i32,
-                    lon_bucket: (index % columns) as i32,
+                    lat_bucket: (40.020 / (spec.half_extent_deg * 0.45)).round() as i32
+                        + (index / columns) as i32,
+                    lon_bucket: (-105.290 / (spec.half_extent_deg * 0.45)).round() as i32
+                        + (index % columns) as i32,
                 };
                 let bounds = GeoBounds::around(
                     crate::model::GeoPoint {
@@ -174,8 +176,19 @@ fn benchmark_live_threedep_pipeline() {
         })
         .unwrap();
     assert_eq!(completed, tiles as i64);
+    let contours: i64 = db
+        .query_row(
+            "SELECT coalesce(sum(contour_count),0) FROM contour_tile_manifest",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        contours > 0,
+        "the live benchmark must process terrain geometry, not empty ocean tiles"
+    );
     eprintln!(
-        "PIPELINE legacy={legacy} tiles={tiles} wall_ms={:.1} peak_rss_mib={:.1} peak_gdal={}",
+        "PIPELINE legacy={legacy} tiles={tiles} contours={contours} wall_ms={:.1} peak_rss_mib={:.1} peak_gdal={}",
         elapsed.as_secs_f64() * 1000.0,
         peak.rss_kib as f64 / 1024.0,
         peak.gdal_processes

@@ -46,6 +46,7 @@ pub(super) fn validate_url(url: &str) -> Result<()> {
                 | "cyberjapandata.gsi.go.jp"
                 | "nz-elevation.s3-ap-southeast-2.amazonaws.com"
                 | "nz-elevation.s3.ap-southeast-2.amazonaws.com"
+                | "services.gis.nc.gov"
         )
     );
     if url.scheme() != "https" || !allowed || !url.username().is_empty() || url.password().is_some()

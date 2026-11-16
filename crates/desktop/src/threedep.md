@@ -18,11 +18,18 @@ exists under a point, and pulls only the small area currently in view.
   budget as USGS, retaining the historical `3dep_1m` directory for compatibility.
   Confirmed nodata writes an empty marker; network errors never do. Server
   hillshade remains a USGS-only feature.
+- North Carolina uses the state's roughly one-metre LiDAR-derived DEM, filling
+  areas where USGS has not published a standard one-metre product. Its original
+  heights in US survey feet are normalized to metres. Confirmed state-service
+  gaps at the geographic screen's borders fall back to fine-only USGS requests.
 
 ### `coverage_at` / `coverage_at_blocking`
 
 - **Does**: Reports whether 3DEP publishes 1 m source under a point, on a 0.05°
-  probe grid. The nonblocking form returns `Unknown` on a miss and schedules one
+  probe grid. Queries cover the entire cell so partial surveys at its edges are
+  considered. Fine raster requests explicitly filter source pixel sizes at or
+  below 1.5 m, leaving uncovered pixels nodata instead of enlarging coarse data.
+  The nonblocking form returns `Unknown` on a miss and schedules one
   deduplicated background probe; the blocking form is for workers already off
   the UI thread.
 - **Interacts with**: the image service's catalog `query` endpoint,
@@ -30,6 +37,11 @@ exists under a point, and pulls only the small area currently in view.
 - **Rationale**: A catalog query is a small JSON response, so an uncovered area
   costs no raster download. A bounding-box screen rejects the rest of the world
   before any request is made.
+- HTTP failures, service errors, malformed and incomplete catalog replies remain
+  `Unknown`, retryable after a 15-second cooldown. They never become permanent
+  `Coarse`/sourceless terrain. Coverage probes have a 20-second request timeout.
+  Requests include the source name with its pixel size: live testing found
+  `outFields=LowPS` alone returned HTTP 502 while `Name,LowPS` succeeded.
 
 ### `fetch_tile_raster`
 

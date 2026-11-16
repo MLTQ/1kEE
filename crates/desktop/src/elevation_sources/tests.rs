@@ -22,6 +22,7 @@ fn country_screens_are_fast_candidates_not_global_requests() {
         (48.85, 2.35),
         (-41.29, 174.775),
         (35.68, 139.77),
+        (35.26, -77.58),
     ] {
         assert!(possible_at(GeoPoint { lat, lon }));
     }
@@ -145,6 +146,7 @@ fn live_international_elevation_sources() {
         (Provider::Switzerland, 46.945, 7.445),
         (Provider::NewZealand, -41.29, 174.775),
         (Provider::Japan, 35.681, 139.767),
+        (Provider::NorthCarolina, 35.26, -77.58),
     ];
     let filter = std::env::var("ONEKEE_ELEVATION_TEST_PROVIDER").unwrap_or_default();
     let mut failures = Vec::new();
@@ -165,6 +167,27 @@ fn live_international_elevation_sources() {
             Ok(actual) => {
                 assert_eq!(actual, provider);
                 assert!(std::fs::metadata(&output).unwrap().len() > 1000);
+                if provider == Provider::NorthCarolina {
+                    let info = std::process::Command::new(
+                        crate::settings_store::resolve_gdal_tool("gdalinfo"),
+                    )
+                    .args(["-json", "-stats"])
+                    .arg(&output)
+                    .output()
+                    .unwrap();
+                    assert!(info.status.success());
+                    let info: serde_json::Value = serde_json::from_slice(&info.stdout).unwrap();
+                    let mean = info["bands"][0]["metadata"][""]["STATISTICS_MEAN"]
+                        .as_str()
+                        .unwrap()
+                        .parse::<f64>()
+                        .unwrap();
+                    assert!(
+                        (5.0..20.0).contains(&mean),
+                        "Kinston terrain must be metres, not unconverted source feet: {mean}"
+                    );
+                    eprintln!("Kinston normalized terrain mean: {mean:.3} m");
+                }
                 eprintln!(
                     "{} verified in {:.2}s",
                     provider.label(),

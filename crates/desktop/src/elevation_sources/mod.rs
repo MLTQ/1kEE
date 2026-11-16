@@ -1,7 +1,8 @@
-//! Bounded on-demand bare-earth elevation outside the USGS service area.
+//! Bounded on-demand bare-earth elevation supplementing the USGS service.
 mod http;
 mod japan;
 mod new_zealand;
+mod north_carolina;
 mod raster;
 mod services;
 mod swiss;
@@ -13,13 +14,14 @@ use std::time::{Duration, Instant};
 pub use tile_archive::contour_grid::Bounds;
 
 pub const NODATA: f32 = -999_999.0;
-pub const PROVIDERS: [Provider; 6] = [
+pub const PROVIDERS: [Provider; 7] = [
     Provider::England,
     Provider::Netherlands,
     Provider::Switzerland,
     Provider::France,
     Provider::NewZealand,
     Provider::Japan,
+    Provider::NorthCarolina,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -30,6 +32,7 @@ pub enum Provider {
     France,
     NewZealand,
     Japan,
+    NorthCarolina,
 }
 
 impl Provider {
@@ -41,6 +44,7 @@ impl Provider {
             Self::France => "France — © IGN LiDAR HD, 0.5 m",
             Self::NewZealand => "New Zealand — Toitū Te Whenua LINZ, 1 m (CC BY 4.0)",
             Self::Japan => "Japan — Geospatial Information Authority of Japan, 1–10 m",
+            Self::NorthCarolina => "North Carolina — NCEM / NC OneMap LiDAR DEM, ~1 m",
         }
     }
     pub fn url(self) -> &'static str {
@@ -53,9 +57,12 @@ impl Provider {
             Self::France => "https://www.data.gouv.fr/datasets/mnt-lidar-hd",
             Self::NewZealand => "https://github.com/linz/elevation",
             Self::Japan => "https://maps.gsi.go.jp/development/ichiran.html#dem",
+            Self::NorthCarolina => {
+                "https://services.gis.nc.gov/secure/rest/services/Elevation/DEM03/ImageServer"
+            }
         }
     }
-    fn contains(self, p: GeoPoint) -> bool {
+    pub(crate) fn contains(self, p: GeoPoint) -> bool {
         let (west, south, east, north) = match self {
             Self::England => (-6.5, 49.8, 2.1, 55.9),
             Self::Netherlands => (3.2, 50.7, 7.3, 53.7),
@@ -63,6 +70,7 @@ impl Provider {
             Self::France => (-5.2, 41.3, 9.7, 51.2),
             Self::NewZealand => (165.0, -48.0, 179.9, -33.0),
             Self::Japan => (122.0, 24.0, 146.0, 46.0),
+            Self::NorthCarolina => (-84.4, 33.8, -75.4, 36.65),
         };
         (west..=east).contains(&p.lon) && (south..=north).contains(&p.lat)
     }
@@ -172,6 +180,7 @@ pub fn fetch(
             Provider::Japan => japan::fetch(request, &scratch, &mut on_bytes),
             Provider::Switzerland => swiss::fetch(request, &scratch),
             Provider::NewZealand => new_zealand::fetch(request, &scratch),
+            Provider::NorthCarolina => north_carolina::fetch(request, &scratch, &mut on_bytes),
             _ => services::fetch(provider, request, &scratch, &mut on_bytes),
         };
         match result {
@@ -215,7 +224,7 @@ impl Drop for Scratch {
 }
 
 // Contours and point samples share two active requests per public provider.
-static ACTIVE: [AtomicUsize; 6] = [const { AtomicUsize::new(0) }; 6];
+static ACTIVE: [AtomicUsize; PROVIDERS.len()] = [const { AtomicUsize::new(0) }; PROVIDERS.len()];
 struct Permit(usize);
 impl Permit {
     fn acquire(provider: Provider) -> Result<Self> {

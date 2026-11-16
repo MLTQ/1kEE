@@ -1,0 +1,41 @@
+{
+  "date": "2026-11-16",
+  "source": "NCEM / NC OneMap DEM03",
+  "service": "https://services.gis.nc.gov/secure/rest/services/Elevation/DEM03/ImageServer",
+  "source_grid_us_survey_feet": 3.125,
+  "source_grid_metres": 0.95250190500381,
+  "height_scale_to_metres": 0.3048006096012192,
+  "north_carolina_live_window": {
+    "center": [
+      35.26,
+      -77.58
+    ],
+    "place": "Kinston",
+    "normalized_mean_metres": 12.441,
+    "passed": true,
+    "usgs_one_metre_point_catalog_count": 0
+  },
+  "usgs_reference": {
+    "place": "Spruce Pine area",
+    "center": [
+      35.944,
+      -82.018
+    ],
+    "fine_survey": "NC_Phase5_2018_A18",
+    "source_pixel_metres": 1
+  },
+  "usgs_live_probe": "passed: Manhattan fine, Anchorage coarse",
+  "live_contour_build": "passed: sub-metre contour geometry imported into a real cache",
+  "pipeline": {
+    "tiles": 2,
+    "contour_features": 1311,
+    "wall_ms": 6182.5,
+    "peak_rss_mib": 65.4,
+    "peak_gdal_processes": 1
+  },
+  "notes": [
+    "Contour spacing is vertical spacing, not positional accuracy.",
+    "State source heights normalized from US survey feet to metres; no datum transformation.",
+    "Live terrain fixtures use geographic tile keys and require nonempty geometry."
+  ]
+}

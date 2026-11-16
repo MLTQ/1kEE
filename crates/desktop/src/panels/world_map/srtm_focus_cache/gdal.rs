@@ -1001,6 +1001,21 @@ pub fn build_threedep_contours(
             &mut on_bytes,
         ) {
             Ok(_) => true,
+            Err(crate::elevation_sources::Error::NoCoverage)
+                if crate::elevation_sources::Provider::NorthCarolina.contains(center) =>
+            {
+                // The state's bounding screen includes a little of its
+                // neighbors; retain the USGS fine source at those borders.
+                crate::threedep::fetch_tile_raster_with_progress(
+                    core.source.min_lat,
+                    core.source.min_lon,
+                    core.source.max_lat,
+                    core.source.max_lon,
+                    spec.raster_size,
+                    &tmp_tif_path,
+                    on_bytes,
+                )
+            }
             Err(crate::elevation_sources::Error::NoCoverage) => {
                 super::builders::record_international_uncovered(tile);
                 false
@@ -1482,8 +1497,8 @@ mod tests {
         assert!(super::super::zoom::spec_uses_threedep(&spec));
         let tile = TileKey {
             zoom_bucket: spec.zoom_bucket,
-            lat_bucket: 0,
-            lon_bucket: 0,
+            lat_bucket: (40.020 / (spec.half_extent_deg * 0.45)).round() as i32,
+            lon_bucket: (-105.290 / (spec.half_extent_deg * 0.45)).round() as i32,
         };
         let bounds = GeoBounds::around(
             GeoPoint {
@@ -1506,13 +1521,16 @@ mod tests {
         let manifest = super::super::db::contour_manifest_window(
             &connection,
             spec.zoom_bucket,
-            -1,
-            1,
-            -1,
-            1,
+            tile.lat_bucket - 1,
+            tile.lat_bucket + 1,
+            tile.lon_bucket - 1,
+            tile.lon_bucket + 1,
         )
         .expect("manifest window");
-        let count = manifest.get(&(0, 0)).copied().expect("tile in manifest");
+        let count = manifest
+            .get(&(tile.lat_bucket, tile.lon_bucket))
+            .copied()
+            .expect("tile in manifest");
         assert!(
             count > 100,
             "expected sub-metre contours over real relief, got {count}"

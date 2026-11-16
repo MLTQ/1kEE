@@ -28,6 +28,27 @@ See [fused LiDAR preparation and benchmarks](lidar-fusion.md) for resolution,
 source coverage, resumable conversion and retention limits. Source discovery and
 bulk acquisition remain available as independent command-line tools below.
 
+## Detailed terrain contours
+
+The fine cyan terrain lines are a separate bare-earth elevation pipeline. In
+the U.S. this uses [USGS 3DEP](https://www.usgs.gov/3d-elevation-program/about-3dep-products-services)
+and now [NCEM / NC OneMap's statewide LiDAR-derived DEM](https://services.gis.nc.gov/secure/rest/services/Elevation/DEM03/ImageServer)
+in North Carolina. The latter fills areas such as Kinston where the USGS query
+did not advertise a standard one-metre product. Its approximately 0.95 m grid
+and original elevation values in US survey feet are normalized to metres for
+the existing contour and point-sampling renderer; no vertical datum conversion
+is claimed. Six international source adapters also remain available where their
+publishers provide data.
+
+At close zoom, `0.5 m contours` describes vertical line spacing, not horizontal
+pixel resolution or guaranteed measurement accuracy. A narrow detailed patch
+with a status such as `SOURCE 2/9` can simply be the completed portion of a
+larger loading view. The surrounding coarse terrain remains until detailed
+source windows and geometry are ready. Fine coverage probes now include survey
+edges and retry temporary catalog failures instead of marking them permanently
+uncovered. Fine-only USGS exports leave actual coverage gaps empty rather than
+resampling a coarse source into apparent fine detail.
+
 ## Catalogs
 
 | Feed | What the index contains | Access |

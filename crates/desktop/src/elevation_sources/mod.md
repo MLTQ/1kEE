@@ -2,7 +2,7 @@
 
 ## Purpose
 Route small, on-demand bare-earth elevation windows to official international
-providers, for the existing contour and point-sampling pipelines.
+and state providers, for the existing contour and point-sampling pipelines.
 
 ## Components
 - `Provider` holds geographic screens, visible credits, and official links.
@@ -17,6 +17,16 @@ Only background workers call fetch. Requests are finite, at most 0.25 degrees
 per axis and 2400 pixels per side. GDAL subprocesses have timeout/shutdown
 handling. Current coverage is England, metropolitan France, Netherlands,
 Switzerland, New Zealand's main islands and Japan. USGS remains its own adapter.
+North Carolina additionally uses NCEM / NC OneMap's statewide LiDAR-derived
+DEM03 service, including eastern areas absent from USGS's one-metre catalog.
+Its 3.125 US-survey-foot grid is about 0.95 m. Source heights are converted from
+US survey feet to metres after XY/nodata normalization; the vertical reference
+is retained without a datum transformation. The common raster validator checks
+the normalized result before publication. The state's geographic screen is a
+candidate only; confirmed gaps near its borders retain the USGS fine-only
+fallback in the contour and point-chunk paths. Temporary service failures stay
+retryable. Sources remain clipped to requested windows and use the same two-job
+provider limit, request-size cap and cache budget.
 Completed contours persist in the existing cache; source rasters do not.
 
 A per-request 180-second deadline covers catalog pagination, PNG fallbacks,
