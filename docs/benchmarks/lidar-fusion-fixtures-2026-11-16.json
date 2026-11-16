@@ -1,0 +1,32 @@
+[
+  {
+    "name": "richmond-2025",
+    "path": "/run/media/m/Minkowski/Data/Lidar/scans/North America/United States/021c498853437065b324-20250214_7742_14NW.copc.laz",
+    "survey": "NOAAID:14835",
+    "bytes": 35884814,
+    "points": 5111898,
+    "z": 15,
+    "x": 18640,
+    "y": 9549
+  },
+  {
+    "name": "ozarks-2024",
+    "path": "/run/media/m/Minkowski/Data/Lidar/scans/North America/United States/9a865afc2e82b1bf3de5-20230922_691500e_4058500n.copc.laz",
+    "survey": "NOAAID:13981",
+    "bytes": 30434727,
+    "points": 4507308,
+    "z": 15,
+    "x": 16228,
+    "y": 9711
+  },
+  {
+    "name": "swiss-2026",
+    "path": "/run/media/m/Minkowski/Data/Lidar/scans/Europe/Switzerland/32de1ae71aba01a1a395-swisssurface3d_2026_2659-1237_2056_5728.copc.laz",
+    "survey": "swisssurface3d:swisssurface3d_2026_2659-1237:swisssurface3d_2026_2659-1237_2056_5728.copc.laz",
+    "bytes": 64242980,
+    "points": 13577020,
+    "z": 15,
+    "x": 34265,
+    "y": 7775
+  }
+]

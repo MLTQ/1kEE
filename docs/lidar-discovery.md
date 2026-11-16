@@ -10,6 +10,12 @@ To find a survey elsewhere, open **Layers → Public Data → Lidar surveys**. S
 
 1kEE saves each completed 512 × 512 map tile under **Lidar/maps/v1** in the configured Data directory. Both views reuse that cache across launches and offline. Tiles use a north-up longitude/latitude grid. PNG metadata records the contributing surveys. Point-cloud blocks and service responses are reused from **Lidar/map-source-cache**. Catalog changes invalidate saved path outlines and empty results. Lidar and webcam markers start hidden on each launch. Turning either layer on lasts for the current session. Saved lidar tiles remain available on disk.
 
+Prepared numeric scans under **Lidar/fused/v1** avoid decoding raw point clouds
+for each map view. **Automatic** uses newer catalog acquisitions first and fills
+their unmeasured pixels from older surveys. Explicit selections retain their own
+date. See [fused LiDAR preparation and benchmarks](lidar-fusion.md) for resolution,
+source coverage, resumable conversion and retention limits.
+
 ## Catalogs
 
 | Feed | What the index contains | Access |

@@ -126,9 +126,9 @@ fn key(tile: Tile, detail: bool, generation: u32, preferred: &str) -> Key {
     let variant = if !detail {
         format!("paths-v2-{generation}")
     } else if preferred.is_empty() {
-        "detail-auto".into()
+        "detail-auto-fused-v1".into()
     } else {
-        format!("detail-{:x}", Sha1::digest(preferred.as_bytes()))
+        format!("detail-fused-v1-{:x}", Sha1::digest(preferred.as_bytes()))
     };
     Key {
         tile,
@@ -478,19 +478,23 @@ fn catalog_snapshot(
         sequence: None,
         revisions: Vec::new(),
     };
-    if let Some(bulk) = bulk_index(path) {
-        snapshot.sequence = bulk
-            .query_row("SELECT coalesce(max(rowid),0) FROM files", [], |r| r.get(0))
-            .ok();
-        if snapshot.sequence.is_some_and(|seq| seq != previous) {
-            snapshot.revisions = keys
-                .into_iter()
-                .map(|k| {
-                    let version = bulk_revision(&bulk, k.tile, preferred);
-                    (k, version)
-                })
-                .collect();
-        }
+    let bulk = bulk_index(path);
+    let raw_sequence: i64 = bulk
+        .as_ref()
+        .and_then(|db| {
+            db.query_row("SELECT coalesce(max(rowid),0) FROM files", [], |r| r.get(0))
+                .ok()
+        })
+        .unwrap_or(0);
+    snapshot.sequence = Some(raw_sequence + fused_revision(path, None, "") * 1_000_000_000);
+    if snapshot.sequence.is_some_and(|seq| seq != previous) {
+        snapshot.revisions = keys
+            .into_iter()
+            .map(|k| {
+                let version = tile_revision(path, bulk.as_ref(), k.tile, preferred);
+                (k, version)
+            })
+            .collect();
     }
     Ok(snapshot)
 }
@@ -501,6 +505,42 @@ fn bulk_index(catalog: &Path) -> Option<rusqlite::Connection> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .ok()
+}
+
+fn fused_revision(catalog: &Path, tile: Option<Tile>, preferred: &str) -> i64 {
+    let Some(root) = catalog.parent() else {
+        return 0;
+    };
+    let Ok(db) = rusqlite::Connection::open_with_flags(
+        root.join("fused/v1/index.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) else {
+        return 0;
+    };
+    if let Some(tile) = tile {
+        let [w, s, e, n] = tile.bounds();
+        db.query_row(
+            "SELECT coalesce(max(id),0) FROM rasters WHERE west<?1 AND east>=?2
+            AND south<?3 AND north>=?4 AND (?5='' OR survey=?5 OR
+            (substr(?5,-1)='/' AND instr(survey,?5)=1))",
+            rusqlite::params![e, w, n, s, preferred],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
+    } else {
+        db.query_row("SELECT coalesce(max(id),0) FROM rasters", [], |r| r.get(0))
+            .unwrap_or(0)
+    }
+}
+
+fn tile_revision(
+    catalog: &Path,
+    bulk: Option<&rusqlite::Connection>,
+    tile: Tile,
+    preferred: &str,
+) -> i64 {
+    bulk.map_or(0, |db| bulk_revision(db, tile, preferred))
+        + fused_revision(catalog, Some(tile), preferred) * 1_000_000_000
 }
 
 fn bulk_revision(db: &rusqlite::Connection, tile: Tile, preferred: &str) -> i64 {
@@ -537,31 +577,10 @@ fn load(
     let target = tile_path(db, k);
     let mut output = target.clone();
     let revision = if k.detail {
-        bulk_index(db).map_or(0, |b| bulk_revision(&b, k.tile, preferred))
+        tile_revision(db, bulk_index(db).as_ref(), k.tile, preferred)
     } else {
         0
     };
-    // A selected acquisition is also a valid offline map in automatic mode.
-    // Look it up across the saved variants without copying data on external drives.
-    if k.detail && preferred.is_empty() && !output.is_file() {
-        let root = db.parent().unwrap_or(Path::new(".")).join("maps/v1");
-        if let Ok(variants) = std::fs::read_dir(root) {
-            let relative = PathBuf::from(z.to_string())
-                .join(x.to_string())
-                .join(format!("{y}.png"));
-            if let Some((_, cached)) = variants
-                .flatten()
-                .filter(|d| d.file_name().to_string_lossy().starts_with("detail-"))
-                .filter_map(|d| {
-                    let path = d.path().join(&relative);
-                    Some((path.metadata().ok()?.modified().ok()?, path))
-                })
-                .max()
-            {
-                output = cached;
-            }
-        }
-    }
     // Older workers cached selected NASA granules as empty before they could read them.
     let empty_prefix = if k.detail
         && preferred.starts_with('G')
@@ -704,7 +723,7 @@ fn load(
 mod tests {
     use super::*;
     #[test]
-    fn saved_selected_map_is_available_on_automatic_offline_revisit() {
+    fn automatic_revisit_does_not_reuse_an_arbitrary_selected_survey() {
         let tmp = tempfile::tempdir().unwrap();
         let db = tmp.path().join("absent.sqlite");
         let tile = Tile {
@@ -719,15 +738,49 @@ mod tests {
         image.put_pixel(10, 20, image::Rgba([200, 130, 70, 255]));
         image.save(output).unwrap();
         let auto = key(tile, true, 9, "");
-        let (reopened, _) = load(&db, &auto, "", 9, &tmp.path().join("no-worker"))
-            .unwrap()
-            .unwrap();
-        assert_eq!(reopened.bounds, tile.bounds());
-        assert_eq!(
-            reopened.pixels[(10, 20)],
-            egui::Color32::from_rgb(200, 130, 70)
+        let empty = tile_path(&db, &auto).with_extension("empty-9");
+        std::fs::create_dir_all(empty.parent().unwrap()).unwrap();
+        std::fs::write(empty, "").unwrap();
+        assert!(
+            load(&db, &auto, "", 9, &tmp.path().join("no-worker"))
+                .unwrap()
+                .is_none()
         );
-        assert_eq!(reopened.pixels[(0, 0)], egui::Color32::TRANSPARENT);
+    }
+
+    #[test]
+    fn converted_scan_invalidates_only_intersecting_acquisition_tiles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let catalog = tmp.path().join("catalog.sqlite");
+        rusqlite::Connection::open(&catalog).unwrap();
+        let root = tmp.path().join("fused/v1");
+        std::fs::create_dir_all(&root).unwrap();
+        let db = rusqlite::Connection::open(root.join("index.sqlite")).unwrap();
+        db.execute_batch("CREATE TABLE rasters (id INTEGER, survey TEXT, west REAL, south REAL, east REAL, north REAL);
+            INSERT INTO rasters VALUES (1,'new',-77.61,37.54,-77.60,37.55);").unwrap();
+        let tile = Tile {
+            z: 15,
+            x: 18640,
+            y: 9549,
+        };
+        let before = tile_revision(&catalog, None, tile, "new");
+        assert!(before > 0);
+        assert_eq!(tile_revision(&catalog, None, tile, "old"), 0);
+        assert_eq!(
+            tile_revision(
+                &catalog,
+                None,
+                Tile {
+                    x: tile.x + 10,
+                    ..tile
+                },
+                "new"
+            ),
+            0
+        );
+        db.execute("UPDATE rasters SET id=2", []).unwrap();
+        assert_ne!(tile_revision(&catalog, None, tile, "new"), before);
+        assert_eq!(fused_revision(&catalog, None, ""), 2);
     }
 
     #[test]

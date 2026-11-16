@@ -1,7 +1,7 @@
 """Render a georeferenced map tile from the local survey index or published measurements."""
 import argparse
 from collections import defaultdict, deque
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 import gzip
 import hashlib
 import io
@@ -79,8 +79,7 @@ def matching(db, box, measurements=False, preferred="", local=False):
         selected_nasa = f" OR {nasa}" if preferred else ""
         sql += f""" AND ({PUBLISHED} OR product='NASA lidar raster' OR product='Lidar raster'
                     OR (source='eba' AND {int(local)}){selected_nasa})
-                    ORDER BY source='linz-coastal' DESC, source='infomar-lidar' DESC,
-                    stac IS NOT NULL DESC, date DESC, id"""
+                    ORDER BY coalesce(date,'') DESC, id"""
     return db.execute(sql, (e, w, n, s, *args))
 
 
@@ -242,7 +241,7 @@ def ept_returns(row, box, folder):
     return elevation_image(values.reshape(SIZE, SIZE), box)
 
 
-def raster_image(urls, box, src_crs=None, depth=False):
+def raster_image(urls, box, src_crs=None, depth=False, band=1):
     import rasterio
     from rasterio.transform import from_bounds
     from rasterio.enums import Resampling
@@ -254,9 +253,10 @@ def raster_image(urls, box, src_crs=None, depth=False):
         for url in urls:
             check_view()
             with rasterio.open(url) as ds, WarpedVRT(ds, src_crs=src_crs or ds.crs, crs="EPSG:4326", transform=transform,
-                    width=SIZE, height=SIZE, resampling=Resampling.bilinear, dtype="float32",
+                    width=SIZE, height=SIZE,
+                    resampling=Resampling.nearest if band == 3 else Resampling.bilinear, dtype="float32",
                     nodata=float("nan")) as vrt:
-                data = vrt.read(1, masked=True).filled(np.nan)
+                data = vrt.read(band, masked=True).filled(np.nan)
                 np.copyto(values, data, where=np.isfinite(data))
     return elevation_image(-values if depth else values, box)
 
@@ -347,6 +347,10 @@ def survey_image(row, box, folder):
 
 def offline_assets(root, box, preferred=""):
     result = defaultdict(list)
+    prepared = fused_assets(root, box, preferred)
+    converted = {url: file for url, survey, file in prepared}
+    for url, survey, file in prepared:
+        result[survey].append(("fused", file, None))
     index = root / "bulk.sqlite"
     if index.is_file():
         with sqlite3.connect(index.resolve().as_uri() + "?mode=ro", uri=True) as db:
@@ -354,6 +358,8 @@ def offline_assets(root, box, preferred=""):
             query = "SELECT survey,kind,path,url FROM files WHERE west<? AND east>=? AND south<? AND north>=?"
             clause, args = survey_filter("survey", preferred)
             for survey, kind, path, url in db.execute(query + clause, (e, w, n, s, *args)):
+                if url in converted:
+                    continue
                 file = root / path
                 result[survey].append((kind, file if file.is_file() else url, None))
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='transects'").fetchone():
@@ -365,6 +371,19 @@ def offline_assets(root, box, preferred=""):
                     file = root / path
                     result[survey].append(("laz", file if file.is_file() else url, member))
     return result
+
+
+def fused_assets(root, box, preferred=""):
+    index = root / "fused/v1/index.sqlite"
+    if not index.is_file():
+        return []
+    w, s, e, n = box
+    clause, args = survey_filter("survey", preferred)
+    with closing(sqlite3.connect(index.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+        rows = db.execute("SELECT url,survey,path FROM rasters WHERE west<? AND east>=? "
+                          "AND south<? AND north>=?" + clause + " ORDER BY date DESC,url", (e,w,n,s,*args))
+        # A missing derived file falls through to the raw/publisher path.
+        return [(url,survey,root/path) for url,survey,path in rows if (root/path).is_file()]
 
 
 def local_cloud(files, box):
@@ -422,6 +441,16 @@ def local_cloud(files, box):
 
 
 def offline_image(files, box):
+    if any(kind == "fused" for kind, _, _ in files):
+        # Keep each scan's gaps transparent. Same-date file ties are stable;
+        # different acquisitions are resolved by measurements' date order.
+        image = Image.new("RGBA", (SIZE, SIZE))
+        for kind, path, member in files:
+            check_view()
+            part = (raster_image([str(path)], box, band=3) if kind == "fused"
+                    else offline_image([(kind,path,member)], box))
+            image = Image.alpha_composite(part, image)
+        return image
     kind, path, _ = files[0]
     if kind in ("relief", "soundings"):
         return irish_relief(str(path), box, soundings=kind == "soundings")
@@ -434,8 +463,7 @@ def measurements(db, box, folder, preferred):
     local = offline_assets(folder.parent, box, preferred)
     rows = matching(db, box, True, preferred, bool(local))
     if local:
-        on_disk = {survey for survey, files in local.items() if any(isinstance(path, Path) for _, path, _ in files)}
-        rows = sorted(rows, key=lambda r: r["id"] not in on_disk)
+        rows = list(rows)
     result = Image.new("RGBA", (SIZE, SIZE))
     credits = []
     covered = Image.new("L", result.size)
@@ -474,7 +502,7 @@ def measurements(db, box, folder, preferred):
             credit = ("swisstopo · swissSURFACE3D Raster shaded surface", SWISS_LAYER,
                       "https://www.swisstopo.admin.ch/en/height-model-swisssurface3d-raster")
         credits.append(credit)
-        covered = ImageChops.lighter(covered, mask)
+        covered = ImageChops.lighter(covered, image.getchannel("A"))
         if row["id"] == preferred or result.getchannel("A").getextrema()[0] == 255:
             break
         # At country scale show a measured preview. Local tiles fill adjacent survey strips.

@@ -1,0 +1,445 @@
+{
+  "machine": {
+    "system": "Linux",
+    "node": "Aine",
+    "release": "7.2.15-1-omarchy",
+    "version": "#1 SMP PREEMPT_DYNAMIC Mon, 02 Nov 2026 10:32:17 +0000",
+    "machine": "x86_64",
+    "processor": ""
+  },
+  "runs": 3,
+  "protocol": "One warmup, alternating full-scan builds; OS/drive caches uncontrolled. Current COPC reads use resolution LOD; full-scan fused rasters use every valid point. Times exclude interpreter startup, include child CLI startup and raster compression. Final timing pass ran after repository compilation and sample publication completed; no other task-owned conversion/build ran during this pass. Other desktop activity was not isolated.",
+  "fixtures": [
+    {
+      "name": "richmond-2025",
+      "path": "/run/media/m/Minkowski/Data/Lidar/scans/North America/United States/021c498853437065b324-20250214_7742_14NW.copc.laz",
+      "survey": "NOAAID:14835",
+      "bytes": 35884814,
+      "points": 5111898,
+      "z": 15,
+      "x": 18640,
+      "y": 9549,
+      "sha256": "55d40e790077c32764e641143de85637791c7123d8ddab733f468efc3cac42ca",
+      "grid": {
+        "w": -77.60482549667358,
+        "s": 37.53945708274841,
+        "width": 430,
+        "height": 343,
+        "resolution": 1.0728836059570312e-05,
+        "bounds": [
+          -77.60481447413378,
+          37.5394694966703,
+          -77.60022451068461,
+          37.54312403098807
+        ]
+      },
+      "builds": [
+        {
+          "repeat": -1,
+          "engine": "python",
+          "seconds": 3.414013542002067
+        },
+        {
+          "repeat": -1,
+          "engine": "gpupdal",
+          "seconds": 4.114516749992617
+        },
+        {
+          "repeat": 0,
+          "engine": "gpupdal",
+          "seconds": 4.218389400994056
+        },
+        {
+          "repeat": 0,
+          "engine": "python",
+          "seconds": 3.468999425007496
+        },
+        {
+          "repeat": 1,
+          "engine": "python",
+          "seconds": 3.3103926699986914
+        },
+        {
+          "repeat": 1,
+          "engine": "gpupdal",
+          "seconds": 4.411031474999618
+        },
+        {
+          "repeat": 2,
+          "engine": "gpupdal",
+          "seconds": 4.499646142998245
+        },
+        {
+          "repeat": 2,
+          "engine": "python",
+          "seconds": 3.3371047569962684
+        }
+      ],
+      "reads": [
+        {
+          "repeat": -1,
+          "engine": "current",
+          "seconds": 1.2531902339978842
+        },
+        {
+          "repeat": -1,
+          "engine": "fused",
+          "seconds": 0.03943917700962629
+        },
+        {
+          "repeat": 0,
+          "engine": "fused",
+          "seconds": 0.027670120995026082
+        },
+        {
+          "repeat": 0,
+          "engine": "current",
+          "seconds": 1.2394795829895884
+        },
+        {
+          "repeat": 1,
+          "engine": "current",
+          "seconds": 1.2429057429981185
+        },
+        {
+          "repeat": 1,
+          "engine": "fused",
+          "seconds": 0.03886221100401599
+        },
+        {
+          "repeat": 2,
+          "engine": "fused",
+          "seconds": 0.027841383998747915
+        },
+        {
+          "repeat": 2,
+          "engine": "current",
+          "seconds": 1.141627069999231
+        }
+      ],
+      "parity": {
+        "valid_cells": 129246,
+        "coverage_mismatch": 0,
+        "count_mismatch": 280,
+        "max_mean_error_m": 0.7694091796875,
+        "p95_mean_error_m": 0.0,
+        "valid_points": 5111898,
+        "max_extrema_error_m": 1.1100006103515625
+      },
+      "raster_bytes": {
+        "python": 1309338,
+        "gpupdal": 1981030
+      },
+      "current_lod_comparison": {
+        "current_pixels": 65398,
+        "fused_pixels": 65407,
+        "shared_pixels": 65398,
+        "p50_height_difference_m": 1.5236074418704249,
+        "p95_height_difference_m": 6.065700460624762,
+        "max_height_difference_m": 17.55518621509755
+      },
+      "builds_medians": {
+        "python": 3.3371047569962684,
+        "gpupdal": 4.411031474999618
+      },
+      "reads_medians": {
+        "current": 1.2394795829895884,
+        "fused": 0.027841383998747915
+      }
+    },
+    {
+      "name": "ozarks-2024",
+      "path": "/run/media/m/Minkowski/Data/Lidar/scans/North America/United States/9a865afc2e82b1bf3de5-20230922_691500e_4058500n.copc.laz",
+      "survey": "NOAAID:13981",
+      "bytes": 30434727,
+      "points": 4507308,
+      "z": 15,
+      "x": 16228,
+      "y": 9711,
+      "sha256": "64ae8787097885d04e9aa7abbe713b09b186567b68f8c322bd97bbba77bbac5a",
+      "grid": {
+        "w": -90.85781335830688,
+        "s": 36.650390625,
+        "width": 561,
+        "height": 256,
+        "resolution": 1.0728836059570312e-05,
+        "bounds": [
+          -90.85779747169707,
+          36.650409988061476,
+          -90.85181101474183,
+          36.65312355849465
+        ]
+      },
+      "builds": [
+        {
+          "repeat": -1,
+          "engine": "python",
+          "seconds": 1.9462896280019777
+        },
+        {
+          "repeat": -1,
+          "engine": "gpupdal",
+          "seconds": 2.929525105995708
+        },
+        {
+          "repeat": 0,
+          "engine": "gpupdal",
+          "seconds": 3.3368393080017995
+        },
+        {
+          "repeat": 0,
+          "engine": "python",
+          "seconds": 1.9529336299892748
+        },
+        {
+          "repeat": 1,
+          "engine": "python",
+          "seconds": 1.825275924988091
+        },
+        {
+          "repeat": 1,
+          "engine": "gpupdal",
+          "seconds": 2.9548020279908087
+        },
+        {
+          "repeat": 2,
+          "engine": "gpupdal",
+          "seconds": 2.649833912990289
+        },
+        {
+          "repeat": 2,
+          "engine": "python",
+          "seconds": 1.872348956996575
+        }
+      ],
+      "reads": [
+        {
+          "repeat": -1,
+          "engine": "current",
+          "seconds": 0.5513871910079615
+        },
+        {
+          "repeat": -1,
+          "engine": "fused",
+          "seconds": 0.028615229995921254
+        },
+        {
+          "repeat": 0,
+          "engine": "fused",
+          "seconds": 0.02021137000701856
+        },
+        {
+          "repeat": 0,
+          "engine": "current",
+          "seconds": 0.500729063001927
+        },
+        {
+          "repeat": 1,
+          "engine": "current",
+          "seconds": 0.5510279539885232
+        },
+        {
+          "repeat": 1,
+          "engine": "fused",
+          "seconds": 0.02536599399172701
+        },
+        {
+          "repeat": 2,
+          "engine": "fused",
+          "seconds": 0.042233148007653654
+        },
+        {
+          "repeat": 2,
+          "engine": "current",
+          "seconds": 0.5453876059909817
+        }
+      ],
+      "parity": {
+        "valid_cells": 95369,
+        "coverage_mismatch": 0,
+        "count_mismatch": 0,
+        "max_mean_error_m": 0.0,
+        "p95_mean_error_m": 0.0,
+        "valid_points": 4507308,
+        "max_extrema_error_m": 0.0
+      },
+      "raster_bytes": {
+        "python": 847327,
+        "gpupdal": 978226
+      },
+      "current_lod_comparison": {
+        "current_pixels": 86283,
+        "fused_pixels": 86338,
+        "shared_pixels": 86283,
+        "p50_height_difference_m": 0.12931131506590532,
+        "p95_height_difference_m": 2.385758908006876,
+        "max_height_difference_m": 17.9793915997019
+      },
+      "builds_medians": {
+        "python": 1.872348956996575,
+        "gpupdal": 2.9548020279908087
+      },
+      "reads_medians": {
+        "current": 0.5453876059909817,
+        "fused": 0.02536599399172701
+      }
+    },
+    {
+      "name": "swiss-2026",
+      "path": "/run/media/m/Minkowski/Data/Lidar/scans/Europe/Switzerland/32de1ae71aba01a1a395-swisssurface3d_2026_2659-1237_2056_5728.copc.laz",
+      "survey": "swisssurface3d:swisssurface3d_2026_2659-1237:swisssurface3d_2026_2659-1237_2056_5728.copc.laz",
+      "bytes": 64242980,
+      "points": 13577020,
+      "z": 15,
+      "x": 34265,
+      "y": 7775,
+      "sha256": "cfc2909781859c4d758729396aa8679cf5f80ec3aba35023b949d2a147e2f060",
+      "grid": {
+        "w": 8.219393491744995,
+        "s": 47.28115439414978,
+        "width": 1159,
+        "height": 849,
+        "resolution": 1.0728836059570312e-05,
+        "bounds": [
+          8.219411373124034,
+          47.2811697145657,
+          8.231816661595028,
+          47.29024738824468
+        ]
+      },
+      "builds": [
+        {
+          "repeat": -1,
+          "engine": "python",
+          "seconds": 8.778887022999697
+        },
+        {
+          "repeat": -1,
+          "engine": "gpupdal",
+          "seconds": 9.57927213300718
+        },
+        {
+          "repeat": 0,
+          "engine": "gpupdal",
+          "seconds": 10.348743117006961
+        },
+        {
+          "repeat": 0,
+          "engine": "python",
+          "seconds": 9.236857355004759
+        },
+        {
+          "repeat": 1,
+          "engine": "python",
+          "seconds": 9.298362511006417
+        },
+        {
+          "repeat": 1,
+          "engine": "gpupdal",
+          "seconds": 9.399501200998202
+        },
+        {
+          "repeat": 2,
+          "engine": "gpupdal",
+          "seconds": 8.98438053400605
+        },
+        {
+          "repeat": 2,
+          "engine": "python",
+          "seconds": 9.3439098779927
+        }
+      ],
+      "reads": [
+        {
+          "repeat": -1,
+          "engine": "current",
+          "seconds": 0.45253309700638056
+        },
+        {
+          "repeat": -1,
+          "engine": "fused",
+          "seconds": 0.037761590006994084
+        },
+        {
+          "repeat": 0,
+          "engine": "fused",
+          "seconds": 0.030472687998553738
+        },
+        {
+          "repeat": 0,
+          "engine": "current",
+          "seconds": 0.45889171698945574
+        },
+        {
+          "repeat": 1,
+          "engine": "current",
+          "seconds": 0.3798962620057864
+        },
+        {
+          "repeat": 1,
+          "engine": "fused",
+          "seconds": 0.045407614001305774
+        },
+        {
+          "repeat": 2,
+          "engine": "fused",
+          "seconds": 0.04908478699508123
+        },
+        {
+          "repeat": 2,
+          "engine": "current",
+          "seconds": 0.3716577120067086
+        }
+      ],
+      "parity": {
+        "valid_cells": 796553,
+        "coverage_mismatch": 43,
+        "count_mismatch": 284150,
+        "max_mean_error_m": 2.1473388671875,
+        "p95_mean_error_m": 0.014801025390625,
+        "valid_points": 13577020,
+        "max_extrema_error_m": 23.219970703125
+      },
+      "raster_bytes": {
+        "python": 4418946,
+        "gpupdal": 5439538
+      },
+      "current_lod_comparison": {
+        "current_pixels": 210361,
+        "fused_pixels": 241015,
+        "shared_pixels": 210361,
+        "p50_height_difference_m": 0.02284545898436363,
+        "p95_height_difference_m": 1.0125593261718677,
+        "max_height_difference_m": 19.516247558593705
+      },
+      "builds_medians": {
+        "python": 9.298362511006417,
+        "gpupdal": 9.399501200998202
+      },
+      "reads_medians": {
+        "current": 0.3798962620057864,
+        "fused": 0.045407614001305774
+      }
+    }
+  ],
+  "dependencies": {
+    "numpy": "2.5.5",
+    "pillow": "13.0.0",
+    "laspy": "2.7.0",
+    "lazrs": "0.8.2",
+    "pyproj": "3.8.0",
+    "rasterio": "1.5.2",
+    "python": "3.13.13",
+    "gdal": "3.12.2"
+  },
+  "cpu_model": "AMD Ryzen 5 5600X 6-Core Processor",
+  "logical_cpus": 12,
+  "gpu": "NVIDIA GeForce RTX 2070 SUPER, 615.78.08\nNVIDIA GeForce RTX 4090, 615.78.08\n",
+  "doctor": "gpupdal 0.1.0\noracle-pdal f1e35f5c3e416b8c6a2c39966c8205cfae54afe2\ncuda enabled\ncuda_toolkit 13.3\ncuda_runtime 13.3\ncuda_driver 13.4\ndevices 2\n0 NVIDIA GeForce RTX 4090 sm_89 25335496704 memory_pools supported\n1 NVIDIA GeForce RTX 2070 SUPER sm_75 8179810304 memory_pools supported\nplacement_profile shipped-rtx4090-sm89-cuda13.3 (shipped)\nlocal_profile not-found /home/m/.config/gpupdal/placement-profile.json\n",
+  "date": "2026-11-16",
+  "implementation_sha256": {
+    "scripts/benchmark_lidar_fusion.py": "41d7a2e514dbea995c50fdac58c5992d100c4082571ecc6aea3594e501a506f3",
+    "scripts/lidar_fused.py": "66f78431a72f012f0ec943c4825d276d6af98f1f26971f23d0aa7d26b1510a3a",
+    "scripts/lidar_map.py": "5bb2de3c7d5b742d7525997eedf810f04251c2e40763a2ef1f4493db78ddfa8a"
+  }
+}
