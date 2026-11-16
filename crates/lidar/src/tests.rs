@@ -267,6 +267,12 @@ fn pending_scan_delegates_and_cancelled_view_stops_native_work() {
             .unwrap()
             .is_none()
     );
+    // The sidebar's prepared-only layer still shows completed pixels while
+    // neighboring raw scans wait in the conversion queue.
+    let prepared = crate::render::render_prepared(&root.join("catalog.sqlite"), bounds(), None)
+        .unwrap()
+        .unwrap();
+    assert!(prepared.rgba.as_chunks::<4>().0.iter().any(|p| p[3] > 0));
 }
 
 #[test]

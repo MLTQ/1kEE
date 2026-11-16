@@ -25,6 +25,12 @@ struct Tile {
     y: u32,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum View {
+    Coverage,
+    Fused,
+}
+
 impl Tile {
     fn bounds(self) -> [f32; 4] {
         let step = 180.0 / (1u32 << self.z) as f32;
@@ -76,7 +82,6 @@ type MapImage = (SatelliteImage, String);
 #[derive(Debug)]
 enum TileError {
     Render(String),
-    AccessDenied(String),
 }
 
 impl From<String> for TileError {
@@ -117,8 +122,6 @@ pub(crate) struct Tiles {
     retry: HashMap<Key, Instant>,
     pub(crate) status: String,
     pub(crate) sources: String,
-    pub(crate) load_error: Option<String>,
-    access_denied: bool,
 }
 
 fn key(tile: Tile, detail: bool, generation: u32, preferred: &str) -> Key {
@@ -126,9 +129,12 @@ fn key(tile: Tile, detail: bool, generation: u32, preferred: &str) -> Key {
     let variant = if !detail {
         format!("paths-v2-{generation}")
     } else if preferred.is_empty() {
-        "detail-auto-native-v1".into()
+        "detail-fused-local-v2".into()
     } else {
-        format!("detail-native-v1-{:x}", Sha1::digest(preferred.as_bytes()))
+        format!(
+            "detail-fused-local-v2-{:x}",
+            Sha1::digest(preferred.as_bytes())
+        )
     };
     Key {
         tile,
@@ -138,9 +144,14 @@ fn key(tile: Tile, detail: bool, generation: u32, preferred: &str) -> Key {
 }
 
 impl Tiles {
-    pub(crate) fn draw(&self, bounds: Option<[f32; 4]>, mut draw: impl FnMut(&SatelliteLayer)) {
+    pub(crate) fn draw(
+        &self,
+        bounds: Option<[f32; 4]>,
+        view: View,
+        mut draw: impl FnMut(&SatelliteLayer),
+    ) {
         let tiles = bounds.map(visible).unwrap_or_default();
-        for detail in [true, false] {
+        for detail in [view == View::Fused] {
             let mut shown = Vec::new();
             for &tile in &tiles {
                 if detail && (!self.measurements || tile.z < DETAIL_ZOOM) {
@@ -181,19 +192,33 @@ impl Tiles {
     }
 
     #[cfg(test)]
-    pub(crate) fn visible_tiles_loaded(&self) -> bool {
-        !self.stable.is_empty()
-            && self.stable.iter().all(|&t| {
-                [false, true].into_iter().all(|detail| {
-                    (detail && (!self.measurements || t.z < DETAIL_ZOOM))
-                        || self.loaded.contains_key(&key(
-                            t,
-                            detail,
-                            self.generation,
-                            &self.preferred,
-                        ))
-                })
-            })
+    pub(crate) fn cache_test_image(
+        &mut self,
+        ctx: &egui::Context,
+        bounds: Option<[f32; 4]>,
+        detail: bool,
+        name: &str,
+    ) {
+        self.measurements = true;
+        for tile in bounds
+            .map(visible)
+            .unwrap_or_else(|| self.view.borrow().clone())
+        {
+            let k = key(tile, detail, self.generation, "");
+            let image = SatelliteImage {
+                bounds: tile.bounds(),
+                pixels: egui::ColorImage::new(
+                    [512, 512],
+                    if detail {
+                        egui::Color32::RED
+                    } else {
+                        egui::Color32::CYAN
+                    },
+                ),
+            };
+            self.loaded
+                .insert(k, Some(SatelliteLayer::new(ctx, name.into(), image)));
+        }
     }
 
     pub(crate) fn stop(&mut self) {
@@ -202,6 +227,8 @@ impl Tiles {
             job.active = None;
         }
         self.view.get_mut().clear();
+        self.stable.clear();
+        self.jobs = [None, None];
     }
 
     pub(crate) fn poll_catalog(&mut self, ctx: &egui::Context, path: &Path, force: bool) -> bool {
@@ -258,27 +285,18 @@ impl Tiles {
         self.catalog_ready
     }
 
-    pub(super) fn retry_selection(&mut self) {
-        self.access_denied = false;
-        self.retry.retain(|k, _| !k.detail);
-        self.load_error = None;
-    }
-
-    pub(crate) fn at_overview(&self) -> bool {
-        self.view
-            .borrow()
-            .first()
-            .is_some_and(|t| t.z < DETAIL_ZOOM)
-    }
-
-    /// None browses outlines; an empty ID enables the automatic mosaic.
-    pub(crate) fn tick(&mut self, ctx: &egui::Context, path: &Path, selection: Option<&str>) {
+    /// Each map view requests only its own part of the single lidar layer.
+    pub(crate) fn tick(&mut self, ctx: &egui::Context, path: &Path, view: View) {
+        let selection = if view == View::Fused { Some("") } else { None };
+        let changed = self.measurements != selection.is_some();
+        if changed {
+            self.jobs = [None, None];
+            self.view.get_mut().clear();
+            self.stable.clear();
+            self.moved = None;
+        }
         self.measurements = selection.is_some();
         let preferred = selection.unwrap_or_default();
-        if self.preferred != preferred || selection.is_none() {
-            self.access_denied = false;
-            self.load_error = None;
-        }
         self.preferred = preferred.to_owned();
         let view = self.view.get_mut();
         if self.stable != *view {
@@ -288,7 +306,7 @@ impl Tiles {
         for slot in 0..2 {
             if let Some(job) = &mut self.jobs[slot] {
                 if let Some(k) = job.key.get()
-                    && ((k.detail && !self.measurements)
+                    && ((k.detail != self.measurements)
                         || !self.stable.contains(&k.tile)
                         || (k.detail && *k != key(k.tile, true, self.generation, preferred)))
                 {
@@ -298,12 +316,6 @@ impl Tiles {
                 match job.rx.try_recv() {
                     Ok(Ok(image)) => {
                         let k = job.key.get().expect("completed tile has a key").clone();
-                        if k.detail
-                            && k.variant == key(k.tile, true, self.generation, preferred).variant
-                            && image.is_some()
-                        {
-                            self.load_error = None;
-                        }
                         self.loaded.insert(
                             k.clone(),
                             image.map(|(pixels, name)| SatelliteLayer::new(ctx, name, pixels)),
@@ -317,18 +329,11 @@ impl Tiles {
                     }
                     Ok(Err(_)) if job.active.is_none() => {}
                     Ok(Err(e)) => {
-                        let denied = matches!(&e, TileError::AccessDenied(_));
                         let message = match e {
-                            TileError::Render(message) | TileError::AccessDenied(message) => {
-                                message
-                            }
+                            TileError::Render(message) => message,
                         };
                         self.status = message.clone();
                         if let Some(k) = job.key.get() {
-                            if k.detail && !preferred.is_empty() {
-                                self.access_denied = denied;
-                                self.load_error = Some(message);
-                            }
                             self.retry.insert(k.clone(), Instant::now());
                         }
                     }
@@ -347,8 +352,8 @@ impl Tiles {
                 ctx.request_repaint_after(Duration::from_millis(350));
                 continue;
             }
-            let detail = slot == 1;
-            if detail && (!self.measurements || self.access_denied) {
+            let detail = self.measurements;
+            if detail && !self.measurements {
                 continue;
             }
             let candidates: Vec<_> = self
@@ -359,6 +364,11 @@ impl Tiles {
                 .map(|t| key(t, detail, self.generation, preferred))
                 .filter(|k| {
                     !self.loaded.contains_key(k)
+                        && !self
+                            .jobs
+                            .iter()
+                            .flatten()
+                            .any(|job| job.key.get().is_none_or(|active| active == k))
                         && !self
                             .retry
                             .get(k)
@@ -373,7 +383,7 @@ impl Tiles {
             let selected = preferred.to_owned();
             let generation = self.generation;
             if detail {
-                self.status = "Loading lidar measurements…".into();
+                self.status = "Loading fused lidar…".into();
             }
             let active = match tempfile::NamedTempFile::new() {
                 Ok(file) => file,
@@ -417,7 +427,7 @@ impl Tiles {
                 .keys()
                 .any(|k| !k.detail && self.stable.contains(&k.tile))
             {
-                self.status = "Right-click a survey boundary to load lidar".into();
+                self.status = "Worldwide survey boundaries".into();
             }
             return;
         }
@@ -441,11 +451,11 @@ impl Tiles {
             }
         }
         if self.stable.first().is_some_and(|t| t.z < DETAIL_ZOOM) {
-            self.status = "Survey paths · zoom in for detail".into();
+            self.status = "Zoom in to see fused lidar".into();
         } else if !self.sources.is_empty() {
-            self.status = "Showing saved lidar measurements".into();
+            self.status = "Showing fused lidar".into();
         } else if blanks > 0 && blanks == self.stable.len() {
-            self.status = "Coverage only · no measured image here".into();
+            self.status = "No fused lidar prepared here yet".into();
         }
     }
 }
@@ -601,16 +611,20 @@ fn load(
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
             != Some(revision);
-    if k.detail && (!output.is_file() || stale) && !empty.is_file() {
-        let span = 180. / (1u32 << z) as f64;
-        let w = -180. + x as f64 * span;
-        let n = 90. - y as f64 * span;
-        if let Some(rendered) =
-            lidar_pipeline::render::render(db, [w, n - span, w + span, n], preferred, Some(active))
-                .map_err(TileError::Render)?
-        {
-            if rendered.rgba.chunks_exact(4).any(|pixel| pixel[3] > 0) {
-                lidar_pipeline::render::save_png(&target, &rendered).map_err(TileError::Render)?;
+    if (!output.is_file() || stale) && !empty.is_file() {
+        if k.detail {
+            let span = 180. / (1u32 << z) as f64;
+            let w = -180. + x as f64 * span;
+            let n = 90. - y as f64 * span;
+            let image = lidar_pipeline::render::render_prepared(
+                db,
+                [w, n - span, w + span, n],
+                Some(active),
+            )
+            .map_err(TileError::Render)?;
+            if let Some(image) = image.filter(|image| image.rgba.chunks_exact(4).any(|p| p[3] > 0))
+            {
+                lidar_pipeline::render::save_png(&target, &image).map_err(TileError::Render)?;
                 output = target.clone();
                 if revision > 0 {
                     let _ = std::fs::write(&stamp, revision.to_string());
@@ -622,86 +636,56 @@ fn load(
                 std::fs::write(&empty, "").map_err(|e| e.to_string())?;
                 return Ok(None);
             }
-        }
-    }
-    let stale = revision > 0
-        && std::fs::read_to_string(&stamp)
-            .ok()
-            .and_then(|v| v.parse::<i64>().ok())
-            != Some(revision);
-    if (!output.is_file() || stale) && !empty.is_file() {
-        let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
-        for (name, contents) in [("lidar_map.py", MAP), ("lidar_catalog.py", SURVEYS)] {
-            std::fs::write(tmp.path().join(name), contents).map_err(|e| e.to_string())?;
-        }
-        if k.detail {
-            std::fs::write(
-                tmp.path().join("lidar_regions.py"),
-                include_bytes!("../../../scripts/lidar_regions.py"),
-            )
-            .map_err(|e| e.to_string())?;
-            std::fs::write(
-                tmp.path().join("ne_110m_countries.json"),
-                include_bytes!("../../cache_builder/assets/ne_110m_countries.json"),
-            )
-            .map_err(|e| e.to_string())?;
-        }
-        let mut cmd = Command::new("uv");
-        cmd.args([
-            "run",
-            "--no-project",
-            "--with",
-            "laspy[lazrs]==2.7.0",
-            "--with",
-            "pyproj",
-            "--with",
-            "requests",
-            "--with",
-            "pillow",
-            "--with",
-            "rasterio",
-            "--",
-            "python",
-        ]);
-        let python = if cfg!(windows) { "python" } else { "python3" };
-        let args = [
-            tmp.path().join("lidar_map.py"),
-            db.to_owned(),
-            PathBuf::from(if k.detail { "detail" } else { "paths" }),
-            z.to_string().into(),
-            x.to_string().into(),
-            y.to_string().into(),
-            target.clone(),
-            preferred.into(),
-            "--empty".into(),
-            empty.clone(),
-            "--active".into(),
-            active.to_owned(),
-        ];
-        let execute = |c: &mut Command| super::lidar_catalog::gdal_path(c).args(&args).output();
-        let result = match execute(&mut cmd) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                execute(&mut Command::new(python))
+        } else {
+            // The existing catalog-boundary renderer is independent of raw scan loading.
+            let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
+            for (name, contents) in [("lidar_map.py", MAP), ("lidar_catalog.py", SURVEYS)] {
+                std::fs::write(tmp.path().join(name), contents).map_err(|e| e.to_string())?;
             }
-            other => other,
-        }
-        .map_err(|e| format!("Cannot start lidar map worker: {e}"))?;
-        if result.status.success() && target.is_file() && !empty.is_file() {
-            output = target;
-            if revision > 0 {
-                let _ = std::fs::write(stamp, revision.to_string());
+            let args = [
+                tmp.path().join("lidar_map.py"),
+                db.to_owned(),
+                "paths".into(),
+                z.to_string().into(),
+                x.to_string().into(),
+                y.to_string().into(),
+                target.clone(),
+                "".into(),
+                "--empty".into(),
+                empty.clone(),
+                "--active".into(),
+                active.to_owned(),
+            ];
+            let execute =
+                |cmd: &mut Command| super::lidar_catalog::gdal_path(cmd).args(&args).output();
+            let mut cmd = Command::new("uv");
+            cmd.args([
+                "run",
+                "--no-project",
+                "--with",
+                "numpy",
+                "--with",
+                "pillow",
+                "--",
+                "python",
+            ]);
+            let result = match execute(&mut cmd) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    execute(&mut Command::new(if cfg!(windows) {
+                        "python"
+                    } else {
+                        "python3"
+                    }))
+                }
+                other => other,
             }
-        } else if !result.status.success() && !output.is_file() {
-            let err = String::from_utf8_lossy(&result.stderr);
-            let message = err
-                .lines()
-                .rev()
-                .find(|l| !l.is_empty())
-                .unwrap_or("render failed");
-            if result.status.code() == Some(77) {
-                return Err(TileError::AccessDenied(message.to_owned()));
+            .map_err(|e| format!("Cannot start lidar boundary worker: {e}"))?;
+            if !result.status.success() {
+                return Err(TileError::Render(format!(
+                    "Lidar boundaries: {}",
+                    String::from_utf8_lossy(&result.stderr).trim()
+                )));
             }
-            return Err(TileError::Render(format!("Lidar tile: {message}")));
         }
     }
     if !output.is_file() && empty.exists() {
@@ -750,6 +734,22 @@ fn load(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_without_a_fused_archive_stays_empty_instead_of_loading_raw_sources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let catalog = tmp.path().join("catalog.sqlite");
+        rusqlite::Connection::open(&catalog).unwrap();
+        let tile = Tile {
+            z: 12,
+            x: 2387,
+            y: 1175,
+        };
+        let k = key(tile, true, 0, "");
+        let active = tempfile::NamedTempFile::new().unwrap();
+        assert!(load(&catalog, &k, "", 0, active.path()).unwrap().is_none());
+        assert!(!tile_path(&catalog, &k).is_file());
+        assert!(tile_path(&catalog, &k).with_extension("empty-0").is_file());
+    }
     #[test]
     fn prepared_view_loads_through_native_reader_and_keeps_source_credit() {
         let tmp = tempfile::tempdir().unwrap();
@@ -870,40 +870,33 @@ mod tests {
     }
 
     #[test]
-    fn boundaries_only_shows_paths_at_detail_zoom_and_does_not_request_measurements() {
+    fn each_view_draws_only_its_own_kind_even_when_both_are_cached() {
+        let ctx = egui::Context::default();
+        let bounds = Some([1., 1., 1.02, 1.02]);
+        let mut tiles = Tiles::default();
+        tiles.cache_test_image(&ctx, bounds, false, "coverage");
+        tiles.cache_test_image(&ctx, bounds, true, "fused");
+        for (view, expected) in [(View::Coverage, "coverage"), (View::Fused, "fused")] {
+            let mut names = Vec::new();
+            tiles.draw(bounds, view, |image| names.push(image.name().to_owned()));
+            assert!(!names.is_empty());
+            assert!(names.iter().all(|name| name == expected));
+        }
+    }
+
+    #[test]
+    fn switching_views_discards_the_previous_viewport_and_stops_its_workers() {
         let ctx = egui::Context::default();
         let tmp = tempfile::tempdir().unwrap();
-        let db = tmp.path().join("catalog.sqlite");
-        let bounds = Some([10., 10., 11., 11.]);
         let mut tiles = Tiles::default();
-        tiles.draw(bounds, |_| {});
-        tiles.stable = tiles.view.borrow().clone();
-        for &tile in &tiles.stable {
-            for (detail, name) in [(false, "outline"), (true, "1998")] {
-                let image = SatelliteImage {
-                    bounds: tile.bounds(),
-                    pixels: egui::ColorImage::new([1, 1], egui::Color32::WHITE),
-                };
-                tiles.loaded.insert(
-                    key(tile, detail, 0, "flight"),
-                    Some(SatelliteLayer::new(&ctx, name.into(), image)),
-                );
-            }
-        }
-        let painted = |tiles: &Tiles| {
-            let mut names = Vec::new();
-            tiles.draw(bounds, |image| names.push(image.name().to_owned()));
-            names.dedup();
-            names
-        };
-        tiles.tick(&ctx, &db, None);
+        tiles.draw(Some([1., 1., 1.02, 1.02]), View::Coverage, |_| {});
+        tiles.tick(&ctx, &tmp.path().join("catalog.sqlite"), View::Fused);
+        assert!(tiles.stable.is_empty());
         assert!(tiles.jobs.iter().all(Option::is_none));
-        assert!(tiles.visible_tiles_loaded());
-        assert_eq!(painted(&tiles), ["outline"]);
-        tiles.tick(&ctx, &db, Some("flight"));
-        assert_eq!(painted(&tiles), ["1998", "outline"]);
-        tiles.tick(&ctx, &db, None);
-        assert_eq!(painted(&tiles), ["outline"]);
+        tiles.draw(Some([1., 1., 1.02, 1.02]), View::Fused, |_| {});
+        tiles.tick(&ctx, &tmp.path().join("catalog.sqlite"), View::Coverage);
+        assert!(tiles.stable.is_empty());
+        assert!(tiles.jobs.iter().all(Option::is_none));
     }
 
     #[test]

@@ -6,8 +6,9 @@ latest-acquisition rendering. Production processing does not invoke Python.
 The default library contains SQLite lookup, bounded windowed GeoTIFF decoding,
 pixel fusion, shading and atomic PNG publication. The desktop calls it directly
 on its existing background worker. It uses the Rust TIFF decoder and does not
-link GDAL or PROJ. Unprepared source views continue through the pre-existing
-source worker; catalog harvesting and downloads are separate existing tools.
+link GDAL or PROJ. The sidebar shows catalog boundary lines on the globe and prepared data in
+Local; unprepared Local regions stay empty. Catalog harvesting and downloads
+remain separate existing tools.
 
 The optional `builder` feature adds LAS/LAZ decoding through `las`/`laz` and
 GDAL/PROJ through checked, owned C API wrappers. It builds a standalone processor:

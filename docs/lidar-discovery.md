@@ -1,20 +1,29 @@
-# Worldwide lidar survey discovery
+# Lidar layer and source data
 
-Turn on **Lidar** in the Earth map toolbar or under **Layers → Base**. On narrow screens the toolbar switch is in **View**. The layer starts with survey boundaries in both Globe and Local. Hover over a boundary or its interior, then right-click. When a single survey covers the point and has map data, it loads immediately. Where surveys overlap, choose a name and acquisition date from the menu. At a globe overview, choosing a survey opens Local at the clicked trace. In a detailed view you keep your position and zoom. Selecting a NASA survey downloads the scan file inside 1kEE. Rows with no directly loadable scan are disabled. Unsampled areas stay transparent.
+Enable **Layers → Base → Lidar** in the Earth sidebar. This is the only LiDAR
+control. It starts off on each launch and stays enabled when switching views.
 
-Open **Lidar surveys** on the map toolbar or **Browse by region** in the Lidar surveys drawer. In **Worldwide**, pick a continent and country, or open **Oceans** and pick a named sea, gulf or ocean basin. Select a survey to open its footprint in Local view. Within each location surveys are alphabetical, with acquisition dates beside their names. Larger lists have a name or ID filter.
+- **Globe** shows all cataloged survey boundary lines, including surveys that
+  have not been downloaded or prepared. These outlines indicate published
+  coverage, not a guarantee of local fused data.
+- **Local** shows the prepared fused elevation layer from **Lidar/fused/v1**.
+  Newer measurements take precedence, with older measurements filling gaps.
+  Areas without prepared data stay transparent. Raw scans and publisher rasters
+  are not loaded as a fallback by this layer. Zoom in to see detailed tiles.
 
-Choose **At map center** in the same picker to switch between overlapping surveys while keeping your position and zoom. **Automatic** loads visible measurements as you zoom. **Boundaries only** clears the active survey and returns to browsing outlines. The worldwide directory uses the center of each survey’s catalog extent and known national collections. Coastal surveys can appear under both a country and a marine region. The local list uses the actual survey footprint at the point where you opened the menu. The app ships the country outlines and marine regions for offline lookup. [Natural Earth marine regions](https://www.naturalearthdata.com/downloads/110m-physical-vectors/110m-physical-labels/)
+There is no top-bar LiDAR button, survey search, regional picker, or boundary
+click action. Switching views preserves the camera and the layer toggle.
+Catalogs still refresh in the background to keep the globe boundaries current.
 
-To find a survey elsewhere, open **Layers → Public Data → Lidar surveys**. Search by part of a name or ID, such as **NOAAID:38**, and select the result. This enables the layer and opens a close Local view. **Clear selection** returns to boundaries only. For NASA surveys, the app uses the granule’s data URL.
+Completed 512 × 512 display tiles are cached under **Lidar/maps/v1** in the
+configured Data directory. Globe boundary tiles and Local fused tiles have
+separate cache variants and are reused offline. PNG metadata retains contributing
+survey credits. New prepared rasters invalidate affected Local tiles as the
+background converter makes progress.
 
-1kEE saves each completed 512 × 512 map tile under **Lidar/maps/v1** in the configured Data directory. Both views reuse that cache across launches and offline. Tiles use a north-up longitude/latitude grid. PNG metadata records the contributing surveys. Point-cloud blocks and service responses are reused from **Lidar/map-source-cache**. Catalog changes invalidate saved path outlines and empty results. Lidar and webcam markers start hidden on each launch. Turning either layer on lasts for the current session. Saved lidar tiles remain available on disk.
-
-Prepared numeric scans under **Lidar/fused/v1** avoid decoding raw point clouds
-for each map view. **Automatic** uses newer catalog acquisitions first and fills
-their unmeasured pixels from older surveys. Explicit selections retain their own
-date. See [fused LiDAR preparation and benchmarks](lidar-fusion.md) for resolution,
-source coverage, resumable conversion and retention limits.
+See [fused LiDAR preparation and benchmarks](lidar-fusion.md) for resolution,
+source coverage, resumable conversion and retention limits. Source discovery and
+bulk acquisition remain available as independent command-line tools below.
 
 ## Catalogs
 
@@ -32,7 +41,7 @@ Acquisition dates, licenses, ground classifications and resolutions vary by surv
 
 ## Refresh and acquisition
 
-The harvester uses Python 3.11+ and the standard library. GDAL command-line tools handle the EBA footprint reprojection and streamed terrain. The map worker uses uv to provision NumPy, Pillow, rasterio, pyproj and laspy with lazrs on first use. A Python environment with those packages also works when uv is absent. INFOMAR ZIP access uses the GDAL command-line tools including `gdal vsi list`. Bulk file downloads use curl. The catalog is stored at **Lidar/catalog.sqlite** inside the configured Data directory. Cached results can be searched offline. Enabling the layer checks the catalogs daily. Catalogs checked within 24 hours are reused, with a seven-day interval for paginated STAC inventories. Refresh compares HTTP validators when supplied and checks NASA's granule count and latest revision before paging. Each source is replaced in a separate transaction. A failed source can be retried while its last successful index remains available.
+The harvester uses Python 3.11+ and the standard library. GDAL command-line tools handle the EBA footprint reprojection and streamed terrain. The globe boundary worker uses uv to provision NumPy and Pillow on first use; Local reads the fused archive directly in Rust. Standalone raw-source rendering tools additionally use rasterio, pyproj and laspy with lazrs. INFOMAR ZIP access uses the GDAL command-line tools including `gdal vsi list`. Bulk file downloads use curl. The catalog is stored at **Lidar/catalog.sqlite** inside the configured Data directory. Cached catalog boundaries remain available offline. Enabling the layer checks the catalogs daily. Catalogs checked within 24 hours are reused, with a seven-day interval for paginated STAC inventories. Refresh compares HTTP validators when supplied and checks NASA's granule count and latest revision before paging. Each source is replaced in a separate transaction. A failed source can be retried while its last successful index remains available.
 
 From the repository root, substitute your configured Data directory for **Data**. The CLI also works independently of the application.
 
@@ -56,13 +65,17 @@ python3 scripts/lidar_catalog.py --db Data/Lidar/catalog.sqlite download \
   --source nasa-brazil --bbox -55 -4 -54 -2 --max-files 1 --netrc --directory scans
 ~~~
 
-Selecting a NASA survey saves its LAS, LAZ, gzipped LAS, or GeoTIFF under **Data/Lidar/scans/continent/country** and renders its measurements. If Earthdata denies access, configure your Earthdata Login for **urs.earthdata.nasa.gov** in your curl netrc file, then retry. The map can also reuse earlier catalog CLI downloads under **Data/Lidar/scans**.
+The catalog CLI can save NASA LAS, LAZ, gzipped LAS, or GeoTIFF files under a
+chosen scan directory. Protected files require your Earthdata Login for
+**urs.earthdata.nasa.gov**. These raw-source tools run independently of the
+single sidebar layer; their outputs need preparation before they appear there.
+
 
 Use **--netrc** with your own curl/Earthdata login configuration for protected NASA files. **--all** selects all individually linked files. **--eba-archives --directory scans** downloads the Brazilian regional ZIPs. OpenTopography records with publisher-mediated access retain their survey links in the export. For other public collections, pass a lidar publisher’s HTTPS STAC collection **items** URL to **refresh --stac-items URL**, or a NASA lidar collection concept ID to **refresh --cmr-collection ID**. Repeat those arguments on subsequent refreshes to update those additional collections.
 
 ## Worldwide bulk downloads
 
-On Linux, the bulk downloader uses the existing catalog, Python 3.11+, requests, and GDAL. It acquires actual scan files and elevation products across NOAA, OpenTopography, LINZ, INFOMAR, swisstopo and the Brazilian EBA archive. It rotates between geographic areas and runs two transfers per provider by default. Coverage depends on the contributing surveys. NASA Earthdata products download on selection and through the catalog download command above.
+On Linux, the bulk downloader uses the existing catalog, Python 3.11+, requests, and GDAL. It acquires actual scan files and elevation products across NOAA, OpenTopography, LINZ, INFOMAR, swisstopo and the Brazilian EBA archive. It rotates between geographic areas and runs two transfers per provider by default. Coverage depends on the contributing surveys. NASA Earthdata products are acquired through the catalog download command above.
 
 ~~~sh
 python3 scripts/lidar_bulk.py --volume-uuid 6FEF-269A --db /run/media/m/Minkowski/Data/Lidar/catalog.sqlite

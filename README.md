@@ -91,9 +91,10 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
   sharing its elevations, lighting and occlusion.
 - **Terrain & bodies** — GEBCO / SRTM / Natural Earth elevation, the Yale Bright
   Star Catalogue and planetary ephemeris, and a replay timeline.
-- **Worldwide lidar surveys** — enable **Layers → Base → Lidar** in Globe or Local. Zoom
-  into survey paths to stream available laser measurements and coastal relief.
-  Viewed tiles are saved for offline use. [Sources and harvester](docs/lidar-discovery.md)
+- **Lidar** — one **Layers → Base → Lidar** sidebar toggle shows worldwide survey
+  boundaries on the Globe and prepared fused elevation data in Local. Newer scans
+  take precedence and gaps stay transparent. Viewed tiles are saved for offline
+  use. [Layer and source preparation](docs/lidar-discovery.md)
 - **Washington LiDAR** — optional DNR bare-earth and top-surface hillshade in
   Local Earth view, with portal access for survey metadata and downloads
   ([usage](docs/washington-lidar.md)).

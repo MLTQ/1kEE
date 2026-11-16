@@ -145,7 +145,7 @@ pub struct AppModel {
     pub planet_trail_years: f32,
     /// User-uploaded vector overlay layers (GeoJSON, KML, or KMZ).
     pub geojson_layers: Vec<GeoJsonLayer>,
-    pub(crate) lidar: crate::lidar_catalog::Browser,
+    pub(crate) lidar: crate::lidar_catalog::Layer,
     pub satellite_layers: Vec<crate::panels::world_map::satellite_layer::SatelliteLayer>,
     pub global_weather: global_weather::GlobalWeather,
     /// ArcGIS FeatureServer sources added by the user.
@@ -361,7 +361,7 @@ impl AppModel {
             show_planet_trails: false,
             planet_trail_years: 0.0,
             geojson_layers: Vec::new(),
-            lidar: crate::lidar_catalog::Browser::new(
+            lidar: crate::lidar_catalog::Layer::new(
                 crate::lidar_catalog::db_path(app_settings.data_root.as_deref(), selected_root.as_deref())),
             satellite_layers: Vec::new(),
             global_weather: global_weather::GlobalWeather::new(

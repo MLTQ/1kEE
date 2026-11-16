@@ -1,16 +1,17 @@
 # Fused LiDAR elevation layer
 
-The LiDAR map can read compact numeric rasters prepared from downloaded scans.
+The Earth sidebar has one **Layers → Base → Lidar** toggle. Globe draws all
+cataloged survey outlines. Local reads compact numeric rasters prepared from
+downloaded scans and fuses acquisitions in descending catalog-date order. A newer
+scan wins only at measured pixels; older measurements can fill gaps. Regions
+without prepared rasters stay transparent. The display does not fall back to
+raw scans or publisher imagery, and there are no survey search or picker controls.
+
 Preparation, archive auditing and fusion of prepared views run in Rust through
 `crates/lidar`. The desktop reads TIFF chunks directly without Python, GDAL or
-PROJ. Its existing source worker still handles views whose downloaded sources
-are not all prepared; catalog discovery and downloads retain their existing
-tools. The Python prototype is a benchmark-only reference under
+PROJ. Globe catalog outlines use the existing background boundary worker. The
+Python converter prototype is retained only as a benchmark reference under
 `scripts/benchmarks/lidar_fusion_reference.py`.
-Automatic mode composites acquisitions in descending catalog-date order. A newer
-scan wins only at measured pixels; an older acquisition can fill its gaps. An
-explicit survey selection still shows that acquisition. Automatic maps have a
-separate cache and never substitute an arbitrary historical selection.
 
 Each prepared scan stores observed minimum, maximum, mean and count in four
 compressed, tiled float32 GeoTIFF bands. Means use float64 accumulation over all
@@ -67,7 +68,7 @@ These read timings include PNG encoding in both paths and executable/native-libr
 
 The native verifier accepted all 154 previously completed rasters (17,817,243,589 source bytes represented by 1,159,491,790 raster bytes), with no failures. Completed receipts are reused, and raw scans remain intact. Native unit/CLI tests cover independent statistics, noise/withheld flags, LAS/LAZ, failed decode, resume/corruption/date changes, latest acquisitions and gaps, TIFF layouts and edge chunks, viewport cancellation, Unicode provenance and volume identity. The desktop integration test exercises its actual prepared-view load entry point.
 
-The desktop release was rebuilt; its dynamic dependency check shows no GDAL, PROJ or Python libraries. A prepared-source render also succeeded with `PATH=/nonexistent`. Existing catalog/download and unprepared-source helpers still use their prior Python path.
+The desktop release was rebuilt; its dynamic dependency check shows no GDAL, PROJ or Python libraries. A prepared-source render also succeeded with `PATH=/nonexistent`. Catalog and download tools still use their prior Python path; the sidebar display now uses prepared data exclusively in Local.
 
 [Raw migration measurements](benchmarks/lidar-native-2026-11-16.json).
 

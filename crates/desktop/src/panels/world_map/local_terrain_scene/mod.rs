@@ -299,7 +299,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             || super::atlas_viewport::local_visible(clip, &layout, &model.globe_view, viewport_center, half),
             |image| image.draw_local(painter, &layout, &model.globe_view, viewport_center, half));
         if model.lidar.enabled {
-            model.lidar.tiles.draw(super::atlas_viewport::local_visible(clip, &layout, &model.globe_view, viewport_center, half),
+            model.lidar.tiles.draw(super::atlas_viewport::local_visible(clip, &layout, &model.globe_view, viewport_center, half), crate::lidar_tiles::View::Fused,
                 |image| image.draw_local(painter, &layout, &model.globe_view, viewport_center, half));
         }
         for image in &model.satellite_layers {
@@ -693,10 +693,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
         );
     }
     if model.active_body == crate::model::ActiveBody::Earth {
-        if model.lidar.enabled && let Some(layer) = &model.lidar.footprint {
-            draw_geojson_layers_local(painter, &layout, &model.globe_view, viewport_center,
-                extent_x_km, extent_y_km, std::slice::from_ref(layer), None);
-        }
+
         for layers in model.ghostmaps.layers() {
             draw_geojson_layers_local(
                 painter, &layout, &model.globe_view, viewport_center, extent_x_km, extent_y_km,

@@ -56,7 +56,7 @@ fn local_button_enters_the_local_renderer_without_a_selected_event() {
 }
 
 #[test]
-fn lidar_and_camera_layers_start_off_and_toggle_independently() {
+fn top_bar_keeps_camera_control_and_has_no_lidar_control() {
     let ctx = egui::Context::default();
     let mut model = AppModel::new();
     let frame = |model: &mut AppModel, events| {
@@ -73,13 +73,13 @@ fn lidar_and_camera_layers_start_off_and_toggle_independently() {
         )
     };
     assert!(!model.lidar.enabled && !model.show_camera_markers);
-    for (label, lidar, cameras) in [
-        ("Lidar", true, false),
-        ("Cameras 0", true, true),
-        ("Lidar", false, true),
-        ("Cameras 0", false, false),
-    ] {
+    for cameras in [true, false] {
+        let label = "Cameras 0";
+
         let out = frame(&mut model, vec![]);
+        assert!(!out.shapes.iter().any(
+            |shape| matches!(&shape.shape,egui::Shape::Text(t) if t.galley.text().contains("Lidar"))
+        ));
         let pos = out
             .shapes
             .iter()
@@ -106,7 +106,7 @@ fn lidar_and_camera_layers_start_off_and_toggle_independently() {
         }
         assert_eq!(
             (model.lidar.enabled, model.show_camera_markers),
-            (lidar, cameras)
+            (false, cameras)
         );
     }
 }

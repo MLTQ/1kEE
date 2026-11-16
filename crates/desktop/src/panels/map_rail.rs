@@ -168,13 +168,6 @@ fn record_buttons(ui: &mut egui::Ui, model: &mut AppModel) {
     {
         model.show_camera_markers = !model.show_camera_markers;
     }
-    if model.active_body == ActiveBody::Earth
-        && button(ui, "Lidar", model.lidar.enabled)
-            .on_hover_text("Show survey boundaries. Right-click a trace to load its lidar.")
-            .clicked()
-    {
-        model.lidar.set_enabled(!model.lidar.enabled);
-    }
 }
 fn focus_button(ui: &mut egui::Ui, model: &mut AppModel) {
     if button(ui, "Focus", false)

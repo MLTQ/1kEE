@@ -192,6 +192,25 @@ pub fn render(
     preferred: &str,
     active: Option<&Path>,
 ) -> Result<Option<Rendered>, String> {
+    render_impl(catalog, bounds, preferred, active, true)
+}
+
+/// Prepared mosaic alone: pending raw scans do not hide completed neighbors.
+pub fn render_prepared(
+    catalog: &Path,
+    bounds: [f64; 4],
+    active: Option<&Path>,
+) -> Result<Option<Rendered>, String> {
+    render_impl(catalog, bounds, "", active, false)
+}
+
+fn render_impl(
+    catalog: &Path,
+    bounds: [f64; 4],
+    preferred: &str,
+    active: Option<&Path>,
+    require_complete: bool,
+) -> Result<Option<Rendered>, String> {
     let root = catalog.parent().ok_or("Missing lidar root")?;
     let index = root.join("fused/v1/index.sqlite");
     if !index.is_file() {
@@ -216,8 +235,9 @@ pub fn render(
     if rows.is_empty() {
         return Ok(None);
     }
-    if let Ok(bulk) =
-        Connection::open_with_flags(root.join("bulk.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
+    if require_complete
+        && let Ok(bulk) =
+            Connection::open_with_flags(root.join("bulk.sqlite"), OpenFlags::SQLITE_OPEN_READ_ONLY)
     {
         let mut stmt = bulk
             .prepare(
