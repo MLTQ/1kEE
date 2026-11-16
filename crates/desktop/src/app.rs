@@ -60,6 +60,9 @@ impl DashboardApp {
         format: eframe::wgpu::TextureFormat,
         renderer: &mut eframe::egui_wgpu::Renderer,
     ) {
+        renderer.callback_resources.insert(
+            panels::world_map::target_pass::Resources::new(device, format),
+        );
         renderer
             .callback_resources
             .insert(globe_pass::GlobePassResources::new(device, format));
@@ -156,6 +159,7 @@ impl eframe::App for DashboardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Handle escape before hidden panels can consume it. Presentation mode
         // changes only visibility, so returning restores the operator's layout.
+        self.model.target.consume_escape(ctx);
         ctx.input_mut(|input| {
             if self.model.obs_view && input.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
                 self.model.obs_view = false;

@@ -112,6 +112,20 @@ fn view_buttons(ui: &mut egui::Ui, model: &mut AppModel) {
         ActiveBody::Mars => "Local Mars view requires Mars terrain data.",
         ActiveBody::Earth => "Local terrain view",
     });
+    if model.active_body == ActiveBody::Earth && model.globe_view.local_mode
+        && button(ui, "TARGET", model.target.selecting)
+            .on_hover_text("Select a 1 km radius cut-out for 3D point-cloud inspection. Escape cancels.")
+            .clicked()
+    {
+        model.stop_event_follow();
+        model.globe_view.stop_motion();
+        model.target.selecting = !model.target.selecting;
+        model.target.hover = None;
+    }
+    if !model.globe_view.local_mode || model.active_body != ActiveBody::Earth {
+        model.target.selecting = false;
+        model.target.hover = None;
+    }
 }
 
 fn body_button(ui: &mut egui::Ui, model: &mut AppModel) {

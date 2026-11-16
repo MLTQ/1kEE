@@ -18,6 +18,10 @@ There is no top-bar LiDAR button, survey search, regional picker, or boundary
 click action. Switching views preserves the camera and the layer toggle.
 Catalogs still refresh in the background to keep the globe boundaries current.
 
+For original measured points, use the separate **Local → TARGET** tool to open
+a one-kilometre-radius cut-out with free flight, source selection and class
+filters. See [Target inspection](target-mode.md) for controls and accuracy limits.
+
 Completed 512 × 512 display tiles are cached under **Lidar/maps/v1** in the
 configured Data directory. Globe boundary tiles and Local fused tiles have
 separate cache variants and are reused offline. PNG metadata retains contributing

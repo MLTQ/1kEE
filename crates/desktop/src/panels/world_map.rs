@@ -8,7 +8,7 @@ mod admin_controls;
 pub(crate) use admin_controls::controls as admin_controls;
 mod building_layer;
 mod camera;
-mod cell_loader;
+pub(crate) mod cell_loader;
 mod fire_layer;
 mod infra_layer;
 mod pipeline_layer;
@@ -42,6 +42,8 @@ mod srtm_stream;
 mod stellar_layer;
 mod terrain_field;
 mod terrain_raster;
+pub(crate) mod target_pass;
+mod target_view;
 mod layer_snapshot;
 mod swot_layer;
 mod raster_mesh;
@@ -76,6 +78,9 @@ pub(crate) fn invalidate_water_cache_pub() {
 pub(crate) use camera::remote_navigation;
 
 pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
+    if model.target.session.is_some() {
+        return target_view::render(ui, model);
+    }
     let panel_frame = if model.obs_view {
         egui::Frame::new().fill(theme::canvas_background())
     } else {
@@ -127,10 +132,12 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
         let (response, painter) = ui.allocate_painter(desired, egui::Sense::click_and_drag());
         let rect = response.rect;
 
-        if camera::manual_input(ui.ctx(), &response, local_terrain_mode) {
+        let targeting = model.target.selecting && local_terrain_mode
+            && model.active_body == crate::model::ActiveBody::Earth;
+        if !targeting && camera::manual_input(ui.ctx(), &response, local_terrain_mode) {
             model.stop_event_follow();
         }
-        if !model.event_follow.enabled() {
+        if !targeting && !model.event_follow.enabled() {
             camera::apply_interaction(ui.ctx(), &response, &mut model.globe_view);
         }
         infrastructure_hover::begin(
@@ -144,6 +151,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
         contour_pass::begin_frame();
         painter.add(contour_pass::residency_callback(rect));
         painter.add(local_contour_pass::residency_callback(rect, ui.ctx()));
+        painter.add(target_pass::release(rect));
         if !local_terrain_mode {
             contour_asset::leave_local_view();
         } else {
@@ -156,13 +164,17 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
         };
         contour_pass::end_frame();
 
+        if targeting {
+            target_view::selection(&painter, rect, model, &response);
+        }
+
 
         if local_terrain_mode && !model.obs_view {
             ui.add_space(10.0);
             draw_local_footer(ui, model, scene.beam_elevation_m);
         }
 
-        if response.clicked() && response.drag_delta().length_sq() < 4.0 {
+        if !targeting && response.clicked() && response.drag_delta().length_sq() < 4.0 {
             if let Some(pointer) = response.interact_pointer_pos() {
                 if let Some((icao24, _)) = scene
                     .flight_markers

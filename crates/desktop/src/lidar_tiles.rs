@@ -255,11 +255,17 @@ impl Tiles {
 
     pub(crate) fn stop(&mut self) {
         self.measurements = false;
+        self.suspend_preparation();
+        self.view.get_mut().clear();
+        self.stable.clear();
+    }
+
+    /// Target shares the EPT worker budget. Yield preparation to its foreground
+    /// request while retaining the Local textures for an immediate return.
+    pub(crate) fn suspend_preparation(&mut self) {
         for job in self.jobs.iter_mut().flatten() {
             job.active = None;
         }
-        self.view.get_mut().clear();
-        self.stable.clear();
         self.jobs = [None, None];
     }
 
@@ -922,6 +928,21 @@ fn load_with_preview(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn target_suspends_preparation_without_hiding_cached_local_measurements() {
+        let ctx=egui::Context::default();let mut tiles=Tiles::default();
+        let bounds=Some([-77.59,35.25,-77.57,35.27]);
+        tiles.cache_test_image(&ctx,bounds,true,"Ready Local");
+        let count=tiles.loaded.len();assert!(count>0);
+        let marker=tempfile::NamedTempFile::new().unwrap();let path=marker.path().to_owned();
+        let (_tx,rx)=mpsc::channel();
+        tiles.jobs[0]=Some(Job {key:Arc::new(OnceLock::new()),rx,active:Some(marker)});
+        tiles.suspend_preparation();
+        assert!(!path.exists());assert!(tiles.jobs.iter().all(Option::is_none));
+        assert!(tiles.measurements);assert_eq!(tiles.loaded.len(),count);
+        let mut shown=0;tiles.draw(bounds,View::Fused,|_|shown+=1);
+        assert!(shown>0,"returning to Local can immediately draw the retained textures");
+    }
     #[test]
     fn neighboring_arrivals_and_catalog_refresh_keep_completed_tiles_visible() {
         let ctx = egui::Context::default();

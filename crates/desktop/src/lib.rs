@@ -21,6 +21,7 @@ mod flight_tracks;
 mod ghostmaps;
 mod lidar_catalog;
 mod lidar_tiles;
+mod target_mode;
 mod gruve;
 mod gpu_config;
 mod model;

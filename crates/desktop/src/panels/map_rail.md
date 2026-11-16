@@ -1,5 +1,11 @@
 # map_rail.rs
 
+Local Earth also exposes **TARGET**, a radial inspection selection tool. It is
+absent on Globe and other celestial bodies. Activating it stops camera motion
+and event following, and leaves the Local camera position and viewing angles
+in place. Clicking the selection enters the independent free-flight Target
+viewport; Escape cancels or returns to Local.
+
 ## Purpose
 Own the single compact map rail with independently available camera controls. Preserve
 view/layer/event/camera/presentation controls alongside Settings, body selection

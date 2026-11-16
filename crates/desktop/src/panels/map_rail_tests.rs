@@ -1,6 +1,19 @@
 use super::*;
 
 #[test]
+fn target_tool_is_available_only_on_local_earth() {
+    let ctx=egui::Context::default();let mut model=AppModel::new();
+    for (body,local,expected) in [(ActiveBody::Earth,false,false),(ActiveBody::Earth,true,true),
+        (ActiveBody::Moon,true,false),(ActiveBody::Mars,true,false)] {
+        model.active_body=body;model.globe_view.local_mode=local;
+        let output=ctx.run(egui::RawInput::default(),|ctx| {
+            egui::CentralPanel::default().show(ctx,|ui|view_buttons(ui,&mut model));
+        });
+        assert_eq!(output.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="TARGET")),expected);
+    }
+}
+
+#[test]
 fn local_button_enters_the_local_renderer_without_a_selected_event() {
     let ctx = egui::Context::default();
     let mut model = AppModel::new();

@@ -4,5 +4,6 @@ pub mod builder;
 #[cfg(feature = "builder")]
 mod geo;
 pub mod render;
+pub mod region;
 #[cfg(feature = "ept")]
 pub mod ept;

@@ -138,6 +138,10 @@ pub(crate) fn tick(ctx: &egui::Context, model: &mut AppModel) {
         b.tiles.stop();
         return;
     }
+    if model.target.session.is_some() {
+        b.tiles.suspend_preparation();
+        return;
+    }
     if b.work.is_none()
         && b.last_check
             .is_none_or(|t| t.elapsed() >= Duration::from_secs(86400))

@@ -50,6 +50,7 @@ impl Default for ActiveBody {
 }
 
 pub struct AppModel {
+    pub(crate) target: crate::target_mode::TargetMode,
     pub events: Vec<EventRecord>,
     pub cameras: Vec<CameraFeed>,
     /// Live AIS vessel positions; refreshed periodically by `moving_tracks`.
@@ -294,6 +295,7 @@ impl AppModel {
             selected_track_mmsi: None,
             selected_flight_icao24: None,
             globe_view: GlobeViewState::from_focus(GeoPoint { lat: 0.0, lon: 0.0 }),
+            target: Default::default(),
             event_follow: event_follow::EventFollow::with_dwell_seconds(
                 app_settings.event_follow_dwell_seconds,
             ),

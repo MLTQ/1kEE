@@ -19,6 +19,9 @@ use tiff::{
     tags::Tag,
 };
 
+#[path = "point_cloud.rs"]
+pub mod point_cloud;
+
 type Result<T> = std::result::Result<T, String>;
 const NODE_LIMIT: u64 = 32 * 1024 * 1024;
 const TRANSFER_LIMIT: u64 = 256 * 1024 * 1024;

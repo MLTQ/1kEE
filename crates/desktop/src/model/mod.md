@@ -9,6 +9,14 @@ source pollers.
 
 ## Components
 
+### Target inspection
+
+`target` is a transient radial-selection / free-flight session. Its camera and
+worker state are independent of `globe_view`; entering and leaving Target does
+not replace the Local position, scale or angles. Escape has priority over
+presentation mode and releases pointer capture after the input borrow ends.
+Target data and jobs are not persisted in AppSettings.
+
 ### OBS view
 - `obs_view` is a session-only presentation toggle, initially off. It hides
   operator chrome without changing layer visibility, selections, camera

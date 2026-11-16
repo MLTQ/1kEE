@@ -1,0 +1,54 @@
+{
+  "context": "3465 context segments \u00b7 0 markers \u00b7 DEM-draped",
+  "dem": "North Carolina \u2014 NCEM / NC OneMap LiDAR DEM, ~1 m \u00b7 sampled grid ~1.0 m \u00b7 display mesh ~3.9 m",
+  "dem_frame_ms_gpu_synchronized": 0.138016,
+  "dem_index_bytes": 6291456,
+  "dem_vertex_bytes": 5263380,
+  "frame_ms_gpu_synchronized": 5.218969466666667,
+  "height_range_source_units": [
+    4.610000133514404,
+    61.5099983215332
+  ],
+  "load_ms": 13984.54833,
+  "notes": [
+    "Original source coordinates retained; no inferred vertical alignment. Source Z units undeclared in this EPT metadata.",
+    "EPT blocks were already cached. Loading time includes a fresh DEM request.",
+    "GPU timing includes CPU preparation, submission and a GPU wait per frame; not an interactive FPS claim.",
+    "Classification 1 is unclassified: the viewer does not relabel these returns as trees or buildings."
+  ],
+  "point_buffer_bytes": 160000000,
+  "points": 8000000,
+  "region": {
+    "lat": 35.26,
+    "lon": -77.58,
+    "radius_m": 1000.0
+  },
+  "source": {
+    "crs": {
+      "authority": "EPSG",
+      "horizontal": "3857",
+      "wkt": "PROJCS[\"WGS 84 / Pseudo-Mercator\",GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\",SPHEROID[\"WGS 84\",6378137,298.257223563,AUTHORITY[\"EPSG\",\"7030\"]],AUTHORITY[\"EPSG\",\"6326\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.0174532925199433,AUTHORITY[\"EPSG\",\"9122\"]],AUTHORITY[\"EPSG\",\"4326\"]],PROJECTION[\"Mercator_1SP\"],PARAMETER[\"central_meridian\",0],PARAMETER[\"scale_factor\",1],PARAMETER[\"false_easting\",0],PARAMETER[\"false_northing\",0],UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"X\",EAST],AXIS[\"Y\",NORTH],EXTENSION[\"PROJ4\",\"+proj=merc +a=6378137 +b=6378137 +lat_ts=0.0 +lon_0=0.0 +x_0=0.0 +y_0=0 +k=1.0 +units=m +nadgrids=@null +wktext +no_defs\"],AUTHORITY[\"EPSG\",\"3857\"]]"
+    },
+    "date": "2019-12-08 / 2020-01-26",
+    "id": "USGS_3DEP_ID:NC_HurricaneFlorence_3_2020",
+    "publisher": "https://s3-us-west-2.amazonaws.com/usgs-lidar-public/NC_HurricaneFlorence_3_2020/ept.json"
+  },
+  "status": "8000000 measured points \u00b7 Point budget reached; raise the budget and refine",
+  "summary": {
+    "complete": false,
+    "decoded": 16561343,
+    "limit": "Point budget reached; raise the budget and refine",
+    "nodes": 343,
+    "points": 8000000,
+    "source": "USGS_3DEP_ID:NC_HurricaneFlorence_3_2020",
+    "transferred_bytes": 0
+  },
+  "date": "2026-11-16",
+  "gpu": "NVIDIA GeForce RTX 4090, Vulkan, NVIDIA 615.78.08",
+  "source_class_counts": {
+    "1": 5523993,
+    "2": 2464701,
+    "20": 4793,
+    "9": 6513
+  }
+}
