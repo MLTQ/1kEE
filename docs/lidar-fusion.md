@@ -4,8 +4,10 @@ The Earth sidebar has one **Layers → Base → Lidar** toggle. Globe draws all
 cataloged survey outlines. Local reads compact numeric rasters prepared from
 downloaded scans and fuses acquisitions in descending catalog-date order. A newer
 scan wins only at measured pixels; older measurements can fill gaps. Regions
-without prepared rasters stay transparent. The display does not fall back to
-raw scans or publisher imagery, and there are no survey search or picker controls.
+without measurements stay transparent. Missing USGS 3DEP views now prepare
+numeric overviews from public EPT blocks on the background tile workers and
+then display the fused rasters. There are no survey search or picker controls.
+Other providers currently require prepared local scans.
 
 Preparation, archive auditing and fusion of prepared views run in Rust through
 `crates/lidar`. The desktop reads TIFF chunks directly without Python, GDAL or
@@ -106,7 +108,8 @@ target/release/one-thousand-electric-eye-lidar \
 ```
 
 The current batch supports present, completed, direct COPC scan receipts in
-`bulk.sqlite`. Existing DEM/relief rasters continue through the raster path.
+`bulk.sqlite`. Other downloaded DEM/relief rasters still need native preparation
+before they can appear through this single fused layer (tracked in `1kee-1048`).
 EBA ZIP members, separately selected NASA granules, wrapped bounds and scans
 requiring more than 16 million output cells are not yet converted by this batch.
 Oversized/invalid scans are recorded in the index's `failures` table and their
@@ -124,6 +127,44 @@ read-only. Follow progress with `journalctl --user -fu 1kee-lidar-fusion` and
 stop with `systemctl --user stop 1kee-lidar-fusion`. After a stop or reboot,
 rerun the build command above to resume. This service converts a snapshot of
 the local inventory; it does not download the world's remaining scans.
+
+## Missing Local coverage
+
+The Kentucky report exposed an acquisition gap: catalog coverage was present,
+but no downloaded or fused scans overlapped the view. Converting downloaded
+Swiss COPCs could never populate that area. Local now prepares bounded USGS
+[EPT](https://entwine.io/en/latest/entwine-point-tile.html) overviews as needed,
+using native Rust HTTP, LAZ decoding, EPSG:3857/4326 XY conversion, numeric
+binning and GeoTIFF publication. The desktop still has no GDAL/PROJ dependency.
+The existing full-density batch continues independently.
+
+Overviews are 512 × 512 at each requested geographic tile's resolution. They
+use hierarchical samples rather than every return; zooming in prepares finer
+samples. Four bands retain observed min/max/mean/count with noise and withheld
+points excluded. No gap interpolation or vertical conversion is performed.
+Date ordering is shared with full-density rasters, which take precedence within
+the same acquisition; finer overviews precede coarser ones. Missing referenced
+files no longer hide other available measurements.
+
+These overviews have a separate `fused/v1/previews.sqlite` index and TIFF
+metadata identifying the sampling product, source CRS and individual EPT node
+hashes. They are excluded from full-density audit/compression receipts and never
+authorize raw-scan reclamation. Preparation is limited to two concurrent jobs,
+256 MiB of downloads per tile, 32 MiB per response, 64 million decoded points
+per survey and three minutes; it preserves 10 GB of free space. Source blocks
+are cached up to 1 GiB after preparation. Camera movement/layer changes cancel
+requests between network/decode operations. A network request has a 30-second
+timeout. Prepared numeric and rendered tiles remain usable offline.
+
+The reported Kentucky region was prepared from the actual public surveys and
+rendered through the native desktop loader. Unit fixtures cover EPT hierarchy
+continuations, both projections, filtering, cancellation, incomplete nodes,
+numeric TIFF round trips, overview-only archives and acquisition/density order.
+An independent laspy/pyproj/NumPy/rasterio reduction of 4,202,195 source returns
+matched every stored band and mask exactly; see the
+[Kentucky verification record](benchmarks/lidar-kentucky-2026-11-16.json).
+The actual desktop load entry point also passed with an initially empty prepared
+archive and cached public source blocks, alongside the RTX 4090 scene test.
 
 ## Benchmark protocol
 

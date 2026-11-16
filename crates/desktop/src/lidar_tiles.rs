@@ -129,10 +129,10 @@ fn key(tile: Tile, detail: bool, generation: u32, preferred: &str) -> Key {
     let variant = if !detail {
         format!("paths-v2-{generation}")
     } else if preferred.is_empty() {
-        "detail-fused-local-v2".into()
+        "detail-fused-local-v3".into()
     } else {
         format!(
-            "detail-fused-local-v2-{:x}",
+            "detail-fused-local-v3-{:x}",
             Sha1::digest(preferred.as_bytes())
         )
     };
@@ -383,7 +383,7 @@ impl Tiles {
             let selected = preferred.to_owned();
             let generation = self.generation;
             if detail {
-                self.status = "Loading fused lidar…".into();
+                self.status = "Loading / preparing lidar…".into();
             }
             let active = match tempfile::NamedTempFile::new() {
                 Ok(file) => file,
@@ -453,7 +453,11 @@ impl Tiles {
         if self.stable.first().is_some_and(|t| t.z < DETAIL_ZOOM) {
             self.status = "Zoom in to see fused lidar".into();
         } else if !self.sources.is_empty() {
-            self.status = "Showing fused lidar".into();
+            self.status = if self.jobs.iter().any(Option::is_some) {
+                "Showing lidar; preparing nearby tiles…".into()
+            } else {
+                "Showing fused lidar".into()
+            };
         } else if blanks > 0 && blanks == self.stable.len() {
             self.status = "No fused lidar prepared here yet".into();
         }
@@ -521,26 +525,36 @@ fn fused_revision(catalog: &Path, tile: Option<Tile>, preferred: &str) -> i64 {
     let Some(root) = catalog.parent() else {
         return 0;
     };
-    let Ok(db) = rusqlite::Connection::open_with_flags(
-        root.join("fused/v1/index.sqlite"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ) else {
-        return 0;
-    };
-    if let Some(tile) = tile {
-        let [w, s, e, n] = tile.bounds();
-        db.query_row(
-            "SELECT coalesce(max(id),0) FROM rasters WHERE west<?1 AND east>=?2
+    let mut revision = 0;
+    for (file, table) in [("index.sqlite", "rasters"), ("previews.sqlite", "tiles")] {
+        let Ok(db) = rusqlite::Connection::open_with_flags(
+            root.join("fused/v1").join(file),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ) else {
+            continue;
+        };
+        revision += if let Some(tile) = tile {
+            let [w, s, e, n] = tile.bounds();
+            db.query_row(
+                &format!(
+                    "SELECT coalesce(max(id),0) FROM {table} WHERE west<?1 AND east>=?2
             AND south<?3 AND north>=?4 AND (?5='' OR survey=?5 OR
-            (substr(?5,-1)='/' AND instr(survey,?5)=1))",
-            rusqlite::params![e, w, n, s, preferred],
-            |r| r.get(0),
-        )
-        .unwrap_or(0)
-    } else {
-        db.query_row("SELECT coalesce(max(id),0) FROM rasters", [], |r| r.get(0))
+            (substr(?5,-1)='/' AND instr(survey,?5)=1))"
+                ),
+                rusqlite::params![e, w, n, s, preferred],
+                |r| r.get(0),
+            )
             .unwrap_or(0)
+        } else {
+            db.query_row(
+                &format!("SELECT coalesce(max(id),0) FROM {table}"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0)
+        };
     }
+    revision
 }
 
 fn tile_revision(
@@ -586,7 +600,7 @@ fn load(
     let Tile { z, x, y } = k.tile;
     let target = tile_path(db, k);
     let mut output = target.clone();
-    let revision = if k.detail {
+    let mut revision = if k.detail {
         tile_revision(db, bulk_index(db).as_ref(), k.tile, preferred)
     } else {
         0
@@ -616,12 +630,30 @@ fn load(
             let span = 180. / (1u32 << z) as f64;
             let w = -180. + x as f64 * span;
             let n = 90. - y as f64 * span;
-            let image = lidar_pipeline::render::render_prepared(
-                db,
-                [w, n - span, w + span, n],
-                Some(active),
-            )
-            .map_err(TileError::Render)?;
+            let bounds = [w, n - span, w + span, n];
+            let mut image = lidar_pipeline::render::render_prepared(db, bounds, Some(active))
+                .map_err(TileError::Render)?;
+            if image.as_ref().is_none_or(|image| {
+                image.rgba.chunks_exact(4).filter(|p| p[3] > 0).count() * 100 < 512 * 512 * 90
+            }) {
+                // Prepare a numeric overview first. Local still displays only
+                // fused rasters; no raw-source renderer or picker is involved.
+                let preparation = lidar_pipeline::ept::prepare(db, bounds, z, Some(active));
+                revision = tile_revision(db, bulk_index(db).as_ref(), k.tile, preferred);
+                image = lidar_pipeline::render::render_prepared(db, bounds, Some(active))
+                    .map_err(TileError::Render)?;
+                // An unavailable historical source must not hide the newest
+                // raster already published while this tile was preparing.
+                if let Err(error) = preparation {
+                    if image
+                        .as_ref()
+                        .is_none_or(|image| !image.rgba.chunks_exact(4).any(|p| p[3] > 0))
+                    {
+                        return Err(TileError::Render(error));
+                    }
+                    eprintln!("Lidar preparation incomplete: {error}");
+                }
+            }
             if let Some(image) = image.filter(|image| image.rgba.chunks_exact(4).any(|p| p[3] > 0))
             {
                 lidar_pipeline::render::save_png(&target, &image).map_err(TileError::Render)?;
@@ -735,10 +767,29 @@ fn load(
 mod tests {
     use super::*;
     #[test]
-    fn local_without_a_fused_archive_stays_empty_instead_of_loading_raw_sources() {
+    #[ignore = "requires public USGS access and writable ONEKEE_LIDAR_TEST_CATALOG"]
+    fn kentucky_public_survey_prepares_and_loads_through_the_desktop_worker() {
+        let catalog =
+            PathBuf::from(std::env::var_os("ONEKEE_LIDAR_TEST_CATALOG").expect("catalog path"));
+        let tile = Tile {
+            z: 10,
+            x: 522,
+            y: 301,
+        };
+        let active = tempfile::NamedTempFile::new().unwrap();
+        let (image, credit) = load(&catalog, &key(tile, true, 4, ""), "", 4, active.path())
+            .unwrap()
+            .unwrap();
+        assert!(credit.contains("KY"), "{credit}");
+        assert!(image.pixels.pixels.iter().filter(|p| p.a() > 0).count() > 512 * 512 / 2);
+    }
+    #[test]
+    fn local_without_prepared_or_remote_coverage_stays_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let catalog = tmp.path().join("catalog.sqlite");
-        rusqlite::Connection::open(&catalog).unwrap();
+        rusqlite::Connection::open(&catalog).unwrap().execute_batch(
+            "CREATE TABLE surveys(id TEXT,date TEXT,west REAL,south REAL,east REAL,north REAL);"
+        ).unwrap();
         let tile = Tile {
             z: 12,
             x: 2387,

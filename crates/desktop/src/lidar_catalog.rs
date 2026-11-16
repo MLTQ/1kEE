@@ -161,7 +161,7 @@ pub(crate) fn toggle(ui: &mut egui::Ui, model: &mut AppModel) {
     let mut enabled = model.lidar.enabled;
     if ui
         .checkbox(&mut enabled, "Lidar")
-        .on_hover_text("Globe: all survey boundaries. Local: prepared fused lidar data.")
+        .on_hover_text("Globe: all survey boundaries. Local: fused lidar data. USGS coverage is prepared in the background when you visit.")
         .changed()
     {
         model.lidar.set_enabled(enabled);

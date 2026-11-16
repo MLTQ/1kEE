@@ -2198,6 +2198,7 @@ dependencies = [
  "gdal-sys",
  "las",
  "png",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",

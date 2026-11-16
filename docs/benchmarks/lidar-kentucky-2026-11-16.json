@@ -1,0 +1,24 @@
+{
+  "survey": "USGS_3DEP_ID:KY_FullState",
+  "tile": [
+    10,
+    522,
+    301
+  ],
+  "nodes": 60,
+  "decoded_points": 4202195,
+  "accepted_points": 1735875,
+  "measured_cells": 251413,
+  "mask_differences": 0,
+  "numeric_differences": 0,
+  "bands": [
+    "min",
+    "max",
+    "mean",
+    "count"
+  ],
+  "product": "view-resolution EPT overview, not full density",
+  "independent_decoder": "laspy/lazrs, pyproj, NumPy, rasterio",
+  "prepared_view_tiles": 7,
+  "prepared_survey_tiles": 24
+}

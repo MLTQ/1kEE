@@ -8,8 +8,11 @@ control. It starts off on each launch and stays enabled when switching views.
   coverage, not a guarantee of local fused data.
 - **Local** shows the prepared fused elevation layer from **Lidar/fused/v1**.
   Newer measurements take precedence, with older measurements filling gaps.
-  Areas without prepared data stay transparent. Raw scans and publisher rasters
-  are not loaded as a fallback by this layer. Zoom in to see detailed tiles.
+  Missing USGS 3DEP views are prepared in the background from public EPT blocks
+  and cached as numeric rasters at the current view resolution. The sidebar
+  reports preparation while these tiles load. Other providers currently need
+  locally prepared scans; areas without measurements stay transparent. Zoom in
+  to prepare finer tiles. Cached tiles work offline.
 
 There is no top-bar LiDAR button, survey search, regional picker, or boundary
 click action. Switching views preserves the camera and the layer toggle.
@@ -87,7 +90,7 @@ The default reserve is **100 GB** (100,000,000,000 bytes). The downloader checks
 
 Open **Data/Lidar/scans** to manage storage. The first two directories are the continent and country, for example **South America/Brazil** or **Oceania/New Zealand**. For cross-border and coastal files the downloader uses the tile center and nearby coastline. National surveys and Brazilian regional archives use their published country. Each filename includes a short identifier so different acquisitions with the same publisher filename can coexist.
 
-Delete a country directory to reclaim its scan storage. Keep **Lidar/bulk.sqlite** and **Lidar/catalog.sqlite**. They retain source URLs, geographic extents and Brazilian ZIP member names. The worldwide job skips country directories you removed. Existing rendered tiles stay available under **Lidar/maps**. When a new view needs an evicted scan, 1kEE reads it from the publisher and saves the resulting tile. Availability then depends on the publisher and your connection.
+Delete a country directory to reclaim its scan storage. Keep **Lidar/bulk.sqlite** and **Lidar/catalog.sqlite**. They retain source URLs, geographic extents and Brazilian ZIP member names. The worldwide job skips country directories you removed. Existing rendered tiles stay available under **Lidar/maps**, and prepared rasters stay under **Lidar/fused**. USGS views can prepare new overviews from the publisher; other providers require prepared local data. Availability of new USGS views depends on the publisher and your connection.
 
 To download a previously saved country again, use its folder name. The command also works while the worldwide job is running. A country with territory in multiple continent directories is restored across those directories.
 

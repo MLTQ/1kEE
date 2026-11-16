@@ -164,6 +164,40 @@ fn newest_measured_pixels_win_and_older_acquisition_fills_only_gaps_without_raw_
 }
 
 #[test]
+fn missing_new_raster_does_not_hide_other_available_measurements() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let db = setup(root);
+    let old = scan(
+        root,
+        "available.las",
+        &[100],
+        &[10.],
+        &[2],
+        &[false],
+        "2020",
+    );
+    let new = scan(root, "missing.las", &[100], &[20.], &[2], &[false], "2026");
+    for asset in [&old, &new] {
+        register(root, asset);
+        prepare(root, &db, asset, 15).unwrap();
+    }
+    let missing: String = db
+        .query_row(
+            "SELECT path FROM rasters WHERE survey=?1",
+            [&new.survey],
+            |r| r.get(0),
+        )
+        .unwrap();
+    fs::remove_file(root.join(missing)).unwrap();
+    let image = crate::render::render_prepared(&root.join("catalog.sqlite"), bounds(), None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(image.credits[0][1], "available.las");
+    assert_eq!(image.rgba[(100 * SIZE + 100) * 4 + 3], 255);
+}
+
+#[test]
 fn resume_repairs_corruption_and_date_updates_invalidate_the_receipt() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();

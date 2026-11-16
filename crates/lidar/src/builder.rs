@@ -548,6 +548,29 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<()> {
         .map(|v| v.parse::<u8>().map_err(err))
         .transpose()?
         .unwrap_or(15);
+    #[cfg(feature = "ept")]
+    if mode == "prepare-view" {
+        let bounds = options
+            .get("--bounds")
+            .ok_or("Missing --bounds west,south,east,north")?
+            .split(',')
+            .map(|v| v.parse::<f64>().map_err(err))
+            .collect::<Result<Vec<_>>>()?
+            .try_into()
+            .map_err(|_| "Expected four bounds")?;
+        let catalog = required("--catalog")?;
+        let prepared = crate::ept::prepare(&catalog, bounds, zoom, None)?;
+        if let Some(output) = options.get("--output")
+            && let Some(image) = crate::render::render_prepared(&catalog, bounds, None)?
+        {
+            crate::render::save_png(Path::new(output), &image)?;
+        }
+        println!(
+            "{}",
+            serde_json::json!({"prepared":prepared,"bounds":bounds,"zoom":zoom})
+        );
+        return Ok(());
+    }
     if !(12..=16).contains(&zoom) {
         return Err("Zoom must be 12–16".into());
     }

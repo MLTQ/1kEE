@@ -212,26 +212,44 @@ fn render_impl(
     require_complete: bool,
 ) -> Result<Option<Rendered>, String> {
     let root = catalog.parent().ok_or("Missing lidar root")?;
-    let index = root.join("fused/v1/index.sqlite");
-    if !index.is_file() {
-        return Ok(None);
-    }
-    let db = Connection::open_with_flags(index, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;
     let [w, s, e, n] = bounds;
-    let mut query = db.prepare("SELECT url,survey,path FROM rasters WHERE west<?1 AND east>=?2
+    let mut rows = Vec::new();
+    for (index, table, url, rank) in [
+        ("index.sqlite", "rasters", "url", "17"),
+        ("previews.sqlite", "tiles", "key", "zoom"),
+    ] {
+        let index = root.join("fused/v1").join(index);
+        if !index.is_file() {
+            continue;
+        }
+        let db =
+            Connection::open_with_flags(index, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;
+        let mut query = db.prepare(&format!("SELECT {url},survey,path,date,{rank} FROM {table} WHERE west<?1 AND east>=?2
         AND south<?3 AND north>=?4 AND (?5='' OR survey=?5 OR (substr(?5,-1)='/' AND instr(survey,?5)=1))
-        ORDER BY date DESC,survey,url").map_err(err)?;
-    let rows = query
-        .query_map(params![e, w, n, s, preferred], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })
-        .map_err(err)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(err)?;
+        ORDER BY date DESC,survey,{url}")).map_err(err)?;
+        let found = query
+            .query_map(params![e, w, n, s, preferred], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, u8>(4)?,
+                ))
+            })
+            .map_err(err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(err)?;
+        rows.extend(found);
+    }
+    // Newest acquisition wins; its full-density raster precedes overviews.
+    // Finer overviews precede coarser ones from the same survey/date.
+    rows.sort_by(|a, b| {
+        b.3.cmp(&a.3)
+            .then(a.1.cmp(&b.1))
+            .then(b.4.cmp(&a.4))
+            .then(a.0.cmp(&b.0))
+    });
     if rows.is_empty() {
         return Ok(None);
     }
@@ -259,13 +277,13 @@ fn render_impl(
         Connection::open_with_flags(catalog, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;
     let mut values = vec![f32::NAN; SIZE * SIZE];
     let mut credits = Vec::new();
-    for (_, survey, path) in rows {
+    for (_, survey, path, _, _) in rows {
         if active.is_some_and(|p| !p.is_file()) {
             return Err("Camera moved".into());
         }
         let file = checked_path(root, &path)?;
         if !file.is_file() {
-            return Ok(None);
+            continue;
         }
         let data = read_mean(&file, bounds)?;
         let mut used = false;

@@ -7,8 +7,32 @@ The default library contains SQLite lookup, bounded windowed GeoTIFF decoding,
 pixel fusion, shading and atomic PNG publication. The desktop calls it directly
 on its existing background worker. It uses the Rust TIFF decoder and does not
 link GDAL or PROJ. The sidebar shows catalog boundary lines on the globe and prepared data in
-Local; unprepared Local regions stay empty. Catalog harvesting and downloads
-remain separate existing tools.
+Local. The desktop enables the optional `ept` feature to prepare view-resolution
+USGS 3DEP overviews on its background workers when local data is missing. This
+also runs entirely in Rust without GDAL/PROJ. Other providers currently need
+prepared local scans. Catalog harvesting and bulk downloads remain separate tools.
+
+EPT overviews live in `fused/v1/previews` with a separate `previews.sqlite`,
+never in the full-density receipt index. Each numeric TIFF includes acquisition,
+source CRS, fetched-node hashes and sampled counts. The viewer orders acquisitions
+by date, prefers full-density data within an acquisition, then finer overviews.
+Only measured cells are visible. Source Z remains unchanged. Source block cache
+size is capped at 1 GiB after each preparation, with at most two preparations per
+process, 256 MiB transferred per tile, 32 MiB per response, 64 million decoded
+points per survey, a three-minute preparation deadline and a 10 GB free-space
+reserve. Moving the camera or disabling the layer cancels work between requests
+and decode batches. A blocking request can take up to its 30-second timeout to
+finish. Overviews never authorize deleting full-resolution source data.
+
+An isolated preparation/render can be run with both features:
+
+```sh
+cargo build --release -p lidar-pipeline --features builder,ept
+target/release/one-thousand-electric-eye-lidar prepare-view \
+  --catalog /path/to/Data/Lidar/catalog.sqlite \
+  --bounds=-88.2421875,36.9140625,-88.06640625,37.08984375 \
+  --zoom 10 --output /tmp/kentucky-lidar.png
+```
 
 The optional `builder` feature adds LAS/LAZ decoding through `las`/`laz` and
 GDAL/PROJ through checked, owned C API wrappers. It builds a standalone processor:
