@@ -9,6 +9,10 @@ numeric overviews from public EPT blocks on the background tile workers and
 then display the fused rasters. There are no survey search or picker controls.
 Other providers currently require prepared local scans.
 
+Local currently displays a shaded elevation image on a flat plane. Elevations
+control its colors and lighting, not the geometry of the tilted Local surface.
+A terrain mesh driven by the fused heights remains separate work (`1kee-1051`).
+
 Preparation, archive auditing and fusion of prepared views run in Rust through
 `crates/lidar`. The desktop reads TIFF chunks directly without Python, GDAL or
 PROJ. Globe catalog outlines use the existing background boundary worker. The
@@ -145,6 +149,24 @@ points excluded. No gap interpolation or vertical conversion is performed.
 Date ordering is shared with full-density rasters, which take precedence within
 the same acquisition; finer overviews precede coarser ones. Missing referenced
 files no longer hide other available measurements.
+
+Coverage alone does not establish sufficient resolution. The renderer tracks
+the coarsest overview that actually contributes measured pixels. A close view
+using a coarser overview requests matching-resolution preparation even when
+every display pixel is opaque. The desktop keeps the overview visible while
+that worker prepares detail, replaces it on completion, and retries failures
+without treating the temporary preview as a completed detailed tile. The v4
+display cache excludes earlier tiles that permanently magnified coarse cells.
+Completed detailed renders exclude coarser overviews, so a newer survey's broad
+preview cells cannot mask finer measured data or extend its apparent footprint.
+Cached PNGs retain their contributing overview zoom and are regenerated if it
+is too coarse for the requested display tile.
+This corrects the regular square pattern seen when a z12 view reused z6 data;
+it does not add height displacement to the flat image layer.
+The reported cached tile had about 8 × 8 effective height samples; the corrected
+display uses the requested 512 × 512 grid and its actual desktop-loaded pixels
+match the native detailed render. See the
+[refinement verification record](benchmarks/lidar-refinement-2026-11-16.json).
 
 These overviews have a separate `fused/v1/previews.sqlite` index and TIFF
 metadata identifying the sampling product, source CRS and individual EPT node

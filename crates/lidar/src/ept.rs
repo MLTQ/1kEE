@@ -697,6 +697,12 @@ mod tests {
             .unwrap();
         assert_eq!(image.rgba[(200 * SIZE + 100) * 4 + 3], 255);
         assert_eq!(image.credits[0][0], "Test survey");
+        assert_eq!(image.overview_zoom, Some(10));
+        assert!(
+            crate::render::render_prepared_detail(&catalog, bounds, 12, None)
+                .unwrap()
+                .is_none()
+        );
         assert!(!folder.join("index.sqlite").exists());
 
         // A full-density raster wins at the same acquisition date. A newer
@@ -714,6 +720,14 @@ mod tests {
         let full_image = crate::render::render_prepared(&catalog, bounds, None)
             .unwrap()
             .unwrap();
+        assert_eq!(full_image.overview_zoom, None);
+        assert_eq!(
+            crate::render::render_prepared_detail(&catalog, bounds, 12, None)
+                .unwrap()
+                .unwrap()
+                .rgba,
+            full_image.rgba
+        );
         assert_ne!(
             &full_image.rgba[cell * 4..cell * 4 + 3],
             &image.rgba[cell * 4..cell * 4 + 3]
@@ -723,5 +737,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(newer.rgba, image.rgba);
+        assert_eq!(newer.overview_zoom, Some(10));
+        assert_eq!(
+            crate::render::render_prepared_detail(&catalog, bounds, 12, None)
+                .unwrap()
+                .unwrap()
+                .rgba,
+            full_image.rgba,
+            "a newer coarse overview must not mask available detailed data"
+        );
     }
 }

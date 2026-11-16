@@ -16,6 +16,12 @@ EPT overviews live in `fused/v1/previews` with a separate `previews.sqlite`,
 never in the full-density receipt index. Each numeric TIFF includes acquisition,
 source CRS, fetched-node hashes and sampled counts. The viewer orders acquisitions
 by date, prefers full-density data within an acquisition, then finer overviews.
+The desktop's completed detailed tile excludes overviews below the requested
+zoom. Coarser data is an intermediate image while matching detail prepares;
+full coverage alone never establishes sufficient resolution. PNG metadata
+records the contributing overview zoom, so an undersampled cached image can be
+regenerated. Local currently paints a flat shaded raster; it does not displace
+terrain vertices using the fused elevations.
 Only measured cells are visible. Source Z remains unchanged. Source block cache
 size is capped at 1 GiB after each preparation, with at most two preparations per
 process, 256 MiB transferred per tile, 32 MiB per response, 64 million decoded

@@ -18,6 +18,8 @@ pub type Credit = [String; 3];
 pub struct Rendered {
     pub rgba: Vec<u8>,
     pub credits: Vec<Credit>,
+    /// Coarsest contributing sampled overview; None means full-density only.
+    pub overview_zoom: Option<u8>,
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -192,7 +194,7 @@ pub fn render(
     preferred: &str,
     active: Option<&Path>,
 ) -> Result<Option<Rendered>, String> {
-    render_impl(catalog, bounds, preferred, active, true)
+    render_impl(catalog, bounds, preferred, active, true, 0)
 }
 
 /// Prepared mosaic alone: pending raw scans do not hide completed neighbors.
@@ -201,7 +203,18 @@ pub fn render_prepared(
     bounds: [f64; 4],
     active: Option<&Path>,
 ) -> Result<Option<Rendered>, String> {
-    render_impl(catalog, bounds, "", active, false)
+    render_impl(catalog, bounds, "", active, false, 0)
+}
+
+/// A completed detailed view excludes coarser overviews, including newer
+/// surveys whose large cells can extend beyond their measured footprint.
+pub fn render_prepared_detail(
+    catalog: &Path,
+    bounds: [f64; 4],
+    zoom: u8,
+    active: Option<&Path>,
+) -> Result<Option<Rendered>, String> {
+    render_impl(catalog, bounds, "", active, false, zoom)
 }
 
 fn render_impl(
@@ -210,6 +223,7 @@ fn render_impl(
     preferred: &str,
     active: Option<&Path>,
     require_complete: bool,
+    minimum_zoom: u8,
 ) -> Result<Option<Rendered>, String> {
     let root = catalog.parent().ok_or("Missing lidar root")?;
     let [w, s, e, n] = bounds;
@@ -242,6 +256,7 @@ fn render_impl(
             .map_err(err)?;
         rows.extend(found);
     }
+    rows.retain(|row| row.4 >= minimum_zoom);
     // Newest acquisition wins; its full-density raster precedes overviews.
     // Finer overviews precede coarser ones from the same survey/date.
     rows.sort_by(|a, b| {
@@ -277,7 +292,8 @@ fn render_impl(
         Connection::open_with_flags(catalog, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;
     let mut values = vec![f32::NAN; SIZE * SIZE];
     let mut credits = Vec::new();
-    for (_, survey, path, _, _) in rows {
+    let mut overview_zoom: Option<u8> = None;
+    for (_, survey, path, _, rank) in rows {
         if active.is_some_and(|p| !p.is_file()) {
             return Err("Camera moved".into());
         }
@@ -292,6 +308,9 @@ fn render_impl(
                 *dest = src;
                 used = true;
             }
+        }
+        if used && rank <= 16 {
+            overview_zoom = Some(overview_zoom.map_or(rank, |old| old.min(rank)));
         }
         if used && !credits.iter().any(|c: &Credit| c[1] == survey) {
             let credit = catalog
@@ -310,6 +329,7 @@ fn render_impl(
     Ok(Some(Rendered {
         rgba: shade(&values, bounds),
         credits,
+        overview_zoom,
     }))
 }
 
@@ -321,6 +341,11 @@ pub fn save_png(path: &Path, rendered: &Rendered) -> Result<(), String> {
         let mut encoder = png::Encoder::new(tmp.as_file_mut(), SIZE as u32, SIZE as u32);
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
+        if let Some(zoom) = rendered.overview_zoom {
+            encoder
+                .add_text_chunk("LidarOverviewZoom".into(), zoom.to_string())
+                .map_err(err)?;
+        }
         // Match the existing ASCII JSON tEXt contract, including non-Latin
         // survey names and supplementary Unicode characters.
         let mut text = String::new();
@@ -362,6 +387,7 @@ mod tests {
                 "scan".into(),
                 "https://example.org".into(),
             ]],
+            overview_zoom: None,
         };
         save_png(&path, &rendered).unwrap();
         let decoder = png::Decoder::new(BufReader::new(File::open(path).unwrap()));

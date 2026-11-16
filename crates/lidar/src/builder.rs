@@ -561,7 +561,8 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<()> {
         let catalog = required("--catalog")?;
         let prepared = crate::ept::prepare(&catalog, bounds, zoom, None)?;
         if let Some(output) = options.get("--output")
-            && let Some(image) = crate::render::render_prepared(&catalog, bounds, None)?
+            && let Some(image) =
+                crate::render::render_prepared_detail(&catalog, bounds, zoom, None)?
         {
             crate::render::save_png(Path::new(output), &image)?;
         }

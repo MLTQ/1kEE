@@ -1,0 +1,34 @@
+{
+  "tile": [
+    12,
+    2064,
+    1174
+  ],
+  "bounds": [
+    -89.296875,
+    38.3642578125,
+    -89.2529296875,
+    38.408203125
+  ],
+  "before_effective_samples": [
+    8,
+    8
+  ],
+  "requested_samples": [
+    512,
+    512
+  ],
+  "before": {
+    "distinct_rgba": 102,
+    "measured_cells": 262144,
+    "overview_zoom": null
+  },
+  "after": {
+    "distinct_rgba": 633,
+    "measured_cells": 262098,
+    "overview_zoom": "12"
+  },
+  "desktop_actual_loader_matches_native_detailed_render": true,
+  "gpu_adapter": "NVIDIA GeForce RTX 4090",
+  "height_displacement": false
+}

@@ -4,7 +4,7 @@ use crate::panels::world_map::satellite_layer::SatelliteLayer;
 use crate::satellite_image::SatelliteImage;
 use std::{
     cell::RefCell,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -98,9 +98,34 @@ struct CatalogSnapshot {
 
 struct Job {
     key: Arc<OnceLock<Key>>,
-    rx: Receiver<Result<Option<MapImage>, TileError>>,
+    rx: Receiver<Update>,
     // The Python renderer checks this marker between source requests.
     active: Option<tempfile::NamedTempFile>,
+}
+
+enum Update {
+    Preview(MapImage),
+    Complete(Result<Option<MapImage>, TileError>),
+}
+
+fn remember(
+    loaded: &mut HashMap<Key, Option<SatelliteLayer>>,
+    order: &mut VecDeque<Key>,
+    ctx: &egui::Context,
+    k: Key,
+    image: Option<MapImage>,
+) {
+    loaded.insert(
+        k.clone(),
+        image.map(|(pixels, name)| SatelliteLayer::new(ctx, name, pixels)),
+    );
+    order.retain(|old| old != &k);
+    order.push_back(k);
+    while order.len() > 100 {
+        if let Some(old) = order.pop_front() {
+            loaded.remove(&old);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -117,6 +142,7 @@ pub(crate) struct Tiles {
     bulk_sequence: i64,
     bulk_versions: HashMap<Key, i64>,
     loaded: HashMap<Key, Option<SatelliteLayer>>,
+    provisional: HashSet<Key>,
     order: VecDeque<Key>,
     jobs: [Option<Job>; 2],
     retry: HashMap<Key, Instant>,
@@ -129,10 +155,10 @@ fn key(tile: Tile, detail: bool, generation: u32, preferred: &str) -> Key {
     let variant = if !detail {
         format!("paths-v2-{generation}")
     } else if preferred.is_empty() {
-        "detail-fused-local-v3".into()
+        "detail-fused-local-v4".into()
     } else {
         format!(
-            "detail-fused-local-v3-{:x}",
+            "detail-fused-local-v4-{:x}",
             Sha1::digest(preferred.as_bytes())
         )
     };
@@ -242,6 +268,7 @@ impl Tiles {
                     if self.generation != snapshot.generation {
                         self.generation = snapshot.generation;
                         self.loaded.clear();
+                        self.provisional.clear();
                         self.order.clear();
                         self.bulk_versions.clear();
                         self.retry.clear();
@@ -252,8 +279,17 @@ impl Tiles {
                     }
                     for (k, version) in snapshot.revisions {
                         if self.bulk_versions.insert(k.clone(), version).unwrap_or(0) != version {
-                            self.loaded.remove(&k);
-                            self.order.retain(|old| old != &k);
+                            // Keep an intermediate image visible while its
+                            // worker publishes the finer source rasters.
+                            if !self
+                                .jobs
+                                .iter()
+                                .flatten()
+                                .any(|job| job.key.get() == Some(&k))
+                            {
+                                self.loaded.remove(&k);
+                                self.order.retain(|old| old != &k);
+                            }
                             self.retry.remove(&k);
                         }
                     }
@@ -314,32 +350,38 @@ impl Tiles {
                 }
 
                 match job.rx.try_recv() {
-                    Ok(Ok(image)) => {
-                        let k = job.key.get().expect("completed tile has a key").clone();
-                        self.loaded.insert(
-                            k.clone(),
-                            image.map(|(pixels, name)| SatelliteLayer::new(ctx, name, pixels)),
-                        );
-                        self.order.push_back(k);
-                        while self.order.len() > 100 {
-                            if let Some(old) = self.order.pop_front() {
-                                self.loaded.remove(&old);
-                            }
+                    Ok(Update::Preview(image)) => {
+                        if job.active.is_some() {
+                            let k = job.key.get().expect("preview tile has a key").clone();
+                            self.provisional.insert(k.clone());
+                            remember(&mut self.loaded, &mut self.order, ctx, k, Some(image));
                         }
+                        continue;
                     }
-                    Ok(Err(_)) if job.active.is_none() => {}
-                    Ok(Err(e)) => {
+                    Ok(Update::Complete(Ok(image))) => {
+                        let k = job.key.get().expect("completed tile has a key").clone();
+                        self.retry.remove(&k);
+                        self.provisional.remove(&k);
+                        remember(&mut self.loaded, &mut self.order, ctx, k, image);
+                    }
+                    Ok(Update::Complete(Err(_))) if job.active.is_none() => {}
+                    Ok(Update::Complete(Err(e))) => {
                         let message = match e {
                             TileError::Render(message) => message,
                         };
                         self.status = message.clone();
                         if let Some(k) = job.key.get() {
                             self.retry.insert(k.clone(), Instant::now());
+                            ctx.request_repaint_after(Duration::from_secs(60));
                         }
                     }
                     Err(mpsc::TryRecvError::Empty) => continue,
                     Err(mpsc::TryRecvError::Disconnected) => {
-                        self.status = "Lidar map worker stopped".into()
+                        self.status = "Lidar map worker stopped".into();
+                        if let Some(k) = job.key.get() {
+                            self.retry.insert(k.clone(), Instant::now());
+                            ctx.request_repaint_after(Duration::from_secs(60));
+                        }
                     }
                 }
                 self.jobs[slot] = None;
@@ -363,7 +405,7 @@ impl Tiles {
                 .filter(|t| !detail || t.z >= DETAIL_ZOOM)
                 .map(|t| key(t, detail, self.generation, preferred))
                 .filter(|k| {
-                    !self.loaded.contains_key(k)
+                    (!self.loaded.contains_key(k) || self.provisional.contains(k))
                         && !self
                             .jobs
                             .iter()
@@ -404,8 +446,18 @@ impl Tiles {
                         .find(|k| tile_path(&db, k).is_file())
                         .unwrap_or(&candidates[0]);
                     let _ = worker_key.set(requested.clone());
-                    let result = load(&db, requested, &selected, generation, &marker);
-                    let _ = tx.send(result);
+                    let result = load_with_preview(
+                        &db,
+                        requested,
+                        &selected,
+                        generation,
+                        &marker,
+                        |image| {
+                            let _ = tx.send(Update::Preview(image));
+                            crate::app::request_repaint();
+                        },
+                    );
+                    let _ = tx.send(Update::Complete(result));
                     crate::app::request_repaint();
                 }) {
                 Ok(_) => {
@@ -419,7 +471,8 @@ impl Tiles {
             }
         }
         self.retry
-            .retain(|_, at| at.elapsed() < Duration::from_secs(60));
+            .retain(|k, at| self.loaded.contains_key(k) || at.elapsed() < Duration::from_secs(60));
+        self.provisional.retain(|k| self.loaded.contains_key(k));
         self.sources.clear();
         if !self.measurements {
             if !self
@@ -455,6 +508,8 @@ impl Tiles {
         } else if !self.sources.is_empty() {
             self.status = if self.jobs.iter().any(Option::is_some) {
                 "Showing lidar; preparing nearby tiles…".into()
+            } else if self.retry.keys().any(|k| self.stable.contains(&k.tile)) {
+                "Showing overview; retrying lidar detail…".into()
             } else {
                 "Showing fused lidar".into()
             };
@@ -590,12 +645,59 @@ fn bulk_revision(db: &rusqlite::Connection, tile: Tile, preferred: &str) -> i64 
     direct.max(archive)
 }
 
+#[cfg(test)]
 fn load(
     db: &Path,
     k: &Key,
     preferred: &str,
     generation: u32,
     active: &Path,
+) -> Result<Option<MapImage>, TileError> {
+    load_with_preview(db, k, preferred, generation, active, |_| {})
+}
+
+fn as_map(image: &lidar_pipeline::render::Rendered, bounds: [f32; 4]) -> MapImage {
+    let name = image
+        .credits
+        .iter()
+        .map(|credit| credit[0].as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    (
+        SatelliteImage {
+            bounds,
+            pixels: egui::ColorImage::from_rgba_unmultiplied([512, 512], &image.rgba),
+        },
+        if name.is_empty() {
+            "Lidar".into()
+        } else {
+            name
+        },
+    )
+}
+
+fn cached_overview_zoom(path: &Path) -> Option<u8> {
+    let file = std::fs::File::open(path).ok()?;
+    let reader = png::Decoder::new(std::io::BufReader::new(file))
+        .read_info()
+        .ok()?;
+    reader
+        .info()
+        .uncompressed_latin1_text
+        .iter()
+        .find(|chunk| chunk.keyword == "LidarOverviewZoom")?
+        .text
+        .parse()
+        .ok()
+}
+
+fn load_with_preview(
+    db: &Path,
+    k: &Key,
+    preferred: &str,
+    generation: u32,
+    active: &Path,
+    mut preview: impl FnMut(MapImage),
 ) -> Result<Option<MapImage>, TileError> {
     let Tile { z, x, y } = k.tile;
     let target = tile_path(db, k);
@@ -620,27 +722,39 @@ fn load(
         format!("{empty_prefix}-{generation}-{revision}")
     });
     let stamp = target.with_extension("revision");
-    let stale = revision > 0
-        && std::fs::read_to_string(&stamp)
-            .ok()
-            .and_then(|v| v.parse::<i64>().ok())
-            != Some(revision);
+    let stale = (k.detail && cached_overview_zoom(&target).is_some_and(|zoom| zoom < z))
+        || (revision > 0
+            && std::fs::read_to_string(&stamp)
+                .ok()
+                .and_then(|v| v.parse::<i64>().ok())
+                != Some(revision));
     if (!output.is_file() || stale) && !empty.is_file() {
         if k.detail {
             let span = 180. / (1u32 << z) as f64;
             let w = -180. + x as f64 * span;
             let n = 90. - y as f64 * span;
             let bounds = [w, n - span, w + span, n];
-            let mut image = lidar_pipeline::render::render_prepared(db, bounds, Some(active))
-                .map_err(TileError::Render)?;
+            let mut image =
+                lidar_pipeline::render::render_prepared_detail(db, bounds, z, Some(active))
+                    .map_err(TileError::Render)?;
             if image.as_ref().is_none_or(|image| {
-                image.rgba.chunks_exact(4).filter(|p| p[3] > 0).count() * 100 < 512 * 512 * 90
+                image.overview_zoom.is_some_and(|zoom| zoom < z)
+                    || image.rgba.chunks_exact(4).filter(|p| p[3] > 0).count() * 100
+                        < 512 * 512 * 90
             }) {
+                let overview = lidar_pipeline::render::render_prepared(db, bounds, Some(active))
+                    .map_err(TileError::Render)?;
+                if let Some(image) = overview
+                    .as_ref()
+                    .filter(|image| image.rgba.chunks_exact(4).any(|p| p[3] > 0))
+                {
+                    preview(as_map(image, k.tile.bounds()));
+                }
                 // Prepare a numeric overview first. Local still displays only
                 // fused rasters; no raw-source renderer or picker is involved.
                 let preparation = lidar_pipeline::ept::prepare(db, bounds, z, Some(active));
                 revision = tile_revision(db, bulk_index(db).as_ref(), k.tile, preferred);
-                image = lidar_pipeline::render::render_prepared(db, bounds, Some(active))
+                image = lidar_pipeline::render::render_prepared_detail(db, bounds, z, Some(active))
                     .map_err(TileError::Render)?;
                 // An unavailable historical source must not hide the newest
                 // raster already published while this tile was preparing.
@@ -651,7 +765,8 @@ fn load(
                     {
                         return Err(TileError::Render(error));
                     }
-                    eprintln!("Lidar preparation incomplete: {error}");
+                    preview(as_map(image.as_ref().unwrap(), k.tile.bounds()));
+                    return Err(TileError::Render(error));
                 }
             }
             if let Some(image) = image.filter(|image| image.rgba.chunks_exact(4).any(|p| p[3] > 0))
@@ -766,6 +881,213 @@ fn load(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn opaque_coarse_overview_is_shown_as_preview_and_requests_refinement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let catalog = tmp.path().join("catalog.sqlite");
+        rusqlite::Connection::open(&catalog).unwrap().execute_batch(
+            "CREATE TABLE surveys(id TEXT,name TEXT,page TEXT,date TEXT,west REAL,south REAL,east REAL,north REAL);
+             INSERT INTO surveys VALUES('scan','Coarse scan','https://example.org','2026',0,0,1,1);"
+        ).unwrap();
+        let tile = Tile {
+            z: 12,
+            x: 4096,
+            y: 2047,
+        };
+        let bounds = tile.bounds();
+        let [w, s, e, n] = bounds.map(f64::from);
+        let folder = tmp.path().join("fused/v1");
+        std::fs::create_dir_all(&folder).unwrap();
+        let db = rusqlite::Connection::open(folder.join("previews.sqlite")).unwrap();
+        db.execute_batch("CREATE TABLE tiles(id INTEGER,key TEXT,survey TEXT,date TEXT,path TEXT,zoom INTEGER,west REAL,south REAL,east REAL,north REAL);").unwrap();
+        db.execute("INSERT INTO tiles VALUES(1,'overview','scan','2026','fused/v1/coarse.tif',6,?1,?2,?3,?4)",
+            rusqlite::params![w,s,e,n]).unwrap();
+        {
+            use tiff::{
+                encoder::{TiffEncoder, colortype::RGBA32Float},
+                tags::Tag,
+            };
+            let mut encoder =
+                TiffEncoder::new(std::fs::File::create(folder.join("coarse.tif")).unwrap())
+                    .unwrap();
+            let mut image = encoder.new_image::<RGBA32Float>(2, 2).unwrap();
+            image
+                .encoder()
+                .write_tag(
+                    Tag::ModelPixelScaleTag,
+                    &[(e - w) / 2., (n - s) / 2., 0.][..],
+                )
+                .unwrap();
+            image
+                .encoder()
+                .write_tag(Tag::ModelTiepointTag, &[0., 0., 0., w, n, 0.][..])
+                .unwrap();
+            image
+                .encoder()
+                .write_tag(
+                    Tag::GeoKeyDirectoryTag,
+                    &[1u16, 1, 0, 1, 2048, 0, 1, 4326][..],
+                )
+                .unwrap();
+            image.write_data(&[10f32, 20., 15., 2.].repeat(4)).unwrap();
+        }
+        let active = tempfile::NamedTempFile::new().unwrap();
+        let mut previews = 0;
+        let result = load_with_preview(
+            &catalog,
+            &key(tile, true, 0, ""),
+            "",
+            0,
+            active.path(),
+            |(image, _)| {
+                previews += 1;
+                assert!(image.pixels.pixels.iter().all(|p| p.a() == 255));
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            previews, 1,
+            "complete coverage must not suppress finer-detail preparation"
+        );
+        assert!(
+            result.is_none(),
+            "a coarse overview must not be saved as completed detail"
+        );
+    }
+
+    #[test]
+    fn intermediate_preview_keeps_worker_running_and_final_image_replaces_it() {
+        let ctx = egui::Context::default();
+        let tmp = tempfile::tempdir().unwrap();
+        let tile = Tile {
+            z: 12,
+            x: 4096,
+            y: 2047,
+        };
+        let k = key(tile, true, 0, "");
+        let make_image = |name: &str, color| {
+            (
+                SatelliteImage {
+                    bounds: tile.bounds(),
+                    pixels: egui::ColorImage::new([2, 2], color),
+                },
+                name.into(),
+            )
+        };
+        let (tx, rx) = mpsc::channel();
+        let chosen = Arc::new(OnceLock::new());
+        assert!(chosen.set(k.clone()).is_ok());
+        let mut tiles = Tiles {
+            measurements: true,
+            stable: vec![tile],
+            view: RefCell::new(vec![tile]),
+            moved: Some(Instant::now()),
+            ..Default::default()
+        };
+        tiles.jobs[0] = Some(Job {
+            key: chosen,
+            rx,
+            active: Some(tempfile::NamedTempFile::new().unwrap()),
+        });
+        tx.send(Update::Preview(make_image("Overview", egui::Color32::RED)))
+            .unwrap();
+        tiles.tick(&ctx, &tmp.path().join("catalog.sqlite"), View::Fused);
+        assert!(tiles.jobs[0].is_some());
+        assert!(tiles.provisional.contains(&k));
+        assert_eq!(tiles.loaded[&k].as_ref().unwrap().name(), "Overview");
+        tx.send(Update::Complete(Ok(Some(make_image(
+            "Detail",
+            egui::Color32::BLUE,
+        )))))
+        .unwrap();
+        tiles.tick(&ctx, &tmp.path().join("catalog.sqlite"), View::Fused);
+        assert!(tiles.jobs[0].is_none());
+        assert!(!tiles.provisional.contains(&k));
+        assert_eq!(tiles.loaded[&k].as_ref().unwrap().name(), "Detail");
+        assert_eq!(
+            tiles.order.len(),
+            1,
+            "replacing the preview must not create an eviction duplicate"
+        );
+        let (tx, rx) = mpsc::channel();
+        let chosen = Arc::new(OnceLock::new());
+        assert!(chosen.set(k.clone()).is_ok());
+        tiles.jobs[0] = Some(Job {
+            key: chosen,
+            rx,
+            active: Some(tempfile::NamedTempFile::new().unwrap()),
+        });
+        tx.send(Update::Preview(make_image(
+            "New overview",
+            egui::Color32::RED,
+        )))
+        .unwrap();
+        tiles.tick(&ctx, &tmp.path().join("catalog.sqlite"), View::Fused);
+        tiles.stop();
+        assert!(
+            tiles.provisional.contains(&k),
+            "cancelling a preview must not mark it as completed detail"
+        );
+        assert_eq!(tiles.loaded[&k].as_ref().unwrap().name(), "New overview");
+    }
+
+    #[test]
+    #[ignore = "requires writable ONEKEE_LIDAR_TEST_CATALOG and public USGS access"]
+    fn close_public_view_refines_coarse_overviews() {
+        let catalog =
+            PathBuf::from(std::env::var_os("ONEKEE_LIDAR_TEST_CATALOG").expect("catalog path"));
+        let tile = Tile {
+            z: 12,
+            x: 2064,
+            y: 1174,
+        };
+        let bounds = tile.bounds().map(f64::from);
+        let before =
+            lidar_pipeline::render::render_prepared_detail(&catalog, bounds, tile.z, None).unwrap();
+        let needs_refinement = before.as_ref().is_none_or(|image| {
+            image.rgba.chunks_exact(4).filter(|p| p[3] > 0).count() * 100 < 512 * 512 * 90
+        });
+        let active = tempfile::NamedTempFile::new().unwrap();
+        let mut previews = 0;
+        let (image, _) = load_with_preview(
+            &catalog,
+            &key(tile, true, 4, ""),
+            "",
+            4,
+            active.path(),
+            |_| previews += 1,
+        )
+        .unwrap()
+        .unwrap();
+        if needs_refinement {
+            assert!(previews > 0);
+        }
+        let index =
+            rusqlite::Connection::open(catalog.parent().unwrap().join("fused/v1/previews.sqlite"))
+                .unwrap();
+        let count: u32=index.query_row("SELECT count(*) FROM tiles WHERE zoom=?1 AND west=?2 AND south=?3 AND east=?4 AND north=?5",
+            rusqlite::params![tile.z,bounds[0],bounds[1],bounds[2],bounds[3]],|r|r.get(0)).unwrap();
+        assert!(
+            count > 0,
+            "close views must prepare matching-resolution source rasters"
+        );
+        assert!(image.pixels.pixels.iter().filter(|p| p.a() > 0).count() > 512 * 512 / 2);
+        let expected =
+            lidar_pipeline::render::render_prepared_detail(&catalog, bounds, tile.z, None)
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            image
+                .pixels
+                .pixels
+                .iter()
+                .flat_map(|p| p.to_array())
+                .collect::<Vec<_>>(),
+            expected.rgba,
+            "the actual display must use detailed samples, even when a newer coarse overview overlaps"
+        );
+    }
+
     #[test]
     #[ignore = "requires public USGS access and writable ONEKEE_LIDAR_TEST_CATALOG"]
     fn kentucky_public_survey_prepares_and_loads_through_the_desktop_worker() {
