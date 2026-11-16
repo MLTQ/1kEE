@@ -166,6 +166,14 @@ matched every stored band and mask exactly; see the
 The actual desktop load entry point also passed with an initially empty prepared
 archive and cached public source blocks, alongside the RTX 4090 scene test.
 
+After the location was clarified as western Tennessee, actual USGS surveys were
+also prepared and rendered near Paris/Kentucky Lake, Jackson, Dyersburg and
+Memphis. Measured pixels covered 97.03–99.96% of these four display tiles, with
+unmeasured areas left transparent. Independent reduction of 31,018,101 decoded
+returns matched every min/max/mean/count value and coverage mask; see the
+[western Tennessee verification record](benchmarks/lidar-tennessee-2026-11-16.json).
+No additional code change was needed for these Tennessee surveys.
+
 ## Benchmark protocol
 
 `scripts/benchmark_lidar_fusion.py` compares the original COPC map read with the

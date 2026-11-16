@@ -1,0 +1,164 @@
+{
+  "product": "view-resolution EPT overview, not full density",
+  "independent_decoder": "laspy/lazrs, pyproj, NumPy, rasterio",
+  "views": [
+    {
+      "area": "Jackson",
+      "tile": [
+        10,
+        518,
+        309
+      ],
+      "bounds": [
+        -88.9453125,
+        35.5078125,
+        -88.76953125,
+        35.68359375
+      ],
+      "seconds": 77.1,
+      "exit": 0,
+      "visible_cells": 261314,
+      "visible_percent": 99.68,
+      "survey_verification": [
+        {
+          "survey": "USGS_3DEP_ID:TN_WestTN_B3_2019",
+          "date": "2019-02-08 / 2021-01-17",
+          "nodes": 310,
+          "decoded_points": 9607171,
+          "accepted_points": 7870055,
+          "measured_cells": 261314,
+          "mask_differences": 0,
+          "numeric_differences": 0
+        }
+      ]
+    },
+    {
+      "area": "Kentucky Lake / Paris",
+      "tile": [
+        10,
+        522,
+        305
+      ],
+      "bounds": [
+        -88.2421875,
+        36.2109375,
+        -88.06640625,
+        36.38671875
+      ],
+      "seconds": 82.4,
+      "exit": 0,
+      "visible_cells": 254348,
+      "visible_percent": 97.03,
+      "survey_verification": [
+        {
+          "survey": "USGS_3DEP_ID:USGS_LPC_TN_WestCentral_B2_2017_LAS_2018",
+          "date": "2017-03-03 / 2017-10-29",
+          "nodes": 67,
+          "decoded_points": 1650150,
+          "accepted_points": 797466,
+          "measured_cells": 35037,
+          "mask_differences": 0,
+          "numeric_differences": 0
+        },
+        {
+          "survey": "USGS_3DEP_ID:USGS_LPC_TN_WestCentral_B1_2017_LAS_2018",
+          "date": "2017-03-03 / 2017-03-19",
+          "nodes": 282,
+          "decoded_points": 8246055,
+          "accepted_points": 6269260,
+          "measured_cells": 219753,
+          "mask_differences": 0,
+          "numeric_differences": 0
+        }
+      ]
+    },
+    {
+      "area": "Memphis",
+      "tile": [
+        10,
+        512,
+        312
+      ],
+      "bounds": [
+        -90.0,
+        34.98046875,
+        -89.82421875,
+        35.15625
+      ],
+      "seconds": 40.7,
+      "exit": 0,
+      "visible_cells": 262046,
+      "visible_percent": 99.96,
+      "survey_verification": [
+        {
+          "survey": "USGS_3DEP_ID:MS_MississippiDelta_A2_2018",
+          "date": "2019-01-27 / 2019-02-18",
+          "nodes": 28,
+          "decoded_points": 558042,
+          "accepted_points": 281699,
+          "measured_cells": 20578,
+          "mask_differences": 0,
+          "numeric_differences": 0
+        },
+        {
+          "survey": "USGS_3DEP_ID:MS_MississippiDelta_A1_2018",
+          "date": "2018-02-18 / 2019-02-08",
+          "nodes": 14,
+          "decoded_points": 290302,
+          "accepted_points": 59952,
+          "measured_cells": 9764,
+          "mask_differences": 0,
+          "numeric_differences": 0
+        },
+        {
+          "survey": "USGS_3DEP_ID:USGS_LPC_TN_ShelbyCo_2017_LAS_2019",
+          "date": "2017-03-02 / 2017-03-04",
+          "nodes": 131,
+          "decoded_points": 3488422,
+          "accepted_points": 2777342,
+          "measured_cells": 242967,
+          "mask_differences": 0,
+          "numeric_differences": 0
+        }
+      ]
+    },
+    {
+      "area": "Dyersburg",
+      "tile": [
+        10,
+        515,
+        307
+      ],
+      "bounds": [
+        -89.47265625,
+        35.859375,
+        -89.296875,
+        36.03515625
+      ],
+      "seconds": 72.9,
+      "exit": 0,
+      "visible_cells": 261088,
+      "visible_percent": 99.6,
+      "survey_verification": [
+        {
+          "survey": "USGS_3DEP_ID:TN_WestTN_B3_2019",
+          "date": "2019-02-08 / 2021-01-17",
+          "nodes": 304,
+          "decoded_points": 7177959,
+          "accepted_points": 5946617,
+          "measured_cells": 261088,
+          "mask_differences": 0,
+          "numeric_differences": 0
+        }
+      ]
+    }
+  ],
+  "bands": [
+    "min",
+    "max",
+    "mean",
+    "count"
+  ],
+  "decoded_points": 31018101,
+  "accepted_points": 24002391
+}
