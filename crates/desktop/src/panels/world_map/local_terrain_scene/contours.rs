@@ -34,6 +34,7 @@ pub(super) fn batches(
                 tile.id,
                 &tile.contours,
                 style_key,
+                model.contour_occlusion,
                 &ctx,
                 move |contour| {
                     // Preserve the original body-specific contour hierarchy.

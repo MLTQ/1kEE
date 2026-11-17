@@ -390,7 +390,17 @@ fn contour_occlusion_hides_far_lines_preserves_crests_and_releases_cache() {
     assert!(
         lit(&off, 87) > 100 && lit(&off, 147) > 100 && lit(&off, 47) > 100 && lit(&off, 23) > 100
     );
+    let key = (b.id, b.version);
+    let tile = &h.renderer.callback_resources.get::<LocalContourPassResources>().unwrap().tiles[&key];
+    assert!(tile.occlusion.is_empty(), "disabled masks take no upload budget");
+    let line_buffer = tile.chunks[0].buffer.clone();
+    let mut delayed = b.clone();
+    delayed.occlusion = Default::default();
+    h.render(std::slice::from_ref(&delayed), &p, true, rect, &[]);
+    assert_eq!(h.pixels(), off, "first terrain is visible while the mask worker is pending");
     h.render(std::slice::from_ref(&b), &p, true, rect, &[]);
+    let tile = &h.renderer.callback_resources.get::<LocalContourPassResources>().unwrap().tiles[&key];
+    assert_eq!(line_buffer, tile.chunks[0].buffer);
     let on = h.pixels();
     assert_eq!(lit(&on, 87), 0, "far valley must be hidden");
     assert!(lit(&on, 147) > 100, "near foreground stays visible");

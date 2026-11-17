@@ -178,11 +178,9 @@ pub struct LocalTileBatch {
 
 #[derive(Default)]
 struct TileInstances {
-    current: Option<(
-        u64,
-        Arc<Vec<LocalSegmentInstance>>,
-        occlusion_geometry::Geometry,
-    )>,
+    current: Option<LocalTileBatch>,
+    mask_build: Option<(u64, u64)>,
+    mask_ready: bool,
     building: Option<(u64, u64)>, // geometry version and unique worker ticket
 }
 
@@ -193,16 +191,68 @@ fn finish_instance_build(
     id: LocalTileId,
     version: u64,
     ticket: u64,
-    instances: Option<(Vec<LocalSegmentInstance>, occlusion_geometry::Geometry)>,
+    instances: Option<Vec<LocalSegmentInstance>>,
 ) {
     if let Some(entry) = cache.get_mut(&id)
         && entry.building == Some((version, ticket))
     {
         entry.building = None;
-        if let Some((instances, occlusion)) = instances {
-            entry.current = Some((version, Arc::new(instances), occlusion));
+        if let Some(instances) = instances {
+            entry.mask_build = None;
+            entry.mask_ready = false;
+            entry.current = Some(LocalTileBatch {
+                id: LocalBatchId::Contour(id),
+                version,
+                instances: Arc::new(instances),
+                occlusion: Default::default(),
+            });
         }
     }
+}
+
+fn finish_mask(
+    cache: &mut HashMap<LocalTileId, TileInstances>,
+    id: LocalTileId,
+    version: u64,
+    ticket: u64,
+    result: Option<occlusion_geometry::Geometry>,
+) {
+    if let Some(entry) = cache.get_mut(&id)
+        && entry.mask_build == Some((version, ticket))
+    {
+        entry.mask_build = None;
+        if let Some(batch) = &mut entry.current
+            && batch.version == version
+            && let Some(mask) = result
+        {
+            batch.occlusion = mask;
+            entry.mask_ready = true;
+        }
+    }
+}
+
+fn request_mask(
+    id: LocalTileId,
+    version: u64,
+    ticket: u64,
+    contours: Arc<Vec<ContourPath>>,
+    ctx: egui::Context,
+) {
+    rayon::spawn(move || {
+        if instance_cache()
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&id)?.mask_build)
+            != Some((version, ticket))
+        {
+            return;
+        }
+        let result = std::panic::catch_unwind(|| occlusion_geometry::build(&contours)).ok();
+        if let Ok(mut cache) = instance_cache().lock() {
+            finish_mask(&mut cache, id, version, ticket, result);
+        }
+        ctx.request_repaint();
+    });
 }
 
 fn instance_cache() -> &'static Mutex<HashMap<LocalTileId, TileInstances>> {
@@ -225,6 +275,7 @@ pub fn instances_for_tile(
     id: LocalTileId,
     contours: &Arc<Vec<ContourPath>>,
     palette: u64,
+    want_mask: bool,
     ctx: &egui::Context,
     style_fn: impl Fn(&ContourPath) -> (egui::Color32, bool) + Send + Sync + 'static,
 ) -> Option<LocalTileBatch> {
@@ -234,15 +285,17 @@ pub fn instances_for_tile(
     {
         let mut guard = instance_cache().lock().ok()?;
         let entry = guard.entry(id).or_default();
-        if let Some((v, instances, occlusion)) = &entry.current
-            && *v == version
+        if let Some(batch) = &entry.current
+            && batch.version == version
         {
-            return Some(LocalTileBatch {
-                id: LocalBatchId::Contour(id),
-                version,
-                instances: instances.clone(),
-                occlusion: occlusion.clone(),
-            });
+            let batch = batch.clone();
+            if want_mask && !entry.mask_ready && entry.mask_build.is_none() {
+                let ticket = BUILD_TICKET.fetch_add(1, Ordering::Relaxed);
+                entry.mask_build = Some((version, ticket));
+                drop(guard);
+                request_mask(id, version, ticket, contours.clone(), ctx.clone());
+            }
+            return Some(batch);
         }
         if entry.building.is_some_and(|(v, _)| v == version) {
             return None;
@@ -257,21 +310,23 @@ pub fn instances_for_tile(
         .name("local-contour-instance-build".into())
         .spawn(move || {
             let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let instances = contours
+                contours
                     .par_iter()
                     .flat_map_iter(|contour| {
                         let (color, is_major) = style_fn(contour);
                         let color = color.to_array();
                         let major = u32::from(is_major);
-                        contour.points.windows(2).map(move |pair| LocalSegmentInstance {
-                            a: [pair[0].lon, pair[0].lat, contour.elevation_m],
-                            b: [pair[1].lon, pair[1].lat, contour.elevation_m],
-                            color,
-                            major,
-                        })
+                        contour
+                            .points
+                            .windows(2)
+                            .map(move |pair| LocalSegmentInstance {
+                                a: [pair[0].lon, pair[0].lat, contour.elevation_m],
+                                b: [pair[1].lon, pair[1].lat, contour.elevation_m],
+                                color,
+                                major,
+                            })
                     })
-                    .collect::<Vec<_>>();
-                (instances, occlusion_geometry::build(&contours))
+                    .collect::<Vec<_>>()
             }));
 
             if let Ok(mut guard) = instance_cache().lock() {
@@ -308,6 +363,7 @@ pub fn retain_instances(visible: &HashSet<LocalTileId>) {
 // ── GPU resources ────────────────────────────────────────────────────────────
 
 struct TileGpu {
+    pending_mask: Option<super::line_upload::Upload<LocalSegmentInstance>>,
     occlusion: Vec<super::contour_pass::InstanceChunk>,
     /// One tile can exceed the device's `max_buffer_size` on its own — a dense
     /// bucket-10 tile is ~4.3 M segments — so its geometry is split across as
@@ -319,7 +375,6 @@ struct TileGpu {
 
 struct PendingTile {
     lines: super::line_upload::Upload<LocalSegmentInstance>,
-    occlusion: super::line_upload::Upload<LocalSegmentInstance>,
     used: u64,
 }
 
@@ -683,23 +738,21 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
                 uploads += 1;
                 let pending = res.pending.entry(key).or_insert_with(|| PendingTile {
                     lines: super::line_upload::Upload::new(batch.instances.clone()),
-                    occlusion: super::line_upload::Upload::new(batch.occlusion.segments.clone()),
                     used: frame,
                 });
                 pending.used = frame;
-                if !pending.lines.advance(device, &mut res.uploads)
-                    || !pending.occlusion.advance(device, &mut res.uploads)
-                {
+                if !pending.lines.advance(device, &mut res.uploads) {
                     self.ctx.request_repaint();
                     continue;
                 }
                 let upload = res.pending.remove(&key).unwrap();
-                let bytes = upload.lines.bytes() + upload.occlusion.bytes();
+                let bytes = upload.lines.bytes();
                 let chunks = upload.lines.chunks;
                 if let Some(previous) = res.tiles.insert(
                     key,
                     TileGpu {
-                        occlusion: upload.occlusion.chunks,
+                        occlusion: Vec::new(),
+                        pending_mask: None,
                         chunks,
                         bytes,
                         last_used: frame,
@@ -710,6 +763,30 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
                 res.resident_bytes += bytes;
             } else if let Some(gpu) = res.tiles.get_mut(&key) {
                 gpu.last_used = frame;
+            }
+        }
+
+        // Lines win the shared budget. Only the visible surface requests a
+        // curtain; its arrival never changes line readiness or version.
+        if !self.upload_only && uniforms.occlusion_enabled != 0. {
+            for batch in &self.batches {
+                let Some(tile) = res.tiles.get_mut(&(batch.id, batch.version)) else {
+                    continue;
+                };
+                if batch.occlusion.segments.is_empty() || !tile.occlusion.is_empty() {
+                    continue;
+                }
+                let mask = tile.pending_mask.get_or_insert_with(|| {
+                    super::line_upload::Upload::new(batch.occlusion.segments.clone())
+                });
+                if mask.advance(device, &mut res.uploads) {
+                    let uploaded = tile.pending_mask.take().unwrap();
+                    tile.bytes += uploaded.bytes();
+                    res.resident_bytes += uploaded.bytes();
+                    tile.occlusion = uploaded.chunks;
+                } else {
+                    self.ctx.request_repaint();
+                }
             }
         }
 
@@ -815,17 +892,56 @@ mod tests {
 
     #[test]
     fn evicted_instance_workers_cannot_resurrect_or_overwrite_returned_tiles() {
-        let id = LocalTileId { zoom_bucket: 6, lat_bucket: 0, lon_bucket: 0 };
+        let id = LocalTileId {
+            zoom_bucket: 6,
+            lat_bucket: 0,
+            lon_bucket: 0,
+        };
         let mut cache = HashMap::new();
-        finish_instance_build(&mut cache, id, 1, 10, Some((vec![], Default::default())));
+        finish_instance_build(&mut cache, id, 1, 10, Some(vec![]));
         assert!(cache.is_empty());
-        cache.insert(id, TileInstances { current: None, building: Some((1, 11)) });
-        finish_instance_build(&mut cache, id, 1, 10, Some((vec![], Default::default())));
+        cache.insert(
+            id,
+            TileInstances {
+                building: Some((1, 11)),
+                ..Default::default()
+            },
+        );
+        finish_instance_build(&mut cache, id, 1, 10, Some(vec![]));
         assert!(cache[&id].current.is_none());
         assert_eq!(cache[&id].building, Some((1, 11)));
-        finish_instance_build(&mut cache, id, 1, 11, Some((vec![], Default::default())));
+        finish_instance_build(&mut cache, id, 1, 11, Some(vec![]));
         assert!(cache[&id].current.is_some());
         assert!(cache[&id].building.is_none());
+    }
+
+    #[test]
+    fn lines_publish_while_optional_mask_is_delayed_and_stale_masks_are_ignored() {
+        let id = LocalTileId {
+            zoom_bucket: 6,
+            lat_bucket: 2,
+            lon_bucket: 3,
+        };
+        let mut cache = HashMap::from([(
+            id,
+            TileInstances {
+                building: Some((7, 1)),
+                ..Default::default()
+            },
+        )]);
+        finish_instance_build(&mut cache, id, 7, 1, Some(vec![]));
+        let entry = cache.get_mut(&id).unwrap();
+        assert_eq!(entry.current.as_ref().unwrap().version, 7);
+        assert!(!entry.mask_ready && entry.mask_build.is_none());
+        entry.mask_build = Some((7, 2));
+        entry.building = Some((8, 3));
+        finish_instance_build(&mut cache, id, 8, 3, Some(vec![]));
+        cache.get_mut(&id).unwrap().mask_build = Some((8, 4));
+        finish_mask(&mut cache, id, 7, 2, Some(Default::default()));
+        assert!(!cache[&id].mask_ready);
+        finish_mask(&mut cache, id, 8, 4, Some(Default::default()));
+        assert!(cache[&id].mask_ready);
+        assert_eq!(cache[&id].current.as_ref().unwrap().version, 8);
     }
 
     #[test]

@@ -581,3 +581,50 @@ fn mixed_database_batch_reads_each_tile_and_preserves_cancellation() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// Run on a private snapshot of a real Local tile. A checksum covers all
+/// elevations, ordered parts, and vertices after production clipping.
+#[test]
+#[ignore = "set ONEKEE_LOCAL_TILE_DB to a private contour SQLite fixture"]
+fn benchmark_local_core_load() {
+    use std::hash::{Hash, Hasher};
+    let path = PathBuf::from(std::env::var_os("ONEKEE_LOCAL_TILE_DB").expect("cache path"));
+    let db = srtm_focus_cache::db::open_cache_db_read_only(&path).unwrap();
+    let key = db.query_row("SELECT zoom_bucket,lat_bucket,lon_bucket FROM contour_tile_manifest ORDER BY contour_count DESC LIMIT 1", [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+    drop(db);
+    let mut batch = request(&path, key);
+    batch.1.simplify_step = 1;
+    for run in 0..6 {
+        let start = Instant::now();
+        let mut result = None;
+        stream_local_contours(
+            &path,
+            std::slice::from_ref(&batch),
+            ReadSelection::EarthCore,
+            &mut |_, _, _| {},
+            &mut |_, contours| {
+                result = Some(contours);
+                true
+            },
+        )
+        .unwrap();
+        let ms = start.elapsed().as_secs_f64() * 1000.;
+        let contours = result.unwrap();
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        let mut vertices = 0;
+        for line in &contours {
+            line.elevation_m.to_bits().hash(&mut hash);
+            line.points.len().hash(&mut hash);
+            vertices += line.points.len();
+            for p in &line.points {
+                p.lat.to_bits().hash(&mut hash);
+                p.lon.to_bits().hash(&mut hash);
+            }
+        }
+        eprintln!(
+            "LOCAL_CORE run={run} ms={ms:.2} parts={} vertices={vertices} hash={:016x}",
+            contours.len(),
+            hash.finish()
+        );
+    }
+}

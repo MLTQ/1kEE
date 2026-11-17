@@ -137,9 +137,11 @@ The removed fill no longer needs a background contour pass. The two remaining
 uniform slots are Surface (0) and Roads (1); each visible contour batch draws
 once. Existing hardware tests verify the separate road and contour uniforms.
 
-Each tile now carries bounded `local_occlusion_geometry` alongside full line
-instances, prepared by the same worker. Both buffers share the upload budget
-and publish atomically; residency and byte accounting include both.
+A tile publishes its complete line buffer as soon as it is ready. Enabling
+occlusion schedules a separate worker for the current source version. The
+visible surface attaches its curtain after line uploads have had the first
+claim on the shared frame budget. Residency accounting includes both buffers.
+Turning off occlusion skips new curtain work.
 `local_occlusion` renders a separate cached depth target during prepare. Surface
 fragments sample it when enabled; roads/staging keep occlusion off. Uniforms
 are 176 bytes including the live palette and polar chart, matched by the WGSL layout regression. No UI depth attachment

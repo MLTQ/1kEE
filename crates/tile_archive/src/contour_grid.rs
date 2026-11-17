@@ -99,6 +99,28 @@ fn clip_edge(a: (f64, f64), z: (f64, f64), b: Bounds) -> Option<((f64, f64), (f6
     }
     let dx = z.0 - a.0;
     let dy = z.1 - a.1;
+    let at = |t: f64| {
+        (
+            (a.0 + t * dx).clamp(b.min_lon, b.max_lon),
+            (a.1 + t * dy).clamp(b.min_lat, b.max_lat),
+        )
+    };
+    // Classify both endpoints before computing boundary intersections.
+    // Buffered legacy contours have many interior and fully exterior edges.
+    let outcode = |p: (f64, f64)| {
+        u8::from(p.0 < b.min_lon)
+            | (u8::from(p.0 > b.max_lon) << 1)
+            | (u8::from(p.1 < b.min_lat) << 2)
+            | (u8::from(p.1 > b.max_lat) << 3)
+    };
+    let (first, last) = (outcode(a), outcode(z));
+    if first & last != 0 {
+        return None;
+    }
+    if first | last == 0 {
+        let pair = (at(0.), at(1.));
+        return (pair.0 != pair.1).then_some(pair);
+    }
     let mut lo: f64 = 0.0;
     let mut hi: f64 = 1.0;
     for (p, q) in [
@@ -120,12 +142,6 @@ fn clip_edge(a: (f64, f64), z: (f64, f64), b: Bounds) -> Option<((f64, f64), (f6
             return None;
         }
     }
-    let at = |t: f64| {
-        (
-            (a.0 + t * dx).clamp(b.min_lon, b.max_lon),
-            (a.1 + t * dy).clamp(b.min_lat, b.max_lat),
-        )
-    };
     let result = (at(lo), at(hi));
     (result.0 != result.1).then_some(result)
 }

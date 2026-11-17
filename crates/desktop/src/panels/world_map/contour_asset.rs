@@ -2242,40 +2242,33 @@ fn stream_contours_from_database(
         }
         let mut decode_time = Duration::ZERO;
         let mut geometry_bytes = 0u64;
-        let rows = match statement.query_map(
-            params![key.zoom_bucket, key.lat_bucket, key.lon_bucket],
-            |row| {
+        let mut decode =
+            |row: &rusqlite::Row<'_>, contours: &mut Vec<ContourPath>| -> rusqlite::Result<()> {
                 let elevation_m: f32 = row.get(1)?;
                 let geometry = row.get_ref(0)?.as_blob()?;
                 geometry_bytes += geometry.len() as u64;
                 let decode_start = read_timer.clock();
-                let mut decoded = Vec::new();
-                let lines = tile_archive::gpkg::try_parse_gpkg_lines(geometry, |lon, lat| GeoPoint { lat, lon })
-                    .filter(|_| elevation_m.is_finite())
-                    .ok_or_else(|| rusqlite::Error::FromSqlConversionFailure(
-                        0, rusqlite::types::Type::Blob,
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid contour geometry or elevation").into()))?;
-                selection.append(&mut decoded, lines, elevation_m);
+                let lines = tile_archive::gpkg::try_parse_gpkg_lines(geometry, |lon, lat| {
+                    GeoPoint { lat, lon }
+                })
+                .filter(|_| elevation_m.is_finite())
+                .ok_or_else(|| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Blob,
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "invalid contour geometry or elevation",
+                        )
+                        .into(),
+                    )
+                })?;
+                selection.append(contours, lines, elevation_m);
                 if let Some(start) = decode_start {
                     decode_time += start.elapsed();
                 }
-                Ok(decoded)
-            },
-        ) {
-            Ok(rows) => rows,
-            Err(error) => {
-                eprintln!(
-                    "[1kEE] contour tile z{} ({},{}) query failed: {error}",
-                    key.zoom_bucket, key.lat_bucket, key.lon_bucket
-                );
-                if srtm_focus_cache::recovery::invalid_geometry(&error) { damaged.push(tile); }
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
-                continue;
-            }
-        };
-
+                Ok(())
+            };
         let expected: Option<usize> = connection.query_row(
             "SELECT contour_count FROM contour_tile_manifest WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
             params![key.zoom_bucket, key.lat_bucket, key.lon_bucket], |r| r.get(0),
@@ -2283,30 +2276,26 @@ fn stream_contours_from_database(
         let total = expected.unwrap_or(0);
         let mut decoded_rows = 0;
         let mut contours = Vec::new();
-        let mut tile_failed = false;
-        for row in rows {
-            let decoded = match row {
-                Ok(row) => row,
-                Err(error) => {
-                    eprintln!(
-                        "[1kEE] contour tile z{} ({},{}) row failed: {error}",
-                        key.zoom_bucket, key.lat_bucket, key.lon_bucket
-                    );
-                    if srtm_focus_cache::recovery::invalid_geometry(&error) { damaged.push(tile); }
-                    if first_error.is_none() {
-                        first_error = Some(error);
-                    }
-                    tile_failed = true;
-                    break;
+        let read_result = (|| -> rusqlite::Result<()> {
+            let mut rows =
+                statement.query(params![key.zoom_bucket, key.lat_bucket, key.lon_bucket])?;
+            while let Some(row) = rows.next()? {
+                decode(row, &mut contours)?;
+                decoded_rows += 1;
+                if decoded_rows % 128 == 0 {
+                    on_progress(key, decoded_rows, total);
                 }
-            };
-            contours.extend(decoded);
-            decoded_rows += 1;
-            if decoded_rows % 128 == 0 {
-                on_progress(key, decoded_rows, total);
             }
+            Ok(())
+        })();
+        if let Err(error) = read_result {
+            eprintln!("[1kEE] contour tile {tile:?} read failed: {error}");
+            if srtm_focus_cache::recovery::invalid_geometry(&error) {
+                damaged.push(tile);
+            }
+            first_error.get_or_insert(error);
+            continue;
         }
-        if tile_failed { continue; }
         if expected.is_none() && decoded_rows == 0 {
             first_error.get_or_insert(rusqlite::Error::QueryReturnedNoRows);
             continue;
@@ -2392,13 +2381,10 @@ fn simplify_line(points: Vec<GeoPoint>, step: usize) -> Vec<GeoPoint> {
         return points;
     }
 
-    let mut simplified: Vec<_> = points
-        .iter()
-        .enumerate()
-        .filter_map(|(index, point)| {
-            (index == 0 || index + 1 == points.len() || index % step == 0).then_some(*point)
-        })
-        .collect();
+    let last = points.len() - 1;
+    let mut simplified = Vec::with_capacity(last.div_ceil(step) + 1);
+    simplified.extend(points[..last].iter().step_by(step).copied());
+    simplified.push(points[last]);
 
     simplified.dedup_by(|left, right| left.lat == right.lat && left.lon == right.lon);
     simplified

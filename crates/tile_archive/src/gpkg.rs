@@ -85,14 +85,27 @@ fn parse_linestring<T>(
     let count = read_u32(wkb, cursor, little)? as usize;
     // Each XY point occupies two f64 values. Check before reserving to reject
     // malformed count fields without a large allocation attempt.
-    if count > wkb.len().checked_sub(*cursor)? / 16 {
-        return None;
-    }
+    let end = cursor.checked_add(count.checked_mul(16)?)?;
+    let coordinates = wkb.get(*cursor..end)?.as_chunks::<16>().0;
+    *cursor = end;
     let mut points = Vec::with_capacity(count);
-    for _ in 0..count {
-        let lon = read_f64(wkb, cursor, little)? as f32;
-        let lat = read_f64(wkb, cursor, little)? as f32;
-        points.push(point(lon, lat));
+    // Test byte order once per line. Each exact chunk is one XY pair.
+    if little {
+        points.extend(coordinates.iter().map(|pair| {
+            let (x, y) = pair.split_at(8);
+            point(
+                f64::from_le_bytes(x.try_into().unwrap()) as f32,
+                f64::from_le_bytes(y.try_into().unwrap()) as f32,
+            )
+        }));
+    } else {
+        points.extend(coordinates.iter().map(|pair| {
+            let (x, y) = pair.split_at(8);
+            point(
+                f64::from_be_bytes(x.try_into().unwrap()) as f32,
+                f64::from_be_bytes(y.try_into().unwrap()) as f32,
+            )
+        }));
     }
     Some(points)
 }
@@ -105,17 +118,6 @@ fn read_u32(bytes: &[u8], cursor: &mut usize, little: bool) -> Option<u32> {
         u32::from_le_bytes(slice.try_into().ok()?)
     } else {
         u32::from_be_bytes(slice.try_into().ok()?)
-    })
-}
-
-fn read_f64(bytes: &[u8], cursor: &mut usize, little: bool) -> Option<f64> {
-    let end = (*cursor).checked_add(8)?;
-    let slice = bytes.get(*cursor..end)?;
-    *cursor = end;
-    Some(if little {
-        f64::from_le_bytes(slice.try_into().ok()?)
-    } else {
-        f64::from_be_bytes(slice.try_into().ok()?)
     })
 }
 

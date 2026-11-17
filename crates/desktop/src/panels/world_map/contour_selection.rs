@@ -53,6 +53,13 @@ impl TileSelection {
             if let Some(core) = self.core {
                 // Clip before simplifying: an edge intersection must not depend
                 // on the vertex-stride phase of either neighboring source.
+                // Most native contours already lie entirely inside their tile.
+                // A repeated point splits the reference clipper's output, so
+                // keep those lines and boundary ownership on the clipping path.
+                if wholly_inside(&line, core) {
+                    self.push(contours, line, elevation_m);
+                    continue;
+                }
                 let points: Vec<_> = line
                     .iter()
                     .map(|p| (f64::from(p.lon), f64::from(p.lat)))
@@ -86,4 +93,18 @@ impl TileSelection {
     pub(super) fn finish(&self, contours: &mut Vec<ContourPath>) {
         select_contour_geometry(contours, self.feature_budget);
     }
+}
+
+fn wholly_inside(line: &[GeoPoint], core: Bounds) -> bool {
+    let mut previous = None;
+    line.iter().all(|p| {
+        let (x, y) = (f64::from(p.lon), f64::from(p.lat));
+        let inside = x > core.min_lon
+            && x < core.max_lon
+            && y > core.min_lat
+            && y < core.max_lat
+            && previous != Some(p);
+        previous = Some(p);
+        inside
+    })
 }

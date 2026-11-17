@@ -12,7 +12,7 @@ pub(crate) struct Geometry {
     pub bounds: [f32; 4],
 }
 
-/// Runs alongside line instance construction on its existing worker. Sparse
+/// Built on demand after line instances are available. Sparse
 /// elevation levels only weaken occlusion; they cannot invent a taller ridge.
 pub(super) fn build(contours: &[ContourPath]) -> Geometry {
     let mut levels: Vec<_> = contours
