@@ -195,8 +195,9 @@ fn bounded_uploads_publish_atomically_and_strip_matches_previous_pixels() {
     // First driver allocations can consume the time slice even for a small
     // snapshot. Require bounded eventual publication, not a one-frame warm GPU.
     let mut small_ready = false;
-    for _ in 0..100 {
-        if gpu.stage(&device, &small, viewport) {
+    for _ in 0..5000 {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        if gpu.stage(&device, &queue, &small, viewport) {
             small_ready = true;
             break;
         }
@@ -213,7 +214,7 @@ fn bounded_uploads_publish_atomically_and_strip_matches_previous_pixels() {
     let staging_started = Instant::now();
     loop {
         let before: u64 = gpu.tiles.values().flatten().map(|c| c.buffer.size()).sum();
-        let ready = gpu.stage(&device, &large, viewport);
+        let ready = gpu.stage(&device, &queue, &large, viewport);
         let after: u64 = gpu.tiles.values().flatten().map(|c| c.buffer.size()).sum();
         assert!(after.saturating_sub(before) <= crate::gpu_config::settings().upload_bytes as u64);
         frames += 1;
@@ -221,7 +222,8 @@ fn bounded_uploads_publish_atomically_and_strip_matches_previous_pixels() {
             break;
         }
         assert!(Arc::ptr_eq(gpu.displayed.as_ref().unwrap(), &small));
-        assert!(frames < 100);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        assert!(frames < 5000);
     }
     eprintln!("Atomic upload: {} MiB/frame, {frames} frames, {:.2} ms staging",
         crate::gpu_config::settings().upload_bytes / 1048576,
@@ -287,62 +289,71 @@ fn callback_lifecycle(
         pixels_per_point: 1.0,
     };
     for shown in [true, false, true] {
-        let output = ctx.run(
-            egui::RawInput {
-                screen_rect: Some(rect),
-                ..Default::default()
-            },
-            |ctx| {
-                let painter = ctx.layer_painter(egui::LayerId::new(
-                    egui::Order::Foreground,
-                    egui::Id::new("native-lifecycle"),
-                ));
-                painter.add(residency_callback(rect));
-                if shown {
-                    let mut uniforms = ContourCallback::new(
-                        ContourLayer::SrtmGlobe,
-                        0,
-                        Arc::new(vec![]),
-                        layout,
-                        view,
-                        0.02,
-                        0.92,
-                        1.,
-                        1.,
-                    )
-                    .uniforms;
-                    uniforms.viewport_size = [rect.width(), rect.height()];
-                    painter.add(egui_wgpu::Callback::new_paint_callback(
-                        rect,
-                        Callback {
-                            candidate: candidate.clone(),
-                            palette: [egui::Color32::RED, egui::Color32::GREEN],
-                            uniforms,
-                            viewport: Viewport::new(layout, view, rect),
-                            ctx: ctx.clone(),
-                        },
+        let start = Instant::now();
+        loop {
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(rect),
+                    ..Default::default()
+                },
+                |ctx| {
+                    let painter = ctx.layer_painter(egui::LayerId::new(
+                        egui::Order::Foreground,
+                        egui::Id::new("native-lifecycle"),
                     ));
-                }
-            },
-        );
-        let jobs = ctx.tessellate(output.shapes, output.pixels_per_point);
-        let mut encoder = device.create_command_encoder(&Default::default());
-        let commands = renderer.update_buffers(device, queue, &mut encoder, &jobs, &screen);
-        queue.submit(
-            commands
-                .into_iter()
-                .chain(std::iter::once(encoder.finish())),
-        );
-        device.poll(wgpu::Maintain::Wait);
-        let resources = renderer
-            .callback_resources
-            .get::<ContourPassResources>()
-            .unwrap();
-        assert_eq!(resources.terrain.displayed.is_some(), shown);
-        if shown {
-            assert!(super::super::super::global_loading::gpu_ready(&ctx, 1000, candidate.id));
+                    painter.add(residency_callback(rect));
+                    if shown {
+                        let mut uniforms = ContourCallback::new(
+                            ContourLayer::SrtmGlobe,
+                            0,
+                            Arc::new(vec![]),
+                            layout,
+                            view,
+                            0.02,
+                            0.92,
+                            1.,
+                            1.,
+                        )
+                        .uniforms;
+                        uniforms.viewport_size = [rect.width(), rect.height()];
+                        painter.add(egui_wgpu::Callback::new_paint_callback(
+                            rect,
+                            Callback {
+                                candidate: candidate.clone(),
+                                palette: [egui::Color32::RED, egui::Color32::GREEN],
+                                uniforms,
+                                viewport: Viewport::new(layout, view, rect),
+                                ctx: ctx.clone(),
+                            },
+                        ));
+                    }
+                },
+            );
+            let jobs = ctx.tessellate(output.shapes, output.pixels_per_point);
+            let mut encoder = device.create_command_encoder(&Default::default());
+            let commands = renderer.update_buffers(device, queue, &mut encoder, &jobs, &screen);
+            queue.submit(
+                commands
+                    .into_iter()
+                    .chain(std::iter::once(encoder.finish())),
+            );
+            device.poll(wgpu::Maintain::Wait);
+            let resources = renderer
+                .callback_resources
+                .get::<ContourPassResources>()
+                .unwrap();
+            if shown && resources.terrain.displayed.is_none() {
+                assert!(start.elapsed() < std::time::Duration::from_secs(10));
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
+            assert_eq!(resources.terrain.displayed.is_some(), shown);
+            if shown {
+                assert!(super::super::super::global_loading::gpu_ready(&ctx, 1000, candidate.id));
+            }
+            assert_eq!(resources.terrain.tiles.is_empty(), !shown);
+            break;
         }
-        assert_eq!(resources.terrain.tiles.is_empty(), !shown);
     }
 }
 
@@ -389,6 +400,10 @@ fn benchmark_native_globe_tiles() {
     }
     assert!(!tiles.is_empty());
     let source = super::tests::frame(tiles);
+    if std::env::var_os("ONEKEE_TERRAIN_ROUTE").is_some() {
+        measured_camera_route(&source);
+        return;
+    }
     let start = Instant::now();
     let flat: Vec<_> = source
         .tiles
@@ -479,17 +494,28 @@ fn benchmark_native_globe_tiles() {
     };
     let baseline_chunks: Vec<_> = baseline_gpu.iter().map(|g| (&dummy, g)).collect();
     let mut gpu = Gpu::default();
+    let mut samples = Vec::new();
+    let upload_start = Instant::now();
     let mut max_ms = 0f64;
     let mut upload_frames = 0;
     loop {
         let start = Instant::now();
-        let done = gpu.stage(&device, &prepared, viewport);
-        max_ms = max_ms.max(start.elapsed().as_secs_f64() * 1000.);
+        let done = gpu.stage(&device, &queue, &prepared, viewport);
+        let elapsed = start.elapsed().as_secs_f64() * 1000.;
+        samples.push(elapsed);
+        max_ms = max_ms.max(elapsed);
         upload_frames += 1;
         if done {
             break;
         }
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
+    samples.sort_by(f64::total_cmp);
+    eprintln!(
+        "terrain staging p99 {:.3} ms, first complete snapshot {:.3} s",
+        samples[(samples.len() - 1) * 99 / 100],
+        upload_start.elapsed().as_secs_f64()
+    );
     eprintln!("staged uploads: {upload_frames} frames, max CPU submission {max_ms:.2}ms");
     gpu.update_density(viewport);
     let interval = gpu.density.interval_m;
@@ -653,5 +679,111 @@ fn benchmark_native_globe_tiles() {
             image::ColorType::Rgba8,
         )
         .unwrap();
+    }
+}
+
+#[path = "admin_test_screen.rs"]
+mod route_screen;
+
+fn measured_camera_route(source: &Arc<Frame>) {
+    use std::time::Duration;
+    let ctx = egui::Context::default();
+    let mut screen = route_screen::Screen::new([1920, 1080]);
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1920., 1080.));
+    let all = prepare(
+        source.clone(),
+        None,
+        egui::Color32::RED,
+        egui::Color32::GREEN,
+    );
+    let subset = |id, x: std::ops::RangeInclusive<i32>| {
+        Arc::new(Prepared {
+            id,
+            source: source.clone(),
+            palette: all.palette,
+            tiles: all
+                .tiles
+                .iter()
+                .zip(&source.tiles)
+                .filter(|(_, tile)| x.contains(&tile.id.lon_bucket))
+                .map(|(tile, _)| tile.clone())
+                .collect(),
+        })
+    };
+    let a = subset(91, 24..=26);
+    let b = subset(92, 26..=29);
+    assert!(!a.tiles.is_empty() && !b.tiles.is_empty());
+    let pace = Duration::from_secs_f64(1. / 60.);
+    for (name, candidate, from, to) in [
+        ("arrive", &a, [40., 18.], [42., 24.]),
+        ("pan_zoom", &b, [42., 24.], [46., 36.]),
+        ("return", &a, [46., 36.], [42., 24.]),
+    ] {
+        let start = Instant::now();
+        let mut times = Vec::new();
+        let mut ready_ms = None;
+        for i in 0..1200 {
+            let frame = Instant::now();
+            let t = (i as f32 / 44.).min(1.);
+            let mut view = GlobeViewState::from_focus(GeoPoint {
+                lat: 15.,
+                lon: from[0] + (to[0] - from[0]) * t,
+            });
+            view.zoom = from[1] + (to[1] - from[1]) * t;
+            let layout = globe_layout(rect, &view);
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(rect),
+                    ..Default::default()
+                },
+                |ctx| {
+                    let painter = ctx.layer_painter(egui::LayerId::background());
+                    painter.add(residency_callback(rect));
+                    let mut uniforms = ContourCallback::new(
+                        ContourLayer::SrtmGlobe,
+                        0,
+                        Arc::new(vec![]),
+                        &layout,
+                        &view,
+                        0.02,
+                        0.92,
+                        1.,
+                        1.,
+                    )
+                    .uniforms;
+                    uniforms.viewport_size = [rect.width(), rect.height()];
+                    painter.add(egui_wgpu::Callback::new_paint_callback(
+                        rect,
+                        Callback {
+                            candidate: candidate.clone(),
+                            palette: [egui::Color32::RED, egui::Color32::GREEN],
+                            uniforms,
+                            viewport: Viewport::new(&layout, &view, rect),
+                            ctx: ctx.clone(),
+                        },
+                    ));
+                },
+            );
+            screen.render(&ctx, output, false);
+            times.push(frame.elapsed().as_secs_f64() * 1000.);
+            if super::super::super::global_loading::gpu_ready(&ctx, 1000, candidate.id) {
+                ready_ms.get_or_insert_with(|| start.elapsed().as_secs_f64() * 1000.);
+                if i >= 59 {
+                    break;
+                }
+            }
+            std::thread::sleep(pace.saturating_sub(frame.elapsed()));
+        }
+        let ready = ready_ms.expect("complete snapshot on route");
+        times.sort_by(f64::total_cmp);
+        let p = |percent| times[(times.len() - 1) * percent / 100];
+        eprintln!(
+            "NATIVE_ROUTE {name} tiles={} frames={} ready_ms={ready:.1} p95_ms={:.2} p99_ms={:.2} max_ms={:.2}",
+            candidate.tiles.len(),
+            times.len(),
+            p(95),
+            p(99),
+            times.last().unwrap()
+        );
     }
 }

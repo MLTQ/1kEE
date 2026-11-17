@@ -10,6 +10,9 @@ mod density;
 #[path = "globe_terrain_texture.rs"]
 mod texture;
 
+#[path = "globe_buffer_worker.rs"]
+mod buffers;
+
 const CHUNK_SEGMENTS: usize = 32_768; // < 1 MiB; small individual allocations
 
 pub(super) struct Chunk {
@@ -232,11 +235,23 @@ pub(super) fn loading_count() -> usize {
 #[derive(Default)]
 pub(super) struct Gpu {
     pub used: bool,
+    worker: Option<buffers::Worker>,
+    in_flight: bool,
     tiles: HashMap<u64, Vec<InstanceChunk>>,
     displayed: Option<Arc<Prepared>>,
     pending: Option<Arc<Prepared>>,
     density: density::Selection,
     texture: Option<texture::Cache>,
+}
+
+impl Drop for Gpu {
+    fn drop(&mut self) {
+        if let Some(worker) = &self.worker {
+            let chunks = self.tiles.drain().flat_map(|(_, v)| v).collect();
+            worker.retire(chunks, self.displayed.take());
+            worker.retire(Vec::new(), self.pending.take());
+        }
+    }
 }
 
 impl Gpu {
@@ -268,12 +283,29 @@ impl Gpu {
                     .flat_map(|image| image.retained_versions()),
             )
             .collect();
-        self.tiles.retain(|version, _| keep.contains(version));
+        let mut retired = Vec::new();
+        self.tiles.retain(|version, chunks| {
+            if keep.contains(version) {
+                return true;
+            }
+            retired.append(chunks);
+            false
+        });
+        if let Some(worker) = &self.worker {
+            worker.retire(retired, None);
+        }
     }
     #[cfg(test)]
-    fn stage(&mut self, device: &wgpu::Device, candidate: &Arc<Prepared>, view: Viewport) -> bool {
+    fn stage(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        candidate: &Arc<Prepared>,
+        view: Viewport,
+    ) -> bool {
         self.stage_budgeted(
             device,
+            queue,
             candidate,
             view,
             &mut super::super::line_upload::Budget::default(),
@@ -282,6 +314,7 @@ impl Gpu {
     fn stage_budgeted(
         &mut self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         candidate: &Arc<Prepared>,
         view: Viewport,
         budget: &mut super::super::line_upload::Budget,
@@ -301,45 +334,64 @@ impl Gpu {
             .pending
             .get_or_insert_with(|| requested.clone())
             .clone();
-        let mut remaining = crate::gpu_config::settings().upload_bytes;
-        // Publish only complete generations: staged fragments cannot double
-        // draw the old LOD, expose half a tile, or erase fallback prematurely.
+        if self.in_flight {
+            match self.worker.as_ref().unwrap().poll() {
+                Ok(chunks) => {
+                    for (key, chunk) in chunks {
+                        self.tiles.entry(key).or_default().push(chunk);
+                    }
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => return false,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => self.worker = None,
+            }
+            self.in_flight = false;
+        }
         let mut ordered: Vec<_> = candidate.tiles.iter().collect();
         ordered.sort_by_key(|t| !t.chunks.iter().any(|c| view.intersects(c.bounds)));
+        let mut jobs = Vec::new();
+        let mut ready = true;
         for tile in ordered {
-            let uploaded = self.tiles.entry(tile.version).or_default();
-            for chunk in &tile.chunks[uploaded.len()..] {
-                let bytes = chunk.instances.len() * std::mem::size_of::<SegmentInstance>();
-                if bytes > remaining || !budget.claim(bytes) {
+            let offset = self.tiles.entry(tile.version).or_default().len();
+            if offset != tile.chunks.len() {
+                ready = false;
+            }
+            for (index, chunk) in tile.chunks.iter().enumerate().skip(offset) {
+                if !budget.claim(std::mem::size_of_val(chunk.instances.as_slice())) {
                     break;
                 }
-                uploaded.extend(split_instance_buffers(
-                    device,
-                    "globe_tile_chunk",
-                    &chunk.instances,
-                ));
-                remaining -= bytes;
+                jobs.push((tile.clone(), index));
             }
         }
-        let ready = candidate
-            .tiles
-            .iter()
-            .all(|t| self.tiles[&t.version].len() == t.chunks.len());
-        if ready {
-            self.displayed = self.pending.take();
+        if !jobs.is_empty() {
+            if self.worker.is_none() {
+                self.worker = buffers::Worker::spawn(device, queue).ok();
+            }
+            if let Some(worker) = &self.worker {
+                self.in_flight = worker.submit(jobs);
+                if !self.in_flight {
+                    self.worker = None;
+                }
+            } else {
+                // Resource-constrained systems can still make bounded progress.
+                for (tile, index) in jobs {
+                    self.tiles
+                        .entry(tile.version)
+                        .or_default()
+                        .extend(split_instance_buffers(
+                            device,
+                            "globe tile fallback",
+                            &tile.chunks[index].instances,
+                        ));
+                }
+            }
         }
-        let keep: std::collections::HashSet<_> = candidate
-            .tiles
-            .iter()
-            .chain(self.displayed.iter().flat_map(|p| &p.tiles))
-            .map(|t| t.version)
-            .chain(
-                self.texture
-                    .iter()
-                    .flat_map(|image| image.retained_versions()),
-            )
-            .collect();
-        self.tiles.retain(|version, _| keep.contains(version));
+        if ready {
+            let previous = std::mem::replace(&mut self.displayed, self.pending.take());
+            if let Some(worker) = &self.worker {
+                worker.retire(Vec::new(), previous);
+            }
+            self.prune();
+        }
         ready
             && self
                 .displayed
@@ -419,9 +471,13 @@ impl egui_wgpu::CallbackTrait for Callback {
             ContourLayer::SrtmGlobe.slot() as u64 * UNIFORM_STRIDE,
             bytemuck::bytes_of(&self.uniforms),
         );
-        let uploaded = res
-            .terrain
-            .stage_budgeted(device, &self.candidate, self.viewport, &mut res.uploads);
+        let uploaded = res.terrain.stage_budgeted(
+            device,
+            queue,
+            &self.candidate,
+            self.viewport,
+            &mut res.uploads,
+        );
         if !uploaded {
             super::super::global_loading::pending_gpu(&self.ctx, 1000);
             self.ctx.request_repaint();

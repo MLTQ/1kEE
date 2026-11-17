@@ -31,7 +31,7 @@ fn full_detail_survives_continuous_camera_motion_and_refinement() {
     };
     let viewport = Viewport::new(&layout, &view, rect);
     let mut gpu = Gpu::default();
-    while !gpu.stage(&device, &frame, viewport) {}
+    while !gpu.stage(&device, &queue, &frame, viewport) {}
     let res = ContourPassResources::new(&device, wgpu::TextureFormat::Rgba8Unorm);
     set_uniforms(&queue, &res, &layout, &view, rect);
     let mut uniforms = ContourCallback::new(
@@ -250,7 +250,7 @@ fn resident_theme_changes_recolor_complete_and_inflight_globe_images() {
     };
     let viewport = Viewport::new(&layout, &view, rect);
     let mut gpu = Gpu::default();
-    while !gpu.stage(&device, &frame, viewport) {}
+    while !gpu.stage(&device, &queue, &frame, viewport) {}
     let buffers: Vec<_> = gpu
         .tiles
         .values()
