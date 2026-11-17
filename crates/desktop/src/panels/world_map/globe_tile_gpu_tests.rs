@@ -25,7 +25,7 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
         }
     }
 }
-pub(super) fn gpu() -> (wgpu::Device, wgpu::Queue) {
+pub(crate) fn gpu() -> (wgpu::Device, wgpu::Queue) {
     let instance = wgpu::Instance::default();
     let adapter = if let Some(name) = crate::gpu_config::adapter_name() {
         crate::gpu_config::select_adapter(&instance.enumerate_adapters(wgpu::Backends::all()), None, &name)
@@ -37,7 +37,7 @@ pub(super) fn gpu() -> (wgpu::Device, wgpu::Queue) {
     eprintln!("Adapter: {:?}", adapter.get_info());
     block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None)).unwrap()
 }
-pub(super) fn target(device: &wgpu::Device, size: [u32; 2]) -> wgpu::Texture {
+pub(crate) fn target(device: &wgpu::Device, size: [u32; 2]) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("private contour regression target"),
         size: wgpu::Extent3d {
@@ -99,7 +99,7 @@ pub(super) fn draw(
     queue.submit([encoder.finish()]);
     device.poll(wgpu::Maintain::Wait);
 }
-pub(super) fn pixels(
+pub(crate) fn pixels(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
@@ -339,6 +339,9 @@ fn callback_lifecycle(
             .get::<ContourPassResources>()
             .unwrap();
         assert_eq!(resources.terrain.displayed.is_some(), shown);
+        if shown {
+            assert!(super::super::super::global_loading::gpu_ready(&ctx, 1000, candidate.id));
+        }
         assert_eq!(resources.terrain.tiles.is_empty(), !shown);
     }
 }

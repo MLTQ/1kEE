@@ -159,3 +159,11 @@ Atlas submits measured height fields to `atlas_surface`: elevations displace the
 sphere by metres/Earth radius. Optional contours, coastlines and bathymetry are
 isolines on that depth-tested surface, bypassing the legacy constant-radius shells.
 Other map themes retain those vector pipelines and their existing behavior.
+
+### Earth Globe loading
+
+`global_loading` collects a fresh scene snapshot for enabled terrain, Atlas and
+LiDAR coverage, and paints a bottom-right progress card through preparation and
+GPU upload. Pending tile outlines and a spinner animate only when the saved
+Loading animation preference permits it. Ready layers stay visible. The overlay
+is hidden in OBS/stereo output; Moon/Mars retain their existing loading display.

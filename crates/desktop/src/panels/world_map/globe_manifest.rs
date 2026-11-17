@@ -12,12 +12,21 @@ pub(super) struct State {
     )>,
     busy: bool,
     epoch: u64,
+    loading: Option<Loading>,
+}
+pub(super) struct Loading {
+    pub key: LocalManifestKey,
+    pub state: srtm_focus_cache::LocalContourRegionState,
+    pub builds: BuildSnapshot,
+    pub available: bool,
+    pub assets: HashSet<(i32, i32)>,
 }
 
 impl State {
     pub fn invalidate(&mut self) {
         self.requested = None;
         self.snapshot = None;
+        self.loading = None;
         self.epoch = self.epoch.wrapping_add(1);
         // Keep the single-flight gate occupied until the old worker returns.
     }
@@ -28,6 +37,7 @@ impl State {
         key: LocalManifestKey,
         revision: u64,
         result: Option<Vec<srtm_focus_cache::FocusContourAsset>>,
+        loading: Option<Loading>,
     ) {
         self.busy = false;
         if epoch == self.epoch
@@ -35,7 +45,16 @@ impl State {
             && let Some(assets) = result
         {
             self.snapshot = Some((key, assets, revision, Instant::now()));
+            self.loading = loading;
         }
+    }
+    pub fn loading(&self) -> Option<&Loading> {
+        self.loading
+            .as_ref()
+            .filter(|p| Some(&p.key) == self.requested.as_ref())
+    }
+    pub fn selecting(&self) -> bool {
+        self.requested.is_some() && self.busy && self.loading().is_none()
     }
 }
 
@@ -103,14 +122,34 @@ pub(super) fn assets_for(
                         ActiveBody::Moon => srtm_focus_cache::ensure_lunar_contour_region,
                         ActiveBody::Mars => srtm_focus_cache::ensure_mars_contour_region,
                     };
-                    load(key.root.as_deref(), center, zoom, radius, radius)
+                    let assets = load(key.root.as_deref(), center, zoom, radius, radius);
+                    let loading = (body == ActiveBody::Earth).then(|| Loading {
+                        key: key.clone(),
+                        state: srtm_focus_cache::local_contour_region_state(
+                            body, &assets, center, zoom, radius,
+                        ),
+                        builds: srtm_focus_cache::db::focus_cache_db_path_for_zoom(
+                            key.root.as_deref(),
+                            zoom,
+                        )
+                        .map(|path| srtm_focus_cache::progress::snapshot(&path, key.zoom_bucket))
+                        .unwrap_or_default(),
+                        available: terrain_assets::find_srtm_root(key.root.as_deref()).is_some(),
+                        assets: assets
+                            .iter()
+                            .map(|a| (a.lat_bucket, a.lon_bucket))
+                            .collect(),
+                    });
+                    (assets, loading)
                 }))
                 .ok();
+                let (result, loading) =
+                    result.map_or((None, None), |(assets, loading)| (Some(assets), loading));
                 cache
                     .lock()
                     .unwrap()
                     .manifest
-                    .finish(epoch, key, revision, result);
+                    .finish(epoch, key, revision, result, loading);
                 wake.request_repaint();
             })
         {
@@ -175,6 +214,7 @@ mod tests {
             state.requested.clone().unwrap(),
             srtm_focus_cache::contour_manifest_revision(),
             Some(vec![]),
+            None,
         );
         drop(guard);
         let output = ctx.run(egui::RawInput::default(), |ctx| {
@@ -201,6 +241,59 @@ mod tests {
     }
 
     #[test]
+    fn globe_loading_tracks_source_decode_publication_and_rejects_old_viewports() {
+        let mut key = key(0);
+        key.build_radius = 0;
+        let info = Loading {
+            key: key.clone(),
+            state: srtm_focus_cache::LocalContourRegionState {
+                ready_buckets: HashSet::from([(0, 0)]),
+                status: srtm_focus_cache::FocusContourRegionStatus {
+                    ready_assets: 1,
+                    pending_assets: 0,
+                    total_assets: 1,
+                },
+            },
+            builds: BuildSnapshot::new(),
+            available: true,
+            assets: HashSet::from([(0, 0)]),
+        };
+        let mut cache = GlobeRegionCache {
+            manifest: State {
+                requested: Some(key.clone()),
+                loading: Some(info),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let snapshot = super::super::globe_loading::snapshot;
+        assert_eq!(snapshot(&cache).reading, 1);
+        assert_eq!(snapshot(&cache).fraction(), 0.75);
+        cache.read_progress.insert((0, 0), 0.5);
+        assert_eq!(snapshot(&cache).fraction(), 0.87);
+        cache.tiles.insert(
+            (0, 0),
+            Arc::new(vec![ContourPath {
+                elevation_m: 1.,
+                points: vec![GeoPoint { lat: 0., lon: 0. }],
+            }]),
+        );
+        assert_eq!(snapshot(&cache).preparing, 1);
+        assert_eq!(snapshot(&cache).ready, 0);
+        cache.merged_revision = Some(cache.tiles_revision);
+        assert!(!snapshot(&cache).active());
+        cache.manifest.busy = true;
+        assert!(
+            !snapshot(&cache).active(),
+            "periodic manifest refresh is not a new load"
+        );
+        cache.manifest.requested.as_mut().unwrap().center_lon_bucket = 3;
+        assert_eq!(snapshot(&cache).selecting, 1);
+        assert_eq!(snapshot(&cache).total, 0);
+        cache.reset_all();
+        assert!(!snapshot(&cache).active());
+    }
+    #[test]
     fn late_manifest_cannot_restore_a_reset_or_panned_scene() {
         let mut state = State {
             requested: Some(key(0)),
@@ -210,13 +303,13 @@ mod tests {
         state.invalidate();
         assert!(state.busy);
         state.requested = Some(key(0));
-        state.finish(0, key(0), 0, Some(vec![]));
+        state.finish(0, key(0), 0, Some(vec![]), None);
         assert!(state.snapshot.is_none());
         assert!(!state.busy);
         state.requested = Some(key(1));
-        state.finish(1, key(0), 0, Some(vec![]));
+        state.finish(1, key(0), 0, Some(vec![]), None);
         assert!(state.snapshot.is_none());
-        state.finish(1, key(1), 42, Some(vec![]));
+        state.finish(1, key(1), 42, Some(vec![]), None);
         assert_eq!(state.snapshot.as_ref().unwrap().2, 42);
     }
 }

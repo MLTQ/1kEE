@@ -139,3 +139,9 @@ Administrative outlines use an eighth uniform slot with the perspective horizon.
 The combined boundary callback reuses the contour view, line pipeline and chunk
 drawing for its displayed generation. It stages lines and shading together using
 the shared upload budget.
+
+Globe geography callbacks can opt into loading metadata. They report a pending
+source version during scene assembly and mark it complete only when replacement
+buffers finish staging in `prepare`. Instance-worker counts and native terrain
+preparation also feed the Globe HUD. These observers retain version tokens only
+and do not change geometry, upload budgets or previous-picture retention.

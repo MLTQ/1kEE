@@ -90,6 +90,8 @@ pub(super) struct Frame {
     pub wanted: usize,
     pub missing: usize,
     pub error: Option<String>,
+    pub failed: usize,
+    pub pending_bounds: Vec<[f32; 4]>,
 }
 impl State {
     fn clear(&mut self) {
@@ -216,6 +218,13 @@ impl State {
             rasters.len()
         };
         Frame {
+            failed: if load_missing {
+                wanted.iter().filter(|k| self.failed.contains_key(k)).count()
+            } else { 0 },
+            pending_bounds: if load_missing {
+                wanted.iter().filter(|k| !self.entries.contains_key(k))
+                    .take(32).map(|k| k.bounds()).collect()
+            } else { vec![] },
             rasters,
             wanted: count,
             missing: if load_missing { missing } else { 0 },

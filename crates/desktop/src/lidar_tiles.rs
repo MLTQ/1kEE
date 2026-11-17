@@ -176,6 +176,34 @@ fn key(tile: Tile, detail: bool, generation: u32, preferred: &str) -> Key {
 }
 
 impl Tiles {
+    pub(crate) fn globe_loading(&self) -> crate::panels::world_map::global_loading::Snapshot {
+        use crate::panels::world_map::global_loading::Snapshot;
+        if !self.catalog_ready {
+            return Snapshot {
+                selecting: usize::from(self.catalog_job.is_some()),
+                ..Default::default()
+            };
+        }
+        let mut s = Snapshot::default();
+        for &tile in self.view.borrow().iter() {
+            let k = key(tile, false, self.generation, &self.preferred);
+            s.total += 1;
+            if self.loaded.contains_key(&k) && !self.dirty.contains(&k) {
+                s.ready += 1;
+                s.fraction_sum += 1.;
+            } else {
+                if self.retry.contains_key(&k) {
+                    s.failed += 1;
+                } else {
+                    s.reading += 1;
+                }
+                if s.bounds.len() < 32 {
+                    s.bounds.push(tile.bounds());
+                }
+            }
+        }
+        s
+    }
     pub(crate) fn draw(
         &self,
         bounds: Option<[f32; 4]>,
@@ -1520,6 +1548,22 @@ mod tests {
         assert!(tiles.jobs.iter().all(Option::is_none));
     }
 
+    #[test]
+    fn globe_loading_counts_only_current_coverage_tiles_and_known_empty_tiles_finish() {
+        let mut tiles = Tiles { catalog_ready: true, ..Default::default() };
+        tiles.draw(Some([1., 1., 1.02, 1.02]), View::Coverage, |_| {});
+        let pending = tiles.globe_loading();
+        assert!(pending.active());
+        assert!(pending.reading > 0);
+        for &tile in tiles.view.borrow().iter() {
+            tiles.loaded.insert(key(tile, false, tiles.generation, &tiles.preferred), None);
+        }
+        assert!(!tiles.globe_loading().active());
+        tiles.draw(Some([100., 20., 100.02, 20.02]), View::Coverage, |_| {});
+        assert!(tiles.globe_loading().active());
+        tiles.stop();
+        assert!(!tiles.globe_loading().active());
+    }
     #[test]
     fn covers_small_views_and_wraps_at_date_line() {
         let view = visible([179.98, -0.05, 180.02, 0.05]);

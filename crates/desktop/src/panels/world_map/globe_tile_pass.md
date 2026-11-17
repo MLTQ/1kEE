@@ -47,3 +47,9 @@ steady frames do not sort or walk pending uploads.
 
 Instance publication frees replaced generations after releasing the UI cache
 lock. Completed refinement jobs promptly release their extra GPU versions.
+
+Prepared candidates receive monotonic loading IDs. The Globe HUD watches their
+actual source-buffer publication in `stage_budgeted`; it remains active while a
+previous complete generation is displayed. Camera/density image refinement does
+not restart the source-loading indicator. The GPU lifecycle regression verifies
+the loading token is complete only when the requested candidate is drawable.

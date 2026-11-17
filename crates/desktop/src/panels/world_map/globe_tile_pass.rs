@@ -23,6 +23,7 @@ struct Tile {
     chunks: Vec<Chunk>,
 }
 struct Prepared {
+    id: u64,
     source: Arc<Frame>,
     palette: u64,
     tiles: Vec<Arc<Tile>>,
@@ -161,6 +162,10 @@ fn prepare(
         })
         .collect();
     Prepared {
+        id: {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        },
         source,
         palette,
         tiles,
@@ -220,6 +225,10 @@ fn instances(
     state.current.clone()
 }
 
+pub(super) fn loading_count() -> usize {
+    CACHE.get().and_then(|c| c.try_lock().ok())
+        .map_or(0, |c| usize::from(c.active && c.busy))
+}
 #[derive(Default)]
 pub(super) struct Gpu {
     pub used: bool,
@@ -372,6 +381,7 @@ pub(crate) fn paint(
         (rect.width() * ppp).max(1.0),
         (rect.height() * ppp).max(1.0),
     ];
+    super::super::global_loading::watch_gpu(painter.ctx(), 1000, candidate.id);
     painter.add(egui_wgpu::Callback::new_paint_callback(
         rect,
         Callback {
@@ -409,11 +419,14 @@ impl egui_wgpu::CallbackTrait for Callback {
             ContourLayer::SrtmGlobe.slot() as u64 * UNIFORM_STRIDE,
             bytemuck::bytes_of(&self.uniforms),
         );
-        if !res
+        let uploaded = res
             .terrain
-            .stage_budgeted(device, &self.candidate, self.viewport, &mut res.uploads)
-        {
+            .stage_budgeted(device, &self.candidate, self.viewport, &mut res.uploads);
+        if !uploaded {
+            super::super::global_loading::pending_gpu(&self.ctx, 1000);
             self.ctx.request_repaint();
+        } else {
+            super::super::global_loading::uploaded(&self.ctx, 1000, self.candidate.id);
         }
         res.terrain.update_density(self.viewport);
         if let Some(frame) = &res.terrain.displayed {
@@ -465,4 +478,4 @@ mod tests;
 
 #[cfg(test)]
 #[path = "globe_tile_gpu_tests.rs"]
-mod gpu_tests;
+pub(crate) mod gpu_tests;

@@ -45,7 +45,7 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
     ui.separator();
     ui.strong("Loading");
     ui.checkbox(&mut model.show_loading_animation, "Loading animation")
-        .on_hover_text("Animate the terrain loading grid and loading outlines. Downloads and progress information remain active when disabled.");
+        .on_hover_text("Animate the terrain loading grid, tile outlines and Globe loading spinner. Downloads and progress information remain active when disabled.");
     ui.small("Changes apply immediately. Save settings to keep this choice after restarting.");
 }
 

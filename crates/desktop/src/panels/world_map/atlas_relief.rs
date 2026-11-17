@@ -401,6 +401,7 @@ pub(super) fn draw_globe(
     }
     let tiles = super::atlas_globe_tiles::frame(painter.ctx(), root, rect, layout, view);
     rasters.extend(tiles.rasters.iter().cloned());
+    let last_raster = rasters.last().map(|r| r.id);
     if !rasters.is_empty() {
         super::atlas_surface::Callback::globe(
             painter,
@@ -420,6 +421,29 @@ pub(super) fn draw_globe(
         d.get_temp::<usize>(egui::Id::new("atlas-globe-uploading"))
             .unwrap_or(0)
     });
+    let pending_upload = last_raster.is_some_and(|id| !super::atlas_surface::uploaded(painter.ctx(), 0, id));
+    let mut loading = super::global_loading::Snapshot {
+        total: tiles.wanted,
+        ready: tiles.wanted - tiles.missing,
+        fraction_sum: (tiles.wanted - tiles.missing) as f32,
+        reading: tiles.missing.saturating_sub(tiles.failed),
+        failed: tiles.failed,
+        uploading: if last_raster.is_none() { 0 } else { uploading.max(usize::from(pending_upload)) },
+        bounds: tiles.pending_bounds.clone(),
+        ..Default::default()
+    };
+    if let Some(image) = IMAGE.get().and_then(|s| s.try_lock().ok()) {
+        let (ready, reading, failed) = image.loading_state();
+        loading.add(super::global_loading::Snapshot {
+            total: ready + reading + failed,
+            ready,
+            fraction_sum: ready as f32,
+            reading,
+            failed,
+            ..Default::default()
+        });
+    }
+    super::global_loading::report(painter.ctx(), loading);
     let message = if let Some(error) = tiles.error {
         Some(format!(
             "Atlas: {} / {} tiles ready · {error}",

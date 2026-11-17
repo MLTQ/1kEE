@@ -18,3 +18,10 @@ a separate synchronous database status check. A regression simulates blocked
 manifest I/O and a completed empty snapshot, verifying both keep scheduling
 refresh frames without opening any database on the UI path. Worker completion
 also requests an immediate repaint through the existing callback.
+
+Earth workers also capture loading metadata from the same assets: source-free
+cells, source availability, build-progress handles and exact requested key.
+Publication uses the same epoch/key gate as geometry. A completed current
+snapshot remains ready during periodic refresh; a changed window reports
+selection until its own metadata arrives. Reset clears loading metadata while
+keeping the single-flight worker gate, without leaving a phantom active load.

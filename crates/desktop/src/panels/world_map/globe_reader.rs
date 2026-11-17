@@ -15,6 +15,7 @@ fn publish(
     }
     let cell = (key.lat_bucket, key.lon_bucket);
     guard.in_flight.remove(&cell);
+    guard.read_progress.remove(&cell);
     guard.residency.record(cell, bounds);
     if guard.residency.wanted(cell) && !guard.tiles.contains_key(&cell) {
         guard.residency.admit(cell, cost);
@@ -41,7 +42,17 @@ pub(super) fn spawn(
                     &requests[0].0.path,
                     &requests,
                     ReadSelection::WholeTile(usize::MAX),
-                    &mut |_, _, _| {},
+                    &mut |key, done, total| {
+                        if let Ok(mut guard) = cache.lock()
+                            && guard.load_epoch == epoch
+                            && guard.load_in_flight == Some(epoch)
+                        {
+                            guard.read_progress.insert(
+                                (key.lat_bucket, key.lon_bucket),
+                                if total > 0 { done as f32 / total as f32 } else { 0. },
+                            );
+                        }
+                    },
                     &mut |key, contours| {
                         let current = publish(cache, epoch, key, contours);
                         if current {

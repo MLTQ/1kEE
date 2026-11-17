@@ -28,6 +28,7 @@ mod gpu_color;
 pub(crate) mod local_contour_pass;
 #[path = "world_map/globe_scene/mod.rs"]
 mod globe_scene;
+pub(crate) mod global_loading;
 mod graticule;
 mod layer_import;
 mod local_terrain_scene;

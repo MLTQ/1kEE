@@ -10,3 +10,7 @@ Per-tile publication keeps the batch gate occupied, checks epoch/current view,
 and wakes composition. A reset rejects publication and cancels remaining reads.
 Final bookkeeping releases in-flight claims and retries failures with backoff.
 Moon/Mars keep the existing batch reader. No source geometry is simplified.
+
+Per-tile decode callbacks update a small progress fraction under the same
+epoch/batch gate. Publication and final cleanup remove those fractions; reset
+clears them. The Globe HUD reads these values without querying SQLite on paint.

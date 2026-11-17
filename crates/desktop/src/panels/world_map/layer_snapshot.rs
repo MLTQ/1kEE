@@ -30,6 +30,18 @@ impl<K: Clone + Eq + Send + 'static, V: Send + Sync + 'static> Snapshot<K, V> {
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
+    /// Current requested source: ready, working, or unavailable. A retained
+    /// older LOD is drawable but does not complete its replacement request.
+    pub fn loading_state(&self) -> (usize, usize, usize) {
+        let Some(requested) = &self.requested else { return (0, 0, 0) };
+        if self.current.as_ref().is_some_and(|(key, _)| key == requested) {
+            (1, 0, 0)
+        } else if self.retry.is_some() {
+            (0, 0, 1)
+        } else {
+            (0, usize::from(self.pending.is_some()), 0)
+        }
+    }
 
     /// Publish an already prepared value without waiting for another key's
     /// worker. Keep the single-flight gate until that worker finishes.

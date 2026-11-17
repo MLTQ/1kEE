@@ -292,6 +292,12 @@ static INSTANCE_CACHE: OnceLock<Mutex<HashMap<ContourLayer, LayerInstances>>> = 
 fn instance_cache() -> &'static Mutex<HashMap<ContourLayer, LayerInstances>> {
     INSTANCE_CACHE.get_or_init(Default::default)
 }
+pub(super) fn loading_count() -> usize {
+    instance_cache().try_lock()
+        .map(|c| c.values().filter(|v| v.active && v.building.is_some()).count())
+        .unwrap_or(1)
+        + tiles::loading_count()
+}
 
 #[path = "contour_lifecycle.rs"]
 mod lifecycle;
@@ -629,6 +635,7 @@ pub struct ContourCallback {
     instances: Arc<Vec<SegmentInstance>>,
     /// `screen_size` is filled in during `prepare` from the screen descriptor.
     uniforms: ContourUniforms,
+    loading_ctx: Option<egui::Context>,
 }
 
 impl ContourUniforms {
@@ -698,6 +705,7 @@ impl ContourCallback {
             layer,
             version,
             instances,
+            loading_ctx: None,
             uniforms: ContourUniforms::for_view(
                 layer,
                 layout,
@@ -710,6 +718,11 @@ impl ContourCallback {
         }
     }
 
+    pub fn with_loading(mut self, ctx: &egui::Context) -> Self {
+        super::global_loading::watch_gpu(ctx, self.layer.slot() as usize, self.version);
+        self.loading_ctx = Some(ctx.clone());
+        self
+    }
     /// egui-wgpu executes paint callbacks with the GPU viewport set to `rect`
     /// (in physical pixels), so the NDC transform must be relative to it.
     pub fn into_paint_callback(mut self, rect: egui::Rect) -> egui::PaintCallback {
@@ -746,6 +759,13 @@ impl egui_wgpu::CallbackTrait for ContourCallback {
             // Finish this snapshot before accepting a newer arrival. Keep the
             // previous complete buffers drawable throughout the upload.
             crate::app::request_repaint();
+        }
+        if gpu.version == self.version && gpu.pending.is_none()
+            && let Some(ctx) = &self.loading_ctx
+        {
+            super::global_loading::uploaded(ctx, self.layer.slot() as usize, self.version);
+        } else if let Some(ctx) = &self.loading_ctx {
+            super::global_loading::pending_gpu(ctx, self.layer.slot() as usize);
         }
         Vec::new()
     }

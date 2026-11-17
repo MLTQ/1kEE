@@ -117,6 +117,7 @@ pub(super) fn paint_with_layout(
     layout: GlobeLayout,
     stereo: bool,
 ) -> GlobeScene {
+    super::global_loading::begin(painter.ctx());
     // Leave gaps in the Atlas capture transparent until measured imagery arrives.
     let backdrop = !(stereo && model.map_theme == theme::MapTheme::Atlas);
     if backdrop {
@@ -588,6 +589,24 @@ pub(super) fn paint_with_layout(
         }
     }
 
+    if model.active_body == crate::model::ActiveBody::Earth && !model.obs_view && !stereo {
+        if model.map_theme != theme::MapTheme::Atlas {
+            super::global_loading::report(painter.ctx(), contour_asset::globe_loading::overview(
+                model.show_contours, model.show_coastlines, model.show_bathymetry,
+            ));
+            if model.show_contours && model.globe_view.zoom >= 1.5 {
+                super::global_loading::report(painter.ctx(), contour_asset::globe_loading::earth());
+            }
+        }
+        if model.lidar.enabled {
+            super::global_loading::report(painter.ctx(), model.lidar.tiles.globe_loading());
+        }
+        super::global_loading::report(painter.ctx(), super::global_loading::Snapshot {
+            preparing: super::contour_pass::loading_count(),
+            ..Default::default()
+        });
+        super::global_loading::draw(painter, rect, &layout, &model.globe_view, time, model.show_loading_animation);
+    }
     GlobeScene {
         event_markers,
         camera_markers,

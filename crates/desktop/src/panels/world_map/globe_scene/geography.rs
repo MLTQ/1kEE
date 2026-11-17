@@ -40,6 +40,7 @@ fn paint_contour_layer(
             contour_stroke_width_px,
             painter.ctx().pixels_per_point(),
         )
+        .with_loading(painter.ctx())
         .into_paint_callback(painter.clip_rect()),
     );
 }

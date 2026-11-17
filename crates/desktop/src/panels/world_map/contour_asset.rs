@@ -25,6 +25,8 @@ mod fallback;
 pub(crate) mod globe_merge;
 #[path = "globe_manifest.rs"]
 mod globe_manifest;
+#[path = "globe_loading_metadata.rs"]
+pub(crate) mod globe_loading;
 #[path = "globe_reader.rs"]
 mod globe_reader;
 #[path = "globe_residency.rs"]
@@ -313,6 +315,7 @@ struct GlobeRegionCache {
     tiles: HashMap<(i32, i32), Arc<Vec<ContourPath>>>,
     /// Tiles already queued for a background DB read.
     in_flight: HashSet<(i32, i32)>,
+    read_progress: HashMap<(i32, i32), f32>,
     /// Insertion order for deterministic eviction among equal-distance ties
     order: Vec<(i32, i32)>,
     /// Contours from the previous zoom bucket, shown while new-resolution
@@ -351,6 +354,7 @@ impl Default for GlobeRegionCache {
             root: None,
             tiles: HashMap::new(),
             in_flight: HashSet::new(),
+            read_progress: HashMap::new(),
             order: Vec::new(),
             zoom_fallback: None,
             merged: None,
@@ -376,6 +380,7 @@ impl GlobeRegionCache {
         self.residency.reset_sources();
         self.tiles.clear();
         self.in_flight.clear();
+        self.read_progress.clear();
         self.order.clear();
         self.mark_tiles_changed();
         self.merged = None;
@@ -873,6 +878,7 @@ fn finish_globe_read(
         }
         for (key, _) in requests {
             cache.in_flight.remove(&(key.lat_bucket, key.lon_bucket));
+            cache.read_progress.remove(&(key.lat_bucket, key.lon_bucket));
         }
         if changed {
             cache.mark_tiles_changed();
