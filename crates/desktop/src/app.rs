@@ -151,7 +151,7 @@ impl Drop for DashboardApp {
         camera_registry::shutdown();
         deflock_source::shutdown();
         fire_source::shutdown();
-        panels::world_map::srtm_focus_cache::terminate_active_gdal_jobs();
+        panels::world_map::srtm_focus_cache::shutdown_terrain_jobs();
     }
 }
 

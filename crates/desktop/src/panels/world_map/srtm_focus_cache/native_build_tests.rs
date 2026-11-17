@@ -171,4 +171,5 @@ fn gpu_srtm_end_to_end_benchmark() {
             );
         }
     }
+    one_thousand_electric_eye_cache_builder::gpu_terrain::shutdown();
 }

@@ -39,6 +39,15 @@ pub(crate) struct Viewport {
 }
 
 impl Viewport {
+    pub(crate) fn intersects_earth_core(self, lat: i32, lon: i32, step: f32) -> bool {
+        let (lat, lon) = (lat as f32 * step, lon as f32 * step);
+        let half = step * 0.5;
+        self.intersects(Bounds {
+            min: [lon - half, lat - half, -12_000.],
+            max: [lon + half, lat + half, 9_000.],
+        })
+    }
+
     pub(crate) fn intersects(self, bounds: Bounds) -> bool {
         if self.projection.pole != 0.0 {
             // A polar tile is an annular sector. Invert the screen once at each
@@ -137,7 +146,7 @@ impl Viewport {
 
 #[derive(Default)]
 pub(super) struct Residency {
-    viewport: Option<Viewport>,
+    pub(super) viewport: Option<Viewport>,
     window: Option<(i32, i32, i32)>,
     // Small metadata survives eviction so a stationary view doesn't repeatedly
     // decode an offscreen tile. None means decoded empty, not a missing tile.

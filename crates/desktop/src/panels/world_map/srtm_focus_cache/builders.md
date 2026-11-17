@@ -80,8 +80,8 @@ SQLite assets immediately.
   restart instead of a poisoned on-disk manifest.
 - Failed GDAL/cache writes enter a bounded exponential per-tile cooldown. This
   prevents a full cache volume or missing source file from repeatedly consuming
-  all build slots; a per-body gate also pauses the next outer-ring batch after
-  a failure. A successful build or manual cache reset clears the gate, while a
+  all build slots; a source-specific gate pauses the next batch on that source after
+  a failure. Hosted Earth downloads and local SRTM have independent gates. A successful build or manual cache reset clears the gate, while a
   manifest hit clears the matching tile's cooldown.
 
 ## 3DEP routing

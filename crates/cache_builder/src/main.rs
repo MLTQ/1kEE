@@ -1,5 +1,7 @@
 fn main() {
-    if let Err(error) = one_thousand_electric_eye_cache_builder::run() {
+    let result = one_thousand_electric_eye_cache_builder::run();
+    one_thousand_electric_eye_cache_builder::gpu_terrain::shutdown();
+    if let Err(error) = result {
         eprintln!("error: {error}");
         std::process::exit(1);
     }

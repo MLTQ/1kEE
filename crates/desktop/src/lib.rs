@@ -70,6 +70,10 @@ fn contour_buffer_wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
             "[1kEE GPU] {} ({:?}, {:?}) driver={} {}",
             info.name, info.backend, info.device_type, info.driver, info.driver_info
         );
+        use one_thousand_electric_eye_cache_builder::gpu_terrain;
+        gpu_terrain::register_desktop_adapter(info);
+        let builder = if gpu_terrain::enabled() { "GPU compute with GDAL fallback" } else { "GDAL" };
+        eprintln!("[1kEE GPU] Native Earth contour builder: {builder}");
         gpu_config::log_settings();
         let mut descriptor = base(adapter);
         let adapter_limits = adapter.limits();
@@ -95,6 +99,7 @@ pub fn run_desktop() -> eframe::Result<()> {
             println!("Verified terrain tile {}/{}/{}: {}", tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket, path.display());
             Ok(())
         })();
+        one_thousand_electric_eye_cache_builder::gpu_terrain::shutdown();
         if let Err(error) = result {
             eprintln!("[1kEE] {error}");
             std::process::exit(1);

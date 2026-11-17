@@ -1,8 +1,9 @@
-//! Opt-in SRTM GL1 compute backend. Sources are read-only; callers own cache writes.
+//! SRTM GL1 compute backend. Sources are read-only; callers own cache writes.
 //! One serialized device and a twelve-window VRAM LRU are shared by background jobs.
 use crate::contours::{self, TileKey};
 use crate::marching_squares::{ContourLine, chain_segments};
 use eframe::wgpu::{self, util::DeviceExt};
+use rayon::prelude::*;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -19,9 +20,44 @@ const MAX_N: u32 = 6000;
 const CAPACITY: u32 = 4_000_000;
 type Lines = (Vec<ContourLine>, Vec<Vec<(f32, f32)>>);
 
-/// Enable explicitly with ONEKEE_TERRAIN_GPU=1. GDAL remains the default.
+// The desktop supplies its actual render adapter before starting terrain jobs.
+// Headless builders continue to require an explicit opt-in.
+static DESKTOP_ADAPTER: OnceLock<wgpu::AdapterInfo> = OnceLock::new();
+static WORKER: OnceLock<Mutex<Result<Worker, String>>> = OnceLock::new();
+
+pub fn register_desktop_adapter(info: wgpu::AdapterInfo) {
+    let _ = DESKTOP_ADAPTER.set(info);
+}
+
+fn select_compute(setting: Option<&str>, adapter: Option<&wgpu::AdapterInfo>) -> bool {
+    match setting {
+        Some(value) => value == "1",
+        // PCI vendor/device pair of the tested desktop RTX 4090.
+        None => adapter.is_some_and(|info| {
+            info.backend == wgpu::Backend::Vulkan && info.vendor == 0x10de && info.device == 0x2684
+        }),
+    }
+}
+
 pub fn enabled() -> bool {
-    std::env::var("ONEKEE_TERRAIN_GPU").is_ok_and(|v| v == "1")
+    select_compute(
+        std::env::var("ONEKEE_TERRAIN_GPU").ok().as_deref(),
+        DESKTOP_ADAPTER.get(),
+    )
+}
+
+/// Finish submitted work and destroy the compute device before the process
+/// unloads its graphics driver. Pending tile jobs see the stopped worker.
+pub fn shutdown() {
+    let stopped = || Err("terrain compute has shut down".to_owned());
+    let worker = WORKER.get_or_init(|| Mutex::new(stopped()));
+    let mut state = worker
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Ok(worker) = std::mem::replace(&mut *state, stopped()) {
+        worker.device.poll(wgpu::Maintain::Wait);
+        drop(worker);
+    }
 }
 
 /// Generate a complete tile in memory. Does not modify any files. An error must
@@ -33,7 +69,6 @@ pub fn build(root: &Path, zoom: i32, lat: i32, lon: i32) -> Result<TerrainTile, 
         .find(|s| s.zoom_bucket == zoom)
         .ok_or("GPU terrain supports SRTM zoom buckets 0–6")?;
     let core = CoreTile::srtm(spec.half_extent_deg, lat, lon);
-    static WORKER: OnceLock<Mutex<Result<Worker, String>>> = OnceLock::new();
     validate_grid(core.source, core.raster_size)?;
     let mut state = WORKER
         .get_or_init(|| Mutex::new(Worker::new()))
@@ -110,6 +145,7 @@ struct Worker {
     sample_pipeline: wgpu::ComputePipeline,
     contour_pipeline: wgpu::ComputePipeline,
     sources: Vec<Source>,
+    segment_buffer: Option<wgpu::Buffer>,
 }
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     struct Wake(std::thread::Thread);
@@ -137,13 +173,22 @@ impl Worker {
             ..Default::default()
         });
         let requested = std::env::var("ONEKEE_GPU").ok().map(|v| v.to_lowercase());
+        let auto_adapter = DESKTOP_ADAPTER
+            .get()
+            .filter(|_| std::env::var_os("ONEKEE_TERRAIN_GPU").is_none());
         let adapter = instance
             .enumerate_adapters(wgpu::Backends::PRIMARY)
             .into_iter()
             .filter(|a| {
+                let info = a.get_info();
+                if let Some(desktop) = auto_adapter {
+                    return info.vendor == desktop.vendor
+                        && info.device == desktop.device
+                        && info.backend == desktop.backend;
+                }
                 requested
                     .as_ref()
-                    .is_none_or(|s| a.get_info().name.to_lowercase().contains(s))
+                    .is_none_or(|s| info.name.to_lowercase().contains(s))
             })
             .min_by_key(|a| match a.get_info().device_type {
                 wgpu::DeviceType::DiscreteGpu => 0,
@@ -198,6 +243,7 @@ impl Worker {
             sample_pipeline,
             contour_pipeline,
             sources: Vec::new(),
+            segment_buffer: None,
         })
     }
     fn buffer(&self, label: &str, data: &[u8], usage: wgpu::BufferUsages) -> wgpu::Buffer {
@@ -377,51 +423,71 @@ impl Worker {
         Ok(grid)
     }
     fn extract(
-        &self,
+        &mut self,
         grid: &wgpu::Buffer,
         n: u32,
         interval: f32,
-        capacity: u32,
+        limit: u32,
     ) -> Result<Vec<[f32; 5]>, String> {
         if !(2..=MAX_N).contains(&n)
             || !interval.is_finite()
             || interval < 1.0
-            || capacity == 0
-            || capacity > CAPACITY
+            || limit == 0
+            || limit > CAPACITY
         {
             return Err("Invalid GPU contour dimensions or interval".into());
         }
-        let params = self.buffer(
-            "contour parameters",
-            bytemuck::cast_slice(&[n, capacity, interval.to_bits(), 0]),
-            wgpu::BufferUsages::UNIFORM,
-        );
-        let segments = self.empty(
-            "contour segments",
-            u64::from(capacity) * 20,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        );
-        let count = self.buffer(
-            "segment count",
-            bytemuck::bytes_of(&0u32),
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        );
-        self.dispatch(
-            &self.contour_pipeline,
-            &[&params, grid, &segments, &count],
-            n,
-        );
-        let count_bytes = self.read(&count, 4)?;
-        let count = u32::from_ne_bytes(count_bytes.try_into().unwrap());
-        if count > capacity {
-            return Err(format!(
-                "GPU contour capacity exceeded ({count}>{capacity}); no partial output accepted"
-            ));
-        }
+        // Most fine tiles use a fraction of the maximum. Grow on overflow and
+        // retain one high-water buffer on the serialized worker for subsequent tiles.
+        let previous = self
+            .segment_buffer
+            .as_ref()
+            .map_or(0, |b| (b.size() / 20) as u32);
+        let mut capacity = (n * n / 4).max(64).max(previous).min(limit);
+        let (segments, count) = loop {
+            let bytes = u64::from(capacity) * 20;
+            if self
+                .segment_buffer
+                .as_ref()
+                .is_none_or(|b| b.size() < bytes)
+            {
+                self.segment_buffer = Some(self.empty(
+                    "contour segments",
+                    bytes,
+                    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                ));
+            }
+            let segments = self.segment_buffer.as_ref().unwrap();
+            let params = self.buffer(
+                "contour parameters",
+                bytemuck::cast_slice(&[n, capacity, interval.to_bits(), 0]),
+                wgpu::BufferUsages::UNIFORM,
+            );
+            let count = self.buffer(
+                "segment count",
+                bytemuck::bytes_of(&0u32),
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            );
+            self.dispatch(
+                &self.contour_pipeline,
+                &[&params, grid, segments, &count],
+                n,
+            );
+            let count = u32::from_ne_bytes(self.read(&count, 4)?.try_into().unwrap());
+            if count <= capacity {
+                break (segments, count);
+            }
+            if capacity == limit {
+                return Err(format!(
+                    "GPU contour capacity exceeded ({count}>{capacity}); no partial output accepted"
+                ));
+            }
+            capacity = (capacity * 4).min(limit);
+        };
         if count == 0 {
             return Ok(Vec::new());
         }
-        let bytes = self.read(&segments, u64::from(count) * 20)?;
+        let bytes = self.read(segments, u64::from(count) * 20)?;
         Ok(bytes
             .as_chunks::<20>()
             .0
@@ -521,32 +587,41 @@ fn validate_source(path: &Path, lat: i32, lon: i32) -> Result<(), String> {
         )),
     }
 }
-fn stitch(mut raw: Vec<[f32; 5]>, b: Bounds, n: u32) -> Lines {
-    // Atomic output order varies; sort before stitching for repeatable caches.
-    raw.sort_unstable_by(|a, b| {
-        a[4].total_cmp(&b[4])
-            .then(a[1].total_cmp(&b[1]))
-            .then(a[0].total_cmp(&b[0]))
-            .then(a[3].total_cmp(&b[3]))
-            .then(a[2].total_cmp(&b[2]))
-    });
-    let mut levels: BTreeMap<i32, Vec<[(f32, f32); 2]>> = BTreeMap::new();
+fn stitch(raw: Vec<[f32; 5]>, b: Bounds, n: u32) -> Lines {
+    // Elevations are integral. Partition before sorting so each independent
+    // chain can use a CPU core while the GPU starts the next tile.
+    let mut levels: BTreeMap<i32, Vec<[f32; 4]>> = BTreeMap::new();
+    for [x, y, z, w, h] in raw {
+        levels.entry(h as i32).or_default().push([x, y, z, w]);
+    }
     let coord = |x: f32, y: f32| {
         (
             (b.min_lon + (f64::from(x) + 0.5) * (b.max_lon - b.min_lon) / f64::from(n)) as f32,
             (b.max_lat - (f64::from(y) + 0.5) * (b.max_lat - b.min_lat) / f64::from(n)) as f32,
         )
     };
-    for [x, y, z, w, h] in raw {
-        levels
-            .entry(h as i32)
-            .or_default()
-            .push([coord(x, y), coord(z, w)]);
-    }
+    let levels: Vec<_> = levels.into_iter().collect();
+    let lines_by_level: Vec<_> = levels
+        .into_par_iter()
+        .map(|(h, mut segments)| {
+            // GPU atomics scatter segments in arbitrary order. Keep the canonical
+            // raster order for equal-level endpoint ties and stable feature IDs.
+            segments.sort_unstable_by(|a, b| {
+                a[1].total_cmp(&b[1])
+                    .then_with(|| a[0].total_cmp(&b[0]))
+                    .then_with(|| a[3].total_cmp(&b[3]))
+                    .then_with(|| a[2].total_cmp(&b[2]))
+            });
+            let segments = segments
+                .into_iter()
+                .map(|[x, y, z, w]| [coord(x, y), coord(z, w)])
+                .collect();
+            (h, chain_segments(segments))
+        })
+        .collect();
     let mut contours = Vec::new();
     let mut coastlines = Vec::new();
-    for (h, segs) in levels {
-        let lines = chain_segments(segs);
+    for (h, lines) in lines_by_level {
         if h == 0 {
             coastlines = lines.clone();
         }

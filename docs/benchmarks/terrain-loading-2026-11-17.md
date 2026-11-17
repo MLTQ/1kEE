@@ -1,6 +1,52 @@
 # Terrain loading measurements, 17 November 2026
 
-## Local contour tiles
+## From an empty Earth contour cache to a Local draw
+
+On the RTX 4090, the desktop now uses Vulkan compute for native SRTM resampling
+and contour extraction. One observed 5.61 s GDAL build of Yemen tile 0/9/27
+spent 3.96 s in `gdalwarp`. The following test measures the additional wait
+for neighboring tiles, including source reads, cache writes and drawing.
+
+| Nine-tile group and engine | First tile | Five tiles | All nine |
+| --- | ---: | ---: | ---: |
+| Wide Yemen, GDAL | 9.54–9.66 s | 10.82–11.02 s | 14.37–14.54 s |
+| Wide Yemen, RTX 4090 | 1.89–2.14 s | 6.85–6.91 s | 10.67–10.69 s |
+| Dead Sea, GDAL | 0.87–0.92 s | 1.15–1.34 s | 1.63–1.94 s |
+| Dead Sea, RTX 4090 | 0.47–0.59 s | 1.10–1.35 s | 1.56–1.68 s |
+
+Each range covers two fresh processes. Both engines ran on the same final code
+in GDAL/GPU/GPU/GDAL order per region. Every process started with a new
+temporary SQLite destination on the internal SSD. Before each run Linux was
+asked to evict the input TIFF pages for that group from the external drive's
+OS file cache. Hardware caches and desktop activity were uncontrolled.
+The nine tiles are centered on native addresses 0/10/28 and 4/126/143. In the
+wide run, the GPU worker read 336.4 MB of compressed source windows. Across
+nine tiles, source I/O took 6.19–6.20 s, TIFF decoding took 2.53–2.58 s and
+GPU contour extraction plus readback took 0.41 s. Other work overlaps these
+times. With OS source pages warm and an empty RAM-backed destination, the wide
+GPU group finished in 4.71–4.87 s. Uncached hosted detail has a separate
+network path.
+
+The ignored `cold_earth_local_nine_tiles` test uses the production Local
+build scheduler, SQLite reader, contour instance jobs and draw callback with
+occlusion off. Each poll submits and waits for an offscreen GPU frame, then
+counts the nonempty tile batches drawn. The final frame is checked for contour
+pixels. The fixed 3×3 region isolates the contour layer from other app activity
+and the desktop compositor. Start it from a test executable with isolated
+settings, set `ONEKEE_SRTM_ROOT`, `ONEKEE_GPU='RTX 4090'` and
+`ONEKEE_TERRAIN_TIMINGS=1`. Set `TMPDIR` on the destination device.
+`ONEKEE_LOCAL_WIDE=1` selects the wide case. `ONEKEE_TERRAIN_GPU=0` selects
+GDAL. Leaving the override unset exercises desktop auto-selection.
+
+The separate `gpu_srtm_end_to_end_benchmark` compares completed native cache
+tiles against GDAL. For tile 0/9/27, the two writers produced 1,531,831 nonzero
+segments each. Summed line length differed by 0.00005%. All three full-cache
+fixtures met the 0.1% length tolerance. The raster tests also compared valid
+heights and nodata across source seams on both hemispheres. In the wide-tile
+benchmark, optimized CPU stitching took 105–127 ms (previously 523–535 ms).
+These geometry checks cover the measured fixtures.
+
+## Reading already-built Local contour tiles
 
 The release `benchmark_local_core_load` test opens a private SQLite snapshot,
 reads the tile, decodes its geometry, clips to its owned Earth core and returns

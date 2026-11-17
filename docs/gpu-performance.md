@@ -76,8 +76,8 @@ It reports preparation time, upload frames and offscreen render/refinement timin
 these are not interactive pan-to-visible latency measurements.
 
 Raw PBF builds remain CPU/storage pipelines. SRTM raster sampling and contour
-extraction now have an opt-in compute backend (see below); other terrain sources
-continue through GDAL.
+extraction use GPU compute automatically on the desktop Vulkan RTX 4090. Other
+adapters can opt in.
 Existing terrain preparation already uses Rayon across tiles. See
 [terrain-pipeline.md](terrain-pipeline.md), [cache-builder.md](cache-builder.md)
 and [runtime-archive.md](runtime-archive.md) for build and storage measurements.
@@ -109,26 +109,26 @@ The larger memory targets have not been benchmarked for interactive revisit
 latency or peak whole-app memory. The profile remains opt-in.
 
 
-## Opt-in GPU terrain generation (2026-11-07)
+## GPU terrain generation
 
-Start the desktop with both the RTX 4090 rendering profile and GPU SRTM builds:
+The desktop enables GPU SRTM builds when its renderer selects a Vulkan RTX 4090.
+To select that card explicitly and enable stage timings, launch:
 
 ```sh
-./scripts/run-4090-terrain.sh
+./scripts/run-4090.sh
 ```
 
 Or set `ONEKEE_TERRAIN_GPU=1 ONEKEE_GPU='RTX 4090'` on the desktop executable.
 This affects uncached SRTM tiles, including isolated repair tiles. Existing
 caches are reused. The current internal repair-root setting remains in effect;
 source elevation files are read-only. No cache deletion or drive repair is needed.
-Unset `ONEKEE_TERRAIN_GPU` (or set it to `0`) to return to GDAL generation.
+Set `ONEKEE_TERRAIN_GPU=0` to force GDAL generation on the same renderer.
 
 GPU resampling and marching squares share a resident raster; CPU work still
 includes TIFF decoding, line stitching, clipping, and SQLite writes. Up to twelve
-source windows stay in VRAM across builds. The compute worker follows
-`ONEKEE_GPU`, uses one adapter, and consumes up to roughly 1 GiB beyond renderer
+source windows stay in VRAM across builds. The desktop compute worker uses the rendering adapter and consumes up to roughly 1 GiB beyond renderer
 budgets. CPU fallback handles unsupported source formats/projections, unavailable
-GPUs, invalid source reads, and output-capacity failures. GDAL remains the default.
+GPUs, invalid source reads, and output-capacity failures. Headless GPU generation requires explicit selection.
 
 For explicit offline builds, use `contours-bbox --engine gpu` with the usual
 SRTM root, bounding box, zoom buckets, and cache destination. This mode reports

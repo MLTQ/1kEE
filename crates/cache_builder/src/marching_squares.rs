@@ -446,7 +446,7 @@ fn interp(v0: f32, v1: f32, threshold: f32) -> f32 {
 
 pub(crate) fn chain_segments(segments: Vec<[(f32, f32); 2]>) -> Vec<Vec<(f32, f32)>> {
     // Map: bit-exact endpoint key → segment indices sharing that endpoint.
-    let mut ep_map: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    let mut ep_map = HashMap::<_, smallvec::SmallVec<[usize; 2]>>::with_capacity(segments.len());
     for (i, seg) in segments.iter().enumerate() {
         for &pt in seg {
             ep_map.entry(ebits(pt)).or_default().push(i);
@@ -516,7 +516,7 @@ fn ebits(p: (f32, f32)) -> (u32, u32) {
 }
 
 fn find_next(
-    ep_map: &HashMap<(u32, u32), Vec<usize>>,
+    ep_map: &HashMap<(u32, u32), smallvec::SmallVec<[usize; 2]>>,
     used: &[bool],
     pt: (f32, f32),
 ) -> Option<usize> {

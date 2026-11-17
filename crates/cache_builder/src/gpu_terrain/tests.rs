@@ -49,7 +49,7 @@ fn source_axes_preserve_native_posts_and_seam_ownership() {
 #[test]
 #[ignore = "requires a compute GPU"]
 fn gpu_matches_cpu_cases_saddles_negative_levels_and_voids() {
-    let worker = Worker::new().unwrap();
+    let mut worker = Worker::new().unwrap();
     let b = Bounds {
         min_lon: 0.,
         max_lon: 2.,
@@ -107,6 +107,11 @@ fn gpu_matches_cpu_cases_saddles_negative_levels_and_voids() {
             .unwrap_err()
             .contains("capacity exceeded")
     );
+    let grown = worker
+        .extract(&upload(&worker, &grid), 8, 1., CAPACITY)
+        .unwrap();
+    assert!(grown.len() > 64);
+    assert!(worker.segment_buffer.as_ref().unwrap().size() < u64::from(CAPACITY) * 20);
     assert!(worker.extract(&upload(&worker, &grid), 8, 0., 64).is_err());
 }
 #[test]
@@ -148,7 +153,14 @@ fn gpu_native_raster_matches_gdal() {
     let mut worker = Worker::new().unwrap();
     // Crosses both a latitude and longitude source boundary, including negative coordinates.
     let mut fixtures = Vec::new();
-    for (lat, lon) in [(29i32, 37i32), (-25, -59)] {
+    for (lat, lon) in [
+        (29i32, 37i32),
+        (-25, -59),
+        (47, -122),
+        (46, 8),
+        (36, -84),
+        (-43, 171),
+    ] {
         let step = 1. / 3600.;
         let n = 32u32;
         let b = Bounds {
@@ -217,7 +229,7 @@ fn gpu_native_raster_matches_gdal() {
 #[test]
 #[ignore = "requires GDAL and compute GPU; synthetic ties/saddles/voids in temporary files"]
 fn gpu_contours_match_gdal_degenerate_cells() {
-    let worker = Worker::new().unwrap();
+    let mut worker = Worker::new().unwrap();
     let root = std::env::temp_dir().join(format!("1kee-gpu-cases-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let bounds = Bounds {
@@ -435,4 +447,26 @@ fn source_windows_include_bilinear_neighbors_without_crossing_the_source() {
     );
     assert_eq!(Window::from_axes(&[-1., -1., 20., 21.], 2), None);
     assert_eq!(Window::from_axes(&[1.], 2), None);
+}
+
+#[test]
+fn desktop_compute_selects_only_the_validated_card_and_honors_overrides() {
+    let mut card = wgpu::AdapterInfo {
+        name: "RTX 4090".into(),
+        vendor: 0x10de,
+        device: 0x2684,
+        device_type: wgpu::DeviceType::DiscreteGpu,
+        driver: String::new(),
+        driver_info: String::new(),
+        backend: wgpu::Backend::Vulkan,
+    };
+    assert!(!select_compute(None, None));
+    assert!(select_compute(None, Some(&card)));
+    assert!(!select_compute(Some("0"), Some(&card)));
+    card.device = 0;
+    assert!(!select_compute(None, Some(&card)));
+    assert!(select_compute(Some("1"), Some(&card)));
+    card.device = 0x2684;
+    card.backend = wgpu::Backend::Gl;
+    assert!(!select_compute(None, Some(&card)));
 }

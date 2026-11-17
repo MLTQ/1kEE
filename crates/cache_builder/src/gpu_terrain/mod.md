@@ -1,16 +1,17 @@
 # SRTM GPU worker
 
 `gpu_terrain::build` returns a complete in-memory tile; `TerrainTile::write`
-uses the existing transactional writer and core clipping. The desktop enables
-this through `ONEKEE_TERRAIN_GPU=1` and falls back to GDAL on compute/source
-errors. `contours-bbox --engine gpu` explicitly requires the GPU and reports
+uses the existing transactional writer and core clipping. The desktop selects GPU compute automatically on the Vulkan RTX 4090
+(PCI 10de:2684). Set `ONEKEE_TERRAIN_GPU=0` to force GDAL or `1` to try GPU
+compute on another adapter. A failed GPU build falls back to GDAL. `contours-bbox --engine gpu` explicitly requires the GPU and reports
 failures instead of silently measuring a CPU fallback.
 
 The backend accepts north-up, WGS84, PixelIsPoint, signed Int16, 3601×3601 GL1
 GeoTIFFs with the canonical integer-degree origins and -32768 nodata. Other
 sources remain GDAL's job. TIFF decoding stays on the CPU. A process-wide
-worker selects `ONEKEE_GPU` (or prefers a discrete primary-backend adapter),
-serializes device submissions, and retains at most twelve source-window buffers,
+worker follows the desktop render adapter in automatic mode. A headless builder selects
+`ONEKEE_GPU` or prefers a discrete primary-backend adapter. The worker
+serializes device submissions and retains at most twelve source-window buffers,
 invalidated on file size/mtime changes. A resident window is reused only when it
 contains every requested bilinear neighbor. Different windows from one source
 may coexist within the same bounded LRU. Source files are never opened for writing.
@@ -39,7 +40,9 @@ This is independently implemented compute code, not a general GDAL replacement.
 Coordinates become f32 for the existing native stitching/writer interface;
 GDAL's f64 output need not have identical vertex/path counts or byte order.
 
-The worker releases its lock before CPU sorting/stitching. Source buffers use
+One reusable segment buffer grows on overflow up to four million segments.
+The worker releases its lock before grouping the output by elevation. Sorting and
+stitching run in parallel across elevations with deterministic tie ordering. Source buffers use
 up to about 594 MiB when all twelve windows span full source files; raster/segments/readback add roughly 290 MiB at the
 limits of 6000² samples and four million segments. These are separate from the
 renderer residency budgets. Allocation failures disable the worker for the

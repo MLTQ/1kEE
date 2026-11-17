@@ -1170,12 +1170,14 @@ fn load_earth_source_region(
         "earth-local-contour-manifest",
         srtm_focus_cache::db::focus_cache_db_path,
         move || {
-            srtm_focus_cache::ensure_focus_contour_region(
+            let viewport = cache.lock().ok().and_then(|guard| guard.residency.viewport);
+            srtm_focus_cache::ensure_local_contour_region(
                 manifest_root.as_deref(),
                 viewport_center,
                 zoom,
                 prefetch_radius,
                 build_radius,
+                viewport,
             )
         },
     );

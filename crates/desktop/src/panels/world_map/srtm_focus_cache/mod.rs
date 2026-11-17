@@ -387,6 +387,17 @@ pub fn ensure_focus_contour_region(
     prefetch_radius: i32,
     build_radius: i32,
 ) -> Vec<FocusContourAsset> {
+    ensure_local_contour_region(selected_root, focus, zoom, prefetch_radius, build_radius, None)
+}
+
+pub(super) fn ensure_local_contour_region(
+    selected_root: Option<&Path>,
+    focus: GeoPoint,
+    zoom: f32,
+    prefetch_radius: i32,
+    build_radius: i32,
+    viewport: Option<super::contour_asset::residency::Viewport>,
+) -> Vec<FocusContourAsset> {
     // SRTM root is only needed to spawn on-demand GDAL builds for uncached tiles.
     // Pre-built tiles in the SQLite cache are returned even without SRTM access.
     let srtm_root = terrain_assets::find_srtm_root(selected_root);
@@ -423,9 +434,13 @@ pub fn ensure_focus_contour_region(
     };
     let mut assets = Vec::new();
 
-    for (lat_bucket, lon_bucket) in
-        ordered_tile_buckets(center_lat_bucket, center_lon_bucket, prefetch_radius)
-    {
+    let mut buckets = ordered_tile_buckets(center_lat_bucket, center_lon_bucket, prefetch_radius);
+    if let Some(view) = viewport {
+        // Stable partition retains center-first ring order within each group.
+        // Keep the offscreen prefetch ring eligible once visible jobs are served.
+        buckets.sort_by_cached_key(|&(lat, lon)| !view.intersects_earth_core(lat, lon, bucket_step));
+    }
+    for (lat_bucket, lon_bucket) in buckets {
         let allow_build = tile_ring_distance(
             lat_bucket,
             lon_bucket,
@@ -710,7 +725,7 @@ pub fn ensure_lunar_preview(selected_root: Option<&Path>) {
     });
 }
 
-pub fn terminate_active_gdal_jobs() {
+pub fn shutdown_terrain_jobs() {
     gdal::shutdown_requested().store(true, Ordering::SeqCst);
 
     let pids = if let Ok(mut guard) = gdal::active_children().lock() {
@@ -734,6 +749,7 @@ pub fn terminate_active_gdal_jobs() {
             .args(["-KILL", &pid.to_string()])
             .status();
     }
+    one_thousand_electric_eye_cache_builder::gpu_terrain::shutdown();
 }
 
 pub fn is_global_coastline_building() -> bool {

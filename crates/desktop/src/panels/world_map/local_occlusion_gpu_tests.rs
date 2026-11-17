@@ -24,6 +24,7 @@ pub(crate) struct Harness {
     device: wgpu::Device,
     queue: wgpu::Queue,
     renderer: egui_wgpu::Renderer,
+    pub(crate) adapter_info: wgpu::AdapterInfo,
     pub(crate) ctx: egui::Context,
     target: wgpu::Texture,
     size: [u32; 2],
@@ -32,7 +33,12 @@ pub(crate) struct Harness {
 impl Harness {
     pub(crate) fn new(size: [u32; 2]) -> Self {
         let instance = wgpu::Instance::default();
-        let adapter = block_on(instance.request_adapter(&Default::default())).expect("GPU adapter");
+        let adapter = if let Some(name) = crate::gpu_config::adapter_name() {
+            crate::gpu_config::select_adapter(&instance.enumerate_adapters(wgpu::Backends::all()), None, &name)
+                .expect("requested GPU adapter")
+        } else {
+            block_on(instance.request_adapter(&Default::default())).expect("GPU adapter")
+        };
         eprintln!("occlusion GPU: {:?}", adapter.get_info());
         let (device, queue) = block_on(adapter.request_device(&Default::default(), None)).unwrap();
         let mut renderer =
@@ -61,6 +67,7 @@ impl Harness {
             device,
             queue,
             renderer,
+            adapter_info: adapter.get_info(),
             ctx: Default::default(),
             target,
             size,

@@ -78,3 +78,7 @@ pub(super) fn paint(
 #[cfg(test)]
 #[path = "celestial_gpu_tests.rs"]
 mod gpu_tests;
+
+#[cfg(all(test, unix))]
+#[path = "earth_cold_tests.rs"]
+mod earth_cold_tests;

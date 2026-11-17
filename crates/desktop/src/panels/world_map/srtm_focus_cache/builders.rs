@@ -181,11 +181,13 @@ fn mars_failed_builds() -> &'static Mutex<HashMap<TileKey, FailedBuildBackoff>> 
 }
 
 /// A failed cache volume or unavailable GDAL source affects more than one
-/// tile. Per-body gates prevent a fresh outer ring from immediately consuming
+/// tile. Per-source gates prevent a fresh outer ring from immediately consuming
 /// every build slot after the first failure.
-fn failed_build_gate() -> &'static Mutex<Option<FailedBuildBackoff>> {
-    static FAILED: OnceLock<Mutex<Option<FailedBuildBackoff>>> = OnceLock::new();
-    FAILED.get_or_init(|| Mutex::new(None))
+fn earth_failed_build_gate(hosted: bool) -> &'static Mutex<Option<FailedBuildBackoff>> {
+    // A hosted download failure must allow local SRTM builds to proceed.
+    static NATIVE: Mutex<Option<FailedBuildBackoff>> = Mutex::new(None);
+    static HOSTED: Mutex<Option<FailedBuildBackoff>> = Mutex::new(None);
+    if hosted { &HOSTED } else { &NATIVE }
 }
 
 fn lunar_failed_build_gate() -> &'static Mutex<Option<FailedBuildBackoff>> {
@@ -282,7 +284,8 @@ pub fn clear_failed_build_backoffs() {
         }
     }
     for gate in [
-        failed_build_gate(),
+        earth_failed_build_gate(false),
+        earth_failed_build_gate(true),
         lunar_failed_build_gate(),
         mars_failed_build_gate(),
     ] {
@@ -399,7 +402,8 @@ pub fn ensure_bucket_asset(
         }
     }
 
-    if !retry_gate_allows(failed_build_gate()) || !retry_allowed(failed_builds(), tile) {
+    let failure_gate = earth_failed_build_gate(uses_threedep);
+    if !retry_gate_allows(failure_gate) || !retry_allowed(failed_builds(), tile) {
         return None;
     }
 
@@ -440,10 +444,10 @@ pub fn ensure_bucket_asset(
         if built.is_some() {
             bump_manifest_revision();
             clear_failed_build(failed_builds(), tile);
-            clear_failed_build_gate(failed_build_gate());
+            clear_failed_build_gate(failure_gate);
         } else {
             record_failed_build(failed_builds(), tile);
-            record_failed_build_gate(failed_build_gate());
+            record_failed_build_gate(failure_gate);
         }
         if let Ok(mut guard) = pending_set().lock() {
             guard.remove(&tile);
