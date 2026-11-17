@@ -340,10 +340,12 @@ struct Fetch<'a> {
     active: Option<&'a Path>,
     transferred: u64,
     started: Instant,
+    budget: Option<&'a point_cloud::budget::StreamBudget>,
 }
 impl Fetch<'_> {
     fn get(&mut self, url: &str) -> Result<Vec<u8>> {
         check(self.active)?;
+        if let Some(reason)=self.budget.and_then(|b|b.limit()) {return Err(reason.into());}
         if self.started.elapsed() > Duration::from_secs(180) {
             return Err("Lidar preparation limit reached; zoom in and retry".into());
         }
@@ -361,20 +363,23 @@ impl Fetch<'_> {
         {
             return Ok(data);
         }
+        let allowance=self.budget.map_or(NODE_LIMIT,|b|b.remaining_transfer().min(NODE_LIMIT));
         let response = self
             .client
             .get(url)
+            .timeout(self.budget.map_or(Duration::from_secs(30),|b|b.remaining_time().min(Duration::from_secs(30))))
             .send()
             .map_err(err)?
             .error_for_status()
             .map_err(err)?;
         let mut data = Vec::new();
         response
-            .take(NODE_LIMIT + 1)
+            .take(allowance + 1)
             .read_to_end(&mut data)
             .map_err(err)?;
         self.transferred += data.len() as u64;
-        if data.len() as u64 > NODE_LIMIT || self.transferred > TRANSFER_LIMIT {
+        if let Some(b)=self.budget {b.transferred.set(b.transferred.get()+data.len() as u64);}
+        if data.len() as u64 > allowance || self.transferred > TRANSFER_LIMIT {
             return Err("Lidar download limit reached; zoom in and retry".into());
         }
         check(self.active)?;
@@ -482,6 +487,7 @@ pub fn prepare(catalog: &Path, bounds: [f64; 4], zoom: u8, active: Option<&Path>
         active,
         transferred: 0,
         started: Instant::now(),
+        budget: None,
     };
     let mut covered = vec![false; SIZE * SIZE];
     let mut prepared = false;

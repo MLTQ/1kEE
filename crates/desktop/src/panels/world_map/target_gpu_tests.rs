@@ -123,6 +123,7 @@ fn target_gpu_preserves_depth_filters_and_releases_buffers() {
         class,
     };
     draw.clouds = vec![Arc::new(Batch {
+        source: None,
         id: 11,
         points: vec![vertex([0., 0., 0.], 2), vertex([0., 10., 0.], 6)],
     })];
@@ -130,6 +131,7 @@ fn target_gpu_preserves_depth_filters_and_releases_buffers() {
     let center = (32 * 64 + 32) * 4;
     let ground = first[center..center + 3].to_vec();
     draw.clouds = vec![Arc::new(Batch {
+        source: None,
         id: 12,
         points: vec![vertex([0., 10., 0.], 6), vertex([0., 0., 0.], 2)],
     })];
@@ -454,6 +456,7 @@ fn target_live_hundred_kilometre_overview() {
                         max_distance = max_distance.max(d);
                     }
                     batches.push(Arc::new(Batch {
+                        source: None,
                         id: crate::target_mode::serial(),
                         points,
                     }));
@@ -568,6 +571,7 @@ fn target_live_israel_original_points_and_retained_dem() {
                     );
                     assert!(points.iter().all(|p| !matches!(p.classification, 7 | 18)));
                     clouds.push(Arc::new(Batch {
+                        source: None,
                         id: crate::target_mode::serial(),
                         points: points
                             .iter()
@@ -714,5 +718,153 @@ fn target_live_manhattan_uses_city_coverage() {
         sources[0].id,
         summary.points,
         occupied.len()
+    );
+}
+
+#[test]
+#[ignore = "configured writable lidar cache, public NYC/NJ original points and GPU"]
+fn target_live_merged_hudson_sources_fill_neighbor_coverage() {
+    use lidar_pipeline::{
+        ept::point_cloud::{self, merge::MergeEvent},
+        region::Region,
+    };
+    let catalog =
+        std::path::PathBuf::from(std::env::var_os("ONEKEE_TARGET_TEST_CATALOG").expect("catalog"));
+    let region = Region {
+        lon: -74.025,
+        lat: 40.72,
+        radius_m: 3000.,
+    };
+    let active = tempfile::NamedTempFile::new().unwrap();
+    let mut clouds = Vec::new();
+    let mut current = None;
+    let mut cells =
+        std::collections::HashMap::<String, std::collections::HashSet<(i32, i32)>>::new();
+    let mut order = Vec::new();
+    let start = std::time::Instant::now();
+    let report = point_cloud::merge::load(
+        &catalog,
+        region,
+        None,
+        Some(active.path()),
+        1_200_000,
+        |crs, xy| crate::target_mode::project::xy(crs, xy, active.path()),
+        |event| {
+            match event {
+                MergeEvent::Data(point_cloud::Event::Header(h)) => current = Some(Arc::new(h)),
+                MergeEvent::Data(point_cloud::Event::Batch { points, .. }) => {
+                    let header = current.as_ref().expect("source provenance");
+                    if !cells.contains_key(&header.source.id) {
+                        order.push(header.source.id.clone());
+                    }
+                    let occupied = cells.entry(header.source.id.clone()).or_default();
+                    let vertices = points
+                        .iter()
+                        .map(|p| {
+                            assert!(region.contains(p.lon_lat[0], p.lon_lat[1]));
+                            let vertex = crate::target_mode::vertex(region, p);
+                            assert!((vertex.position[2] as f64 - p.source_xyz[2]).abs() < 0.0001);
+                            occupied.insert((
+                                (vertex.position[0] / 100.).floor() as i32,
+                                (vertex.position[1] / 100.).floor() as i32,
+                            ));
+                            vertex
+                        })
+                        .collect();
+                    clouds.push(Arc::new(Batch {
+                        id: crate::target_mode::serial(),
+                        source: current.clone(),
+                        points: vertices,
+                    }));
+                }
+                _ => {}
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    let seconds = start.elapsed().as_secs_f64();
+    assert!(report.contributors() >= 2);
+    assert_eq!(
+        clouds.iter().map(|b| b.points.len()).sum::<usize>(),
+        report.total.points
+    );
+    assert!(
+        report.total.points <= 1_200_000
+            && report.total.decoded <= 96_000_000
+            && report.total.transferred_bytes <= 256 * 1024 * 1024 + 1
+    );
+    assert!(report.unverified_heights);
+    let combined = cells
+        .values()
+        .flat_map(|s| s.iter().copied())
+        .collect::<std::collections::HashSet<_>>();
+    let first = &cells[&order[0]];
+    assert!(
+        combined.len() > first.len(),
+        "neighboring surveys must add measured spatial coverage"
+    );
+    let (device, queue) = gpu();
+    let mut camera = Camera::for_radius(3000.);
+    camera.reset(clouds[0].points[0].position[2]);
+    let draw = Draw {
+        session: 662,
+        camera,
+        radius: 3000.,
+        clouds,
+        terrain: None,
+        context: None,
+        points: true,
+        surface: false,
+        context_visible: false,
+        class_mask: u32::MAX,
+        color_mode: 0,
+        point_size: 1.0,
+        rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280., 720.)),
+        ctx: egui::Context::default(),
+    };
+    let mut resources = Resources::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+    let mut image = Vec::new();
+    for _ in 0..16 {
+        image = render(&mut resources, &draw, &device, &queue);
+        if draw
+            .clouds
+            .iter()
+            .all(|b| resources.batches[&b.id].uploaded == b.points.len())
+        {
+            break;
+        }
+    }
+    assert!(
+        draw.clouds
+            .iter()
+            .all(|b| resources.batches[&b.id].uploaded == b.points.len())
+    );
+    let mut encoder = png::Encoder::new(
+        std::fs::File::create("/tmp/1kee-target-merged-hudson.png").unwrap(),
+        1280,
+        720,
+    );
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .unwrap()
+        .write_image_data(&image)
+        .unwrap();
+    let receipt = serde_json::json!({"center":[region.lon,region.lat],"radius_m":region.radius_m,"budget":1_200_000,
+        "seconds":seconds,"first_survey":order[0],"first_source_100m_cells":first.len(),"combined_100m_cells":combined.len(),
+        "report":report,"note":"Original unaligned source heights, with an unverified-heights label; cell counts measure observed sampling, not continuous survey coverage."});
+    std::fs::write(
+        "/tmp/1kee-target-merged-hudson.json",
+        serde_json::to_vec_pretty(&receipt).unwrap(),
+    )
+    .unwrap();
+    eprintln!(
+        "MERGED_HUDSON contributors={} points={} first_cells={} combined_cells={} seconds={seconds:.2}",
+        report.contributors(),
+        report.total.points,
+        first.len(),
+        combined.len()
     );
 }

@@ -8,8 +8,8 @@ previous Local camera, including its position, zoom and viewing angles. Escape
 also cancels the selection tool before entry.
 
 Inside Target, change **km radius** and click **Apply radius** to reload the
-cut-out around the same center. The chosen survey, point budget and display
-options are retained. Framing and initial flight speed scale to the new size.
+cut-out around the same center. The merge/single-survey choice, point budget
+and display options are retained. Framing and initial flight speed scale to the new size.
 The last chosen radius is retained when returning to Local during this session.
 Teal published survey outlines also appear while selecting, even if the normal
 LiDAR raster layer is off.
@@ -23,13 +23,13 @@ the camera moves. The boundary stays at the selected radius from its center.
 
 ## Data and accuracy
 
-- **Point cloud** streams original returns from intersecting public USGS EPT
-  surveys and supported OpenTopography bulk LAS/LAZ collections. Candidates
-  are ranked by their actual polygon coverage of the center and radial sample
-  points before acquisition date. An overlapping bounding box alone does not
-  establish coverage. The survey selector permits
-  inspection of another indexed acquisition. Dates and publisher links stay
-  visible. Acquisitions are inspected individually, preserving their identity.
+- **Point cloud** defaults to **All surveys (merge)**, combining original
+  observations from intersecting supported USGS EPT and OpenTopography bulk
+  LAS/LAZ sources. The selector also permits single-survey inspection.
+  Actual polygons rank the central survey; neighboring footprints that add
+  coverage are visited before repeated coverage of the same area. Dates,
+  references, publisher links and per-source point counts appear under
+  **Survey sources**. Every point batch retains its source identity.
 - **DEM terrain** loads numeric bare-earth heights from the existing state,
   national and international elevation adapters. It first checks retained
   ground rasters indexed in `Lidar/bulk.sqlite`, using a locally available
@@ -64,8 +64,14 @@ Horizontal coordinates use a WGS84 geodesic distance chart around the center;
 original source XYZ remains authoritative.
 
 Some EPT feeds declare no vertical coordinate system or Z units. Target keeps
-original numeric Z and displays that limitation. It permits combined DEM/point
-display only when compatible NAVD88 metre references are explicitly known;
+original numeric Z and shows these surveys together with an **Unverified
+heights** label. No coordinate values are averaged, rescaled or shifted to
+smooth acquisition seams. Original observations from different dates can
+overlap; the selector allows each source to be inspected separately.
+Conflicting explicitly declared height references are reported and excluded
+from the merged view; those sources can still be inspected individually.
+Target permits combined DEM/point display only when **every** contributing
+survey has a matching NAVD88 metre reference;
 otherwise the two are inspected separately. No vertical offsets, datum
 conversion or automatic alignment are inferred from similar-looking heights.
 DEM-draped context follows the same rule. There is no synthetic filling of
@@ -73,12 +79,23 @@ point-cloud gaps or conversion of grid cells into fake laser returns.
 
 ## Loading and resource limits
 
-Nodes load progressively, keeping already displayed points visible. The
-default budget is eight million points; the control supports one to sixteen
-million and **Refine / reload** requests the chosen budget. A point, transfer,
-time or hierarchy limit is reported as partial detail, never as a complete
-cloud. Failed refinement preserves the prior display until a replacement batch
-arrives. Full source density can exceed these budgets in a one-kilometre circle.
+Nodes load progressively, keeping already displayed points visible as neighbors
+load. The default budget is eight million points; the control supports one to
+sixteen million and **Refine / reload** requests the chosen budget. Half the
+combined point budget is initially shared across candidate surveys so a dense
+first source cannot consume it all. Unfinished readers then resume to add
+detail. Source-record cursors avoid replaying earlier observations; this is
+not spatial rounding or coordinate averaging.
+
+All sources and passes share a 96-million decoded-record budget, 4096 node/file
+reads, 256 MiB network-transfer budget and 180-second loading window. Discovery
+selects up to 64 supported candidates from a bounded catalog query, prioritizing
+complementary footprints. A candidate, point, transfer, time or hierarchy limit
+is reported as partial detail. Source failures retain successful batches and
+allow other surveys to continue. A wholly unsuccessful reload preserves the
+previous display. Full source density can exceed these budgets even in a
+one-kilometre circle. No claim of continuous coverage is inferred from survey
+footprints, sparse returns or a completed source read.
 
 Existing EPT blocks are reused through the bounded LiDAR download cache. This
 does not delete raw scans or turn raster receipts into point-cloud archives.
@@ -114,3 +131,5 @@ See the [Kinston benchmark and real-data previews](benchmarks/target-nc-2026-11-
 The [100 km validation](benchmarks/target-radius-2026-11-16.md) records the
 regional overview and Local catalog-outline checks.
 See also the [Israel and Manhattan source validation](benchmarks/target-sources-2026-11-17.md).
+The [merged Hudson validation](benchmarks/target-merge-2026-11-17.md) checks
+combined neighboring point clouds and measured coverage beyond the first source.

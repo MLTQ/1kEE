@@ -27,6 +27,7 @@ pub(crate) struct Vertex {
 pub(crate) struct Batch {
     pub id: u64,
     pub points: Vec<Vertex>,
+    pub source: Option<Arc<Header>>,
 }
 static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 pub(crate) fn serial() -> u64 {
@@ -81,6 +82,8 @@ enum Message {
     Sources(Vec<Source>),
     Header(Header),
     Batch(Arc<Batch>),
+    Report(point_cloud::merge::Report),
+    Progress(String),
     Done(Result<Summary, String>),
 }
 pub(crate) struct Session {
@@ -92,6 +95,9 @@ pub(crate) struct Session {
     pub source: Option<Header>,
     pub sources: Vec<Source>,
     pub selected_source: usize,
+    pub merge_surveys: bool,
+    pub headers: Vec<Arc<Header>>,
+    pub merge_report: Option<point_cloud::merge::Report>,
     pub summary: Option<Summary>,
     pub status: String,
     pub terrain: Option<Arc<Terrain>>,
@@ -134,7 +140,7 @@ impl Session {
         input: ContextInput,
         ctx: &egui::Context,
     ) -> Result<Self, String> {
-        let chosen = self.source.as_ref().map(|h| h.source.clone());
+        let chosen = if self.merge_surveys {None} else {self.sources.get(self.selected_source).cloned().or_else(||self.source.as_ref().map(|h|h.source.clone()))};
         let mut next = Self::configured(
             region,
             catalog,
@@ -187,6 +193,9 @@ impl Session {
             source: None,
             sources: Vec::new(),
             selected_source: 0,
+            merge_surveys: chosen.is_none(),
+            headers: Vec::new(),
+            merge_report: None,
             summary: None,
             status: "Finding point-cloud surveys…".into(),
             terrain: None,
@@ -217,14 +226,21 @@ impl Session {
         Ok(session)
     }
     pub fn compatible_dem(&self) -> bool {
-        self.source.as_ref().is_some_and(|h| {
-            h.crs["vertical"].as_str() == Some("5703") || h.crs["vertical"].as_u64() == Some(5703)
-        }) && self.terrain.as_ref().is_some_and(|t| t.navd88)
+        let known=if self.headers.is_empty() {
+            self.source.as_ref().is_some_and(|h|point_cloud::merge::vertical_reference(h).as_deref()==Some("EPSG:5703"))
+        } else {self.headers.iter().all(|h|point_cloud::merge::vertical_reference(h).as_deref()==Some("EPSG:5703"))};
+        known && self.terrain.as_ref().is_some_and(|t|t.navd88)
+    }
+    pub fn unverified_heights(&self)->bool {
+        if self.headers.is_empty() {self.source.as_ref().is_some_and(|h|point_cloud::merge::vertical_reference(h).is_none())}
+        else {self.headers.iter().any(|h|point_cloud::merge::vertical_reference(h).is_none())}
     }
     pub fn start_points(&mut self, chosen: Option<Source>, ctx: &egui::Context) {
         self.point_active = None;
         self.point_rx = None;
         self.summary = None;
+        self.merge_surveys = chosen.is_none();
+        self.merge_report = None;
         self.replacing = true;
         self.pending_header = None;
         self.status = "Loading original LiDAR returns…".into();
@@ -239,36 +255,32 @@ impl Session {
         let worker_ctx = ctx.clone();
         let (tx, rx) = mpsc::sync_channel(2);
         let spawned=std::thread::Builder::new().name("target-points".into()).spawn(move || {
-            let run=||->Result<Summary,String> {
-                let mut available=point_cloud::sources(&catalog,region)?;
-                if let Some(source)=&chosen && !available.iter().any(|s|s.id==source.id) {available.insert(0,source.clone());}
-                let sources=chosen.map_or_else(||available.clone(),|s|vec![s]);
-                tx.send(Message::Sources(available)).map_err(|_|"Target closed")?;
-                let mut last="No supported original point source is indexed here. Survey outlines include data not yet readable in Target; DEM availability is reported separately.".to_string();
-                for source in sources {
-                    if !marker.is_file() {return Err("Target closed".into());}
-                    let mut emitted=0;
-                    let result=point_cloud::stream_with_transform(&catalog,region,&source,Some(&marker),budget,
-                        |crs,points|project::xy(crs,points,&marker),|event| {
-                        let message=match event {
-                            Event::Header(h)=>Message::Header(h),
-                            Event::Batch {points,..}=>{
-                                emitted+=points.len();
-                                Message::Batch(Arc::new(Batch {id:serial(),
-                                    points:points.iter().map(|p|vertex(region,p)).collect()}))
-                            },
-                        };
-                        tx.send(message).map_err(|_|"Target closed".to_string())?;
-                        worker_ctx.request_repaint();Ok(())
-                    });
-                    match result {Ok(summary) if summary.points>0=>return Ok(summary),
-                        Ok(_)=>last=format!("No returns in {} within this circle",source.name),
-                        Err(e) if emitted>0=>return Err(format!("Partial point cloud retained · {e}")),
-                        Err(e)=>last=e,}
+            let mut current:Option<Arc<Header>>=None;
+            let result=point_cloud::merge::load(&catalog,region,chosen,Some(&marker),budget,
+                |crs,points|project::xy(crs,points,&marker),|event| {
+                    use point_cloud::merge::MergeEvent;
+                    let message=match event {
+                        MergeEvent::Sources(sources)=>Message::Sources(sources),
+                        MergeEvent::Reading {source,refining}=>Message::Progress(format!("{} · {}",
+                            if refining {"Adding detail"} else {"Loading coverage"},source.name)),
+                        MergeEvent::Data(Event::Header(header))=>{
+                            current=Some(Arc::new(header.clone()));Message::Header(header)
+                        }
+                        MergeEvent::Data(Event::Batch {points,..})=>Message::Batch(Arc::new(Batch {
+                            id:serial(),source:current.clone(),points:points.iter().map(|p|vertex(region,p)).collect(),
+                        })),
+                    };
+                    tx.send(message).map_err(|_|"Target closed".to_string())?;
+                    worker_ctx.request_repaint();Ok(())
+                });
+            let done=match result {
+                Ok(report)=>{
+                    let total=report.total.clone();
+                    let _=tx.send(Message::Report(report));Ok(total)
                 }
-                Err(last)
+                Err(error)=>Err(error),
             };
-            let result=run();let _=tx.send(Message::Done(result));worker_ctx.request_repaint();
+            let _=tx.send(Message::Done(done));worker_ctx.request_repaint();
         });
         match spawned {
             Ok(_) => {
@@ -295,7 +307,7 @@ impl Session {
             match message {
                 Some(Ok(Message::Sources(sources))) => {
                     self.sources = sources;
-                    if let Some(header) = &self.source
+                    if !self.replacing && let Some(header) = &self.source
                         && let Some(index) =
                             self.sources.iter().position(|s| s.id == header.source.id)
                     {
@@ -305,11 +317,15 @@ impl Session {
                 Some(Ok(Message::Header(h))) => {
                     self.pending_header = Some(h);
                 }
+                Some(Ok(Message::Progress(status)))=>self.status=status,
+                Some(Ok(Message::Report(report)))=>self.merge_report=Some(report),
                 Some(Ok(Message::Batch(batch))) => {
+                    let header=batch.source.clone().or_else(||self.pending_header.clone().map(Arc::new));
                     if self.replacing {
+                        self.headers.clear();
                         self.clouds.clear();
                         self.points = 0;
-                        self.source = self.pending_header.take();
+                        self.source = header.as_deref().cloned();
                         self.replacing = false;
                         if let Some(header) = &self.source
                             && let Some(index) =
@@ -318,7 +334,10 @@ impl Session {
                             self.selected_source = index;
                         }
                     }
-                    if self.points == 0 && self.show_points && !self.compatible_dem() {
+                    if let Some(header)=header && !self.headers.iter().any(|h|h.source.id==header.source.id) {
+                        self.headers.push(header);
+                    }
+                    if self.show_points && !self.compatible_dem() {
                         self.show_terrain = false;
                     }
                     if !self.camera.positioned
@@ -334,7 +353,7 @@ impl Session {
                     match result {
                         Ok(summary) => {
                             self.status = if summary.complete {
-                                format!("{} measured points · selected survey loaded", summary.points)
+                                format!("{} measured points · {} survey(s) read", summary.points,self.headers.len().max(1))
                             } else {
                                 format!("{} measured points · {}", summary.points, summary.limit)
                             };
@@ -453,6 +472,7 @@ pub(crate) mod tests {
             region,
             camera: Default::default(),
             clouds: vec![Arc::new(Batch {
+                source: None,
                 id: serial(),
                 points: vec![Vertex {
                     position: [0., 0., 12.],
@@ -472,6 +492,9 @@ pub(crate) mod tests {
             }),
             sources: Vec::new(),
             selected_source: 0,
+            merge_surveys: true,
+            headers: Vec::new(),
+            merge_report: None,
             summary: None,
             status: "Measured fixture".into(),
             terrain: None,
@@ -510,6 +533,29 @@ pub(crate) mod tests {
         assert_eq!(empty.survey_label(),"Known survey");
     }
     #[test]
+    fn merged_batches_keep_each_source_and_later_unknown_heights_disable_dem_alignment() {
+        let ctx=egui::Context::default();
+        let mut s=session();
+        let mut first=s.source.clone().unwrap();first.source.id="west".into();
+        let mut second=first.clone();second.source.id="east".into();second.crs=serde_json::json!({"horizontal":"3857"});
+        let (tx,rx)=mpsc::channel();s.point_rx=Some(rx);s.replacing=true;s.show_points=true;
+        s.terrain=Some(Arc::new(Terrain {batch:Arc::new(Batch {id:serial(),source:None,points:vec![]}),indices:vec![],
+            label:"NAVD88 fixture".into(),navd88:true,width:2,height:2,heights:vec![12.;4],origin:[0.,2.],scale:[1.,-1.]}));
+        s.show_terrain=true;
+        for (x,h) in [(-500.,first),(500.,second)] {
+            tx.send(Message::Header(h.clone())).unwrap();
+            tx.send(Message::Batch(Arc::new(Batch {id:serial(),source:Some(Arc::new(h)),points:vec![Vertex {position:[x,0.,12.345],color:[255;4],class:2}]}))).unwrap();
+            s.poll(&ctx);
+            if x<0. {assert!(s.compatible_dem());assert!(s.show_terrain);assert!(!s.unverified_heights());}
+        }
+        s.poll(&ctx);
+        assert_eq!(s.points,2);assert_eq!(s.headers.len(),2);
+        assert_eq!(s.clouds[0].source.as_ref().unwrap().source.id,"west");
+        assert_eq!(s.clouds[1].source.as_ref().unwrap().source.id,"east");
+        assert!(s.unverified_heights());assert!(!s.compatible_dem());assert!(!s.show_terrain);
+        assert!(s.merge_surveys);
+    }
+    #[test]
     fn incoming_points_preserve_an_explicit_dem_only_view() {
         let ctx = egui::Context::default();
         let mut s = session();
@@ -522,6 +568,7 @@ pub(crate) mod tests {
         header.crs = serde_json::json!({"horizontal":"3857"});
         tx.send(Message::Header(header)).unwrap();
         tx.send(Message::Batch(Arc::new(Batch {
+            source: None,
             id: serial(),
             points: vec![Vertex {
                 position: [0., 0., 12.],
@@ -555,6 +602,7 @@ pub(crate) mod tests {
         s.replacing = true;
         tx.send(Message::Header(header)).unwrap();
         tx.send(Message::Batch(Arc::new(Batch {
+            source: None,
             id: serial(),
             points: vec![Vertex {
                 position: [1., 2., 3.],

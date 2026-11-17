@@ -1,8 +1,22 @@
 //! Original EPT returns for radial inspection; no gridding or height synthesis.
 use super::*;
 use crate::region::Region;
+#[path = "point_budget.rs"]
+pub(crate) mod budget;
+#[path = "point_merge.rs"]
+pub mod merge;
 #[path = "point_sources.rs"]
 mod point_sources;
+use budget::StreamBudget;
+
+/// Source record positions, not a lossy spatial deduplication grid. A later
+/// pass resumes after exactly the last consumed source record.
+#[derive(Default, Debug)]
+pub(crate) struct StreamCursor {
+    pub nodes: HashMap<String, u64>,
+    pub bulk: u64,
+    pub complete: bool,
+}
 
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 pub struct Source {
@@ -23,7 +37,7 @@ pub struct Point {
     pub rgb: Option<[u16; 3]>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct Header {
     pub source: Source,
     pub crs: Value,
@@ -48,6 +62,9 @@ pub struct Summary {
 
 /// These are candidate survey footprints. Actual returns determine coverage.
 pub fn sources(catalog: &Path, region: Region) -> Result<Vec<Source>> {
+    candidates(catalog, region).map(|(sources, _)| sources)
+}
+fn candidates(catalog: &Path, region: Region) -> Result<(Vec<Source>, bool)> {
     if !region.valid() {
         return Err("Invalid Target region".into());
     }
@@ -60,7 +77,7 @@ pub fn sources(catalog: &Path, region: Region) -> Result<Vec<Source>> {
         (SELECT rowid FROM surveys WHERE south<?3 AND north>?4
         AND ((west<?1 AND east>?2) OR (west<?1-360 AND east>?2-360)
             OR (west<?1+360 AND east>?2+360)))
-        ORDER BY CASE WHEN west<=?5 AND east>=?5 AND south<=?6 AND north>=?6 THEN 0 ELSE 1 END,date DESC,id LIMIT 256",
+        ORDER BY CASE WHEN west<=?5 AND east>=?5 AND south<=?6 AND north>=?6 THEN 0 ELSE 1 END,date DESC,id LIMIT 257",
         )
         .map_err(err)?;
     let mut candidates = query
@@ -78,7 +95,10 @@ pub fn sources(catalog: &Path, region: Region) -> Result<Vec<Source>> {
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(err)?
         .into_iter()
-        .map(|(source, geometry)| (point_sources::coverage(&geometry, region), source))
+        .map(|(source, geometry)| {
+            let (center, mask) = point_sources::footprint_mask(&geometry, region);
+            (u32::from(center) * 10_000 + mask.count_ones(), source, mask)
+        })
         .collect::<Vec<_>>();
     // Bounding boxes can overlap a city while every return belongs to the
     // neighboring state. Prefer the actual center/radial footprint before date.
@@ -87,7 +107,29 @@ pub fn sources(catalog: &Path, region: Region) -> Result<Vec<Source>> {
             .then(b.1.date.cmp(&a.1.date))
             .then(a.1.id.cmp(&b.1.id))
     });
-    Ok(candidates.into_iter().take(16).map(|(_, s)| s).collect())
+    let limited = candidates.len() > 64;
+    let mut selected = Vec::new();
+    let mut covered = 0u64;
+    while !candidates.is_empty() && selected.len() < 64 {
+        let index = if selected.is_empty() {
+            0
+        } else {
+            let mut best = 0;
+            let mut gain = 0;
+            for (i, (_, _, mask)) in candidates.iter().enumerate() {
+                let next = (mask & !covered).count_ones();
+                if next > gain {
+                    best = i;
+                    gain = next;
+                }
+            }
+            best
+        };
+        let (_, source, mask) = candidates.remove(index);
+        covered |= mask;
+        selected.push(source);
+    }
+    Ok((selected, limited))
 }
 
 /// Streams spatially intersecting octree nodes from coarse to original detail.
@@ -120,6 +162,30 @@ pub fn stream_with_transform(
     active: Option<&Path>,
     max_points: usize,
     project: impl FnMut(&str, &mut [[f64; 2]]) -> Result<()>,
+    emit: impl FnMut(Event) -> Result<()>,
+) -> Result<Summary> {
+    stream_resume(
+        catalog,
+        region,
+        source,
+        active,
+        max_points,
+        &StreamBudget::default(),
+        &mut StreamCursor::default(),
+        project,
+        emit,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn stream_resume(
+    catalog: &Path,
+    region: Region,
+    source: &Source,
+    active: Option<&Path>,
+    max_points: usize,
+    resources: &StreamBudget,
+    cursor: &mut StreamCursor,
+    project: impl FnMut(&str, &mut [[f64; 2]]) -> Result<()>,
     mut emit: impl FnMut(Event) -> Result<()>,
 ) -> Result<Summary> {
     if !region.valid() || !(1..=16_000_000).contains(&max_points) {
@@ -147,10 +213,12 @@ pub fn stream_with_transform(
         active,
         transferred: 0,
         started: Instant::now(),
+        budget: Some(resources),
     };
     if source.id.starts_with("opentopoID:") {
-        let result = point_sources::stream(
-            catalog, region, source, active, max_points, &mut fetch, project, &mut emit,
+        let result = point_sources::stream_resume(
+            catalog, region, source, active, max_points, &mut fetch, cursor, resources, project,
+            &mut emit,
         );
         prune_cache(&cache)?;
         return result;
@@ -176,11 +244,13 @@ pub fn stream_with_transform(
         crs: meta.srs.clone(),
         publisher: format!("{base}/ept.json"),
     }))?;
-    let mut summary = walk(
+    let mut summary = walk_resume(
         &meta,
         region,
         active,
         max_points,
+        cursor,
+        resources,
         &mut |relative| fetch.get(&format!("{base}/{relative}")),
         &mut emit,
     )?;
@@ -190,11 +260,34 @@ pub fn stream_with_transform(
     Ok(summary)
 }
 
+#[cfg(test)]
 fn walk(
     meta: &Metadata,
     region: Region,
     active: Option<&Path>,
     max_points: usize,
+    get: &mut impl FnMut(&str) -> Result<Vec<u8>>,
+    emit: &mut impl FnMut(Event) -> Result<()>,
+) -> Result<Summary> {
+    walk_resume(
+        meta,
+        region,
+        active,
+        max_points,
+        &mut StreamCursor::default(),
+        &StreamBudget::default(),
+        get,
+        emit,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn walk_resume(
+    meta: &Metadata,
+    region: Region,
+    active: Option<&Path>,
+    max_points: usize,
+    cursor: &mut StreamCursor,
+    resources: &StreamBudget,
     get: &mut impl FnMut(&str) -> Result<Vec<u8>>,
     emit: &mut impl FnMut(Event) -> Result<()>,
 ) -> Result<Summary> {
@@ -213,12 +306,9 @@ fn walk(
     let start = Instant::now();
     while let Some((depth, x, y, z)) = queue.pop_front() {
         check(active)?;
-        if summary.nodes >= 4096
-            || summary.decoded >= 96_000_000
-            || start.elapsed() > Duration::from_secs(170)
-        {
+        if resources.limit().is_some() || start.elapsed() > Duration::from_secs(170) {
             summary.complete = false;
-            summary.limit = "Loading budget reached; refine to request more detail".into();
+            summary.limit = resources.limit().unwrap_or("Loading budget reached").into();
             break;
         }
         let scale = 2f64.powi(depth as i32);
@@ -251,78 +341,96 @@ fn walk(
         if !(1..=4_000_000).contains(&count) {
             return Err("Invalid/oversized point node".into());
         }
-        let bytes = get(&format!("ept-data/{key}.laz"))?;
-        let mut reader = las::Reader::with_options(
-            Cursor::new(bytes),
-            las::ReaderOptions::default().with_laz_parallelism(las::LazParallelism::No),
-        )
-        .map_err(err)?;
-        if reader.header().number_of_points() != count as u64 {
-            return Err("Point node count differs from hierarchy".into());
-        }
-        let mut seen = 0;
-        let mut points = Vec::new();
-        let mut limited = false;
-        loop {
-            check(active)?;
-            let batch = reader.read_points(32_768).map_err(err)?;
-            if batch.is_empty() {
-                break;
+        let resume = cursor.nodes.get(&key).copied().unwrap_or(0);
+        if resume < count as u64 {
+            let bytes = get(&format!("ept-data/{key}.laz"))?;
+            let mut reader = las::Reader::with_options(
+                Cursor::new(bytes),
+                las::ReaderOptions::default().with_laz_parallelism(las::LazParallelism::No),
+            )
+            .map_err(err)?;
+            if reader.header().number_of_points() != count as u64 {
+                return Err("Point node count differs from hierarchy".into());
             }
-            seen += batch.len() as u64;
-            for point in batch.points() {
-                let p = point.map_err(err)?;
-                if p.is_withheld || matches!(u8::from(p.classification), 7 | 18) {
-                    continue;
-                }
-                let (lon, lat) = geographic(p.x, p.y, mercator);
-                if ![lon, lat, p.z].iter().all(|v| v.is_finite()) {
-                    return Err("Invalid original point coordinate".into());
-                }
-                if !region.contains(lon, lat) {
-                    continue;
-                }
-                if summary.points + points.len() >= max_points {
+            reader.seek(resume).map_err(err)?;
+            let mut seen = resume;
+            resources.nodes.set(resources.nodes.get() + 1);
+            let mut points = Vec::new();
+            let mut limited = false;
+            loop {
+                check(active)?;
+                let allowed = resources.remaining_decoded();
+                if allowed == 0 {
                     limited = true;
                     break;
                 }
-                points.push(Point {
-                    source_xyz: [p.x, p.y, p.z],
-                    lon_lat: [lon, lat],
-                    classification: u8::from(p.classification),
-                    intensity: p.intensity,
-                    return_number: p.return_number,
-                    rgb: p.color.map(|c| [c.red, c.green, c.blue]),
-                });
+                let batch = reader.read_points(allowed as u64).map_err(err)?;
+                if batch.is_empty() {
+                    break;
+                }
+                summary.decoded += batch.len() as u64;
+                resources
+                    .decoded
+                    .set(resources.decoded.get() + batch.len() as u64);
+                for point in batch.points() {
+                    let p = point.map_err(err)?;
+                    seen += 1;
+                    if p.is_withheld || matches!(u8::from(p.classification), 7 | 18) {
+                        continue;
+                    }
+                    let (lon, lat) = geographic(p.x, p.y, mercator);
+                    if ![lon, lat, p.z].iter().all(|v| v.is_finite()) {
+                        return Err("Invalid original point coordinate".into());
+                    }
+                    if !region.contains(lon, lat) {
+                        continue;
+                    }
+                    if summary.points + points.len() >= max_points {
+                        seen -= 1;
+                        limited = true;
+                        break;
+                    }
+                    points.push(Point {
+                        source_xyz: [p.x, p.y, p.z],
+                        lon_lat: [lon, lat],
+                        classification: u8::from(p.classification),
+                        intensity: p.intensity,
+                        return_number: p.return_number,
+                        rgb: p.color.map(|c| [c.red, c.green, c.blue]),
+                    });
+                }
+                if limited {
+                    break;
+                }
+            }
+            cursor.nodes.insert(key.clone(), seen);
+            if !limited && seen != count as u64 {
+                return Err("Incomplete original point decode".into());
+            }
+            summary.nodes += 1;
+            summary.points += points.len();
+            if !points.is_empty() {
+                // EPT spacing is in source XY units; EPSG:3857 is corrected for
+                // latitude only for a descriptive density readout, never XYZ.
+                let spacing = (xmax - xmin) / scale / f64::from(meta.span)
+                    * if mercator {
+                        region.lat.to_radians().cos().abs()
+                    } else {
+                        111_320.
+                    };
+                emit(Event::Batch {
+                    points,
+                    spacing_m: spacing,
+                })?;
             }
             if limited {
+                summary.complete = false;
+                summary.limit = resources
+                    .limit()
+                    .unwrap_or("Point budget reached; raise the budget and refine")
+                    .into();
                 break;
             }
-        }
-        if !limited && seen != count as u64 {
-            return Err("Incomplete original point decode".into());
-        }
-        summary.decoded += seen;
-        summary.nodes += 1;
-        summary.points += points.len();
-        if !points.is_empty() {
-            // EPT spacing is in source XY units; EPSG:3857 is corrected for
-            // latitude only for a descriptive density readout, never XYZ.
-            let spacing = (xmax - xmin) / scale / f64::from(meta.span)
-                * if mercator {
-                    region.lat.to_radians().cos().abs()
-                } else {
-                    111_320.
-                };
-            emit(Event::Batch {
-                points,
-                spacing_m: spacing,
-            })?;
-        }
-        if limited {
-            summary.complete = false;
-            summary.limit = "Point budget reached; raise the budget and refine".into();
-            break;
         }
         if depth < 22 {
             for dz in 0..2 {
@@ -343,6 +451,7 @@ fn walk(
             summary.limit = "Maximum hierarchy depth reached".into();
         }
     }
+    cursor.complete = summary.complete;
     Ok(summary)
 }
 
@@ -396,6 +505,39 @@ mod tests {
                 .name,
             "wrapped"
         );
+    }
+    #[test]
+    fn merge_candidates_visit_complementary_footprints_before_repeated_center_surveys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.sqlite");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE surveys(id TEXT,name TEXT,date TEXT,geometry TEXT,stac TEXT,west REAL,south REAL,east REAL,north REAL);").unwrap();
+        for (id, date, w, e) in [
+            ("center-new", "2026", -0.003, 0.003),
+            ("center-old", "2025", -0.003, 0.003),
+            ("east", "2020", 0.004, 0.02),
+            ("west", "2020", -0.02, -0.004),
+        ] {
+            let geometry = json!({"type":"Polygon","coordinates":[[[w,-0.02],[e,-0.02],[e,0.02],[w,0.02],[w,-0.02]]]});
+            db.execute(
+                "INSERT INTO surveys VALUES(?1,?2,?3,?4,NULL,-0.03,-0.03,0.03,0.03)",
+                params![format!("USGS_3DEP_ID:{id}"), id, date, geometry.to_string()],
+            )
+            .unwrap();
+        }
+        let sources = sources(
+            &path,
+            Region {
+                lon: 0.,
+                lat: 0.,
+                radius_m: 1000.,
+            },
+        )
+        .unwrap();
+        assert_eq!(sources[0].name, "center-new");
+        assert!(sources[1..3].iter().any(|s| s.name == "east"));
+        assert!(sources[1..3].iter().any(|s| s.name == "west"));
+        assert_eq!(sources[3].name, "center-old");
     }
     #[test]
     fn manhattan_uses_city_footprint_even_without_a_catalog_date() {
@@ -565,6 +707,49 @@ mod tests {
         assert!(!limited.complete);
         assert_eq!(limited.points, 1);
         assert!(limited.limit.contains("budget"));
+        let mut cursor = StreamCursor::default();
+        let resources = StreamBudget::default();
+        let mut resumed = Vec::new();
+        for quota in [1, 20] {
+            walk_resume(
+                &meta,
+                region,
+                None,
+                quota,
+                &mut cursor,
+                &resources,
+                &mut get.clone(),
+                &mut |e| {
+                    if let Event::Batch { points, .. } = e {
+                        resumed.extend(points.into_iter().map(|p| p.source_xyz));
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+        }
+        assert!(cursor.complete);
+        assert_eq!(
+            resumed,
+            received.iter().map(|p| p.source_xyz).collect::<Vec<_>>()
+        );
+        let resources = StreamBudget {
+            max_decoded: 1,
+            ..Default::default()
+        };
+        let partial = walk_resume(
+            &meta,
+            region,
+            None,
+            20,
+            &mut StreamCursor::default(),
+            &resources,
+            &mut get.clone(),
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        assert!(!partial.complete);
+        assert_eq!(resources.decoded.get(), 1);
         assert!(
             walk(
                 &meta,

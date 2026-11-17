@@ -3,7 +3,8 @@
 Actual Polygon/MultiPolygon footprints, including holes and date-line wrapping,
 rank candidate surveys by center coverage and 49 radial sample locations before
 date. Sampling selects candidates; actual source returns determine coverage.
-The real Manhattan geometry fixture prevents a newer neighboring New Jersey
+Complementary footprint masks put neighboring coverage ahead of repeated
+center coverage. The real Manhattan geometry fixture prevents a newer neighboring New Jersey
 bounding box from outranking the NYC footprint with an unspecified catalog date.
 
 For supported OpenTopography records, a trusted catalog STAC collection slug

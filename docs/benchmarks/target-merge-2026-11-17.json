@@ -1,0 +1,99 @@
+{
+  "budget": 1200000,
+  "center": [
+    -74.025,
+    40.72
+  ],
+  "combined_100m_cells": 2923,
+  "first_source_100m_cells": 2111,
+  "first_survey": "USGS_3DEP_ID:NY_NewYorkCity",
+  "note": "Original unaligned source heights, with an unverified-heights label; cell counts measure observed sampling, not continuous survey coverage.",
+  "radius_m": 3000.0,
+  "report": {
+    "survey_limit_reached": false,
+    "surveys": [
+      {
+        "complete": false,
+        "error": null,
+        "header": {
+          "crs": {
+            "authority": "EPSG",
+            "horizontal": "3857",
+            "wkt": "PROJCS[\"WGS 84 / Pseudo-Mercator\",GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\",SPHEROID[\"WGS 84\",6378137,298.257223563,AUTHORITY[\"EPSG\",\"7030\"]],AUTHORITY[\"EPSG\",\"6326\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.0174532925199433,AUTHORITY[\"EPSG\",\"9122\"]],AUTHORITY[\"EPSG\",\"4326\"]],PROJECTION[\"Mercator_1SP\"],PARAMETER[\"central_meridian\",0],PARAMETER[\"scale_factor\",1],PARAMETER[\"false_easting\",0],PARAMETER[\"false_northing\",0],UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"X\",EAST],AXIS[\"Y\",NORTH],EXTENSION[\"PROJ4\",\"+proj=merc +a=6378137 +b=6378137 +lat_ts=0.0 +lon_0=0.0 +x_0=0.0 +y_0=0 +k=1.0 +units=m +nadgrids=@null +wktext +no_defs\"],AUTHORITY[\"EPSG\",\"3857\"]]"
+          },
+          "publisher": "https://s3-us-west-2.amazonaws.com/usgs-lidar-public/NY_NewYorkCity/ept.json",
+          "source": {
+            "date": "",
+            "id": "USGS_3DEP_ID:NY_NewYorkCity",
+            "name": "NY NewYorkCity"
+          }
+        },
+        "points": 1000000,
+        "source": {
+          "date": "",
+          "id": "USGS_3DEP_ID:NY_NewYorkCity",
+          "name": "NY NewYorkCity"
+        }
+      },
+      {
+        "complete": false,
+        "error": null,
+        "header": {
+          "crs": {
+            "authority": "EPSG",
+            "horizontal": "3857",
+            "wkt": "PROJCS[\"WGS 84 / Pseudo-Mercator\",GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\",SPHEROID[\"WGS 84\",6378137,298.257223563,AUTHORITY[\"EPSG\",\"7030\"]],AUTHORITY[\"EPSG\",\"6326\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.0174532925199433,AUTHORITY[\"EPSG\",\"9122\"]],AUTHORITY[\"EPSG\",\"4326\"]],PROJECTION[\"Mercator_1SP\"],PARAMETER[\"central_meridian\",0],PARAMETER[\"scale_factor\",1],PARAMETER[\"false_easting\",0],PARAMETER[\"false_northing\",0],UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"X\",EAST],AXIS[\"Y\",NORTH],EXTENSION[\"PROJ4\",\"+proj=merc +a=6378137 +b=6378137 +lat_ts=0.0 +lon_0=0.0 +x_0=0.0 +y_0=0 +k=1.0 +units=m +nadgrids=@null +wktext +no_defs\"],AUTHORITY[\"EPSG\",\"3857\"]]"
+          },
+          "publisher": "https://s3-us-west-2.amazonaws.com/usgs-lidar-public/USGS_Lidar_Point_Cloud_NJ_SdL5_2014_LAS_2015/ept.json",
+          "source": {
+            "date": "2014-03-21 / 2014-04-21",
+            "id": "USGS_3DEP_ID:USGS_Lidar_Point_Cloud_NJ_SdL5_2014_LAS_2015",
+            "name": "USGS Lidar Point Cloud NJ SdL5 2014 LAS 2015"
+          }
+        },
+        "points": 200000,
+        "source": {
+          "date": "2014-03-21 / 2014-04-21",
+          "id": "USGS_3DEP_ID:USGS_Lidar_Point_Cloud_NJ_SdL5_2014_LAS_2015",
+          "name": "USGS Lidar Point Cloud NJ SdL5 2014 LAS 2015"
+        }
+      },
+      {
+        "complete": true,
+        "error": null,
+        "header": {
+          "crs": {
+            "authority": "EPSG",
+            "horizontal": "3857",
+            "wkt": "PROJCS[\"WGS 84 / Pseudo-Mercator\",GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\",SPHEROID[\"WGS 84\",6378137,298.257223563,AUTHORITY[\"EPSG\",\"7030\"]],AUTHORITY[\"EPSG\",\"6326\"]],PRIMEM[\"Greenwich\",0,AUTHORITY[\"EPSG\",\"8901\"]],UNIT[\"degree\",0.0174532925199433,AUTHORITY[\"EPSG\",\"9122\"]],AUTHORITY[\"EPSG\",\"4326\"]],PROJECTION[\"Mercator_1SP\"],PARAMETER[\"central_meridian\",0],PARAMETER[\"scale_factor\",1],PARAMETER[\"false_easting\",0],PARAMETER[\"false_northing\",0],UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"X\",EAST],AXIS[\"Y\",NORTH],EXTENSION[\"PROJ4\",\"+proj=merc +a=6378137 +b=6378137 +lat_ts=0.0 +lon_0=0.0 +x_0=0.0 +y_0=0 +k=1.0 +units=m +nadgrids=@null +wktext +no_defs\"],AUTHORITY[\"EPSG\",\"3857\"]]"
+          },
+          "publisher": "https://s3-us-west-2.amazonaws.com/usgs-lidar-public/ARRA-LFTNE_NewYork_2010/ept.json",
+          "source": {
+            "date": "2010-12-20 / 2011-12-11",
+            "id": "USGS_3DEP_ID:ARRA-LFTNE_NewYork_2010",
+            "name": "ARRA-LFTNE NewYork 2010"
+          }
+        },
+        "points": 0,
+        "source": {
+          "date": "2010-12-20 / 2011-12-11",
+          "id": "USGS_3DEP_ID:ARRA-LFTNE_NewYork_2010",
+          "name": "ARRA-LFTNE NewYork 2010"
+        }
+      }
+    ],
+    "total": {
+      "complete": false,
+      "decoded": 3168493,
+      "limit": "Combined point budget reached; raise the budget and refine",
+      "nodes": 61,
+      "points": 1200000,
+      "source": "merged",
+      "transferred_bytes": 0
+    },
+    "unverified_heights": true
+  },
+  "seconds": 3.865649388,
+  "date": "2026-11-17",
+  "gpu": "NVIDIA GeForce RTX 4090 / Vulkan / driver 615.78.08"
+}

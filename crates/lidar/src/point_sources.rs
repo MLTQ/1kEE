@@ -1,7 +1,7 @@
 //! Published bulk LAS/LAZ access and actual-footprint ranking for Target.
 use super::*;
 
-pub(super) fn coverage(geometry: &str, region: Region) -> u32 {
+pub(super) fn footprint_mask(geometry: &str, region: Region) -> (bool, u64) {
     fn ring(r: &Value, lon: f64, lat: f64) -> bool {
         let Some(points) = r.as_array() else {
             return false;
@@ -42,13 +42,11 @@ pub(super) fn coverage(geometry: &str, region: Region) -> u32 {
         }
     }
     let Ok(g) = serde_json::from_str::<Value>(geometry) else {
-        return 0;
+        return (false, 0);
     };
-    let mut score = if contains(&g, region.lon, region.lat) {
-        10_000
-    } else {
-        0
-    };
+    let center = contains(&g, region.lon, region.lat);
+    let mut mask = 0u64;
+    let mut bit = 0;
     for x in -4i32..=4 {
         for y in -4i32..=4 {
             if x * x + y * y > 16 {
@@ -58,10 +56,18 @@ pub(super) fn coverage(geometry: &str, region: Region) -> u32 {
                 x as f64 * region.radius_m / 4.,
                 y as f64 * region.radius_m / 4.,
             );
-            score += u32::from(contains(&g, lon, lat));
+            if contains(&g, lon, lat) {
+                mask |= 1u64 << bit;
+            }
+            bit += 1;
         }
     }
-    score
+    (center, mask)
+}
+#[cfg(test)]
+fn coverage(geometry: &str, region: Region) -> u32 {
+    let (center, mask) = footprint_mask(geometry, region);
+    u32::from(center) * 10_000 + mask.count_ones()
 }
 
 fn collection(catalog: &Path, source: &Source) -> Result<(String, String)> {
@@ -139,6 +145,7 @@ fn assets(xml: &str, slug: &str) -> Result<Vec<String>> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(super) fn stream(
     catalog: &Path,
     region: Region,
@@ -146,6 +153,32 @@ pub(super) fn stream(
     active: Option<&Path>,
     max_points: usize,
     fetch: &mut Fetch<'_>,
+    project: impl FnMut(&str, &mut [[f64; 2]]) -> Result<()>,
+    emit: &mut impl FnMut(Event) -> Result<()>,
+) -> Result<Summary> {
+    stream_resume(
+        catalog,
+        region,
+        source,
+        active,
+        max_points,
+        fetch,
+        &mut StreamCursor::default(),
+        &StreamBudget::default(),
+        project,
+        emit,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+pub(super) fn stream_resume(
+    catalog: &Path,
+    region: Region,
+    source: &Source,
+    active: Option<&Path>,
+    max_points: usize,
+    fetch: &mut Fetch<'_>,
+    cursor: &mut StreamCursor,
+    resources: &StreamBudget,
     mut project: impl FnMut(&str, &mut [[f64; 2]]) -> Result<()>,
     emit: &mut impl FnMut(Event) -> Result<()>,
 ) -> Result<Summary> {
@@ -206,35 +239,42 @@ pub(super) fn stream(
             publisher: page.clone(),
         }))?;
         let expected = header.number_of_points();
-        let mut seen = 0u64;
+        reader.seek(cursor.bulk).map_err(err)?;
+        let mut seen = cursor.bulk;
+        resources.nodes.set(resources.nodes.get() + 1);
         loop {
             check(active)?;
-            if summary.decoded >= 96_000_000 || fetch.started.elapsed() > Duration::from_secs(170) {
+            if resources.limit().is_some() || fetch.started.elapsed() > Duration::from_secs(170) {
                 summary.complete = false;
                 summary.limit = "Loading budget reached; bulk source is partially inspected".into();
                 break;
             }
-            let batch = reader.read_points(32_768).map_err(err)?;
+            let batch = reader
+                .read_points(resources.remaining_decoded() as u64)
+                .map_err(err)?;
             if batch.is_empty() {
                 break;
             }
             let mut retained = Vec::new();
+            summary.decoded += batch.len() as u64;
+            resources
+                .decoded
+                .set(resources.decoded.get() + batch.len() as u64);
             for p in batch.points() {
                 let p = p.map_err(err)?;
                 seen += 1;
-                summary.decoded += 1;
                 if p.is_withheld || matches!(u8::from(p.classification), 7 | 18) {
                     continue;
                 }
                 if ![p.x, p.y, p.z].iter().all(|v| v.is_finite()) {
                     return Err("Invalid original LAS coordinate".into());
                 }
-                retained.push(p);
+                retained.push((seen, p));
             }
-            let mut xy = retained.iter().map(|p| [p.x, p.y]).collect::<Vec<_>>();
+            let mut xy = retained.iter().map(|(_, p)| [p.x, p.y]).collect::<Vec<_>>();
             project(&horizontal, &mut xy)?;
             let mut points = Vec::new();
-            for (p, [lon, lat]) in retained.into_iter().zip(xy) {
+            for ((ordinal, p), [lon, lat]) in retained.into_iter().zip(xy) {
                 if !lon.is_finite()
                     || !lat.is_finite()
                     || !(-180. ..=180.).contains(&lon)
@@ -246,6 +286,7 @@ pub(super) fn stream(
                     continue;
                 }
                 if summary.points + points.len() >= max_points {
+                    seen = ordinal - 1;
                     summary.complete = false;
                     summary.limit = "Point budget reached; raise the budget and refine".into();
                     break;
@@ -259,6 +300,7 @@ pub(super) fn stream(
                     rgb: p.color.map(|c| [c.red, c.green, c.blue]),
                 });
             }
+            cursor.bulk = seen;
             summary.points += points.len();
             if !points.is_empty() {
                 emit(Event::Batch {
@@ -278,6 +320,7 @@ pub(super) fn stream(
             break;
         }
     }
+    cursor.complete = summary.complete;
     summary.transferred_bytes = fetch.transferred;
     Ok(summary)
 }
@@ -353,6 +396,7 @@ mod tests {
                 active: None,
                 transferred: 0,
                 started: Instant::now(),
+                budget: None,
             };
             let source = Source {
                 id: "opentopoID:fixture".into(),
@@ -393,6 +437,50 @@ mod tests {
             assert!(measured.iter().all(|p| !matches!(p.classification, 7 | 18)));
             assert_eq!(summary.transferred_bytes, 0);
         }
+        let source = Source {
+            id: "opentopoID:fixture".into(),
+            date: "2026".into(),
+            name: "Fixture".into(),
+        };
+        let resources = StreamBudget::default();
+        let mut cursor = StreamCursor::default();
+        let mut resumed = Vec::new();
+        for quota in [1, 10] {
+            let mut fetch = Fetch {
+                client: Client::new(),
+                folder: dir.path(),
+                active: None,
+                transferred: 0,
+                started: Instant::now(),
+                budget: Some(&resources),
+            };
+            stream_resume(
+                &catalog,
+                Region {
+                    lon: 0.,
+                    lat: 0.,
+                    radius_m: 1000.,
+                },
+                &source,
+                None,
+                quota,
+                &mut fetch,
+                &mut cursor,
+                &resources,
+                |_, _| Ok(()),
+                &mut |e| {
+                    if let Event::Batch { points, .. } = e {
+                        resumed.extend(points.into_iter().map(|p| p.source_xyz[2]));
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+        }
+        assert!(cursor.complete);
+        assert_eq!(cursor.bulk, 5);
+        assert_eq!(resumed.len(), 2);
+        assert!((resumed[0] - 12.345).abs() < 0.0011 && (resumed[1] - 16.789).abs() < 0.0011);
     }
     #[test]
     fn bulk_listing_rejects_truncation_oversize_and_traversal() {

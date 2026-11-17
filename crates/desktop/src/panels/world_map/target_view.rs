@@ -271,6 +271,7 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
     let mut apply_radius = false;
     let mut radius_km = model.target.radius_km;
     let prior_source = session.selected_source;
+    let prior_merge = session.merge_surveys;
     egui::Frame::new().fill(theme::panel_fill(230)).corner_radius(8_u8).inner_margin(8.0_f32).show(ui,|ui| {
         ui.horizontal_wrapped(|ui| {
             exit=ui.button("← LOCAL  [Esc]").clicked();
@@ -301,26 +302,39 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
         });
         ui.horizontal_wrapped(|ui| {
             egui::ComboBox::from_id_salt("target-survey").width(340.)
-                .selected_text(session.survey_label().to_owned())
-                .show_ui(ui,|ui| {for (i,source) in session.sources.iter().enumerate() {
-                    ui.selectable_value(&mut session.selected_source,i,format!("{} · {}",source.name,source.date));
-                }});
+                .selected_text(if session.merge_surveys {"All surveys (merge)".to_string()} else {session.survey_label().to_owned()})
+                .show_ui(ui,|ui| {
+                    if ui.selectable_label(session.merge_surveys,"All surveys (merge)").clicked() {session.merge_surveys=true;}
+                    for (i,source) in session.sources.iter().enumerate() {
+                        if ui.selectable_label(!session.merge_surveys && session.selected_source==i,format!("{} · {}",source.name,source.date)).clicked() {
+                            session.merge_surveys=false;session.selected_source=i;
+                        }
+                    }
+                });
             ui.add(egui::Slider::new(&mut session.budget_millions,1..=16).text("million points"));
             reload=ui.button("Refine / reload").clicked();
             ui.small(&session.status);
             if session.loading() {ui.small(format!("{:.0}s",session.started.elapsed().as_secs_f64()));}
         });
         ui.small(&session.terrain_status);ui.small(&session.context_status);
-        if let Some(source)=&session.source {
-            let vertical=source.crs.get("vertical").map(|v|v.to_string()).unwrap_or_else(||"undeclared".into());
-            ui.horizontal_wrapped(|ui| {
-                ui.hyperlink_to(format!("{} · {}",source.source.name,source.source.date),&source.publisher);
-                ui.small(format!("Vertical reference: {vertical} · original source Z{}",
-                    if vertical=="undeclared" {" · Z units unverified"} else {" · no height offsets"}));
+        if session.unverified_heights() {
+            ui.colored_label(egui::Color32::from_rgb(231,186,103),"Unverified heights · original source Z shown together; matching height datum / units are not established.");
+        }
+        if let Some(report)=&session.merge_report {
+            ui.collapsing(format!("Survey sources ({} contributing / {} candidates)",report.contributors(),report.surveys.len()),|ui| {
+                for entry in &report.surveys {
+                    if let Some(header)=&entry.header {source_credit(ui,header);} else {ui.label(&entry.source.name);}
+                    ui.small(format!("{} points · {}",entry.points,if entry.complete {"source read"} else {"partial / unavailable"}));
+                    if let Some(error)=&entry.error {ui.small(error);}
+                }
             });
-            if !session.compatible_dem() {
-                ui.small("Point heights and DEM heights have unverified matching references; inspect them separately.");
-            }
+        } else if !session.headers.is_empty() {
+            ui.collapsing(format!("Contributing surveys ({})",session.headers.len()),|ui| {
+                for source in &session.headers {source_credit(ui,source);}
+            });
+        }
+        if session.source.is_some() && !session.compatible_dem() {
+            ui.small("Point heights and DEM heights have unverified matching references; inspect them separately.");
         }
     });
     model.target.radius_km = radius_km.clamp(0.1, 100.);
@@ -352,8 +366,8 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
             Err(error) => session.status = error,
         }
     }
-    if !apply_radius && (reload || prior_source != session.selected_source) {
-        let selected = session.sources.get(session.selected_source).cloned();
+    if !apply_radius && (reload || prior_source != session.selected_source || prior_merge != session.merge_surveys) {
+        let selected = if session.merge_surveys {None} else {session.sources.get(session.selected_source).cloned()};
         session.start_points(selected, ui.ctx());
     }
     if reset {
@@ -421,6 +435,13 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
         model.target.session = Some(session);
     }
     rect
+}
+fn source_credit(ui:&mut egui::Ui,source:&lidar_pipeline::ept::point_cloud::Header) {
+    ui.horizontal_wrapped(|ui| {
+        ui.hyperlink_to(format!("{} · {}",source.source.name,if source.source.date.is_empty() {"date unspecified"} else {&source.source.date}),&source.publisher);
+        let reference=lidar_pipeline::ept::point_cloud::merge::vertical_reference(source).unwrap_or_else(||"unverified".into());
+        ui.small(format!("Height reference: {reference} · original Z, no offsets"));
+    });
 }
 fn reset_camera(s: &mut Session) {
     let elevation = if s.show_points {

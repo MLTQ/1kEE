@@ -224,6 +224,7 @@ pub(super) fn build(
     }
     Ok(ContextGeometry {
         batch: Arc::new(Batch {
+            source: None,
             id: serial(),
             points,
         }),

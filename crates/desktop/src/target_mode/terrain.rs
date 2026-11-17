@@ -206,6 +206,7 @@ pub(super) fn read(path: &Path, region: Region, label: &str) -> Result<Terrain, 
     if indices.is_empty() {return Err("No DEM measurements intersect the selected circle".into());}
     Ok(Terrain {
         batch: Arc::new(Batch {
+            source: None,
             id: serial(),
             points,
         }),
@@ -230,6 +231,7 @@ mod tests {
     fn dem_sampling_preserves_valid_zero_negative_and_missing_heights() {
         let terrain = Terrain {
             batch: Arc::new(Batch {
+                source: None,
                 id: 0,
                 points: vec![],
             }),
