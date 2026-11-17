@@ -46,7 +46,7 @@ mod terrain_raster;
 pub(crate) mod target_pass;
 pub(crate) mod lidar_coverage;
 mod target_view;
-mod layer_snapshot;
+pub(crate) mod layer_snapshot;
 mod swot_layer;
 mod raster_mesh;
 pub(crate) mod satellite_layer;

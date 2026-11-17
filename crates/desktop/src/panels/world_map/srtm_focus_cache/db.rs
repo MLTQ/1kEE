@@ -483,10 +483,14 @@ pub fn mark_tile_empty(cache_db_path: &Path, tile: TileKey) -> rusqlite::Result<
     tx.commit()
 }
 
-pub fn focus_cache_root(selected_root: Option<&Path>) -> Option<PathBuf> {
+pub(super) fn focus_cache_directory(selected_root: Option<&Path>) -> PathBuf {
     let root = terrain_assets::find_derived_root(selected_root)
         .unwrap_or_else(|| std::env::temp_dir().join("1kee-derived"));
-    let cache_root = root.join("terrain");
+    root.join("terrain")
+}
+
+pub fn focus_cache_root(selected_root: Option<&Path>) -> Option<PathBuf> {
+    let cache_root = focus_cache_directory(selected_root);
     fs::create_dir_all(&cache_root).ok()?;
     Some(cache_root)
 }

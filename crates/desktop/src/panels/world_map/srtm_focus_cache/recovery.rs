@@ -53,7 +53,7 @@ fn root_for(path: &Path, isolated: Option<&Path>) -> PathBuf {
     }
 }
 
-fn root(path: &Path) -> PathBuf {
+pub(super) fn root(path: &Path) -> PathBuf {
     root_for(path, isolated_root().as_deref())
 }
 

@@ -2,6 +2,10 @@
 
 ## Purpose
 
+`focus_cache_directory` shares path resolution with read-only diagnostics without
+creating directories; the renderer/builder's `focus_cache_root` retains creation
+behavior when needed.
+
 Owns the SQLite contour-cache schema, cache-path helpers, and the connection
 contracts shared by on-demand terrain builders and render-time tile lookups.
 

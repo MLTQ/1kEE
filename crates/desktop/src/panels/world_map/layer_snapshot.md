@@ -22,3 +22,6 @@ retaining a compatible display during normal camera movement.
 unrelated worker's gate. The warm-hit regression holds that worker blocked and
 checks that a cache hit displays immediately and cannot be overwritten by its
 obsolete completion.
+
+The crate-visible snapshot helper also serves Settings contour-cache diagnostics,
+with root-compatible retained results and timed refresh keys.

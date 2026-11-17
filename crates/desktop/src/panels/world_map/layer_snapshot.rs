@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(super) struct Snapshot<K, V> {
+pub(crate) struct Snapshot<K, V> {
     requested: Option<K>,
     current: Option<(K, Arc<V>)>,
     pending: Option<(u64, K, mpsc::Receiver<Option<Arc<V>>>)>,

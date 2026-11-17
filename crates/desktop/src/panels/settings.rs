@@ -10,6 +10,8 @@ mod event_follow;
 mod overview;
 #[path = "settings_paths.rs"]
 mod paths;
+#[path = "settings_contour_cache.rs"]
+mod contour_cache;
 #[path = "settings_sources.rs"]
 mod sources;
 
