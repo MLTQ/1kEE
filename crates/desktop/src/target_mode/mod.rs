@@ -2,6 +2,8 @@
 pub(crate) mod camera;
 mod context;
 mod terrain;
+pub(crate) mod project;
+mod local_dem;
 use camera::Camera;
 pub(crate) use context::{ContextGeometry, ContextInput};
 use lidar_pipeline::{
@@ -166,10 +168,12 @@ impl Session {
         let (tx, rx) = mpsc::channel();
         let worker_ctx = ctx.clone();
         let marker = active.path().to_owned();
+        let terrain_catalog = catalog.clone();
         let spawn = std::thread::Builder::new()
             .name("target-dem".into())
             .spawn(move || {
-                let result = terrain::load(region, &marker);
+                let result = local_dem::load(&terrain_catalog,region,&marker)
+                    .and_then(|local|local.map_or_else(||terrain::load(region,&marker),Ok));
                 let _ = tx.send(result);
                 worker_ctx.request_repaint();
             })
@@ -240,11 +244,12 @@ impl Session {
                 if let Some(source)=&chosen && !available.iter().any(|s|s.id==source.id) {available.insert(0,source.clone());}
                 let sources=chosen.map_or_else(||available.clone(),|s|vec![s]);
                 tx.send(Message::Sources(available)).map_err(|_|"Target closed")?;
-                let mut last="No public point cloud is indexed here; the DEM and map context can still be inspected".to_string();
+                let mut last="No supported original point source is indexed here. Survey outlines include data not yet readable in Target; DEM availability is reported separately.".to_string();
                 for source in sources {
                     if !marker.is_file() {return Err("Target closed".into());}
                     let mut emitted=0;
-                    let result=point_cloud::stream(&catalog,region,&source,Some(&marker),budget,|event| {
+                    let result=point_cloud::stream_with_transform(&catalog,region,&source,Some(&marker),budget,
+                        |crs,points|project::xy(crs,points,&marker),|event| {
                         let message=match event {
                             Event::Header(h)=>Message::Header(h),
                             Event::Batch {points,..}=>{
@@ -275,6 +280,14 @@ impl Session {
     }
     pub fn loading(&self) -> bool {
         self.point_rx.is_some() || self.terrain_rx.is_some() || self.context_rx.is_some()
+    }
+    pub fn survey_label(&self) -> &str {
+        if let Some(header)=&self.source {return &header.source.name;}
+        if self.point_rx.is_some() {
+            if let Some(header)=&self.pending_header {return &header.source.name;}
+            if let Some(source)=self.sources.get(self.selected_source) {return &source.name;}
+            "Finding surveys…"
+        } else {"No point cloud loaded"}
     }
     pub fn poll(&mut self, ctx: &egui::Context) {
         for _ in 0..4 {
@@ -321,7 +334,7 @@ impl Session {
                     match result {
                         Ok(summary) => {
                             self.status = if summary.complete {
-                                format!("{} measured points · source detail loaded", summary.points)
+                                format!("{} measured points · selected survey loaded", summary.points)
                             } else {
                                 format!("{} measured points · {}", summary.points, summary.limit)
                             };
@@ -425,6 +438,9 @@ pub(crate) mod tests {
     ) -> Result<Terrain, String> {
         terrain::load(region, active)
     }
+    pub(crate) fn live_local_terrain(catalog:&std::path::Path,region:Region,active:&std::path::Path)->Result<Terrain,String> {
+        local_dem::load(catalog,region,active)?.ok_or("No retained DEM".into())
+    }
     pub(crate) fn session() -> Session {
         let active = tempfile::NamedTempFile::new().unwrap();
         let region = Region {
@@ -480,6 +496,18 @@ pub(crate) mod tests {
             context_input: None,
             _active: active,
         }
+    }
+    #[test]
+    fn finished_empty_point_search_does_not_keep_claiming_to_find_surveys() {
+        let s=session();
+        let mut empty=s;
+        empty.source=None;
+        assert_eq!(empty.survey_label(),"No point cloud loaded");
+        let (_tx,rx)=mpsc::channel();
+        empty.point_rx=Some(rx);
+        assert_eq!(empty.survey_label(),"Finding surveys…");
+        empty.sources.push(Source {id:"known".into(),name:"Known survey".into(),date:String::new()});
+        assert_eq!(empty.survey_label(),"Known survey");
     }
     #[test]
     fn incoming_points_preserve_an_explicit_dem_only_view() {

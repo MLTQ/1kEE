@@ -6,7 +6,7 @@ license.workspace = true
 
 [features]
 builder = ["dep:gdal-sys", "dep:las", "dep:fs2", "dep:sha2"]
-ept = ["dep:las", "dep:sha2", "dep:reqwest", "dep:fs2"]
+ept = ["dep:las", "dep:sha2", "dep:reqwest", "dep:fs2", "dep:roxmltree"]
 
 [dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }
@@ -20,6 +20,7 @@ las = { version = "0.11.2", features = ["laz-parallel"], optional = true }
 fs2 = { version = "0.4", optional = true }
 sha2 = { version = "0.10", optional = true }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"], optional = true }
+roxmltree = { version = "0.20", optional = true }
 
 [[bin]]
 name = "one-thousand-electric-eye-lidar"

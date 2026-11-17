@@ -521,3 +521,198 @@ fn target_live_hundred_kilometre_overview() {
         summary.points, terrain.label
     );
 }
+
+#[test]
+#[ignore = "real public Israel LAZ, retained DEM, configured writable lidar cache and GPU"]
+fn target_live_israel_original_points_and_retained_dem() {
+    use lidar_pipeline::{ept::point_cloud, region::Region};
+    let catalog =
+        std::path::PathBuf::from(std::env::var_os("ONEKEE_TARGET_TEST_CATALOG").expect("catalog"));
+    let region = Region {
+        lon: 34.84,
+        lat: 32.30,
+        radius_m: 1000.,
+    };
+    let marker = tempfile::NamedTempFile::new().unwrap();
+    let terrain = Arc::new(
+        crate::target_mode::tests::live_local_terrain(&catalog, region, marker.path()).unwrap(),
+    );
+    let source = point_cloud::sources(&catalog, region)
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == "opentopoID:OTLAS.102016.2039.1")
+        .expect("Israel survey");
+    let mut clouds = Vec::new();
+    let mut header = None;
+    let start = std::time::Instant::now();
+    let summary = point_cloud::stream_with_transform(
+        &catalog,
+        region,
+        &source,
+        Some(marker.path()),
+        8_000_000,
+        |crs, points| crate::target_mode::project::xy(crs, points, marker.path()),
+        |e| {
+            match e {
+                point_cloud::Event::Header(h) => header = Some(h),
+                point_cloud::Event::Batch { points, .. } => {
+                    assert!(
+                        points
+                            .iter()
+                            .all(|p| region.contains(p.lon_lat[0], p.lon_lat[1]))
+                    );
+                    assert!(
+                        points
+                            .iter()
+                            .all(|p| p.source_xyz[0] > 100_000. && p.source_xyz[0] < 300_000.)
+                    );
+                    assert!(points.iter().all(|p| !matches!(p.classification, 7 | 18)));
+                    clouds.push(Arc::new(Batch {
+                        id: crate::target_mode::serial(),
+                        points: points
+                            .iter()
+                            .map(|p| crate::target_mode::vertex(region, p))
+                            .collect(),
+                    }));
+                }
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    let load_seconds = start.elapsed().as_secs_f64();
+    assert!(summary.points > 10_000 && summary.complete);
+    let header = header.unwrap();
+    assert!(header.publisher.contains("10.5069/G99C6VBM"));
+    assert!(!terrain.navd88);
+    let (device, queue) = gpu();
+    let mut camera = Camera::for_radius(1000.);
+    camera.reset(clouds[0].points[0].position[2]);
+    let mut draw = Draw {
+        session: 555,
+        camera,
+        radius: 1000.,
+        clouds,
+        terrain: Some(terrain.clone()),
+        context: None,
+        points: true,
+        surface: false,
+        context_visible: false,
+        class_mask: u32::MAX,
+        color_mode: 0,
+        point_size: 1.5,
+        rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280., 720.)),
+        ctx: egui::Context::default(),
+    };
+    let mut resources = Resources::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+    let mut points = render(&mut resources, &draw, &device, &queue);
+    for _ in 0..16 {
+        if draw.clouds.iter().all(|b| {
+            resources
+                .batches
+                .get(&b.id)
+                .is_some_and(|g| g.uploaded == b.points.len())
+        }) {
+            break;
+        }
+        points = render(&mut resources, &draw, &device, &queue);
+    }
+    assert!(
+        draw.clouds
+            .iter()
+            .all(|b| resources.batches[&b.id].uploaded == b.points.len())
+    );
+    draw.points = false;
+    draw.surface = true;
+    draw.camera.reset(terrain.center_height());
+    let dem = render(&mut resources, &draw, &device, &queue);
+    assert_ne!(points, dem);
+    for (name, rgba) in [("points", points), ("dem", dem)] {
+        let mut encoder = png::Encoder::new(
+            std::fs::File::create(format!("/tmp/1kee-target-israel-{name}.png")).unwrap(),
+            1280,
+            720,
+        );
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&rgba)
+            .unwrap();
+    }
+    let report = serde_json::json!({"center":[region.lon,region.lat],"radius_m":region.radius_m,"summary":summary,"load_seconds":load_seconds,
+        "source_crs":header.crs,"dem":terrain.label,"triangles":terrain.indices.len()/3,
+        "notes":["Original LAS XYZ/Z, classifications, intensity and returns preserved; XY alone transformed through the declared horizontal CRS.",
+            "Point and DEM displays checked separately because a matching vertical datum is unverified."]});
+    std::fs::write(
+        "/tmp/1kee-target-israel.json",
+        serde_json::to_vec_pretty(&report).unwrap(),
+    )
+    .unwrap();
+    eprintln!(
+        "ISRAEL_TARGET points={} complete={} seconds={load_seconds:.2} {}",
+        summary.points, summary.complete, terrain.label
+    );
+}
+
+#[test]
+#[ignore = "reads the actual catalog and public NYC EPT through the configured writable cache"]
+fn target_live_manhattan_uses_city_coverage() {
+    use lidar_pipeline::{ept::point_cloud, region::Region};
+    let catalog =
+        std::path::PathBuf::from(std::env::var_os("ONEKEE_TARGET_TEST_CATALOG").expect("catalog"));
+    let region = Region {
+        lon: -74.012680,
+        lat: 40.709930,
+        radius_m: 1000.,
+    };
+    let sources = point_cloud::sources(&catalog, region).unwrap();
+    assert_eq!(sources[0].id, "USGS_3DEP_ID:NY_NewYorkCity");
+    let active = tempfile::NamedTempFile::new().unwrap();
+    let mut occupied = std::collections::HashSet::new();
+    let mut center = false;
+    let summary = point_cloud::stream(
+        &catalog,
+        region,
+        &sources[0],
+        Some(active.path()),
+        500_000,
+        |e| {
+            if let point_cloud::Event::Batch { points, .. } = e {
+                for p in points {
+                    let [x, y] = region.offset(p.lon_lat[0], p.lon_lat[1]);
+                    assert!(x.hypot(y) < 1000.001);
+                    if x.hypot(y) < 100. {
+                        center = true;
+                    }
+                    occupied.insert(((x / 200.).floor() as i32, (y / 200.).floor() as i32));
+                }
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(summary.points > 1000 && center);
+    assert!(
+        occupied.iter().any(|(x, _)| *x >= 2),
+        "east/Manhattan side has original returns"
+    );
+    assert!(
+        occupied.iter().any(|(x, _)| *x <= -2),
+        "west side retains source returns"
+    );
+    let report = serde_json::json!({"center":[region.lon,region.lat],"radius_m":1000,"source":sources[0],"summary":summary,
+        "occupied_200m_cells":occupied.len(),"returns_within_central_100m":center,"test_point_budget":500_000});
+    std::fs::write(
+        "/tmp/1kee-target-manhattan.json",
+        serde_json::to_vec_pretty(&report).unwrap(),
+    )
+    .unwrap();
+    eprintln!(
+        "MANHATTAN_TARGET source={} points={} occupied_cells={} center={center}",
+        sources[0].id,
+        summary.points,
+        occupied.len()
+    );
+}

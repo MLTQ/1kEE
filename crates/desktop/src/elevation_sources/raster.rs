@@ -15,6 +15,22 @@ pub(super) fn warp(
     scratch: &Scratch,
     libertiff: bool,
 ) -> Result<PathBuf> {
+    warp_inner(inputs, request, scratch, libertiff, false)
+}
+pub(super) fn warp_local(
+    inputs: &[String],
+    request: Request,
+    scratch: &Scratch,
+) -> Result<PathBuf> {
+    warp_inner(inputs, request, scratch, false, true)
+}
+fn warp_inner(
+    inputs: &[String],
+    request: Request,
+    scratch: &Scratch,
+    libertiff: bool,
+    no_vertical_shift: bool,
+) -> Result<PathBuf> {
     if inputs.is_empty() {
         return Err(Error::NoCoverage);
     }
@@ -79,6 +95,9 @@ pub(super) fn warp(
     // that codec; GDAL 3.11+'s built-in LIBERTIFF reader handles it directly.
     if libertiff {
         command.args(["-if", "LIBERTIFF"]);
+    }
+    if no_vertical_shift {
+        command.arg("-novshift").env("PROJ_NETWORK", "OFF");
     }
     command.args(inputs).arg(&output);
     run(command)?;

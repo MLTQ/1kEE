@@ -1,6 +1,8 @@
 //! Original EPT returns for radial inspection; no gridding or height synthesis.
 use super::*;
 use crate::region::Region;
+#[path = "point_sources.rs"]
+mod point_sources;
 
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 pub struct Source {
@@ -53,25 +55,39 @@ pub fn sources(catalog: &Path, region: Region) -> Result<Vec<Source>> {
     let db = Connection::open_with_flags(catalog, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;
     let mut query = db
         .prepare(
-            "SELECT id,coalesce(date,''),name FROM surveys
-        WHERE id LIKE 'USGS_3DEP_ID:%' AND rowid IN
+            "SELECT id,coalesce(date,''),name,CASE WHEN length(geometry)<=524288 THEN geometry ELSE '{}' END FROM surveys
+        WHERE (id LIKE 'USGS_3DEP_ID:%' OR (id LIKE 'opentopoID:%' AND stac IS NOT NULL)) AND rowid IN
         (SELECT rowid FROM surveys WHERE south<?3 AND north>?4
         AND ((west<?1 AND east>?2) OR (west<?1-360 AND east>?2-360)
             OR (west<?1+360 AND east>?2+360)))
-        ORDER BY CASE WHEN west<=?5 AND east>=?5 AND south<=?6 AND north>=?6 THEN 0 ELSE 1 END,date DESC,id LIMIT 16",
+        ORDER BY CASE WHEN west<=?5 AND east>=?5 AND south<=?6 AND north>=?6 THEN 0 ELSE 1 END,date DESC,id LIMIT 256",
         )
         .map_err(err)?;
-    query
+    let mut candidates = query
         .query_map(params![e, w, n, s, region.lon, region.lat], |r| {
-            Ok(Source {
-                id: r.get(0)?,
-                date: r.get(1)?,
-                name: r.get(2)?,
-            })
+            Ok((
+                Source {
+                    id: r.get(0)?,
+                    date: r.get(1)?,
+                    name: r.get(2)?,
+                },
+                r.get::<_, String>(3)?,
+            ))
         })
         .map_err(err)?
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(err)
+        .map_err(err)?
+        .into_iter()
+        .map(|(source, geometry)| (point_sources::coverage(&geometry, region), source))
+        .collect::<Vec<_>>();
+    // Bounding boxes can overlap a city while every return belongs to the
+    // neighboring state. Prefer the actual center/radial footprint before date.
+    candidates.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then(b.1.date.cmp(&a.1.date))
+            .then(a.1.id.cmp(&b.1.id))
+    });
+    Ok(candidates.into_iter().take(16).map(|(_, s)| s).collect())
 }
 
 /// Streams spatially intersecting octree nodes from coarse to original detail.
@@ -82,6 +98,28 @@ pub fn stream(
     source: &Source,
     active: Option<&Path>,
     max_points: usize,
+    emit: impl FnMut(Event) -> Result<()>,
+) -> Result<Summary> {
+    stream_with_transform(
+        catalog,
+        region,
+        source,
+        active,
+        max_points,
+        |_, _| Err("Projected LAS source requires a horizontal coordinate transformer".into()),
+        emit,
+    )
+}
+
+/// A projected LAS adapter supplies an XY-only transform. Original source XYZ,
+/// including Z units/datum, is never passed through that transform.
+pub fn stream_with_transform(
+    catalog: &Path,
+    region: Region,
+    source: &Source,
+    active: Option<&Path>,
+    max_points: usize,
+    project: impl FnMut(&str, &mut [[f64; 2]]) -> Result<()>,
     mut emit: impl FnMut(Event) -> Result<()>,
 ) -> Result<Summary> {
     if !region.valid() || !(1..=16_000_000).contains(&max_points) {
@@ -98,17 +136,6 @@ pub fn stream(
     let cache = root.join("fused/v1/ept-cache");
     fs::create_dir_all(&cache).map_err(err)?;
     prune_cache(&cache)?;
-    let id = source
-        .id
-        .strip_prefix("USGS_3DEP_ID:")
-        .ok_or("Unsupported point source")?;
-    let mut base = reqwest::Url::parse("https://s3-us-west-2.amazonaws.com/usgs-lidar-public/")
-        .map_err(err)?;
-    base.path_segments_mut()
-        .map_err(|_| "Invalid point source URL")?
-        .pop_if_empty()
-        .push(id);
-    let base = base.to_string();
     let mut fetch = Fetch {
         client: Client::builder()
             .user_agent("1kEE Target point viewer")
@@ -121,6 +148,24 @@ pub fn stream(
         transferred: 0,
         started: Instant::now(),
     };
+    if source.id.starts_with("opentopoID:") {
+        let result = point_sources::stream(
+            catalog, region, source, active, max_points, &mut fetch, project, &mut emit,
+        );
+        prune_cache(&cache)?;
+        return result;
+    }
+    let id = source
+        .id
+        .strip_prefix("USGS_3DEP_ID:")
+        .ok_or("Unsupported point source")?;
+    let mut base = reqwest::Url::parse("https://s3-us-west-2.amazonaws.com/usgs-lidar-public/")
+        .map_err(err)?;
+    base.path_segments_mut()
+        .map_err(|_| "Invalid point source URL")?
+        .pop_if_empty()
+        .push(id);
+    let base = base.to_string();
     let meta: Metadata =
         serde_json::from_slice(&fetch.get(&format!("{base}/ept.json"))?).map_err(err)?;
     meta.validate()?;
@@ -309,11 +354,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("catalog.sqlite");
         let db = Connection::open(&path).unwrap();
-        db.execute_batch("CREATE TABLE surveys(id TEXT,name TEXT,date TEXT,west REAL,south REAL,east REAL,north REAL);
+        db.execute_batch("CREATE TABLE surveys(id TEXT,name TEXT,date TEXT,west REAL,south REAL,east REAL,north REAL,geometry TEXT DEFAULT '{}',stac TEXT);
             CREATE INDEX surveys_extent ON surveys(west,east,south,north);
-            INSERT INTO surveys VALUES('USGS_3DEP_ID:fringe','fringe','2026',0.3,-0.1,0.6,0.1);
-            INSERT INTO surveys VALUES('USGS_3DEP_ID:center','center','2020',-0.1,-0.1,0.1,0.1);
-            INSERT INTO surveys VALUES('USGS_3DEP_ID:date-line','wrapped','2020',-181,-1,-179,1);").unwrap();
+            INSERT INTO surveys(id,name,date,west,south,east,north) VALUES('USGS_3DEP_ID:fringe','fringe','2026',0.3,-0.1,0.6,0.1);
+            INSERT INTO surveys(id,name,date,west,south,east,north) VALUES('USGS_3DEP_ID:center','center','2020',-0.1,-0.1,0.1,0.1);
+            INSERT INTO surveys(id,name,date,west,south,east,north) VALUES('USGS_3DEP_ID:date-line','wrapped','2020',-181,-1,-179,1);").unwrap();
+        for (id, w, e) in [("center", -0.1, 0.1), ("fringe", 0.3, 0.6)] {
+            let geometry = json!({"type":"Polygon","coordinates":[[[w,-0.1],[e,-0.1],[e,0.1],[w,0.1],[w,-0.1]]]});
+            db.execute(
+                "UPDATE surveys SET geometry=?1 WHERE name=?2",
+                params![geometry.to_string(), id],
+            )
+            .unwrap();
+        }
         let candidates = sources(
             &path,
             Region {
@@ -343,6 +396,35 @@ mod tests {
                 .name,
             "wrapped"
         );
+    }
+    #[test]
+    fn manhattan_uses_city_footprint_even_without_a_catalog_date() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.sqlite");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE surveys(id TEXT,name TEXT,date TEXT,geometry TEXT,stac TEXT,west REAL,south REAL,east REAL,north REAL);").unwrap();
+        let rows: Value =
+            serde_json::from_str(include_str!("fixtures/manhattan-surveys.json")).unwrap();
+        for row in rows.as_array().unwrap() {
+            db.execute(
+                "INSERT INTO surveys VALUES(?1,?2,?3,?4,NULL,-74.7,40.,-73.,42.)",
+                params![
+                    row["id"].as_str(),
+                    row["name"].as_str(),
+                    row["date"].as_str().unwrap_or(""),
+                    row["geometry"].as_str()
+                ],
+            )
+            .unwrap();
+        }
+        let region = Region {
+            lon: -74.012680,
+            lat: 40.709930,
+            radius_m: 1000.,
+        };
+        let selected = sources(&path, region).unwrap();
+        assert_eq!(selected[0].id, "USGS_3DEP_ID:NY_NewYorkCity");
+        assert!(selected[0].date.is_empty());
     }
     #[test]
     #[ignore = "downloads original NC EPT points into a writable ONEKEE_TARGET_TEST_CATALOG cache"]

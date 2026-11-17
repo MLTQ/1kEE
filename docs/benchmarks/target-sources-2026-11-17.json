@@ -1,0 +1,64 @@
+{
+  "date": "2026-11-17",
+  "gpu": "NVIDIA GeForce RTX 4090 / Vulkan / driver 615.78.08",
+  "manhattan": {
+    "center": [
+      -74.01268,
+      40.70993
+    ],
+    "occupied_200m_cells": 88,
+    "radius_m": 1000,
+    "returns_within_central_100m": true,
+    "source": {
+      "date": "",
+      "id": "USGS_3DEP_ID:NY_NewYorkCity",
+      "name": "NY NewYorkCity"
+    },
+    "summary": {
+      "complete": false,
+      "decoded": 1621446,
+      "limit": "Point budget reached; raise the budget and refine",
+      "nodes": 26,
+      "points": 500000,
+      "source": "USGS_3DEP_ID:NY_NewYorkCity",
+      "transferred_bytes": 4873566
+    },
+    "test_point_budget": 500000
+  },
+  "notes": [
+    "NYC deliberately capped at 500,000 original returns; partial detail is reported.",
+    "A published footprint is separate from readable Target source support.",
+    "Known source positions and Z are preserved; point/DEM references remain separate when unverified."
+  ],
+  "israel_full_upload_check": {
+    "center": [
+      34.84,
+      32.3
+    ],
+    "dem": "Israel Mediterranean Sharon sea cliff, 2006 \u00b7 2006-02-01 \u00b7 retained LiDAR DTM \u00b7 native cells ~2.03 m \u00b7 vertical datum unverified \u00b7 sampled grid ~1.0 m \u00b7 display mesh ~3.9 m",
+    "load_seconds": 65.343663366,
+    "notes": [
+      "Original LAS XYZ/Z, classifications, intensity and returns preserved; XY alone transformed through the declared horizontal CRS.",
+      "Point and DEM displays checked separately because a matching vertical datum is unverified."
+    ],
+    "radius_m": 1000.0,
+    "source_crs": {
+      "horizontal": "2039"
+    },
+    "summary": {
+      "complete": true,
+      "decoded": 13268620,
+      "limit": "",
+      "nodes": 1,
+      "points": 377003,
+      "source": "opentopoID:OTLAS.102016.2039.1",
+      "transferred_bytes": 0
+    },
+    "triangles": 232554
+  },
+  "israel_initial_cold_scan": {
+    "load_seconds": 65.319358959,
+    "transferred_bytes": 24961156,
+    "retained_points": 377003
+  }
+}

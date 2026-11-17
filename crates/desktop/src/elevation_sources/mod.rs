@@ -194,6 +194,19 @@ pub(crate) fn fetch_target(
         on_bytes,
     )
 }
+/// Normalize a verified numeric, metre-height local DEM without downloading or
+/// applying a vertical datum transformation. The source remains authoritative.
+pub(crate) fn local_target(input:&Path,region:lidar_pipeline::region::Region,size:u32,destination:&Path)->Result<()> {
+    if !region.valid() {return Err(Error::Failed("invalid Target region".into()));}
+    let [w,s,e,n]=region.bounds();
+    let request=Request {bounds:Bounds {min_lon:w,min_lat:s,max_lon:e,max_lat:n},width:size,height:size};
+    if !request.valid_window(4.) {return Err(Error::Failed("unsupported local DEM window".into()));}
+    let _deadline=Deadline::start();
+    let scratch=Scratch::new(destination)?;
+    let path=raster::warp_local(&[input.to_string_lossy().into_owned()],request,&scratch)?;
+    std::fs::rename(path,destination)?;
+    Ok(())
+}
 fn fetch_request(
     request: Request,
     target: bool,

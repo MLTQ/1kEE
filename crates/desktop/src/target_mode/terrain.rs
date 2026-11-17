@@ -203,6 +203,7 @@ pub(super) fn read(path: &Path, region: Region, label: &str) -> Result<Terrain, 
         }
     }
     let spacing = scale[1].abs() * 111_320.;
+    if indices.is_empty() {return Err("No DEM measurements intersect the selected circle".into());}
     Ok(Terrain {
         batch: Arc::new(Batch {
             id: serial(),

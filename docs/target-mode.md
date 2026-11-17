@@ -24,11 +24,16 @@ the camera moves. The boundary stays at the selected radius from its center.
 ## Data and accuracy
 
 - **Point cloud** streams original returns from intersecting public USGS EPT
-  surveys, prioritizing center-covering candidates and their newest acquisitions. The survey selector permits
+  surveys and supported OpenTopography bulk LAS/LAZ collections. Candidates
+  are ranked by their actual polygon coverage of the center and radial sample
+  points before acquisition date. An overlapping bounding box alone does not
+  establish coverage. The survey selector permits
   inspection of another indexed acquisition. Dates and publisher links stay
   visible. Acquisitions are inspected individually, preserving their identity.
 - **DEM terrain** loads numeric bare-earth heights from the existing state,
-  national and international elevation adapters. Its numeric requested grid is
+  national and international elevation adapters. It first checks retained
+  ground rasters indexed in `Lidar/bulk.sqlite`, using a locally available
+  numeric raster only when metre height units are verified. Its numeric requested grid is
   retained for ground placement; a coarser, explicitly
   labelled display mesh keeps flight responsive. Missing heights stay holes.
 - **Map context** includes available cached roads, water and prepared vector
@@ -78,7 +83,26 @@ arrives. Full source density can exceed these budgets in a one-kilometre circle.
 Existing EPT blocks are reused through the bounded LiDAR download cache. This
 does not delete raw scans or turn raster receipts into point-cloud archives.
 Published cloud coverage and locally indexed catalogs determine availability;
-the viewer does not yet decode every provider's local LAS/COPC holding.
+the viewer does not yet decode every provider's local LAS/COPC holding. A teal
+survey boundary remains a published footprint, including surveys that need
+another point reader. Finished empty loads report that state explicitly;
+the source selector does not keep claiming to search after a worker finishes.
+
+OpenTopography bulk access currently supports linked single-file LAS/LAZ
+collections up to 32 MiB within the existing 256 MiB transfer / 1 GiB source
+cache limits. Larger or multi-file collections require a spatial LAS/COPC
+index and are reported as unsupported. LAS is decoded in Rust; configured
+GDAL tools transform batches of horizontal coordinates only, with network grid
+fetching disabled. Source Z and point attributes stay unchanged. Scanning a
+bulk file can take longer than loading indexed EPT nodes.
+
+The Sharon coastal survey in Israel now loads its original 2006 points and its
+retained ground DEM. The local DEM's actual native cells are approximately
+2.03 m; an approximately 1 m requested grid does not create extra source detail.
+Its uncertain vertical reference remains separate from the point display.
+Only numeric rasters with declared metre band units or explicitly verified
+publisher units are accepted. Independent retained raster tiles/acquisitions
+are not silently blended to fill missing data.
 Escape cancels jobs, releases the cursor, and frees Target GPU buffers on the
 next Local frame. Loading animation preferences do not affect flight controls.
 
@@ -89,3 +113,4 @@ they do not replace the user's terrain or fused raster archives.
 See the [Kinston benchmark and real-data previews](benchmarks/target-nc-2026-11-16.md).
 The [100 km validation](benchmarks/target-radius-2026-11-16.md) records the
 regional overview and Local catalog-outline checks.
+See also the [Israel and Manhattan source validation](benchmarks/target-sources-2026-11-17.md).

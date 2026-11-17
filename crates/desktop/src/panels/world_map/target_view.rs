@@ -301,7 +301,7 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
         });
         ui.horizontal_wrapped(|ui| {
             egui::ComboBox::from_id_salt("target-survey").width(340.)
-                .selected_text(session.source.as_ref().map_or("Finding surveys…",|h|h.source.name.as_str()))
+                .selected_text(session.survey_label().to_owned())
                 .show_ui(ui,|ui| {for (i,source) in session.sources.iter().enumerate() {
                     ui.selectable_value(&mut session.selected_source,i,format!("{} · {}",source.name,source.date));
                 }});
@@ -368,6 +368,11 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
     painter.rect_filled(rect, 0., egui::Color32::from_rgb(10, 18, 23));
     painter.add(egui_wgpu_callback(&session, rect, ui.ctx()));
     draw_boundary(&painter, rect, &session);
+    if !session.loading() && session.points==0 && session.terrain.is_none() {
+        painter.text(rect.center(),egui::Align2::CENTER_CENTER,
+            "No Target data loaded here\nSurvey boundaries show published coverage; a readable point or DEM source is required.\nSee the source status above for details.",
+            egui::FontId::proportional(16.),theme::text_muted());
+    }
     if session.show_context
         && (!session.show_points || session.compatible_dem())
         && let Some(context) = &session.context

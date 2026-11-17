@@ -16,6 +16,14 @@ headers publish with their first actual batch. A failed or empty refresh keeps
 the old source and geometry; the first replacement batch atomically changes
 both. Partial successful loads remain visible on later failures.
 
+Discovery ranks actual survey polygons before dates. Original USGS EPT and
+supported OpenTopography single-file bulk LAS/LAZ are decoded in Rust. Bulk
+coordinates use a declared horizontal CRS and bounded XY-only GDAL batches;
+source Z is untouched. Unsupported collections and finished empty workers are
+shown explicitly. The selector names a discovered survey while reading it.
+Retained, verified metre-height ground rasters are tried before remote DEM
+services; they remain separate from points with unverified matching Z.
+
 DEM and point workers are independent. Missing or undeclared vertical reference
 prevents combined display and prevents DEM-draped context being misrepresented
 as source-point geometry. Native point Z is never adjusted to fit terrain.
