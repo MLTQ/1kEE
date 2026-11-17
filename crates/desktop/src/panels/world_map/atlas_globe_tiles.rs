@@ -137,7 +137,6 @@ impl State {
         max_edge: usize,
         wanted: &[Key],
         load_missing: bool,
-        keep: bool,
         budget: usize,
         load: impl FnOnce(Key, Option<PathBuf>, usize) -> Result<Arc<Raster>, String> + Send + 'static,
     ) -> Frame {
@@ -162,18 +161,16 @@ impl State {
         }
         // Stable draw ordering also keeps the rendered-target cache useful.
         rasters.sort_by_key(|r| r.id);
-        if !keep {
-            while self.bytes > budget {
-                let oldest = self
-                    .entries
-                    .iter()
-                    .filter(|(key, _)| !visible.contains(key))
-                    .min_by_key(|(_, entry)| entry.touched)
-                    .map(|(key, _)| *key);
-                let Some(oldest) = oldest else { break };
-                let entry = self.entries.remove(&oldest).unwrap();
-                self.bytes -= entry.raster.heights.len() * 4 + entry.raster.colors.len();
-            }
+        while self.bytes > budget {
+            let oldest = self
+                .entries
+                .iter()
+                .filter(|(key, _)| !visible.contains(key))
+                .min_by_key(|(_, entry)| entry.touched)
+                .map(|(key, _)| *key);
+            let Some(oldest) = oldest else { break };
+            let entry = self.entries.remove(&oldest).unwrap();
+            self.bytes -= entry.raster.heights.len() * 4 + entry.raster.colors.len();
         }
         if load_missing && self.job.is_none() {
             let next = wanted.iter().find(|key| {
@@ -251,7 +248,6 @@ pub(super) fn frame(
         ctx.input(|i| i.max_texture_side).clamp(16, 8192),
         &wanted,
         load,
-        settings.atlas_keep_globe,
         settings.atlas_cpu_bytes,
         |key, root, edge| {
             let detail = super::atlas_source::load_globe(root.as_deref(), key.region(), edge)?;

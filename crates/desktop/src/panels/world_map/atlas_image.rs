@@ -49,7 +49,7 @@ fn valid(height: f32) -> bool {
 }
 
 /// Height/depth tints, deliberately not geological classifications.
-fn elevation_color(height: f32) -> [f32; 3] {
+pub(crate) fn elevation_color(height: f32) -> [f32; 3] {
     const RAMP: &[(f32, [f32; 3])] = &[
         (-11_000.0, [16.0, 43.0, 65.0]),
         (-5_000.0, [28.0, 72.0, 96.0]),

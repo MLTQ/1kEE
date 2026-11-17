@@ -62,8 +62,7 @@ fn america_rockies_appalachians_camera_path_never_rebuilds_seen_tiles() {
                 8192,
                 &wanted,
                 true,
-                true,
-                1,
+                64 << 20,
                 move |key, _, _| {
                     *builds.lock().unwrap().entry(key).or_default() += 1;
                     Ok(fixture(key))
@@ -100,8 +99,7 @@ fn america_rockies_appalachians_camera_path_never_rebuilds_seen_tiles() {
         8192,
         &[Key(12, 24)],
         false,
-        true,
-        1,
+        64 << 20,
         |_, _, _| panic!("no load"),
     );
     assert_eq!(frame.missing, 0);
@@ -130,7 +128,7 @@ fn busy_worker_does_not_hide_warm_tiles_and_clear_rejects_old_results() {
         epoch: state.epoch,
         result,
     });
-    let frame = state.frame(&ctx, None, 8192, &[a, b], true, true, 1, |_, _, _| {
+    let frame = state.frame(&ctx, None, 8192, &[a, b], true, 1, |_, _, _| {
         panic!("already busy")
     });
     assert_eq!(frame.rasters[0].id, raster.id);
@@ -153,7 +151,7 @@ fn failed_tiles_retry_with_backoff_and_source_changes_discard_results() {
     state
         .failed
         .insert(key, (Instant::now(), "unplugged drive".into()));
-    let frame = state.frame(&ctx, None, 8192, &[key], true, false, 1, |_, _, _| {
+    let frame = state.frame(&ctx, None, 8192, &[key], true, 1, |_, _, _| {
         panic!("retry storm")
     });
     assert!(frame.error.unwrap().contains("unplugged"));
@@ -171,8 +169,7 @@ fn failed_tiles_retry_with_backoff_and_source_changes_discard_results() {
         8192,
         &[key],
         false,
-        false,
-        1,
+        64 << 20,
         |_, _, _| unreachable!(),
     );
     assert!(state.entries.is_empty());
@@ -201,8 +198,7 @@ fn native_globe_tiles_persist_lossless_prepared_terrain() {
             8192,
             &wanted,
             true,
-            true,
-            1,
+            64 << 20,
             |key, root, edge| {
                 super::super::atlas_source::load_globe(root.as_deref(), key.region(), edge)?
                     .into_raster_with_core(Some(key.bounds()))
@@ -228,8 +224,7 @@ fn native_globe_tiles_persist_lossless_prepared_terrain() {
             8192,
             &[key],
             true,
-            true,
-            1,
+            64 << 20,
             |_, _, _| panic!("warm tile rebuilt"),
         );
         assert_eq!(frame.missing, 0);
@@ -270,4 +265,48 @@ fn native_globe_tiles_persist_lossless_prepared_terrain() {
             started.elapsed().as_secs_f64() * 1000.
         );
     }
+}
+
+#[test]
+fn cpu_budget_evicts_cold_tiles_and_protects_visible_tiles() {
+    let keys = [Key(10, 10), Key(11, 10), Key(12, 10)];
+    let mut state = State {
+        identity: Some((None, 1202)),
+        ..Default::default()
+    };
+    let ctx = egui::Context::default();
+    for (i, key) in keys.into_iter().enumerate() {
+        let raster = fixture(key);
+        state.bytes += raster.heights.len() * 4 + raster.colors.len();
+        state.entries.insert(
+            key,
+            Entry {
+                raster,
+                touched: i as u64,
+            },
+        );
+    }
+    state.tick = 4;
+    let two = state.bytes / 3 * 2;
+    state.frame(
+        &ctx,
+        None,
+        8192,
+        &keys[..1],
+        false,
+        two,
+        |_, _, _| unreachable!(),
+    );
+    assert!(state.entries.contains_key(&keys[0]) && !state.entries.contains_key(&keys[1]));
+    let frame = state.frame(
+        &ctx,
+        None,
+        8192,
+        &[keys[0], keys[2]],
+        false,
+        1,
+        |_, _, _| unreachable!(),
+    );
+    assert_eq!(frame.rasters.len(), 2);
+    assert_eq!(state.bytes, two);
 }

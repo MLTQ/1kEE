@@ -3,9 +3,12 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
-    path::Path,
+    path::{Path, PathBuf},
     time::Duration,
 };
+#[path = "atlas_regions.rs"]
+pub mod regions;
+
 pub const FILE_NAME: &str = "atlas_heights_v1.sqlite";
 const APP_ID: i32 = 0x314b4154;
 const VERSION: i32 = 1;
@@ -235,7 +238,13 @@ impl Writer {
             .map_err(|e| e.to_string())
     }
 }
+struct Siblings {
+    directory: PathBuf,
+    region: regions::Region,
+    last: Option<(regions::Region, Option<Connection>)>,
+}
 pub struct Reader {
+    siblings: Option<Siblings>,
     connection: Connection,
     tiles: HashMap<Key, (Vec<f32>, u64)>,
     tick: u64,
@@ -253,9 +262,42 @@ impl Reader {
             .map_err(|e| e.to_string())?;
         Ok(Self {
             connection,
+            siblings: None,
             tiles: HashMap::new(),
             tick: 0,
         })
+    }
+    pub fn open_region(directory: &Path, region: regions::Region) -> Result<Self> {
+        let mut reader = Self::open(&region.path(directory))?;
+        reader.siblings = Some(Siblings {
+            directory: directory.into(),
+            region,
+            last: None,
+        });
+        Ok(reader)
+    }
+    fn read_tile(&mut self, key: Key) -> Result<Option<Vec<f32>>> {
+        if let Some(siblings) = &mut self.siblings {
+            let [w, s, e, n] = key.bounds();
+            let owner = regions::Region::at((w + e) * 0.5, (s + n) * 0.5);
+            if owner != siblings.region {
+                if siblings.last.as_ref().is_none_or(|(r, _)| *r != owner) {
+                    let path = owner.path(&siblings.directory);
+                    let connection = if path.try_exists().map_err(|e| e.to_string())? {
+                        Some(Self::open(&path)?.connection)
+                    } else {
+                        None
+                    };
+                    siblings.last = Some((owner, connection));
+                }
+                if let Some((_, Some(connection))) = &siblings.last
+                    && let Some(tile) = get(connection, key, None)?
+                {
+                    return Ok(Some(tile));
+                }
+            }
+        }
+        get(&self.connection, key, None)
     }
     pub fn has_tier(&self, tier: Tier) -> Result<bool> {
         self.connection
@@ -305,7 +347,7 @@ impl Reader {
                     y: ykey,
                 };
                 if !self.tiles.contains_key(&key) {
-                    let Some(values) = get(&self.connection, key, None)? else {
+                    let Some(values) = self.read_tile(key)? else {
                         return Ok(None);
                     };
                     if self.tiles.len() >= 64 {
@@ -319,11 +361,16 @@ impl Reader {
                 *used = self.tick;
                 let [tw, _, _, tn] = key.bounds();
                 let d = tier.spacing() / 3600.;
+                let side = tier.side();
+                let xs: Vec<_> = longitudes[xrange.clone()]
+                    .iter()
+                    .map(|lon| interpolation((lon - tw) / d + 0.5, side))
+                    .collect();
                 for row in yrange.clone() {
-                    let y = (tn - latitudes[row]) / d + 0.5;
-                    for col in xrange.clone() {
-                        let x = (longitudes[col] - tw) / d + 0.5;
-                        out[row * size[0] + col] = bilinear(values, tier.side(), x, y);
+                    let (iy, fy) = interpolation((tn - latitudes[row]) / d + 0.5, side);
+                    let start = row * size[0] + xrange.start;
+                    for (pixel, &(ix, fx)) in out[start..start + xs.len()].iter_mut().zip(&xs) {
+                        *pixel = bilinear(values, side, iy * side + ix, fx, fy);
                     }
                 }
             }
@@ -345,20 +392,19 @@ fn tile_ranges(values: &[f64], key: impl Fn(f64) -> i32) -> Vec<(std::ops::Range
     }
     out
 }
-fn bilinear(values: &[f32], side: usize, x: f64, y: f64) -> f32 {
-    let x = x.clamp(0., (side - 1) as f64);
-    let y = y.clamp(0., (side - 1) as f64);
-    let ix = (x.floor() as usize).min(side - 2);
-    let iy = (y.floor() as usize).min(side - 2);
-    let fx = (x - ix as f64) as f32;
-    let fy = (y - iy as f64) as f32;
+fn interpolation(coordinate: f64, side: usize) -> (usize, f32) {
+    let value = coordinate.clamp(0., (side - 1) as f64);
+    let lower = (value.floor() as usize).min(side - 2);
+    (lower, (value - lower as f64) as f32)
+}
+fn bilinear(values: &[f32], side: usize, origin: usize, fx: f32, fy: f32) -> f32 {
     let mut sum = 0.;
     let mut weight = 0.;
     for (index, w) in [
-        (iy * side + ix, (1. - fx) * (1. - fy)),
-        (iy * side + ix + 1, fx * (1. - fy)),
-        ((iy + 1) * side + ix, (1. - fx) * fy),
-        ((iy + 1) * side + ix + 1, fx * fy),
+        (origin, (1. - fx) * (1. - fy)),
+        (origin + 1, fx * (1. - fy)),
+        (origin + side, (1. - fx) * fy),
+        (origin + side + 1, fx * fy),
     ] {
         let value = values[index];
         if value.is_finite() {

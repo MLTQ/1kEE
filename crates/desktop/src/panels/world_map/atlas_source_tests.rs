@@ -165,3 +165,53 @@ fn globe_tiles_keep_terrain_resolution_independent_of_window_size() {
         .unwrap();
     assert!(local.grid.metres.iter().all(|h| (*h - 5678.).abs() < 0.01));
 }
+
+#[test]
+#[ignore = "reads real GEBCO from ONEKEE_ATLAS_ROOT, writes only a private pin"]
+fn installed_region_feeds_local_and_globe_offline() {
+    use one_thousand_electric_eye_cache_builder::atlas as builder;
+    use tile_archive::atlas::{Tier, regions};
+    let source = PathBuf::from(std::env::var_os("ONEKEE_ATLAS_ROOT").unwrap());
+    let directory = tempfile::tempdir().unwrap();
+    let derived = directory.path().join("Derived");
+    std::fs::create_dir(&derived).unwrap();
+    assert_eq!(
+        terrain_assets::find_derived_root(Some(directory.path())).as_ref(),
+        Some(&derived),
+        "run the test with isolated settings"
+    );
+    let region = regions::Region::at(-107., 38.);
+    let pins = derived.join("terrain/regions");
+    let size = region
+        .install(&pins, 32 << 20, |out| {
+            builder::run(
+                builder::Command {
+                    data_root: source,
+                    srtm_root: None,
+                    cache: out.to_owned(),
+                    gdal_bin_dir: Default::default(),
+                    bounds: region.source_bounds(),
+                    tiers: vec![Tier::Terrain],
+                },
+                &mut |_| {},
+            )
+            .map(|_| ())
+        })
+        .unwrap();
+    region.verify(&region.path(&pins)).unwrap();
+    let viewport = Region::padded([-107.7, 37.7, -107.3, 38.2]).unwrap();
+    let local = load(Some(directory.path()), viewport, 256).unwrap();
+    let globe = load_globe(Some(directory.path()), viewport, 256).unwrap();
+    assert_eq!(local.source, "Atlas cache · 15 arcsecond terrain");
+    assert_eq!(local.grid.metres, globe.grid.metres);
+    let range = local
+        .grid
+        .metres
+        .iter()
+        .copied()
+        .fold([f32::INFINITY, f32::NEG_INFINITY], |[lo, hi], v| {
+            [lo.min(v), hi.max(v)]
+        });
+    assert!(range[1] - range[0] > 100.);
+    eprintln!("Pinned Rocky Mountains region {size} bytes, Local/Globe elevations {range:?} m");
+}

@@ -141,3 +141,25 @@ fn wide_views_read_each_tile_once_despite_a_smaller_lru() {
     );
     assert_eq!(reader.tiles.len(), 64);
 }
+
+#[test]
+fn local_window_samples_across_two_installed_regions() {
+    let directory = tempfile::tempdir().unwrap();
+    let left = regions::Region::at(1., 0.);
+    let right = regions::Region::at(6., 0.);
+    let write = |region: regions::Region, key, level| {
+        let writer = Writer::open(&region.path(directory.path())).unwrap();
+        writer
+            .put(key, "test", &vec![level; Tier::Terrain.side().pow(2)])
+            .unwrap();
+        writer.finish().unwrap();
+    };
+    write(left, Key::at(Tier::Terrain, 4.5, 0.5), 11.);
+    write(right, Key::at(Tier::Terrain, 5.5, 0.5), 42.);
+    let mut reader = Reader::open_region(directory.path(), left).unwrap();
+    let values = reader
+        .sample([4., 0., 6., 1.], [2, 1], Tier::Terrain)
+        .unwrap()
+        .unwrap();
+    assert_eq!(values, vec![11., 42.]);
+}

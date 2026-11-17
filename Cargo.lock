@@ -2843,6 +2843,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "tiff",
  "tile-archive",
 ]
@@ -2860,8 +2861,10 @@ dependencies = [
  "eframe",
  "egui",
  "flate2",
+ "glam",
  "gruve-sdk",
  "image",
+ "libloading 0.8.9",
  "lidar-pipeline",
  "lyon_tessellation",
  "lz4_flex",

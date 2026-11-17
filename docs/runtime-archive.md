@@ -158,3 +158,20 @@ See [platforms.md](platforms.md). `Derived/platforms.1ka` holds the small public
 inventory independently or can be copied with `pack-archive --platforms`.
 RIGS/grid 4 stores versioned point records and provenance in a single payload;
 world packing preserves original bytes and existing layer namespaces.
+
+## Moving a region of Earth contour tiles
+
+Use the cache builder to export tiles from `srtm_native_v1.sqlite` or
+`srtm_focus_cache.sqlite`. Bounds are west, south, east, north in degrees.
+The package includes the cached contour and coastline manifests in that window.
+The reported count describes available coverage, including surveyed empty tiles.
+
+```sh
+one-thousand-electric-eye-cache-builder contour-region pack /data/terrain/srtm_native_v1.sqlite region.sqlite 43 14 45 16
+one-thousand-electric-eye-cache-builder contour-region verify region.sqlite
+one-thousand-electric-eye-cache-builder contour-region install region.sqlite /destination/Derived/terrain
+```
+
+The destination transaction replaces only keys declared by the package. A
+checksum covers source type, exact bounds, tile keys, timestamps, elevations
+and original geometry bytes. Installing again refreshes the same keys.

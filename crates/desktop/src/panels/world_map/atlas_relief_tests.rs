@@ -393,8 +393,8 @@ fn atlas_retention_uses_bytes_and_recovers_covered_views() {
 fn atlas_globe_residency_keeps_old_regions_and_clear_rejects_late_loads() {
     use super::super::atlas_viewport::Region;
     let mut globe = RecentDetails {
-        budget: 256,
-        ..RecentDetails::resident()
+        budget: 768,
+        ..Default::default()
     };
     let mut local = RecentDetails {
         budget: 256,
@@ -429,7 +429,7 @@ fn atlas_globe_residency_keeps_old_regions_and_clear_rejects_late_loads() {
     assert_eq!(globe.entries.len(), 3);
     assert_eq!(
         globe.bytes, 768,
-        "resident globe bypasses ordinary LRU pressure"
+        "three regions fit the configured Globe budget"
     );
     assert!(Arc::ptr_eq(
         &globe.get(&requests[0]).unwrap().raster,
@@ -448,7 +448,7 @@ fn atlas_globe_residency_keeps_old_regions_and_clear_rejects_late_loads() {
         globe.entries.is_empty(),
         "a pre-clear worker cannot re-pin terrain"
     );
-    let delayed = Mutex::new(RecentDetails::resident());
+    let delayed = Mutex::new(RecentDetails::default());
     delayed.lock().unwrap().clear();
     assert!(
         matches!(load_detail_from(&requests[0], &delayed, 0), Err(error) if error == "Atlas request was invalidated"),

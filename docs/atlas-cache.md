@@ -106,9 +106,7 @@ when compressed heights plus colors reach its byte budget. SQLite allows 25%
 plus 256 MiB above that payload budget for pages; its journal is additional.
 
 Globe and Local keep their last GPU terrain and rendered targets when hidden,
-so switching modes/themes back does not upload them again. Normally GPU sources
-are bounded to current and incoming terrain in each mode. The Globe residency
-experiment below keeps older completed Globe windows too. Current rendering resources and the bounded background
+so switching modes/themes back does not upload them again. Globe keeps recently used completed textures within its VRAM target. Local keeps current and incoming textures. Current rendering resources and the bounded background
 save queue have separate RAM lifetimes. Cache Blast/source invalidation clears
 RAM and GPU views explicitly. Recent saved windows survive a desktop restart.
 
@@ -119,38 +117,30 @@ A bounded writer keeps compression and disk writes off the rendering path. A
 full write queue can skip a save; read/write failures fall back without hiding
 terrain. The recent-view cache is independent of OSM builds and Atlas prebuilds.
 
-## Globe residency experiment
+## Globe retention and offline regions
 
-The 4090 launcher now sets `ONEKEE_ATLAS_KEEP_GLOBE=1`. Every completed Atlas
-Globe relief tile stays in RAM and, once uploaded, VRAM until **Cache Blast**
-or desktop exit. Panning, zooming, visiting other regions and switching views
-retain it. Returning to covered terrain reuses the original rasters and uploaded
-textures immediately, even while an unrelated tile is being built. Only tiles
-intersecting current geographic coverage are submitted; retained tiles elsewhere
-add no terrain draw calls. Incomplete abandoned GPU uploads are discarded.
+Globe keeps visible terrain and evicts the least recently viewed offscreen tiles
+when prepared RAM or texture bytes exceed their targets. A native 5° Globe tile
+uses about 11 MiB in each pool. A viewport that needs more than the target
+keeps its visible tiles. `ONEKEE_ATLAS_VRAM_MIB` defaults to 512 MiB, or
+2048 MiB with the 4090 launcher. Set `ONEKEE_ATLAS_KEEP_GLOBE=0` to release
+offscreen Globe textures immediately. Recently prepared heights still follow
+the RAM budget. Cache Blast invalidates both generations.
 
-This option applies only to **Globe**. Local keeps its existing RAM budget and
-GPU replacement policy. The pinned Globe pool is separate and bypasses the RAM
-LRU budget; memory grows as new Globe regions finish loading. Startup logs the
-mode. The map reports ready, loading and uploading tile counts while filling coverage. No
-whole-planet preload is performed. Persistent disk cache behavior is unchanged.
-Cache Blast also rejects old workers so they cannot re-pin terrain after clear.
+In **Terrain Library → Offline Atlas regions**, center the map on the desired
+area and choose **Pin / update region**. Each file holds the 5° cell and
+neighboring elevation posts for continuous edges. The app copies measured
+15-arcsecond heights from the prepared archive or builds them from local GEBCO.
+**Install from file** imports the selected region from a compatible SQLite
+height archive. **Verify region** checks coverage, lengths, height values and
+per-tile CRCs. **Unpin region** frees this copy. Files live under
+`Derived/terrain/regions` and survive recent-view eviction. Updates preserve
+the previous file until the replacement has passed verification and fits
+`ONEKEE_ATLAS_PIN_MIB` (2048 MiB by default).
 
-Use `./scripts/run-4090.sh` to test. To compare against bounded residency:
-
-```sh
-ONEKEE_ATLAS_KEEP_GLOBE=0 ./scripts/run-4090.sh
-```
-
-Ordinary launches default to bounded residency unless the variable is set.
-
-
-The fixed Globe grid replaces the old camera-window keys. Existing saved Local
-windows and other cache files remain usable; the first visit to a new Globe tile
-may need a source read before that tile becomes reusable. A native 5° tile takes
-about 11 MiB of prepared RAM and 11 MiB of GPU textures. Residency is intentionally
-unbounded in the 4090 profile, so exploring more of the planet grows memory use;
-it is not a promise that the entire native-resolution planet fits in VRAM.
+Local can sample adjacent pinned regions. Finer prepared land, raw SRTM and fine
+surveys keep precedence where available. Downloads are unnecessary for a pinned
+region. Existing saved Local windows and other cache files remain usable.
 
 Regression coverage follows actual America → Rockies → Appalachians camera
 selection, including slightly changed return positions, rather than supplying

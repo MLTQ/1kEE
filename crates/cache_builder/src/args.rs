@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 pub enum Command {
     Gui,
     Atlas(crate::atlas::Command),
+    ContourRegion(Vec<String>),
     AdminLods(PathBuf),
     PackArchive(crate::archive_pack::Command),
     Pipelines(crate::pipelines::Command),
@@ -109,6 +110,7 @@ where
     match command.as_str() {
         "gui" => Ok(Command::Gui),
         "atlas" => crate::atlas::parse(args).map(Command::Atlas),
+        "contour-region" => Ok(Command::ContourRegion(args.collect())),
         "admin-lods" => {
             let dir = args.next().ok_or("Expected admin-lods <admin_cells directory>")?;
             if args.next().is_some() {
@@ -448,6 +450,9 @@ fn usage() -> String {
       --out <Derived/terrain/atlas_heights_v1.sqlite> [--srtm-root <folder>]
       [--tiers overview,terrain,land] [--gdal-bin-dir <folder>]
       [--min-lon W --min-lat S --max-lon E --max-lat N]
+  one-thousand-electric-eye-cache-builder contour-region pack CACHE REGION WEST SOUTH EAST NORTH
+  one-thousand-electric-eye-cache-builder contour-region verify REGION
+  one-thousand-electric-eye-cache-builder contour-region install REGION TERRAIN_DIRECTORY
   one-thousand-electric-eye-cache-builder admin-lods <Derived/osm/admin_cells>
   one-thousand-electric-eye-cache-builder pack-archive --out <Derived/world.1ka>
       [--osm-cache-dir <Derived/osm>] [--earth-contours <database>]

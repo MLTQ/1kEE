@@ -18,5 +18,6 @@ serde_json = "1"
 cell-format = { path = "../cell_format" }
 tile-archive = { path = "../tile_archive" }
 ring = "0.17"
+tempfile = "3"
 
 bytemuck = { version = "1", features = ["derive"] }

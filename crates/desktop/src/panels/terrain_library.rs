@@ -22,6 +22,7 @@ pub(crate) fn tick(ctx: &egui::Context, model: &mut AppModel) {
 }
 
 pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
+    super::offline_regions::show(ui, model);
     // The inventory opens SQLite; only inspect it while this section is visible.
     if !model.asset_inventory_pending() {
         model.osm_inventory = osm_ingest::OsmInventory::detect_from(model.selected_root.as_deref());

@@ -21,8 +21,7 @@ The surface shader is composed with runtime measured-height lighting. Light/styl
 
 Forest coverage binds at source slot 3 and shares the staging budget through `atlas_surface_forest`. Readiness and mask ID participate in render caching; visibility changes restore the original material without source re-upload.
 
-The ONEKEE_ATLAS_KEEP_GLOBE experiment pins every fully uploaded source in slot
-0 across geographic navigation. Slot 1 keeps ordinary current/incoming-only
-replacement. Partly staged obsolete sources are discarded in either mode. The
-active draw list is unchanged, so retained offscreen regions do not add draws.
-Explicit generation invalidation releases all pinned resources.
+Slot 0 retains fully uploaded offscreen sources within the configured VRAM target
+while a CPU owner still holds their rasters. Eviction follows last use and preserves
+active sources. Slot 1 retains current and incoming Local sources. Both modes discard
+obsolete partial uploads and clear resources on generation invalidation.

@@ -1,6 +1,7 @@
 //! Shared cache construction and the companion application entry point.
 mod admin;
-mod atlas;
+pub mod atlas;
+mod contour_region;
 mod app;
 mod build_monitor;
 mod builder_dashboard;
@@ -31,7 +32,9 @@ pub fn run() -> Result<(), String> {
         args::Command::Gui => launch_gui(),
         args::Command::Atlas(command) => atlas::run(command, &mut |p| {
             println!("[{:.1}%] {}: {}", p.fraction() * 100.0, p.state, p.message);
-        }).map(|summary| println!("{summary}")),
+        })
+        .map(|summary| println!("{summary}")),
+        args::Command::ContourRegion(args) => contour_region::run(&args).map_err(|e| e.to_string()),
         args::Command::AdminLods(dir) => {
             let mut found = false;
             for level in 2..=11 {

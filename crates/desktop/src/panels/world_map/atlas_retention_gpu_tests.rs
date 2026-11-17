@@ -196,6 +196,15 @@ fn atlas_gpu_globe_regions_stay_resident_but_local_still_evicts() {
             );
             assert_eq!(res.slots[1].sources.len(), 1);
         }
+        if keep {
+            res.globe_budget = bytes_per_region * 3;
+            for &i in &[0, 1, 0, 2] {
+                prepare(&mut res, &make_globe(regions[i].clone()));
+            }
+            assert!(res.slots[0].sources.contains_key(&regions[0].id));
+            assert!(!res.slots[0].sources.contains_key(&regions[1].id));
+            assert_eq!(res.slots[0].sources.len(), 3);
+        }
         // Abandoned partial GPU uploads are not completed tiles and must not
         // accumulate when the user navigates before staging finishes.
         let partial = raster(2048, [0., 40., 10., 50.]);
@@ -274,8 +283,7 @@ fn atlas_gpu_camera_tiles_revisit_without_build_or_upload() {
                     8192,
                     &wanted,
                     true,
-                    true,
-                    1,
+                    64 << 20,
                     move |key, _, _| {
                         *builds.lock().unwrap().entry(key).or_default() += 1;
                         Ok(make_tile(key, 65))

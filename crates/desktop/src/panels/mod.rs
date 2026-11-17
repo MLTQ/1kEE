@@ -8,6 +8,7 @@ mod follow_recap;
 pub(crate) mod layer_drawer;
 pub(crate) mod layer_file_import;
 mod map_rail;
+mod offline_regions;
 mod replay_controls;
 pub(crate) mod settings;
 mod status_log;

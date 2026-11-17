@@ -6,6 +6,7 @@ use wgpu::util::DeviceExt;
 mod forest;
 
 struct Source {
+    touched: u64,
     raster: Arc<Raster>,
     height: wgpu::Texture,
     color: wgpu::Texture,
@@ -23,6 +24,7 @@ struct Target {
 }
 #[derive(Default)]
 struct Slot {
+    tick: u64,
     sources: HashMap<u64, Source>,
     active: Vec<u64>,
     target: Option<Target>,
@@ -41,6 +43,7 @@ pub(super) struct Resources {
     slots: [Slot; 2],
     generation: u64,
     keep_globe: bool,
+    globe_budget: usize,
     #[cfg(test)]
     uploaded_bytes: usize,
 }
@@ -236,6 +239,7 @@ impl Resources {
             sampler,
             slots: Default::default(),
             generation: GENERATION.load(Ordering::Relaxed),
+            globe_budget: crate::gpu_config::settings().atlas_gpu_bytes,
             keep_globe: crate::gpu_config::settings().atlas_keep_globe,
             #[cfg(test)]
             uploaded_bytes: 0,
@@ -256,6 +260,7 @@ impl Resources {
             &forest.texture,
         );
         Source {
+            touched: 0,
             raster,
             height,
             color,
@@ -318,9 +323,11 @@ impl Resources {
             }
         }
         let state = &mut self.slots[slot];
+        state.tick = state.tick.wrapping_add(1);
         let mut budget = 8 * 1024 * 1024;
         for raster in &callback.data {
             let source = state.sources.get_mut(&raster.id).unwrap();
+            source.touched = state.tick;
             while source.row < raster.size[1] {
                 let rows = (512 * 1024 / (raster.size[0] * 8))
                     .max(1)
@@ -412,8 +419,32 @@ impl Resources {
             .collect();
         state.sources.retain(|id, source| {
             keep.contains(id)
-                || (slot == 0 && self.keep_globe && source.row == source.raster.size[1])
+                || (slot == 0
+                    && self.keep_globe
+                    && source.row == source.raster.size[1]
+                    && Arc::strong_count(&source.raster) > 1)
         });
+        if slot == 0 && self.keep_globe {
+            // Height and pigment textures each use four bytes per post.
+            let bytes = |s: &Source| s.raster.size[0] * s.raster.size[1] * 8;
+            let mut used: usize = state.sources.values().map(bytes).sum();
+            if used > self.globe_budget {
+                let mut cold: Vec<_> = state
+                    .sources
+                    .iter()
+                    .filter(|(id, _)| !keep.contains(id))
+                    .map(|(id, s)| (s.touched, *id, bytes(s)))
+                    .collect();
+                cold.sort_unstable();
+                for (_, id, size) in cold {
+                    state.sources.remove(&id);
+                    used -= size;
+                    if used <= self.globe_budget {
+                        break;
+                    }
+                }
+            }
+        }
         if slot == 0 {
             let uploading = callback.data.len() - state.active.len();
             let changed = callback.ctx.data_mut(|d| {

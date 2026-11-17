@@ -9,6 +9,8 @@ pub(crate) struct Settings {
     pub upload_bytes: usize,
     pub upload_us: u64,
     pub atlas_cpu_bytes: usize,
+    pub atlas_gpu_bytes: usize,
+    pub atlas_pin_bytes: usize,
     pub atlas_disk_bytes: usize,
     pub atlas_keep_globe: bool,
 }
@@ -38,9 +40,11 @@ pub(crate) fn settings() -> &'static Settings {
         cpu_bytes: setting("ONEKEE_CPU_CACHE_MIB", 4096, 256, 65536) * 1024 * 1024,
         upload_bytes: setting("ONEKEE_UPLOAD_MIB", 4, 1, 64) * 1024 * 1024,
         upload_us: setting("ONEKEE_UPLOAD_US", 2000, 100, 8000) as u64,
+        atlas_pin_bytes: setting("ONEKEE_ATLAS_PIN_MIB", 2048, 16, 262144) * 1024 * 1024,
+        atlas_gpu_bytes: setting("ONEKEE_ATLAS_VRAM_MIB", 512, 16, 32768) * 1024 * 1024,
         atlas_cpu_bytes: setting("ONEKEE_ATLAS_RAM_MIB", 1024, 256, 32768) * 1024 * 1024,
         atlas_disk_bytes: setting("ONEKEE_ATLAS_DISK_MIB", 8192, 512, 262144) * 1024 * 1024,
-        atlas_keep_globe: setting("ONEKEE_ATLAS_KEEP_GLOBE", 0, 0, 1) == 1,
+        atlas_keep_globe: setting("ONEKEE_ATLAS_KEEP_GLOBE", 1, 0, 1) == 1,
     })
 }
 
@@ -60,7 +64,8 @@ pub(crate) fn log_settings() {
     );
     if s.atlas_keep_globe {
         eprintln!(
-            "[1kEE GPU] Atlas Globe retains completed relief in RAM/VRAM until Cache Blast or exit; Local remains bounded"
+            "[1kEE GPU] Atlas Globe texture retention target {} MiB",
+            s.atlas_gpu_bytes / 1048576
         );
     }
 }
