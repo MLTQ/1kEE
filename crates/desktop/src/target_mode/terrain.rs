@@ -182,7 +182,11 @@ pub(super) fn read(path: &Path, region: Region, label: &str) -> Result<Terrain, 
                     north as f32,
                     if valid(h) { h } else { f32::NAN },
                 ],
-                color: [85, 112, 119, 255],
+                color: {
+                    let [r, g, b] =
+                        crate::panels::world_map::elevation_color(h).map(|v| v.round() as u8);
+                    [r, g, b, 255]
+                },
                 class: 0,
             });
         }

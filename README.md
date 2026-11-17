@@ -73,6 +73,9 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
   locations, rings mark approximate locations, and purple squares mark rules with
   coordinates. Click a marker for details. **Browse buildout** opens
   all campuses, jurisdictional rules and dated news with source links.
+- **Offline terrain** — center the map and open **Terrain Library → Offline Atlas regions**
+  to pin, update or verify a region. In **Target → DEM terrain**, adjust the light or
+  select **Elevation profile** to measure a section. [Atlas storage](docs/atlas-cache.md) · [Target controls](docs/target-mode.md)
 - **Atlas appearance** — choose **Settings → Appearance → ATLAS** for cream-paper
   controls, richer red/ochre elevation tints, deep blue bathymetry and lit GEBCO
   3D terrain in Earth Globe and Local views. Heights displace the actual surface;

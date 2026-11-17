@@ -39,7 +39,39 @@ pub(super) fn run(mut command: Command, active: &Path, label: &str) -> Result<()
     result
 }
 
+#[path = "projection_native.rs"]
+mod native;
+
 pub(crate) fn xy(crs: &str, points: &mut [[f64; 2]], active: &Path) -> Result<(), String> {
+    if !active.is_file() || gdal::shutdown_requested().load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("Target closed".into());
+    }
+    if points.len() > 32_768 {
+        return Err("Coordinate batch exceeds the Target limit".into());
+    }
+    if points.is_empty() {
+        return Ok(());
+    }
+    thread_local! {
+        static WORKER: std::cell::RefCell<Option<native::Projection>> = Default::default();
+    }
+    let converted = WORKER.with_borrow_mut(|worker| {
+        if worker.as_ref().is_none_or(|w| w.crs != crs) {
+            *worker = native::Projection::new(crs);
+        }
+        worker.as_ref().map(|w| w.convert(points))
+    });
+    match converted {
+        Some(result) => result?,
+        None => cli_xy(crs, points, active)?,
+    }
+    if !active.is_file() || gdal::shutdown_requested().load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("Target closed".into());
+    }
+    Ok(())
+}
+
+fn cli_xy(crs: &str, points: &mut [[f64; 2]], active: &Path) -> Result<(), String> {
     if points.is_empty() {
         return Ok(());
     }
@@ -92,7 +124,12 @@ mod tests {
     fn projected_xy_keeps_order_precision_and_cancellation() {
         let active = tempfile::NamedTempFile::new().unwrap();
         let mut p = [[180352.3369445393, 706671.4663639435], [181000., 700000.]];
+        let mut reference = p;
+        cli_xy("EPSG:2039", &mut reference, active.path()).unwrap();
         xy("EPSG:2039", &mut p, active.path()).unwrap();
+        for (actual, expected) in p.into_iter().flatten().zip(reference.into_iter().flatten()) {
+            assert!((actual - expected).abs() < 1e-10);
+        }
         assert!((p[0][0] - 34.78855934677259).abs() < 0.00002);
         assert!(p[0][1] > p[1][1]);
         let mut same = p;

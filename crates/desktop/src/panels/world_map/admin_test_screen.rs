@@ -87,6 +87,15 @@ impl Screen {
             ),
         );
     }
+    #[allow(dead_code)]
+    pub fn install_target(&mut self) {
+        self.renderer.callback_resources.insert(
+            crate::panels::world_map::target_pass::Resources::new(
+                &self.device,
+                wgpu::TextureFormat::Rgba8Unorm,
+            ),
+        );
+    }
     pub fn render(
         &mut self,
         ctx: &egui::Context,

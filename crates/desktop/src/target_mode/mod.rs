@@ -1,5 +1,6 @@
 //! Transient Target session, source jobs and a camera independent of Local.
 pub(crate) mod camera;
+pub(crate) mod profile;
 mod context;
 mod terrain;
 pub(crate) mod project;
@@ -107,6 +108,8 @@ pub(crate) struct Session {
     pub show_points: bool,
     pub show_terrain: bool,
     pub show_context: bool,
+    pub profile: profile::Profile,
+    pub light: crate::atlas_style::AtlasStyle,
     pub class_mask: u32,
     pub color_mode: u32,
     pub point_size: f32,
@@ -156,6 +159,7 @@ impl Session {
         next.class_mask = self.class_mask;
         next.color_mode = self.color_mode;
         next.point_size = self.point_size;
+        next.light = self.light;
         Ok(next)
     }
     fn configured(
@@ -207,6 +211,11 @@ impl Session {
             show_points: true,
             show_terrain: true,
             show_context: true,
+            profile: Default::default(),
+            light: crate::atlas_style::AtlasStyle {
+                altitude_deg: 18.,
+                ..Default::default()
+            },
             class_mask: u32::MAX,
             color_mode: 0,
             point_size: 2.,
@@ -504,6 +513,11 @@ pub(crate) mod tests {
             show_points: true,
             show_terrain: false,
             show_context: false,
+            profile: Default::default(),
+            light: crate::atlas_style::AtlasStyle {
+                altitude_deg: 18.,
+                ..Default::default()
+            },
             class_mask: u32::MAX,
             color_mode: 0,
             point_size: 2.,

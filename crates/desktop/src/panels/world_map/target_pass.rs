@@ -18,6 +18,7 @@ struct Uniforms {
     viewport: [f32; 4],
     flags: [u32; 4],
     height: [f32; 4],
+    light: [f32; 4],
 }
 #[derive(Clone)]
 pub(crate) struct Draw {
@@ -33,6 +34,7 @@ pub(crate) struct Draw {
     pub class_mask: u32,
     pub color_mode: u32,
     pub point_size: f32,
+    pub light: [f32; 4],
     pub rect: egui::Rect,
     pub ctx: egui::Context,
 }
@@ -420,6 +422,7 @@ impl Resources {
             ],
             flags: [draw.class_mask, draw.color_mode, 0, 0],
             height: [ground, 150., 0., 0.],
+            light: draw.light,
         };
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniforms));
         let texture = self.texture.as_ref().unwrap();

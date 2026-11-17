@@ -316,6 +316,20 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
             ui.small(&session.status);
             if session.loading() {ui.small(format!("{:.0}s",session.started.elapsed().as_secs_f64()));}
         });
+        if session.show_terrain && session.terrain.is_some() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Terrain light");
+                ui.add(egui::Slider::new(&mut session.light.azimuth_deg,0.0..=360.0).suffix("°").text("bearing"));
+                ui.add(egui::Slider::new(&mut session.light.altitude_deg,5.0..=85.0).suffix("°").text("altitude"));
+                if ui.selectable_label(session.profile.enabled,"Elevation profile").clicked() {
+                    session.profile.enabled = !session.profile.enabled;
+                    session.camera.looking = false;
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
+                }
+            });
+            if session.profile.enabled {session.profile.chart(ui);}
+        }
         ui.small(&session.terrain_status);ui.small(&session.context_status);
         if session.unverified_heights() {
             ui.colored_label(egui::Color32::from_rgb(231,186,103),"Unverified heights · original source Z shown together; matching height datum / units are not established.");
@@ -378,11 +392,25 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
         egui::Sense::click_and_drag(),
     );
     let rect = response.rect;
-    flight_input(&mut session, &response, ui.ctx(), fly);
+    if fly || !session.show_terrain {
+        session.profile.enabled = false;
+    }
+    if session.profile.enabled {
+        if let Some(dem) = &session.terrain {
+            session
+                .profile
+                .input(&response, dem, session.region, &session.camera);
+        }
+    } else {
+        flight_input(&mut session, &response, ui.ctx(), fly);
+    }
     painter.rect_filled(rect, 0., egui::Color32::from_rgb(10, 18, 23));
     painter.add(egui_wgpu_callback(&session, rect, ui.ctx()));
     draw_boundary(&painter, rect, &session);
-    if !session.loading() && session.points==0 && session.terrain.is_none() {
+    if session.profile.enabled {
+        session.profile.draw_path(&painter, rect, &session.camera);
+    }
+    if !session.loading() && session.points == 0 && session.terrain.is_none() {
         painter.text(rect.center(),egui::Align2::CENTER_CENTER,
             "No Target data loaded here\nSurvey boundaries show published coverage; a readable point or DEM source is required.\nSee the source status above for details.",
             egui::FontId::proportional(16.),theme::text_muted());
@@ -422,9 +450,11 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
             egui::Stroke::new(1.0_f32, theme::text_muted()),
         );
     }
-    painter.text(rect.left_bottom()+egui::vec2(16.,-16.),egui::Align2::LEFT_BOTTOM,
+    if !session.profile.enabled {
+        painter.text(rect.left_bottom()+egui::vec2(16.,-16.),egui::Align2::LEFT_BOTTOM,
         format!("CLICK TO FLY · MOUSE LOOK · WASD · SPACE / C UP / DOWN\nSHIFT BOOST · WHEEL SPEED · RMB RELEASE · HOME RESET · ESC LOCAL\nE {:.1} m  N {:.1} m  Z {:.2} {}",session.camera.eye[0],session.camera.eye[1],session.camera.eye[2],
             if session.show_points {"source units"} else {"m (DEM)"}),egui::FontId::monospace(11.),theme::text_muted());
+    }
     if session.loading() {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(100));
@@ -471,6 +501,7 @@ fn egui_wgpu_callback(s: &Session, rect: egui::Rect, ctx: &egui::Context) -> egu
             class_mask: s.class_mask,
             color_mode: s.color_mode,
             point_size: s.point_size,
+            light: s.light.light(0.),
             rect,
             ctx: ctx.clone(),
         },
@@ -576,3 +607,7 @@ fn draw_boundary(painter: &egui::Painter, rect: egui::Rect, s: &Session) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "target_inspector_tests.rs"]
+mod inspector_tests;

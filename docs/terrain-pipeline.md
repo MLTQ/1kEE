@@ -513,3 +513,8 @@ Hard process termination can still leave temporary files behind.
 Persistent contour-cache growth still needs a budget/reclamation policy
 (tracked in `1kee-8ce`). The safeguards prevent further futile builds on a full
 volume; they do not free existing cached geometry or guarantee indefinite space.
+
+The Local reader decodes contiguous XY pairs and sends lines wholly inside the
+owned core directly to the renderer. Boundary crossings still use the tile
+clipper. Line readiness on CPU and GPU now precedes optional occlusion
+refinement. See the [paired tile measurements](benchmarks/terrain-loading-2026-11-17.md).

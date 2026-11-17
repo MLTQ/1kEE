@@ -4,6 +4,7 @@ struct Uniforms {
     viewport: vec4<f32>, // physical width, height, point radius px, radial metres
     flags: vec4<u32>, // class mask, color mode
     height: vec4<f32>,
+    light: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
 struct Input {
@@ -67,9 +68,13 @@ fn linear_rgb(rgb: vec3<f32>) -> vec3<f32> {
 }
 @fragment fn fs_surface(input: Output) -> @location(0) vec4<f32> {
     let normal = normalize(cross(dpdx(input.world),dpdy(input.world)));
-    let illumination = 0.25 + 0.75 * abs(dot(normal,normalize(vec3<f32>(0.4,-0.5,0.75))));
+    let up = select(-normal, normal, normal.z >= 0.);
+    let relief = normalize(vec3<f32>(up.xy * 3., up.z));
+    let diffuse = max(dot(relief, u.light.xyz), 0.);
+    let lit = clamp(0.64 + (diffuse - u.light.z) * 1.6, 0.12, 1.15);
+    let pigment = mix(vec3<f32>(0.72,0.81,0.96), vec3<f32>(1.04,1.01,0.95), min(lit,1.));
     if length(input.xy) > u.viewport.w { discard; }
-    return vec4<f32>(linear_rgb(input.color.rgb) * illumination,1.);
+    return vec4<f32>(linear_rgb(input.color.rgb) * pigment * lit,1.);
 }
 @fragment fn fs_lines(input: Output) -> @location(0) vec4<f32> {
     if length(input.xy) > u.viewport.w { discard; }

@@ -1,11 +1,8 @@
 # Target point coordinate transforms
 
-Transforms a bounded batch of at most 32,768 source XY coordinates through the
-configured `gdaltransform`, preserving float64 input and parsed output. Native
-source Z never enters the process. Source LAS must declare a usable horizontal
-reference; an undeclared or unhandled compound reference is rejected.
-
-Temporary file streams avoid pipe deadlocks. Each process checks the Target
-cancellation marker and application shutdown, times out after 30 seconds and
-is killed/reaped on failure. PROJ network fetching is disabled. Output size,
-line count and numeric validity are checked before the batch is used.
+Each point-loading thread reuses a private PROJ context and a normalized
+horizontal transform for the current declared CRS. It converts up to 32,768
+float64 XY pairs in place. Original source elevations and attributes stay with
+their returns. Both paths disable PROJ network access. Cancellation is checked
+between bounded batches. The configured GDAL executable remains the fallback
+when the runtime library or requested operation is unavailable.

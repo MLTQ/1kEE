@@ -21,7 +21,9 @@ Without `ONEKEE_GPU`, the existing eframe adapter selection remains unchanged.
 | `ONEKEE_CPU_CACHE_MIB` | 4096 | 12288 | 256–65536 |
 | `ONEKEE_ATLAS_RAM_MIB` | 1024 | 8192 | 256–32768 |
 | `ONEKEE_ATLAS_DISK_MIB` | 8192 | 32768 | 512–262144 |
-| `ONEKEE_ATLAS_KEEP_GLOBE` | 0 | 1 | 0–1 |
+| `ONEKEE_ATLAS_VRAM_MIB` | 512 | 2048 | 16–32768 |
+| `ONEKEE_ATLAS_PIN_MIB` | 2048 | 2048 | 16–262144 |
+| `ONEKEE_ATLAS_KEEP_GLOBE` | 1 | 1 | 0–1 |
 | `ONEKEE_UPLOAD_MIB` | 4 | 16 | 1–64 |
 | `ONEKEE_UPLOAD_US` | 2000 | 2000 | 100–8000 |
 
@@ -32,9 +34,9 @@ For example, `ONEKEE_UPLOAD_MIB=8 ./scripts/run-4090.sh` tries a smaller upload 
 budgets too: the script's memory profile is intended for the 24 GiB card.
 
 The Atlas settings govern prepared height/color RAM and compressed disk caches
-separately from contour memory. With `ONEKEE_ATLAS_KEEP_GLOBE=1`, completed Globe
-geographic tiles bypass RAM eviction and their GPU textures stay resident until Cache
-Blast or exit; Local remains bounded. Use `0` for a bounded-residency comparison.
+separately from contour memory. Completed Globe tiles use a visibility-aware RAM and VRAM LRU.
+Setting `ONEKEE_ATLAS_KEEP_GLOBE=0` releases offscreen textures immediately.
+Pinned regions have a separate disk budget.
 See [Atlas reuse](atlas-cache.md#interactive-map-reuse).
 
 Memory settings are terrain retention targets, not reservations or
@@ -45,8 +47,9 @@ Defaults on other machines are unchanged, and no VRAM capacity is guessed from
 wgpu's maximum single-buffer size.
 
 The upload budget is shared across line layers within each globe/local frame.
-Both byte and elapsed submission limits still apply. The time limit cannot
-preempt a driver allocation already in progress and does not measure GPU execution.
+Both byte and elapsed admission limits apply. Native Globe driver allocations,
+copies and buffer retirement run on a worker. Exact-size retired buffers can
+be reused within a pool limited to twice the per-frame byte allowance.
 Complete snapshots replace older geometry atomically. Increasing bytes can reduce
 frames needed to publish a tile only when bytes, rather than time, limit progress.
 
@@ -250,3 +253,6 @@ benchmark. Clippy completed with existing repository warnings. The cache-builder
 suite was rerun serially after an unrelated compact-PBF lock failure; follow-up
 `1kee-990` records that failure. Wider terrain/topology and interactive validation
 remain tracked by `1kee-988`.
+
+For native terrain staging, a paced camera route and Local tile read timings,
+see the [November 2026 terrain measurements](benchmarks/terrain-loading-2026-11-17.md).

@@ -106,6 +106,11 @@ fn draw(ctx: egui::Context) -> Draw {
         context_visible: false,
         class_mask: u32::MAX,
         color_mode: 0,
+        light: crate::atlas_style::AtlasStyle {
+            altitude_deg: 18.,
+            ..Default::default()
+        }
+        .light(0.),
         point_size: 5.,
         rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(64., 64.)),
         ctx,
@@ -313,6 +318,11 @@ fn target_live_nc_cutout_benchmark() {
         context_visible: false,
         class_mask: u32::MAX,
         color_mode: 0,
+        light: crate::atlas_style::AtlasStyle {
+            altitude_deg: 18.,
+            ..Default::default()
+        }
+        .light(0.),
         point_size: 1.2,
         rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280., 720.)),
         ctx: ctx.clone(),
@@ -488,6 +498,11 @@ fn target_live_hundred_kilometre_overview() {
         context_visible: false,
         class_mask: u32::MAX,
         color_mode: 0,
+        light: crate::atlas_style::AtlasStyle {
+            altitude_deg: 18.,
+            ..Default::default()
+        }
+        .light(0.),
         point_size: 1.5,
         rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280., 720.)),
         ctx,
@@ -604,6 +619,11 @@ fn target_live_israel_original_points_and_retained_dem() {
         context_visible: false,
         class_mask: u32::MAX,
         color_mode: 0,
+        light: crate::atlas_style::AtlasStyle {
+            altitude_deg: 18.,
+            ..Default::default()
+        }
+        .light(0.),
         point_size: 1.5,
         rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280., 720.)),
         ctx: egui::Context::default(),
@@ -631,7 +651,25 @@ fn target_live_israel_original_points_and_retained_dem() {
     draw.camera.reset(terrain.center_height());
     let dem = render(&mut resources, &draw, &device, &queue);
     assert_ne!(points, dem);
-    for (name, rgba) in [("points", points), ("dem", dem)] {
+    let index_buffer = resources.indices.as_ref().unwrap().1.clone();
+    draw.light = crate::atlas_style::AtlasStyle {
+        azimuth_deg: 135.,
+        altitude_deg: 18.,
+        ..Default::default()
+    }
+    .light(0.);
+    let relit = render(&mut resources, &draw, &device, &queue);
+    let changed = dem
+        .chunks_exact(4)
+        .zip(relit.chunks_exact(4))
+        .filter(|(a, b)| a != b)
+        .count();
+    assert!(
+        changed > 1_000,
+        "changing light must relight visible terrain: {changed}"
+    );
+    assert_eq!(index_buffer, resources.indices.as_ref().unwrap().1);
+    for (name, rgba) in [("points", points), ("dem", dem), ("dem-relit", relit)] {
         let mut encoder = png::Encoder::new(
             std::fs::File::create(format!("/tmp/1kee-target-israel-{name}.png")).unwrap(),
             1280,
@@ -819,6 +857,11 @@ fn target_live_merged_hudson_sources_fill_neighbor_coverage() {
         context_visible: false,
         class_mask: u32::MAX,
         color_mode: 0,
+        light: crate::atlas_style::AtlasStyle {
+            altitude_deg: 18.,
+            ..Default::default()
+        }
+        .light(0.),
         point_size: 1.0,
         rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280., 720.)),
         ctx: egui::Context::default(),

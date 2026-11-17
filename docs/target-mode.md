@@ -21,6 +21,18 @@ controls; **Home** resets the Target camera. Flight can pass through surfaces
 and go outside the fixed cut-out. It never requests a new geographic region as
 the camera moves. The boundary stays at the selected radius from its center.
 
+## Inspecting measured terrain
+
+Enable **DEM terrain**. Use **Bearing** and **Altitude** to move the low-angle
+light across the surface. Choose **Elevation profile**, then click two points
+on the terrain or drag from A to B. The chart shows horizontal distance,
+minimum and maximum elevation, and relief in metres. Hover over the chart to
+read distance and height at a sample. Gaps indicate missing DEM data. Picking
+uses the visible triangles and the profile samples the underlying height grid.
+Click again to start another section. **Fly** returns to navigation.
+
+![A 661 m terrain profile crosses the Sharon sea cliff, showing 46.22 m of measured relief.](benchmarks/target-sharon-cliff-profile.png)
+
 ## Data and accuracy
 
 - **Point cloud** defaults to **All surveys (merge)**, combining original
@@ -52,6 +64,9 @@ England/Netherlands/France services; other fine-source adapters retain their
 small-window limits to prevent a large COG/tile download fanout. Point-cloud
 detail remains controlled by its separate point and transfer budgets. A
 100 km radius covers 10,000 times the area of a one-kilometre radius.
+
+Projected LAS batches share an offline PROJ transform on their loading thread.
+Systems without the native transform use the configured GDAL executable.
 
 Source XYZ is decoded as float64. WGS84 selection and local metre offsets are
 calculated before conversion to GPU float32; the local-coordinate regression
