@@ -54,13 +54,15 @@ pub fn sources(catalog: &Path, region: Region) -> Result<Vec<Source>> {
     let mut query = db
         .prepare(
             "SELECT id,coalesce(date,''),name FROM surveys
-        WHERE id LIKE 'USGS_3DEP_ID:%' AND south<?3 AND north>?4
+        WHERE id LIKE 'USGS_3DEP_ID:%' AND rowid IN
+        (SELECT rowid FROM surveys WHERE south<?3 AND north>?4
         AND ((west<?1 AND east>?2) OR (west<?1-360 AND east>?2-360)
-            OR (west<?1+360 AND east>?2+360)) ORDER BY date DESC,id LIMIT 16",
+            OR (west<?1+360 AND east>?2+360)))
+        ORDER BY CASE WHEN west<=?5 AND east>=?5 AND south<=?6 AND north>=?6 THEN 0 ELSE 1 END,date DESC,id LIMIT 16",
         )
         .map_err(err)?;
     query
-        .query_map(params![e, w, n, s], |r| {
+        .query_map(params![e, w, n, s, region.lon, region.lat], |r| {
             Ok(Source {
                 id: r.get(0)?,
                 date: r.get(1)?,
@@ -302,6 +304,46 @@ fn walk(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn regional_candidates_prefer_center_coverage_and_preserve_wrapped_footprints() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.sqlite");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE surveys(id TEXT,name TEXT,date TEXT,west REAL,south REAL,east REAL,north REAL);
+            CREATE INDEX surveys_extent ON surveys(west,east,south,north);
+            INSERT INTO surveys VALUES('USGS_3DEP_ID:fringe','fringe','2026',0.3,-0.1,0.6,0.1);
+            INSERT INTO surveys VALUES('USGS_3DEP_ID:center','center','2020',-0.1,-0.1,0.1,0.1);
+            INSERT INTO surveys VALUES('USGS_3DEP_ID:date-line','wrapped','2020',-181,-1,-179,1);").unwrap();
+        let candidates = sources(
+            &path,
+            Region {
+                lon: 0.,
+                lat: 0.,
+                radius_m: 100_000.,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            ["center", "fringe"]
+        );
+        assert_eq!(
+            sources(
+                &path,
+                Region {
+                    lon: 179.99,
+                    lat: 0.,
+                    radius_m: 100_000.
+                }
+            )
+            .unwrap()[0]
+                .name,
+            "wrapped"
+        );
+    }
     #[test]
     #[ignore = "downloads original NC EPT points into a writable ONEKEE_TARGET_TEST_CATALOG cache"]
     fn live_target_nc_original_points() {

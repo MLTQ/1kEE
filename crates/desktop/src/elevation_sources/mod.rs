@@ -134,6 +134,9 @@ impl Request {
         }
     }
     fn valid(self) -> bool {
+        self.valid_window(0.25)
+    }
+    fn valid_window(self, max_span: f64) -> bool {
         let b = self.bounds;
         [b.min_lon, b.min_lat, b.max_lon, b.max_lat]
             .iter()
@@ -146,8 +149,8 @@ impl Request {
             && b.max_lat <= 85.0
             && (16..=2400).contains(&self.width)
             && (16..=2400).contains(&self.height)
-            && b.max_lon - b.min_lon <= 0.25
-            && b.max_lat - b.min_lat <= 0.25
+            && b.max_lon - b.min_lon <= max_span
+            && b.max_lat - b.min_lat <= max_span
     }
 }
 
@@ -158,15 +161,48 @@ pub fn fetch(
     width: u32,
     height: u32,
     destination: &Path,
-    mut on_bytes: impl FnMut(u64, Option<u64>),
+    on_bytes: impl FnMut(u64, Option<u64>),
 ) -> Result<Provider> {
-    let _deadline = Deadline::start();
     let request = Request {
         bounds,
         width,
         height,
     };
-    if !request.valid() {
+    fetch_request(request, false, destination, on_bytes)
+}
+
+/// Regional Target overviews use server-side bounded numeric exports only.
+/// The ordinary fine-window and multi-COG fanout limits remain unchanged.
+pub(crate) fn fetch_target(
+    region: lidar_pipeline::region::Region,
+    size: u32,
+    destination: &Path,
+    on_bytes: impl FnMut(u64, Option<u64>),
+) -> Result<Provider> {
+    if !region.valid() {
+        return Err(Error::Failed("invalid Target radius".into()));
+    }
+    let [w, s, e, n] = region.bounds();
+    fetch_request(
+        Request {
+            bounds: Bounds { min_lon: w, min_lat: s, max_lon: e, max_lat: n },
+            width: size,
+            height: size,
+        },
+        true,
+        destination,
+        on_bytes,
+    )
+}
+fn fetch_request(
+    request: Request,
+    target: bool,
+    destination: &Path,
+    mut on_bytes: impl FnMut(u64, Option<u64>),
+) -> Result<Provider> {
+    let _deadline = Deadline::start();
+    let wide = !request.valid();
+    if wide && (!target || !request.valid_window(4.)) {
         return Err(Error::Failed("invalid elevation window".into()));
     }
     let scratch = Scratch::new(destination)?;
@@ -174,6 +210,8 @@ pub fn fetch(
     for provider in PROVIDERS
         .into_iter()
         .filter(|p| p.contains(request.center()))
+        .filter(|p| !wide || matches!(p,
+            Provider::England | Provider::Netherlands | Provider::France | Provider::NorthCarolina))
     {
         let _permit = Permit::acquire(provider)?;
         let result = match provider {

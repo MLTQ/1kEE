@@ -91,18 +91,7 @@ pub(super) fn load(region: Region, active: &Path) -> Result<Terrain, String> {
     };
     let mut provider = None;
     let fetched = if crate::elevation_sources::possible_at(center) {
-        match crate::elevation_sources::fetch(
-            crate::elevation_sources::Bounds {
-                min_lon: w,
-                min_lat: s,
-                max_lon: e,
-                max_lat: n,
-            },
-            2048,
-            2048,
-            &raster,
-            |_, _| {},
-        ) {
+        match crate::elevation_sources::fetch_target(region, 2048, &raster, |_, _| {}) {
             Ok(p) => {
                 provider = Some(p);
                 true

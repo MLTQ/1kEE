@@ -4,6 +4,12 @@ Owns the selected WGS84 Region, independent flight camera, immutable measured
 point batches, numeric DEM, draped map context and cancellation markers.
 AppModel keeps Local's GlobeViewState untouched while Target is active.
 
+Radius ranges from 100 m to 100 km and persists across Target exit/re-entry in
+the current app session. Selection preview updates immediately; changing an
+open cut-out uses explicit Apply radius, retaining survey, budget and display
+options while resetting the independent camera to fit the new extent. Large
+extents use bounded overview terrain and central-window cached vector detail.
+
 The point worker uses a bounded channel and a shared EPT permit. It converts
 float64 geographic offsets to 20-byte GPU vertices off the UI thread. Survey
 headers publish with their first actual batch. A failed or empty refresh keeps

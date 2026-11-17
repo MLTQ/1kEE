@@ -1,7 +1,8 @@
 # Fused LiDAR elevation layer
 
 The Earth sidebar has one **Layers → Base → Lidar** toggle. Globe draws all
-cataloged survey outlines. Local reads compact numeric rasters prepared from
+cataloged survey outlines. Local also draws teal catalog outlines, including
+unprepared surveys, and reads compact numeric rasters prepared from
 downloaded scans and fuses acquisitions in descending catalog-date order. A newer
 scan wins only at measured pixels; older measurements can fill gaps. Regions
 without measurements stay transparent. Missing USGS 3DEP views now prepare

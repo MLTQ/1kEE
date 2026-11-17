@@ -43,6 +43,7 @@ pub(super) fn completed<T>(job: &mut Option<ReadJob<T>>) -> Option<Result<T, Str
 pub(crate) struct Layer {
     pub(crate) enabled: bool,
     pub(crate) tiles: Tiles,
+    pub(crate) coverage:crate::panels::world_map::lidar_coverage::Coverage,
     path: PathBuf,
     last_check: Option<Instant>,
     work: Option<ReadJob<String>>,
@@ -134,20 +135,23 @@ pub(crate) fn tick(ctx: &egui::Context, model: &mut AppModel) {
     if let Some(result) = refreshed {
         b.status = result.unwrap_or_else(|error| error);
     }
-    if !b.enabled || model.active_body != ActiveBody::Earth {
+    if (!b.enabled && !model.target.selecting) || model.active_body != ActiveBody::Earth {
         b.tiles.stop();
+        b.coverage.suspend();
         return;
     }
     if model.target.session.is_some() {
         b.tiles.suspend_preparation();
         return;
     }
+    b.coverage.tick(ctx,&b.path,model.globe_view.local_mode);
     if b.work.is_none()
         && b.last_check
             .is_none_or(|t| t.elapsed() >= Duration::from_secs(86400))
     {
         check(ctx, b);
     }
+    if !b.enabled {return;}
     if b.tiles.poll_catalog(ctx, &b.path, force) {
         let view = if model.globe_view.local_mode {
             View::Fused
@@ -165,12 +169,15 @@ pub(crate) fn toggle(ui: &mut egui::Ui, model: &mut AppModel) {
     let mut enabled = model.lidar.enabled;
     if ui
         .checkbox(&mut enabled, "Lidar")
-        .on_hover_text("Globe: all survey boundaries. Local: fused lidar data. USGS coverage is prepared in the background when you visit.")
+        .on_hover_text("Globe: all survey boundaries. Local: teal survey outlines and fused lidar data. Target also shows coverage while selecting.")
         .changed()
     {
         model.lidar.set_enabled(enabled);
     }
     if model.lidar.enabled {
+        if model.globe_view.local_mode && !model.lidar.coverage.status.is_empty() {
+            ui.small(&model.lidar.coverage.status).on_hover_text("Published survey footprints, including unprepared data. Outlines use cached ground heights where available.");
+        }
         let status = if !model.lidar.tiles.status.is_empty() {
             &model.lidar.tiles.status
         } else {

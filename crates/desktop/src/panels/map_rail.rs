@@ -114,13 +114,19 @@ fn view_buttons(ui: &mut egui::Ui, model: &mut AppModel) {
     });
     if model.active_body == ActiveBody::Earth && model.globe_view.local_mode
         && button(ui, "TARGET", model.target.selecting)
-            .on_hover_text("Select a 1 km radius cut-out for 3D point-cloud inspection. Escape cancels.")
+            .on_hover_text("Select an adjustable radial cut-out for 3D point-cloud inspection. Escape cancels.")
             .clicked()
     {
         model.stop_event_follow();
         model.globe_view.stop_motion();
         model.target.selecting = !model.target.selecting;
         model.target.hover = None;
+    }
+    if model.target.selecting {
+        ui.scope(|ui| {
+            ui.spacing_mut().slider_width = 90.;
+            crate::target_mode::TargetMode::radius_control(ui, &mut model.target.radius_km);
+        });
     }
     if !model.globe_view.local_mode || model.active_body != ActiveBody::Earth {
         model.target.selecting = false;

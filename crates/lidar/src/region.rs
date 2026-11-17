@@ -2,6 +2,7 @@
 const A: f64 = 6_378_137.;
 const F: f64 = 1. / 298.257_223_563;
 const B: f64 = A * (1. - F);
+pub const MAX_RADIUS_M: f64 = 100_000.;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Region {
@@ -17,7 +18,7 @@ impl Region {
             && self.lat.is_finite()
             && (-89. ..=89.).contains(&self.lat)
             && self.radius_m.is_finite()
-            && (1. ..=5_000.).contains(&self.radius_m)
+            && (1. ..=MAX_RADIUS_M).contains(&self.radius_m)
     }
 
     /// East/north geodesic distance on the ellipsoid; Z is handled separately
@@ -40,8 +41,8 @@ impl Region {
     /// windows where their source API requires longitudes within ±180°.
     pub fn bounds(self) -> [f64; 4] {
         let mut b = [self.lon, self.lat, self.lon, self.lat];
-        for i in 0..64 {
-            let angle = i as f64 * std::f64::consts::TAU / 64.;
+        for i in 0..256 {
+            let angle = i as f64 * std::f64::consts::TAU / 256.;
             let [mut lon, lat] = self.location(
                 angle.sin() * self.radius_m * 1.001,
                 angle.cos() * self.radius_m * 1.001,
@@ -53,7 +54,7 @@ impl Region {
     }
 }
 
-// Vincenty's direct/inverse formulae. Target windows are at most 10 km wide,
+// Vincenty's direct/inverse formulae. Target windows are at most 200 km wide,
 // far from the antipodal convergence singularity.
 fn coefficients(cos_sq_alpha: f64) -> (f64, f64) {
     let u = cos_sq_alpha * (A * A - B * B) / (B * B);
@@ -148,6 +149,36 @@ fn direct(lon: f64, lat: f64, bearing: f64, distance: f64) -> [f64; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn maximum_target_radius_bounds_enclose_the_full_wgs84_circle() {
+        for (lon, lat) in [(0., 0.), (-77.58, 35.26), (179.99, 55.), (-100., 89.)] {
+            for radius_m in [100., 1000., 100_000.] {
+                let r = Region { lon, lat, radius_m };
+                assert!(r.valid());
+                let b = r.bounds();
+                for i in 0..720 {
+                    let angle = i as f64 * std::f64::consts::TAU / 720.;
+                    let xy = [angle.sin() * radius_m, angle.cos() * radius_m];
+                    let p = r.location(xy[0], xy[1]);
+                    let q = r.offset(p[0], p[1]);
+                    assert!((q[0] - xy[0]).hypot(q[1] - xy[1]) < 0.0001);
+                    let x = lon + (p[0] - lon + 180.).rem_euclid(360.) - 180.;
+                    assert!(
+                        x >= b[0] && x <= b[2] && p[1] >= b[1] && p[1] <= b[3],
+                        "{r:?} {b:?} {p:?}"
+                    );
+                }
+            }
+        }
+        assert!(
+            !Region {
+                lon: 0.,
+                lat: 0.,
+                radius_m: 100_001.
+            }
+            .valid()
+        );
+    }
     #[test]
     fn wgs84_radius_roundtrips_at_equator_nc_poles_and_date_line() {
         let equator = Region {

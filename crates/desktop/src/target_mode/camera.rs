@@ -1,6 +1,7 @@
 //! Independent free flight. Metre-scaled east/north; source vertical values.
 #[derive(Clone, Debug)]
 pub(crate) struct Camera {
+    pub radius_m: f32,
     pub eye: [f32; 3],
     pub yaw: f32,
     pub pitch: f32,
@@ -11,6 +12,7 @@ pub(crate) struct Camera {
 impl Default for Camera {
     fn default() -> Self {
         Self {
+            radius_m: 1000.,
             eye: [0., -1800., 1100.],
             yaw: 0.,
             pitch: -0.55,
@@ -21,8 +23,16 @@ impl Default for Camera {
     }
 }
 impl Camera {
+    pub fn for_radius(radius_m: f32) -> Self {
+        Self {
+            radius_m,
+            eye: [0., -1.8 * radius_m, 1.1 * radius_m],
+            speed: (radius_m * 0.1).clamp(10., 10_000.),
+            ..Self::default()
+        }
+    }
     pub fn reset(&mut self, elevation: f32) {
-        self.eye = [0., -1800., elevation + 1100.];
+        self.eye = [0., -1.8 * self.radius_m, elevation + 1.1 * self.radius_m];
         self.yaw = 0.;
         self.pitch = -0.55;
         self.positioned = true;
@@ -62,6 +72,24 @@ impl Camera {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn framing_and_flight_speed_scale_through_the_hundred_kilometre_limit() {
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024., 768.));
+        for radius in [100., 1000., 100_000.] {
+            let mut c = Camera::for_radius(radius);
+            c.reset(50.);
+            assert!(c.speed >= 10. && c.speed <= 10_000.);
+            for i in 0..128 {
+                let a = i as f32 * std::f32::consts::TAU / 128.;
+                assert!(
+                    rect.contains(
+                        c.project([a.sin() * radius, a.cos() * radius, 50.], rect)
+                            .unwrap()
+                    )
+                );
+            }
+        }
+    }
     #[test]
     fn flight_uses_look_direction_vertical_controls_and_bounded_delta_time() {
         let mut c = Camera {

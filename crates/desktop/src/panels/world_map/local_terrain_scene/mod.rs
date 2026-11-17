@@ -492,6 +492,12 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
 
     super::admin_render::draw(painter, &layout, model, viewport_center);
 
+    if model.active_body == crate::model::ActiveBody::Earth && (model.lidar.enabled || model.target.selecting) {
+        model.lidar.coverage.draw(painter,&projection,
+            super::atlas_viewport::local_visible(clip,&layout,&model.globe_view,viewport_center,half),
+            model.selected_root.as_deref(),model.settings_threedep_enabled);
+    }
+
     // Beam, markers, legend and progress bar always render regardless of load state.
     let beam_elevation_m = draw_local_beam(
         painter,

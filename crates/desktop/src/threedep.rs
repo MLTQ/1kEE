@@ -611,6 +611,12 @@ fn sample_cache() -> &'static Mutex<SampleCache> {
 /// Returns a value only when the covering chunk is already decoded in memory.
 /// Otherwise it schedules the download/decode and returns `None` so the caller
 /// falls back to SRTM for now; the chunk is used from the next repaint on.
+/// Cache-only overlay lookup: never schedules a raster request or decoder.
+pub(crate) fn cached_elevation_m(point:GeoPoint)->Option<f32> {
+    let key=chunk_key_for(point);
+    sample_cache().try_lock().ok()?.tiles.iter().find(|t|t.key==key)?.sample(point)
+}
+
 pub fn peek_elevation_m(derived_root: &Path, point: GeoPoint) -> Option<f32> {
     if !is_enabled() {
         return None;

@@ -1,33 +1,52 @@
 # Target inspection
 
 In **Local → Earth**, click **TARGET**. Move the pointer to position the red
-selection cylinder. Its ground footprint has a **1,000 metre radius** measured
-on WGS84. Left click opens an independent 3D cut-out; **Escape** returns to the
+selection cylinder. **km radius** adjusts its WGS84 ground radius from **0.1 to
+100 km**, starting at 1 km. The mouse wheel can zoom the Local map while placing
+the circle. Left click opens an independent 3D cut-out; **Escape** returns to the
 previous Local camera, including its position, zoom and viewing angles. Escape
 also cancels the selection tool before entry.
+
+Inside Target, change **km radius** and click **Apply radius** to reload the
+cut-out around the same center. The chosen survey, point budget and display
+options are retained. Framing and initial flight speed scale to the new size.
+The last chosen radius is retained when returning to Local during this session.
+Teal published survey outlines also appear while selecting, even if the normal
+LiDAR raster layer is off.
 
 Click the Target canvas or **Fly** to capture the mouse. Move the mouse to look,
 use **WASD** to fly, **Space / C** to move vertically, and **Shift** to boost.
 The mouse wheel changes speed. **Right click** releases the pointer for the
 controls; **Home** resets the Target camera. Flight can pass through surfaces
 and go outside the fixed cut-out. It never requests a new geographic region as
-the camera moves. The boundary remains one kilometre from the selected center.
+the camera moves. The boundary stays at the selected radius from its center.
 
 ## Data and accuracy
 
 - **Point cloud** streams original returns from intersecting public USGS EPT
-  surveys, trying the newest candidate first. The survey selector permits
+  surveys, prioritizing center-covering candidates and their newest acquisitions. The survey selector permits
   inspection of another indexed acquisition. Dates and publisher links stay
   visible. Acquisitions are inspected individually, preserving their identity.
 - **DEM terrain** loads numeric bare-earth heights from the existing state,
-  national and international elevation adapters. Its approximately one-metre
-  requested grid is retained for ground placement; a coarser, explicitly
+  national and international elevation adapters. Its numeric requested grid is
+  retained for ground placement; a coarser, explicitly
   labelled display mesh keeps flight responsive. Missing heights stay holes.
 - **Map context** includes available cached roads, water and prepared vector
   cells, visible imported vector layers, and nearby event/camera markers.
   Overlays are draped on valid DEM heights. Building footprints remain
   footprints; unprovided building heights are not invented. Context is a
   snapshot of available data at entry, not a new bulk acquisition.
+  For radii above 5 km, detailed cached roads/cells are limited to the central
+  5 km radius. Imported context is still clipped to the whole Target.
+
+Large targets use bounded regional overviews rather than uniform one-metre
+coverage. For example, the 100 km NC check requested a 2048 × 2048 height grid
+at approximately 98 m sampling, with a roughly 392 m display mesh. Both spacings
+are reported. Wide numeric exports currently use USGS, NCEM and supported
+England/Netherlands/France services; other fine-source adapters retain their
+small-window limits to prevent a large COG/tile download fanout. Point-cloud
+detail remains controlled by its separate point and transfer budgets. A
+100 km radius covers 10,000 times the area of a one-kilometre radius.
 
 Source XYZ is decoded as float64. WGS84 selection and local metre offsets are
 calculated before conversion to GPU float32; the local-coordinate regression
@@ -36,6 +55,8 @@ This checks software precision, not survey measurement accuracy. Source
 classification, intensity, return number and available RGB are retained in the
 display attributes. Noise classes 7/18 and withheld returns are excluded. Point
 size changes only the display footprint, not measured positions.
+Horizontal coordinates use a WGS84 geodesic distance chart around the center;
+original source XYZ remains authoritative.
 
 Some EPT feeds declare no vertical coordinate system or Z units. Target keeps
 original numeric Z and displays that limitation. It permits combined DEM/point
@@ -66,3 +87,5 @@ live checks use `ONEKEE_TARGET_TEST_CATALOG` and disposable output under `/tmp`;
 they do not replace the user's terrain or fused raster archives.
 
 See the [Kinston benchmark and real-data previews](benchmarks/target-nc-2026-11-16.md).
+The [100 km validation](benchmarks/target-radius-2026-11-16.md) records the
+regional overview and Local catalog-outline checks.

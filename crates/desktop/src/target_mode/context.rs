@@ -117,7 +117,14 @@ pub(super) fn build(
     let Some(terrain) = terrain else {
         return Err("Map context needs a DEM for ground placement".into());
     };
-    let [w, s, e, n] = region.bounds();
+    // Full-resolution cached vector cells and roads are bounded to a 5 km
+    // central detail window for regional selections. Imported context remains
+    // clipped to the full Target; no regional planet-cell fanout is launched.
+    let detail = Region {
+        radius_m: region.radius_m.min(5000.),
+        ..region
+    };
+    let [w, s, e, n] = detail.bounds();
     if w >= -180.
         && e <= 180.
         && let Some(root) = &input.root
@@ -202,7 +209,7 @@ pub(super) fn build(
             Some(([x as f32, y as f32, z], label))
         })
         .collect::<Vec<_>>();
-    let label = format!(
+    let mut label = format!(
         "{} context segments · {} markers · DEM-draped{}",
         points.len() / 2,
         labels.len(),
@@ -212,6 +219,9 @@ pub(super) fn build(
             ""
         }
     );
+    if region.radius_m > 5000. {
+        label.push_str(" · cached detail within central 5 km radius");
+    }
     Ok(ContextGeometry {
         batch: Arc::new(Batch {
             id: serial(),

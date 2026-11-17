@@ -59,10 +59,12 @@ fn selection_with(
         model.target.hover = Some(Region {
             lon: p.lon.into(),
             lat: p.lat.into(),
-            radius_m: 1000.,
+            radius_m: model.target.radius_km.clamp(0.1, 100.) * 1000.,
         });
     }
-    if let Some(region) = model.target.hover {
+    if let Some(mut region) = model.target.hover {
+        region.radius_m = model.target.radius_km.clamp(0.1, 100.) * 1000.;
+        model.target.hover = Some(region);
         let ground = model
             .selected_root
             .as_ref()
@@ -120,8 +122,10 @@ fn selection_with(
             rect.left_top() + egui::vec2(18., 18.),
             egui::Align2::LEFT_TOP,
             format!(
-                "TARGET · 1 KM RADIUS\n{:.6}, {:.6}\nLEFT CLICK TO ENTER · ESC TO CANCEL",
-                region.lat, region.lon
+                "TARGET · {:.1} KM RADIUS\n{:.6}, {:.6}\nWHEEL TO ZOOM · LEFT CLICK TO ENTER · ESC TO CANCEL",
+                region.radius_m / 1000.,
+                region.lat,
+                region.lon
             ),
             egui::FontId::monospace(13.),
             red,
@@ -164,6 +168,7 @@ mod tests {
         model.globe_view.local_zoom = 40.;
         model.globe_view.stop_motion();
         model.target.selecting = true;
+        model.target.radius_km = 100.;
         let before = format!("{:?}", model.globe_view);
         let pointer = egui::pos2(400., 300.);
         for pressed in [None, Some(true), Some(false)] {
@@ -208,7 +213,7 @@ mod tests {
             .session
             .as_mut()
             .expect("left click enters Target");
-        assert_eq!(session.region.radius_m, 1000.);
+        assert_eq!(session.region.radius_m, 100_000.);
         assert!(!model.target.selecting);
         session.camera.looking = true;
         let eye = session.camera.eye;
@@ -251,6 +256,7 @@ mod tests {
             },
         );
         assert!(!model.target.engaged());
+        assert_eq!(model.target.radius_km, 100.);
         assert_eq!(format!("{:?}", model.globe_view), before);
     }
 }
@@ -262,15 +268,21 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
     let mut reset = false;
     let mut fly = false;
     let mut reload = false;
+    let mut apply_radius = false;
+    let mut radius_km = model.target.radius_km;
     let prior_source = session.selected_source;
     egui::Frame::new().fill(theme::panel_fill(230)).corner_radius(8_u8).inner_margin(8.0_f32).show(ui,|ui| {
         ui.horizontal_wrapped(|ui| {
             exit=ui.button("← LOCAL  [Esc]").clicked();
-            ui.strong("TARGET");ui.label("1 km radius");
+            ui.strong("TARGET");ui.label(format!("{:.1} km radius",session.region.radius_m/1000.));
+            crate::target_mode::TargetMode::radius_control(ui,&mut radius_km);
+            if (radius_km*1000.-session.region.radius_m).abs()>0.01 {
+                apply_radius=ui.button("Apply radius").clicked();
+            }
             ui.monospace(format!("{:.6}, {:.6}",session.region.lat,session.region.lon));
             reset=ui.button("Home").on_hover_text("Reset Target camera").clicked();
             fly=ui.button(if session.camera.looking {"Flying · RMB to release"}else{"Fly"}).clicked();
-            ui.add(egui::Slider::new(&mut session.camera.speed,1. ..=1000.).logarithmic(true).text("speed"));
+            ui.add(egui::Slider::new(&mut session.camera.speed,1. ..=10_000.).logarithmic(true).text("speed"));
         });
         ui.horizontal_wrapped(|ui| {
             if ui.checkbox(&mut session.show_points,"Point cloud").changed() && session.show_points && !session.compatible_dem() {
@@ -311,7 +323,36 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
             }
         }
     });
-    if reload || prior_source != session.selected_source {
+    model.target.radius_km = radius_km.clamp(0.1, 100.);
+    if apply_radius {
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
+        let region = Region {
+            radius_m: model.target.radius_km * 1000.,
+            ..session.region
+        };
+        let input = ContextInput::capture(model, region);
+        let catalog = crate::lidar_catalog::db_path(
+            Some(&model.settings_data_root),
+            model.selected_root.as_deref(),
+        );
+        match session.resized(
+            region,
+            catalog,
+            model.selected_root.clone(),
+            input,
+            ui.ctx(),
+        ) {
+            Ok(replacement) => {
+                session = replacement;
+                reload = false;
+            }
+            Err(error) => session.status = error,
+        }
+    }
+    if !apply_radius && (reload || prior_source != session.selected_source) {
         let selected = session.sources.get(session.selected_source).cloned();
         session.start_points(selected, ui.ctx());
     }
@@ -454,7 +495,7 @@ fn flight_input(s: &mut Session, response: &egui::Response, ctx: &egui::Context,
         reset_camera(s);
     }
     if s.camera.looking {
-        s.camera.speed = (s.camera.speed * (scroll * 0.002).exp()).clamp(1., 1000.);
+        s.camera.speed = (s.camera.speed * (scroll * 0.002).exp()).clamp(1., 10_000.);
         // Ignore the initial capture-frame pointer warp.
         s.camera.step(
             movement,

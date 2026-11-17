@@ -412,3 +412,112 @@ fn target_live_nc_cutout_benchmark() {
         session.points, session.status
     );
 }
+
+#[test]
+#[ignore = "requires the configured lidar cache, public NC terrain and a GPU; checks the 100 km maximum"]
+fn target_live_hundred_kilometre_overview() {
+    use lidar_pipeline::{ept::point_cloud, region::Region};
+    let catalog = std::env::var_os("ONEKEE_TARGET_TEST_CATALOG")
+        .map(std::path::PathBuf::from)
+        .expect("catalog");
+    let region = Region {
+        lon: -77.58,
+        lat: 35.26,
+        radius_m: 100_000.,
+    };
+    let marker = tempfile::NamedTempFile::new().unwrap();
+    let terrain = Arc::new(crate::target_mode::tests::live_terrain(region, marker.path()).unwrap());
+    assert_eq!((terrain.width, terrain.height), (2048, 2048));
+    assert!(
+        terrain.scale[1].abs() * 111_320. > 90.,
+        "regional grid must report its real overview spacing"
+    );
+    let mut batches = Vec::new();
+    let mut summary = None;
+    let mut max_distance = 0f32;
+    for source in point_cloud::sources(&catalog, region).unwrap() {
+        let loaded = point_cloud::stream(
+            &catalog,
+            region,
+            &source,
+            Some(marker.path()),
+            50_000,
+            |event| {
+                if let point_cloud::Event::Batch { points, .. } = event {
+                    let points = points
+                        .iter()
+                        .map(|p| crate::target_mode::vertex(region, p))
+                        .collect::<Vec<_>>();
+                    for p in &points {
+                        let d = p.position[0].hypot(p.position[1]);
+                        assert!(d <= 100_000.02);
+                        max_distance = max_distance.max(d);
+                    }
+                    batches.push(Arc::new(Batch {
+                        id: crate::target_mode::serial(),
+                        points,
+                    }));
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        if loaded.points > 0 {
+            summary = Some(loaded);
+            break;
+        }
+    }
+    let summary = summary.expect("real source returns in the large circle");
+    assert!(max_distance > 10_000.);
+    let (device, queue) = gpu();
+    let ctx = egui::Context::default();
+    let mut camera = Camera::for_radius(100_000.);
+    camera.reset(terrain.center_height());
+    let mut draw = Draw {
+        session: 123,
+        camera,
+        radius: 100_000.,
+        clouds: batches,
+        terrain: Some(terrain.clone()),
+        context: None,
+        points: true,
+        surface: false,
+        context_visible: false,
+        class_mask: u32::MAX,
+        color_mode: 0,
+        point_size: 1.5,
+        rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280., 720.)),
+        ctx,
+    };
+    let mut resources = Resources::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+    let points = render(&mut resources, &draw, &device, &queue);
+    draw.points = false;
+    draw.surface = true;
+    let image = render(&mut resources, &draw, &device, &queue);
+    assert_ne!(image, points);
+    let mut encoder = png::Encoder::new(
+        std::fs::File::create("/tmp/1kee-target-100km-dem.png").unwrap(),
+        1280,
+        720,
+    );
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .unwrap()
+        .write_image_data(&image)
+        .unwrap();
+    let report = serde_json::json!({"radius_km":100,"point_test_budget":50_000,"summary":summary,
+        "max_point_distance_m":max_distance,"dem":terrain.label,"dem_grid":[terrain.width,terrain.height],
+        "dem_vertex_bytes":terrain.batch.points.len()*std::mem::size_of::<Vertex>(),"dem_index_bytes":terrain.indices.len()*4,
+        "notes":["Actual regional overview; no claim of uniform one-metre detail at this radius.","Point streaming was deliberately limited to 50,000 source returns for this integration check."]});
+    std::fs::write(
+        "/tmp/1kee-target-100km.json",
+        serde_json::to_vec_pretty(&report).unwrap(),
+    )
+    .unwrap();
+    eprintln!(
+        "TARGET_100KM points={} max_distance_m={max_distance:.1} {}",
+        summary.points, terrain.label
+    );
+}

@@ -32,6 +32,30 @@ fn country_screens_are_fast_candidates_not_global_requests() {
 }
 
 #[test]
+fn target_overviews_do_not_relax_normal_fine_window_limits() {
+    let region = lidar_pipeline::region::Region {
+        lon: -77.58,
+        lat: 35.26,
+        radius_m: 100_000.,
+    };
+    let [w, s, e, n] = region.bounds();
+    let r = Request {
+        bounds: Bounds {
+            min_lon: w,
+            min_lat: s,
+            max_lon: e,
+            max_lat: n,
+        },
+        width: 2048,
+        height: 2048,
+    };
+    assert!(!r.valid());
+    assert!(r.valid_window(4.));
+    let huge = Request { width: 2401, ..r };
+    assert!(!huge.valid_window(4.));
+}
+
+#[test]
 fn queries_use_numeric_terrain_and_longitude_first_bounds() {
     let request = request(48.85, 2.35);
     for provider in [Provider::England, Provider::Netherlands, Provider::France] {

@@ -43,6 +43,7 @@ mod stellar_layer;
 mod terrain_field;
 mod terrain_raster;
 pub(crate) mod target_pass;
+pub(crate) mod lidar_coverage;
 mod target_view;
 mod layer_snapshot;
 mod swot_layer;
@@ -137,7 +138,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
         if !targeting && camera::manual_input(ui.ctx(), &response, local_terrain_mode) {
             model.stop_event_follow();
         }
-        if !targeting && !model.event_follow.enabled() {
+        if (!targeting || ui.ctx().input(|input|input.smooth_scroll_delta.y!=0.)) && !model.event_follow.enabled() {
             camera::apply_interaction(ui.ctx(), &response, &mut model.globe_view);
         }
         infrastructure_hover::begin(

@@ -4,7 +4,9 @@ Local Earth also exposes **TARGET**, a radial inspection selection tool. It is
 absent on Globe and other celestial bodies. Activating it stops camera motion
 and event following, and leaves the Local camera position and viewing angles
 in place. Clicking the selection enters the independent free-flight Target
-viewport; Escape cancels or returns to Local.
+viewport; Escape cancels or returns to Local. While selecting, a logarithmic
+radius slider spans 0.1–100 km and the wheel can zoom Local to frame the circle.
+Teal catalog footprints guide placement even when the Lidar layer is disabled.
 
 ## Purpose
 Own the single compact map rail with independently available camera controls. Preserve

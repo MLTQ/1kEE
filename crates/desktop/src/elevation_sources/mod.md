@@ -29,6 +29,13 @@ retryable. Sources remain clipped to requested windows and use the same two-job
 provider limit, request-size cap and cache budget.
 Completed contours persist in the existing cache; source rasters do not.
 
+`fetch_target` permits regional overviews for a validated Target radius up to
+100 km, capped at four angular degrees per axis and the same output pixel and
+response limits. Only numeric server-side exports (NCEM, England, Netherlands,
+France) use this path. It leaves ordinary `fetch` at 0.25° and excludes wide
+Swiss/NZ/Japan COG/tile fanout. Source detail and requested overview sampling are
+distinct; the Target renderer reports its actual grid and mesh spacing.
+
 A per-request 180-second deadline covers catalog pagination, PNG fallbacks,
 provider admission and raster work. Individual HTTP requests share the remaining
 budget, including waits for a provider slot; shutdown and deadline failures stay retryable.

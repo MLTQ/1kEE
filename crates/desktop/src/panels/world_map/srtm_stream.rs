@@ -134,6 +134,14 @@ pub fn peek_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> Option
     Some(value)
 }
 
+/// Read an already decoded tile using a pre-resolved root. No disk access or
+/// background work is started by coverage-outline painting.
+pub(super) fn cached_tile_elevation_m(root:Option<&Path>,point:GeoPoint)->Option<f32> {
+    let path=tile_path(root?,point);
+    let value=tile_cache().try_lock().ok()?.tiles.iter().find(|t|t.path==path)?.tile.sample_elevation_m(point);
+    (value.is_finite() && (-12_000. ..=10_000.).contains(&value)).then_some(value)
+}
+
 /// Nonblocking 1 m 3DEP lookup, resolving the derived-asset root the chunk
 /// cache lives under. Returns `None` whenever 3DEP is disabled, unavailable
 /// here, or simply not cached yet.

@@ -31,13 +31,28 @@ pub(crate) fn serial() -> u64 {
     SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-#[derive(Default)]
 pub(crate) struct TargetMode {
+    pub radius_km: f64,
     pub selecting: bool,
     pub hover: Option<Region>,
     pub session: Option<Session>,
 }
+impl Default for TargetMode {
+    fn default() -> Self {
+        Self {
+            radius_km: 1.,
+            selecting: false,
+            hover: None,
+            session: None,
+        }
+    }
+}
 impl TargetMode {
+    pub fn radius_control(ui: &mut egui::Ui, radius: &mut f64) -> egui::Response {
+        ui.add(egui::Slider::new(radius, 0.1..=100.)
+            .logarithmic(true).step_by(0.1).max_decimals(1).text("km radius"))
+            .on_hover_text("Target radius: 100 m to 100 km. Point count and loading remain budgeted independently.")
+    }
     pub fn engaged(&self) -> bool {
         self.selecting || self.session.is_some()
     }
@@ -50,7 +65,10 @@ impl TargetMode {
         escape
     }
     pub fn exit(&mut self, ctx: &egui::Context) {
-        *self = Self::default();
+        *self = Self {
+            radius_km: self.radius_km,
+            ..Self::default()
+        };
         ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
         ctx.send_viewport_cmd(egui::ViewportCommand::CursorVisible(true));
         ctx.request_repaint();
@@ -104,6 +122,43 @@ impl Session {
         input: ContextInput,
         ctx: &egui::Context,
     ) -> Result<Self, String> {
+        Self::configured(region, catalog, root, input, 8, None, ctx)
+    }
+    pub fn resized(
+        &self,
+        region: Region,
+        catalog: PathBuf,
+        root: Option<PathBuf>,
+        input: ContextInput,
+        ctx: &egui::Context,
+    ) -> Result<Self, String> {
+        let chosen = self.source.as_ref().map(|h| h.source.clone());
+        let mut next = Self::configured(
+            region,
+            catalog,
+            root,
+            input,
+            self.budget_millions,
+            chosen,
+            ctx,
+        )?;
+        next.show_points = self.show_points;
+        next.show_terrain = self.show_terrain;
+        next.show_context = self.show_context;
+        next.class_mask = self.class_mask;
+        next.color_mode = self.color_mode;
+        next.point_size = self.point_size;
+        Ok(next)
+    }
+    fn configured(
+        region: Region,
+        catalog: PathBuf,
+        root: Option<PathBuf>,
+        input: ContextInput,
+        budget: usize,
+        chosen: Option<Source>,
+        ctx: &egui::Context,
+    ) -> Result<Self, String> {
         if !region.valid() {
             return Err("Target selection is outside supported coordinates".into());
         }
@@ -122,7 +177,7 @@ impl Session {
         let mut session = Self {
             id: serial(),
             region,
-            camera: Default::default(),
+            camera: Camera::for_radius(region.radius_m as f32),
             clouds: Vec::new(),
             points: 0,
             source: None,
@@ -142,7 +197,7 @@ impl Session {
             class_mask: u32::MAX,
             color_mode: 0,
             point_size: 2.,
-            budget_millions: 8,
+            budget_millions: budget,
             started: Instant::now(),
             catalog,
             point_rx: None,
@@ -154,7 +209,7 @@ impl Session {
             context_input: Some(input.with_root(root)),
             _active: active,
         };
-        session.start_points(None, ctx);
+        session.start_points(chosen, ctx);
         Ok(session)
     }
     pub fn compatible_dem(&self) -> bool {
@@ -181,8 +236,10 @@ impl Session {
         let (tx, rx) = mpsc::sync_channel(2);
         let spawned=std::thread::Builder::new().name("target-points".into()).spawn(move || {
             let run=||->Result<Summary,String> {
-                let sources=if let Some(source)=chosen {vec![source]} else {point_cloud::sources(&catalog,region)?};
-                tx.send(Message::Sources(sources.clone())).map_err(|_|"Target closed")?;
+                let mut available=point_cloud::sources(&catalog,region)?;
+                if let Some(source)=&chosen && !available.iter().any(|s|s.id==source.id) {available.insert(0,source.clone());}
+                let sources=chosen.map_or_else(||available.clone(),|s|vec![s]);
+                tx.send(Message::Sources(available)).map_err(|_|"Target closed")?;
                 let mut last="No public point cloud is indexed here; the DEM and map context can still be inspected".to_string();
                 for source in sources {
                     if !marker.is_file() {return Err("Target closed".into());}
@@ -224,8 +281,12 @@ impl Session {
             let message = self.point_rx.as_ref().map(|r| r.try_recv());
             match message {
                 Some(Ok(Message::Sources(sources))) => {
-                    if self.sources.is_empty() {
-                        self.sources = sources;
+                    self.sources = sources;
+                    if let Some(header) = &self.source
+                        && let Some(index) =
+                            self.sources.iter().position(|s| s.id == header.source.id)
+                    {
+                        self.selected_source = index;
                     }
                 }
                 Some(Ok(Message::Header(h))) => {
@@ -244,7 +305,7 @@ impl Session {
                             self.selected_source = index;
                         }
                     }
-                    if self.points == 0 && !self.compatible_dem() {
+                    if self.points == 0 && self.show_points && !self.compatible_dem() {
                         self.show_terrain = false;
                     }
                     if !self.camera.positioned
@@ -358,6 +419,12 @@ pub(crate) fn vertex(region: Region, p: &point_cloud::Point) -> Vertex {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    pub(crate) fn live_terrain(
+        region: Region,
+        active: &std::path::Path,
+    ) -> Result<Terrain, String> {
+        terrain::load(region, active)
+    }
     pub(crate) fn session() -> Session {
         let active = tempfile::NamedTempFile::new().unwrap();
         let region = Region {
@@ -415,6 +482,31 @@ pub(crate) mod tests {
         }
     }
     #[test]
+    fn incoming_points_preserve_an_explicit_dem_only_view() {
+        let ctx = egui::Context::default();
+        let mut s = session();
+        s.show_points = false;
+        s.show_terrain = true;
+        s.replacing = true;
+        let (tx, rx) = mpsc::channel();
+        s.point_rx = Some(rx);
+        let mut header = s.source.clone().unwrap();
+        header.crs = serde_json::json!({"horizontal":"3857"});
+        tx.send(Message::Header(header)).unwrap();
+        tx.send(Message::Batch(Arc::new(Batch {
+            id: serial(),
+            points: vec![Vertex {
+                position: [0., 0., 12.],
+                color: [255; 4],
+                class: 2,
+            }],
+        })))
+        .unwrap();
+        s.poll(&ctx);
+        assert!(!s.show_points);
+        assert!(s.show_terrain);
+    }
+    #[test]
     fn target_refresh_keeps_completed_points_until_a_replacement_batch_and_exit_cancels_jobs() {
         let ctx = egui::Context::default();
         let mut s = session();
@@ -452,6 +544,7 @@ pub(crate) mod tests {
         s.point_active = Some(tempfile::NamedTempFile::new().unwrap());
         let marker = s.point_active.as_ref().unwrap().path().to_owned();
         let mut mode = TargetMode {
+            radius_km: 100.,
             selecting: false,
             hover: None,
             session: Some(s),
@@ -473,6 +566,7 @@ pub(crate) mod tests {
             },
         );
         assert!(!marker.exists());
+        assert_eq!(mode.radius_km, 100.);
     }
     #[test]
     fn target_gpu_offsets_preserve_submillimetre_positions_and_original_heights() {

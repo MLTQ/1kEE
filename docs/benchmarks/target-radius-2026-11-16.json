@@ -1,0 +1,47 @@
+{
+  "date": "2026-11-16",
+  "center_wgs84": {
+    "longitude": -77.58,
+    "latitude": 35.26
+  },
+  "gpu": "NVIDIA GeForce RTX 4090 / Vulkan / driver 615.78.08",
+  "target_100_km": {
+    "dem": "North Carolina \u2014 NCEM / NC OneMap LiDAR DEM, ~1 m \u00b7 sampled grid ~98.1 m \u00b7 display mesh ~392.3 m",
+    "dem_grid": [
+      2048,
+      2048
+    ],
+    "dem_index_bytes": 2858904,
+    "dem_vertex_bytes": 5263380,
+    "max_point_distance_m": 92300.0703125,
+    "notes": [
+      "Actual regional overview; no claim of uniform one-metre detail at this radius.",
+      "Point streaming was deliberately limited to 50,000 source returns for this integration check."
+    ],
+    "point_test_budget": 50000,
+    "radius_km": 100,
+    "summary": {
+      "complete": false,
+      "decoded": 71388,
+      "limit": "Point budget reached; raise the budget and refine",
+      "nodes": 13,
+      "points": 50000,
+      "source": "USGS_3DEP_ID:NC_HurricaneFlorence_10_2020",
+      "transferred_bytes": 0
+    }
+  },
+  "local_coverage": {
+    "drawn_segments": 5160,
+    "limited": false,
+    "projection_and_shape_ms": 1.398624,
+    "read_ms": 15.497611,
+    "surveys": 681,
+    "vertices": 16515
+  },
+  "conditions": [
+    "Real catalog and source data; source EPT blocks reused from the bounded cache.",
+    "50,000 original point returns deliberately cap this correctness check; ordinary UI budgets are 1\u201316 million.",
+    "Coverage timing measures the indexed read and headless egui projection/shape creation; it is not a whole-app frame benchmark.",
+    "DEM holes remain holes. Original point Z has no declared vertical reference and is shown separately from the DEM."
+  ]
+}

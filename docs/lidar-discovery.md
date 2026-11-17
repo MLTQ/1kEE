@@ -6,7 +6,9 @@ control. It starts off on each launch and stays enabled when switching views.
 - **Globe** shows all cataloged survey boundary lines, including surveys that
   have not been downloaded or prepared. These outlines indicate published
   coverage, not a guarantee of local fused data.
-- **Local** shows the prepared fused elevation layer from **Lidar/fused/v1**.
+- **Local** shows teal catalog survey outlines and the prepared fused elevation
+  layer from **Lidar/fused/v1**. Outlines include unprepared surveys, allowing
+  Target placement before source points or fused rasters have loaded.
   Newer measurements take precedence, with older measurements filling gaps.
   Missing USGS 3DEP views are prepared in the background from public EPT blocks
   and cached as numeric rasters at the current view resolution. The sidebar
@@ -19,7 +21,7 @@ click action. Switching views preserves the camera and the layer toggle.
 Catalogs still refresh in the background to keep the globe boundaries current.
 
 For original measured points, use the separate **Local → TARGET** tool to open
-a one-kilometre-radius cut-out with free flight, source selection and class
+an adjustable 0.1–100 km radius cut-out with free flight, source selection and class
 filters. See [Target inspection](target-mode.md) for controls and accuracy limits.
 
 Completed 512 × 512 display tiles are cached under **Lidar/maps/v1** in the
