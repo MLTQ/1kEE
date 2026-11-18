@@ -266,6 +266,7 @@ mod tests {
             }),
             indices: vec![0, 1, 2],
             label: String::new(),
+            height_range: crate::target_mode::heatmap::HeightRange { low: 0., high: 0. },
             navd88: true,
             width: 9,
             height: 9,

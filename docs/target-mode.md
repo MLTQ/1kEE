@@ -23,7 +23,19 @@ the camera moves. The boundary stays at the selected radius from its center.
 
 ## Inspecting measured terrain
 
-Enable **DEM terrain**. Use **Bearing** and **Altitude** to move the low-angle
+Choose **Elevation heatmap** from the Target color menu to color low elevations
+blue, middle elevations green and high elevations yellow through red. For the
+bare-earth view, enable **DEM terrain** and turn off **Point cloud**. The terrain
+light brings out slopes within each color band.
+
+The legend shows the elevation range of the enabled layers inside the Target
+circle. It updates as points load or you filter **Classes**, and stays fixed as
+you fly. DEM elevations are in metres. Point elevations use the survey's source
+units unless its NAVD88 metre reference is verified.
+
+![Castillo de San Marcos in Target, with orange earthworks above the green and cyan courtyard. The USGS 3DEP elevation scale spans −1.13 to 4.31 m.](benchmarks/target-castillo-heatmap.png)
+
+With **DEM terrain** enabled, use **Bearing** and **Altitude** to move the low-angle
 light across the surface. Choose **Elevation profile**, then click two points
 on the terrain or drag from A to B. The chart shows horizontal distance,
 minimum and maximum elevation, and relief in metres. Hover over the chart to

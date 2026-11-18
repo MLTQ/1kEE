@@ -1,5 +1,5 @@
 //! Target point sprites and measured terrain with their own depth attachment.
-use crate::target_mode::{Batch, ContextGeometry, Terrain, Vertex, camera::Camera};
+use crate::target_mode::{Batch, ContextGeometry, Terrain, Vertex, camera::Camera, heatmap};
 use eframe::{egui_wgpu, wgpu};
 use std::{
     collections::{HashMap, HashSet},
@@ -19,6 +19,7 @@ struct Uniforms {
     flags: [u32; 4],
     height: [f32; 4],
     light: [f32; 4],
+    heat_colors: [[f32; 4]; heatmap::COLORS.len()],
 }
 #[derive(Clone)]
 pub(crate) struct Draw {
@@ -33,6 +34,7 @@ pub(crate) struct Draw {
     pub context_visible: bool,
     pub class_mask: u32,
     pub color_mode: u32,
+    pub heatmap_range: Option<heatmap::HeightRange>,
     pub point_size: f32,
     pub light: [f32; 4],
     pub rect: egui::Rect,
@@ -403,6 +405,7 @@ impl Resources {
             draw.terrain.as_ref().map(|t| t.center_height())
         }
         .unwrap_or(draw.camera.eye[2] - 1100.);
+        let (low, high) = draw.heatmap_range.map_or((0., 0.), |r| (r.low, r.high));
         let uniforms = Uniforms {
             eye: v4(draw.camera.eye),
             right: v4(right),
@@ -421,8 +424,12 @@ impl Resources {
                 draw.radius,
             ],
             flags: [draw.class_mask, draw.color_mode, 0, 0],
-            height: [ground, 150., 0., 0.],
+            height: [ground, 150., low, high],
             light: draw.light,
+            heat_colors: heatmap::COLORS.map(|rgb| {
+                let [r, g, b] = rgb.map(|v| f32::from(v) / 255.);
+                [r, g, b, 1.]
+            }),
         };
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniforms));
         let texture = self.texture.as_ref().unwrap();

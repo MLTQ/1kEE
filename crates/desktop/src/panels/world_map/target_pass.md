@@ -22,6 +22,7 @@ scale uniformly on large displays, preserving camera aspect ratio.
 
 Vertex layout is float32 east/north/source-Z, four RGB bytes, and a packed u32
 for classification, intensity, return number and RGB availability. Coordinates
-are made local in float64 before upload. Uniforms contain eight aligned vec4s
-and must match target_points.wgsl exactly. Class filtering and coloring alter
-presentation without changing measured coordinates.
+are made local in float64 before upload. The heatmap uses a shared sRGB ramp
+and local elevation limits in the uniform buffer. Terrain looks up the color
+at the interpolated fragment height before applying relief lighting. Class
+filtering and coloring alter presentation without changing measured coordinates.

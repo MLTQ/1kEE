@@ -1,11 +1,13 @@
 //! Transient Target session, source jobs and a camera independent of Local.
 pub(crate) mod camera;
+pub(crate) mod heatmap;
 pub(crate) mod profile;
 mod context;
 mod terrain;
 pub(crate) mod project;
 mod local_dem;
 use camera::Camera;
+use heatmap::HeightRange;
 pub(crate) use context::{ContextGeometry, ContextInput};
 use lidar_pipeline::{
     ept::point_cloud::{self, Event, Header, Source, Summary},
@@ -82,17 +84,29 @@ impl TargetMode {
 enum Message {
     Sources(Vec<Source>),
     Header(Header),
-    Batch(Arc<Batch>),
+    Batch(Arc<Batch>, Box<[HeightRange; 32]>),
     Report(point_cloud::merge::Report),
     Progress(String),
     Done(Result<Summary, String>),
 }
+impl Message {
+    fn point_batch(batch: Batch) -> Self {
+        let mut ranges = Box::new([HeightRange::EMPTY; 32]);
+        for p in &batch.points {
+            let class = (p.class & 255).min(31) as usize;
+            ranges[class].include(p.position[2]);
+        }
+        Self::Batch(Arc::new(batch), ranges)
+    }
+}
+
 pub(crate) struct Session {
     pub id: u64,
     pub region: Region,
     pub camera: Camera,
     pub clouds: Vec<Arc<Batch>>,
     pub points: usize,
+    point_heights: [HeightRange; 32],
     pub source: Option<Header>,
     pub sources: Vec<Source>,
     pub selected_source: usize,
@@ -194,6 +208,7 @@ impl Session {
             camera: Camera::for_radius(region.radius_m as f32),
             clouds: Vec::new(),
             points: 0,
+            point_heights: [HeightRange::EMPTY; 32],
             source: None,
             sources: Vec::new(),
             selected_source: 0,
@@ -234,11 +249,33 @@ impl Session {
         session.start_points(chosen, ctx);
         Ok(session)
     }
+    pub fn heatmap_range(&self) -> Option<HeightRange> {
+        let mut range = HeightRange::EMPTY;
+        if self.show_terrain && let Some(terrain) = &self.terrain {
+            range = terrain.height_range;
+        }
+        if self.show_points {
+            for (class, heights) in self.point_heights.iter().enumerate() {
+                if self.class_mask & (1 << class) != 0 {
+                    range = range.union(*heights);
+                }
+            }
+        }
+        (range.low <= range.high).then_some(range)
+    }
+
     pub fn compatible_dem(&self) -> bool {
-        let known=if self.headers.is_empty() {
-            self.source.as_ref().is_some_and(|h|point_cloud::merge::vertical_reference(h).as_deref()==Some("EPSG:5703"))
-        } else {self.headers.iter().all(|h|point_cloud::merge::vertical_reference(h).as_deref()==Some("EPSG:5703"))};
-        known && self.terrain.as_ref().is_some_and(|t|t.navd88)
+        self.points_in_navd88_metres() && self.terrain.as_ref().is_some_and(|t| t.navd88)
+    }
+    pub fn points_in_navd88_metres(&self) -> bool {
+        let navd88 = |h: &Header| {
+            point_cloud::merge::vertical_reference(h).as_deref() == Some("EPSG:5703")
+        };
+        if self.headers.is_empty() {
+            self.source.as_ref().is_some_and(navd88)
+        } else {
+            self.headers.iter().all(|h| navd88(h))
+        }
     }
     pub fn unverified_heights(&self)->bool {
         if self.headers.is_empty() {self.source.as_ref().is_some_and(|h|point_cloud::merge::vertical_reference(h).is_none())}
@@ -275,9 +312,9 @@ impl Session {
                         MergeEvent::Data(Event::Header(header))=>{
                             current=Some(Arc::new(header.clone()));Message::Header(header)
                         }
-                        MergeEvent::Data(Event::Batch {points,..})=>Message::Batch(Arc::new(Batch {
+                        MergeEvent::Data(Event::Batch {points,..})=>Message::point_batch(Batch {
                             id:serial(),source:current.clone(),points:points.iter().map(|p|vertex(region,p)).collect(),
-                        })),
+                        }),
                     };
                     tx.send(message).map_err(|_|"Target closed".to_string())?;
                     worker_ctx.request_repaint();Ok(())
@@ -328,12 +365,13 @@ impl Session {
                 }
                 Some(Ok(Message::Progress(status)))=>self.status=status,
                 Some(Ok(Message::Report(report)))=>self.merge_report=Some(report),
-                Some(Ok(Message::Batch(batch))) => {
+                Some(Ok(Message::Batch(batch, ranges))) => {
                     let header=batch.source.clone().or_else(||self.pending_header.clone().map(Arc::new));
                     if self.replacing {
                         self.headers.clear();
                         self.clouds.clear();
                         self.points = 0;
+                        self.point_heights = [HeightRange::EMPTY; 32];
                         self.source = header.as_deref().cloned();
                         self.replacing = false;
                         if let Some(header) = &self.source
@@ -355,6 +393,9 @@ impl Session {
                         self.camera.reset(p.position[2]);
                     }
                     self.points += batch.points.len();
+                    for (current, incoming) in self.point_heights.iter_mut().zip(ranges.iter()) {
+                        *current = current.union(*incoming);
+                    }
                     self.clouds.push(batch);
                     self.status = format!("Loading · {} measured points", self.points);
                 }
@@ -490,6 +531,11 @@ pub(crate) mod tests {
                 }],
             })],
             points: 1,
+            point_heights: {
+                let mut ranges = [HeightRange::EMPTY; 32];
+                ranges[2].include(12.);
+                ranges
+            },
             source: Some(Header {
                 source: Source {
                     id: "fixture".into(),
@@ -535,6 +581,46 @@ pub(crate) mod tests {
         }
     }
     #[test]
+    fn heatmap_tracks_enabled_classes_and_layers_as_points_arrive() {
+        let mut s = session();
+        let (tx, rx) = mpsc::channel();
+        s.point_rx = Some(rx);
+        let points = [(2, -3.), (6, 20.), (6, f32::INFINITY), (2, f32::NAN)]
+            .map(|(class, z)| Vertex {
+                position: [0., 0., z],
+                color: [255; 4],
+                class,
+            })
+            .to_vec();
+        tx.send(Message::point_batch(Batch {
+            id: serial(),
+            source: None,
+            points,
+        }))
+        .unwrap();
+        s.poll(&egui::Context::default());
+        assert_eq!(
+            s.heatmap_range(),
+            Some(HeightRange {
+                low: -3.,
+                high: 20.
+            })
+        );
+        s.class_mask = 1 << 2;
+        assert_eq!(
+            s.heatmap_range(),
+            Some(HeightRange {
+                low: -3.,
+                high: 12.
+            })
+        );
+        s.class_mask = 1 << 5;
+        assert_eq!(s.heatmap_range(), None);
+        s.class_mask = u32::MAX;
+        s.show_points = false;
+        assert_eq!(s.heatmap_range(), None);
+    }
+    #[test]
     fn finished_empty_point_search_does_not_keep_claiming_to_find_surveys() {
         let s=session();
         let mut empty=s;
@@ -554,11 +640,11 @@ pub(crate) mod tests {
         let mut second=first.clone();second.source.id="east".into();second.crs=serde_json::json!({"horizontal":"3857"});
         let (tx,rx)=mpsc::channel();s.point_rx=Some(rx);s.replacing=true;s.show_points=true;
         s.terrain=Some(Arc::new(Terrain {batch:Arc::new(Batch {id:serial(),source:None,points:vec![]}),indices:vec![],
-            label:"NAVD88 fixture".into(),navd88:true,width:2,height:2,heights:vec![12.;4],origin:[0.,2.],scale:[1.,-1.]}));
+            label:"NAVD88 fixture".into(),height_range:HeightRange {low:12.,high:12.},navd88:true,width:2,height:2,heights:vec![12.;4],origin:[0.,2.],scale:[1.,-1.]}));
         s.show_terrain=true;
         for (x,h) in [(-500.,first),(500.,second)] {
             tx.send(Message::Header(h.clone())).unwrap();
-            tx.send(Message::Batch(Arc::new(Batch {id:serial(),source:Some(Arc::new(h)),points:vec![Vertex {position:[x,0.,12.345],color:[255;4],class:2}]}))).unwrap();
+            tx.send(Message::point_batch(Batch {id:serial(),source:Some(Arc::new(h)),points:vec![Vertex {position:[x,0.,12.345],color:[255;4],class:2}]})).unwrap();
             s.poll(&ctx);
             if x<0. {assert!(s.compatible_dem());assert!(s.show_terrain);assert!(!s.unverified_heights());}
         }
@@ -581,7 +667,7 @@ pub(crate) mod tests {
         let mut header = s.source.clone().unwrap();
         header.crs = serde_json::json!({"horizontal":"3857"});
         tx.send(Message::Header(header)).unwrap();
-        tx.send(Message::Batch(Arc::new(Batch {
+        tx.send(Message::point_batch(Batch {
             source: None,
             id: serial(),
             points: vec![Vertex {
@@ -589,7 +675,7 @@ pub(crate) mod tests {
                 color: [255; 4],
                 class: 2,
             }],
-        })))
+        }))
         .unwrap();
         s.poll(&ctx);
         assert!(!s.show_points);
@@ -600,6 +686,7 @@ pub(crate) mod tests {
         let ctx = egui::Context::default();
         let mut s = session();
         let before = s.clouds[0].id;
+        let old_range = s.heatmap_range().unwrap();
         let (tx, rx) = mpsc::channel();
         s.point_rx = Some(rx);
         s.replacing = true;
@@ -610,12 +697,13 @@ pub(crate) mod tests {
             .unwrap();
         s.poll(&ctx);
         assert_eq!(s.clouds[0].id, before);
+        assert_eq!(s.heatmap_range(), Some(old_range));
         assert_eq!(s.source.as_ref().unwrap().source.id, "fixture");
         let (tx, rx) = mpsc::channel();
         s.point_rx = Some(rx);
         s.replacing = true;
         tx.send(Message::Header(header)).unwrap();
-        tx.send(Message::Batch(Arc::new(Batch {
+        tx.send(Message::point_batch(Batch {
             source: None,
             id: serial(),
             points: vec![Vertex {
@@ -623,7 +711,7 @@ pub(crate) mod tests {
                 color: [255; 4],
                 class: 2,
             }],
-        })))
+        }))
         .unwrap();
         tx.send(Message::Done(Err("partial load failed".into())))
             .unwrap();
@@ -631,6 +719,7 @@ pub(crate) mod tests {
         assert_ne!(s.clouds[0].id, before);
         assert_eq!(s.source.as_ref().unwrap().source.id, "replacement");
         assert_eq!(s.points, 1);
+        assert_eq!(s.heatmap_range(), Some(HeightRange { low: 3., high: 3. }));
         s.point_active = Some(tempfile::NamedTempFile::new().unwrap());
         let marker = s.point_active.as_ref().unwrap().path().to_owned();
         let mut mode = TargetMode {

@@ -3,8 +3,9 @@ struct Uniforms {
     projection: vec4<f32>, // tan(fov/2), aspect, near, far
     viewport: vec4<f32>, // physical width, height, point radius px, radial metres
     flags: vec4<u32>, // class mask, color mode
-    height: vec4<f32>,
+    height: vec4<f32>, // Height mode base/span, heatmap low/high
     light: vec4<f32>,
+    heat_colors: array<vec4<f32>, 7>,
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
 struct Input {
@@ -34,6 +35,15 @@ fn class_color(classification: u32) -> vec4<f32> {
 fn linear_rgb(rgb: vec3<f32>) -> vec3<f32> {
     return select(pow((rgb + 0.055) / 1.055, vec3<f32>(2.4)), rgb / 12.92, rgb <= vec3<f32>(0.04045));
 }
+fn elevation_heatmap(z: f32) -> vec3<f32> {
+    var t = 0.5;
+    if u.height.w > u.height.z {
+        t = clamp((z - u.height.z) / (u.height.w - u.height.z), 0., 1.);
+    }
+    let stop = t * 6.;
+    let i = min(u32(stop), 5u);
+    return linear_rgb(mix(u.heat_colors[i].rgb, u.heat_colors[i + 1u].rgb, stop - f32(i)));
+}
 @vertex fn vs_point(input: Input, @builtin(vertex_index) index: u32) -> Output {
     let corners = array<vec2<f32>,6>(vec2<f32>(-1.,-1.),vec2<f32>(1.,-1.),vec2<f32>(-1.,1.),
         vec2<f32>(-1.,1.),vec2<f32>(1.,-1.),vec2<f32>(1.,1.));
@@ -56,6 +66,7 @@ fn linear_rgb(rgb: vec3<f32>) -> vec3<f32> {
         let intensity = sqrt(f32((input.packed >> 8u) & 65535u) / 65535.);
         out.color = vec4<f32>(vec3<f32>(intensity),1.);
     }
+    if u.flags.y == 4u { out.color = vec4<f32>(elevation_heatmap(input.position.z), 1.); }
     return out;
 }
 @vertex fn vs_surface(input: Input) -> Output {
@@ -74,7 +85,9 @@ fn linear_rgb(rgb: vec3<f32>) -> vec3<f32> {
     let lit = clamp(0.64 + (diffuse - u.light.z) * 1.6, 0.12, 1.15);
     let pigment = mix(vec3<f32>(0.72,0.81,0.96), vec3<f32>(1.04,1.01,0.95), min(lit,1.));
     if length(input.xy) > u.viewport.w { discard; }
-    return vec4<f32>(linear_rgb(input.color.rgb) * pigment * lit,1.);
+    var color = linear_rgb(input.color.rgb);
+    if u.flags.y == 4u { color = elevation_heatmap(input.world.z); }
+    return vec4<f32>(color * pigment * lit,1.);
 }
 @fragment fn fs_lines(input: Output) -> @location(0) vec4<f32> {
     if length(input.xy) > u.viewport.w { discard; }

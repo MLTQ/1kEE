@@ -2,7 +2,7 @@
 use super::{local_terrain_scene as local, target_pass};
 use crate::{
     model::{AppModel, GeoPoint},
-    target_mode::{ContextInput, Session},
+    target_mode::{ContextInput, Session, heatmap},
     theme,
 };
 use lidar_pipeline::region::Region;
@@ -293,12 +293,24 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
                 session.show_points=false;reset=true;
             }
             ui.checkbox(&mut session.show_context,"Map context");
-            egui::ComboBox::from_id_salt("target-colors").selected_text(["Classification","Height","Source RGB","Intensity"][session.color_mode as usize])
-                .show_ui(ui,|ui| {for (i,label) in ["Classification","Height","Source RGB","Intensity"].into_iter().enumerate() {
-                    ui.selectable_value(&mut session.color_mode,i as u32,label);
-                }});
+            let modes = ["Classification", "Height", "Source RGB", "Intensity", "Elevation heatmap"];
+            egui::ComboBox::from_id_salt("target-colors")
+                .selected_text(modes[session.color_mode as usize])
+                .show_ui(ui, |ui| {
+                    for (i, label) in modes.into_iter().enumerate() {
+                        ui.selectable_value(&mut session.color_mode, i as u32, label);
+                    }
+                });
             ui.add(egui::Slider::new(&mut session.point_size,0.5..=5.).text("point size"));
             ui.menu_button("Classes",|ui|class_controls(ui,&mut session.class_mask));
+            if session.color_mode == heatmap::COLOR_MODE && let Some(range) = session.heatmap_range() {
+                let unit = if session.show_points && session.points > 0 && !session.points_in_navd88_metres() {
+                    "source units"
+                } else {
+                    "m"
+                };
+                heatmap_legend(ui, range, unit);
+            }
         });
         ui.horizontal_wrapped(|ui| {
             egui::ComboBox::from_id_salt("target-survey").width(340.)
@@ -500,6 +512,7 @@ fn egui_wgpu_callback(s: &Session, rect: egui::Rect, ctx: &egui::Context) -> egu
             context_visible: s.show_context && (!s.show_points || s.compatible_dem()),
             class_mask: s.class_mask,
             color_mode: s.color_mode,
+            heatmap_range: s.heatmap_range(),
             point_size: s.point_size,
             light: s.light.light(0.),
             rect,
@@ -563,6 +576,38 @@ fn flight_input(s: &mut Session, response: &egui::Response, ctx: &egui::Context,
         ctx.request_repaint();
     }
 }
+fn heatmap_legend(ui: &mut egui::Ui, range: heatmap::HeightRange, unit: &str) {
+    ui.horizontal(|ui| {
+        let flat = range.low == range.high;
+        if !flat {
+            ui.small(format!("{:.2}", range.low));
+        }
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(if flat { 12. } else { 88. }, 9.),
+            egui::Sense::hover(),
+        );
+        let mut mesh = egui::Mesh::default();
+        let colors = if flat {
+            [heatmap::COLORS[heatmap::COLORS.len() / 2]; heatmap::COLORS.len()]
+        } else {
+            heatmap::COLORS
+        };
+        for (i, [r, g, b]) in colors.into_iter().enumerate() {
+            let x = egui::lerp(rect.x_range(), i as f32 / (colors.len() - 1) as f32);
+            let color = egui::Color32::from_rgb(r, g, b);
+            mesh.colored_vertex(egui::pos2(x, rect.top()), color);
+            mesh.colored_vertex(egui::pos2(x, rect.bottom()), color);
+            if i > 0 {
+                let j = (i * 2) as u32;
+                mesh.add_triangle(j - 2, j - 1, j);
+                mesh.add_triangle(j, j - 1, j + 1);
+            }
+        }
+        ui.painter().add(mesh);
+        ui.small(format!("{:.2} {unit}", range.high));
+    });
+}
+
 fn class_controls(ui: &mut egui::Ui, mask: &mut u32) {
     for (label, bits) in [
         ("Ground", 1 << 2),

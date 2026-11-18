@@ -1,5 +1,5 @@
 //! Numeric DEM and a clipped display mesh. No synthetic terrain fills gaps.
-use super::{Batch, Vertex, serial};
+use super::{Batch, Vertex, heatmap::HeightRange, serial};
 use lidar_pipeline::region::Region;
 use std::{path::Path, sync::Arc};
 use tiff::{
@@ -11,6 +11,7 @@ pub(crate) struct Terrain {
     pub batch: Arc<Batch>,
     pub indices: Vec<u32>,
     pub label: String,
+    pub height_range: HeightRange,
     pub navd88: bool,
     pub width: usize,
     pub height: usize,
@@ -168,6 +169,7 @@ pub(super) fn read(path: &Path, region: Region, label: &str) -> Result<Terrain, 
         .chain(std::iter::once(height - 1))
         .collect::<Vec<_>>();
     let mut points = Vec::with_capacity(xs.len() * ys.len());
+    let mut height_range = HeightRange::EMPTY;
     for &y in &ys {
         for &x in &xs {
             let ll = [
@@ -176,6 +178,9 @@ pub(super) fn read(path: &Path, region: Region, label: &str) -> Result<Terrain, 
             ];
             let [east, north] = region.offset(ll[0], ll[1]);
             let h = heights[y * width + x];
+            if valid(h) && east * east + north * north <= region.radius_m * region.radius_m {
+                height_range.include(h);
+            }
             points.push(Vertex {
                 position: [
                     east as f32,
@@ -215,6 +220,7 @@ pub(super) fn read(path: &Path, region: Region, label: &str) -> Result<Terrain, 
             points,
         }),
         indices,
+        height_range,
         label: format!(
             "{label} · sampled grid ~{spacing:.1} m · display mesh ~{:.1} m",
             spacing * stride as f64
@@ -241,6 +247,7 @@ mod tests {
             }),
             indices: vec![],
             label: String::new(),
+            height_range: HeightRange { low: -4., high: 4. },
             navd88: false,
             width: 3,
             height: 3,

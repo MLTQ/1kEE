@@ -106,6 +106,7 @@ fn draw(ctx: egui::Context) -> Draw {
         context_visible: false,
         class_mask: u32::MAX,
         color_mode: 0,
+        heatmap_range: None,
         light: crate::atlas_style::AtlasStyle {
             altitude_deg: 18.,
             ..Default::default()
@@ -116,11 +117,88 @@ fn draw(ctx: egui::Context) -> Draw {
         ctx,
     }
 }
+fn check_elevation_heatmap(resources: &mut Resources, device: &wgpu::Device, queue: &wgpu::Queue) {
+    let mut draw = draw(egui::Context::default());
+    draw.camera.eye = [0., 0., 10.];
+    draw.camera.pitch = -std::f32::consts::FRAC_PI_2;
+    draw.color_mode = heatmap::COLOR_MODE;
+    let range = heatmap::HeightRange {
+        low: -0.3,
+        high: 0.3,
+    };
+    draw.heatmap_range = Some(range);
+    let vertex = |position| Vertex {
+        position,
+        color: [255; 4],
+        class: 2,
+    };
+    let positions = [[-3., 0., -0.3], [0., 0., 0.], [3., 0., 0.3]];
+    draw.clouds.push(Arc::new(Batch {
+        id: 1,
+        source: None,
+        points: positions.map(vertex).to_vec(),
+    }));
+    let samples = positions.map(|p| {
+        let pixel = draw.camera.project(p, draw.rect).unwrap();
+        (pixel.y as usize * 64 + pixel.x as usize) * 4
+    });
+    let points = render(resources, &draw, device, queue);
+    for (index, expected) in samples.into_iter().zip([0, 3, 6]) {
+        for (&actual, stop) in points[index..index + 3]
+            .iter()
+            .zip(heatmap::COLORS[expected])
+        {
+            assert!(actual.abs_diff(stop) <= 1);
+        }
+    }
+    // The middle of this plane has no green vertices. Its green band must
+    // come from interpolating height before looking up the surface color.
+    draw.surface = true;
+    draw.points = false;
+    draw.terrain = Some(Arc::new(Terrain {
+        batch: Arc::new(Batch {
+            id: 2,
+            source: None,
+            points: [
+                [-4., -3., -0.3],
+                [4., -3., 0.3],
+                [-4., 3., -0.3],
+                [4., 3., 0.3],
+            ]
+            .map(vertex)
+            .to_vec(),
+        }),
+        indices: vec![0, 1, 2, 1, 3, 2],
+        label: String::new(),
+        height_range: range,
+        navd88: true,
+        width: 2,
+        height: 2,
+        heights: vec![-0.3, 0.3, -0.3, 0.3],
+        origin: [0.; 2],
+        scale: [1., -1.],
+    }));
+    let terrain = render(resources, &draw, device, queue);
+    let [low, mid, high] = samples.map(|i| &terrain[i..i + 3]);
+    assert!(low[2] > low[1] && low[1] > low[0]);
+    assert!(mid[1] > mid[0] && mid[1] > mid[2]);
+    assert!(high[0] > high[1] && high[1] > high[2]);
+    draw.heatmap_range = Some(heatmap::HeightRange { low: 0., high: 0. });
+    draw.surface = false;
+    draw.points = true;
+    let flat = render(resources, &draw, device, queue);
+    assert_eq!(
+        &flat[samples[0]..samples[0] + 3],
+        &points[samples[1]..samples[1] + 3]
+    );
+}
+
 #[test]
 #[ignore = "requires a GPU; checks actual depth rendering, filtering, flight and resource release"]
 fn target_gpu_preserves_depth_filters_and_releases_buffers() {
     let (device, queue) = gpu();
     let mut resources = Resources::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+    check_elevation_heatmap(&mut resources, &device, &queue);
     let mut draw = draw(egui::Context::default());
     let vertex = |position, class| Vertex {
         position,
@@ -318,6 +396,7 @@ fn target_live_nc_cutout_benchmark() {
         context_visible: false,
         class_mask: u32::MAX,
         color_mode: 0,
+        heatmap_range: None,
         light: crate::atlas_style::AtlasStyle {
             altitude_deg: 18.,
             ..Default::default()
@@ -498,6 +577,7 @@ fn target_live_hundred_kilometre_overview() {
         context_visible: false,
         class_mask: u32::MAX,
         color_mode: 0,
+        heatmap_range: None,
         light: crate::atlas_style::AtlasStyle {
             altitude_deg: 18.,
             ..Default::default()
@@ -619,6 +699,7 @@ fn target_live_israel_original_points_and_retained_dem() {
         context_visible: false,
         class_mask: u32::MAX,
         color_mode: 0,
+        heatmap_range: None,
         light: crate::atlas_style::AtlasStyle {
             altitude_deg: 18.,
             ..Default::default()
@@ -857,6 +938,7 @@ fn target_live_merged_hudson_sources_fill_neighbor_coverage() {
         context_visible: false,
         class_mask: u32::MAX,
         color_mode: 0,
+        heatmap_range: None,
         light: crate::atlas_style::AtlasStyle {
             altitude_deg: 18.,
             ..Default::default()
