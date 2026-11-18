@@ -415,6 +415,7 @@ fn streaming_reader_can_cancel_between_tiles() {
 #[test]
 fn manifest_publication_preserves_revision_observed_before_selection() {
     let key = LocalManifestKey {
+        build_at: BuildAt::Viewport,
         root: None,
         center_lat_bucket: 0,
         center_lon_bucket: 0,

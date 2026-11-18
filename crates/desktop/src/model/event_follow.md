@@ -28,6 +28,9 @@ and advances it with egui's absolute time; `event_tour.rs` owns weighted selecti
   with a 0.65-second minimum and a hard ten-second cap. Large zoom changes get a
   modest extra allowance within that cap. Local arrival uses regional zoom 9.5
   and a yaw orbit; globe arrival circles the location at zoom 35.
+- During a Local flight, the contour loader can read its committed landing
+  coordinates and zoom. Releasing the camera or reaching the stop ends that
+  request. Updating a story's metadata preserves the active flight destination.
 - Quintic Hermite curves preserve position/velocity on retarget and join the
   orbit velocity at arrival. Widen/approach zoom phases scale with duration;
   local heading advances at the orbit rate so nearby hops do not swivel sharply.

@@ -160,10 +160,7 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             model.selected_root.as_deref(), focus, viewport_center,
             selection.zoom, selection.radius, selection.radius, painter.ctx().clone(),
         ),
-        crate::model::ActiveBody::Earth => contour_asset::load_srtm_lod_region(
-            model.selected_root.as_deref(), focus, viewport_center,
-            selection.zoom, render_zoom, selection.radius, painter.ctx().clone(),
-        ),
+        crate::model::ActiveBody::Earth => earth_contours_for_view(model, selection, time, painter.ctx()),
     };
     let viewport = contour_asset::residency::Viewport { body: model.active_body, projection, rect: clip.expand(8.0) };
     let candidate = handoff::prepare(model.selected_root.as_deref(), viewport, &contour_load, painter.ctx());
@@ -1007,6 +1004,27 @@ pub fn is_active(model: &AppModel) -> bool {
     // Earth can render cached/streamed terrain and vector layers without a raw
     // SRTM installation. Source readiness must not override the selected view.
     true
+}
+
+fn earth_contours_for_view(
+    model: &AppModel,
+    selection: lod::Selection,
+    time: f64,
+    ctx: &egui::Context,
+) -> contour_asset::LocalContourLoad {
+    let landing = model.event_follow.local_landing(time).map(|(center, zoom)| {
+        let arrival = lod::select(model.active_body, zoom, Some(selection));
+        let step = lod::step(model.active_body, arrival.zoom);
+        srtm_focus_cache::TileKey {
+            zoom_bucket: srtm_focus_cache::zoom_bucket_for_zoom(arrival.zoom),
+            lat_bucket: (center.lat / step).round() as i32,
+            lon_bucket: (center.lon / step).round() as i32,
+        }
+    });
+    contour_asset::load_srtm_lod_region(
+        model.selected_root.as_deref(), landing, model.globe_view.local_center,
+        selection.zoom, local_render_zoom(model.globe_view.local_zoom), selection.radius, ctx.clone(),
+    )
 }
 
 fn local_focus(model: &AppModel) -> GeoPoint {

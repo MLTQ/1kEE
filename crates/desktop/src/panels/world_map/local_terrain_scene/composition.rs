@@ -107,7 +107,11 @@ pub(crate) fn compose(
             cached.tile.clone()
         } else {
             let contours = clip_contours(&source.tile, &regions);
-            let bounds = Bounds::from_contours(&contours);
+            let bounds = if Arc::ptr_eq(&contours, &source.tile.contours) {
+                source.tile.bounds
+            } else {
+                Bounds::from_contours(&contours)
+            };
             LocalTileGeometry {
                 id,
                 contours,

@@ -15,6 +15,13 @@ Its single-flight epochs reject results from workers started before the reset.
 - Legacy outer geometry is clipped row-by-row before simplification and cache
   publication, keeping retained memory proportional to the disjoint cores.
   Packed and SQLite paths share the same policy; disk data is unchanged.
+- The Earth Local scene sends each decoded tile directly to the geographic
+  compositor. The merged-path API still waits for a matching flattened
+  snapshot. GPU upload and display publication retain their own readiness checks.
+- During a Follow Events flight, the manifest worker requests the center tile
+  and two rings at the landing coordinates and arrival detail level. Transit
+  frames can read existing tiles from disk. Arrival restores normal viewport
+  build scheduling, including the outer rings.
 
 ### Earth source fallback
 - `contour_fallback.rs` selects the loading grid independently of camera zoom

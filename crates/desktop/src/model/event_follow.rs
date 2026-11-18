@@ -75,6 +75,13 @@ impl EventFollow {
         self.enabled && self.flight.is_some()
     }
 
+    /// The committed landing pose is stable even when a feed refresh moves a story.
+    pub(crate) fn local_landing(&self, now: f64) -> Option<(GeoPoint, f32)> {
+        let flight = self.flight.as_ref()?;
+        (self.enabled && flight.local && now < flight.started + flight.duration)
+            .then(|| (flight.orbit_center, flight.end[2].exp() as f32))
+    }
+
     /// Regional cards appear only after arrival at the flight's destination
     /// zoom. Capture their current alpha on departure to fade out continuously,
     /// including when a new event interrupts an unfinished fade.

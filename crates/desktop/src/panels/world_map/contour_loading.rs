@@ -13,6 +13,7 @@ pub(super) fn snapshot(
     cache: &Mutex<LocalRegionCache>,
     assets: &LocalManifestAssetViews,
     state: srtm_focus_cache::LocalContourRegionState,
+    publication: Publication,
 ) -> Snapshot {
     let mut stages = LocalLoadingStages::default();
     let mut ready = state.ready_buckets;
@@ -72,11 +73,7 @@ pub(super) fn snapshot(
         let fraction = guard
             .as_ref()
             .map(|cache| {
-                if (cache.entries.contains_key(&key) && cache.published_tiles.contains(&key))
-                    || cache
-                        .entries
-                        .get(&key)
-                        .is_some_and(|lines| lines.is_empty())
+                if cache.entries.get(&key).is_some_and(|lines| publication.ready(cache, &key, lines))
                 {
                     1.0
                 } else if cache.entries.contains_key(&key) {
@@ -156,6 +153,7 @@ mod tests {
                         total_assets: 1,
                     },
                 },
+                Publication::Merged,
             )
         };
         assert_eq!(read().fractions[&(0, 0)], 0.75);

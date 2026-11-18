@@ -26,6 +26,27 @@ fn event(id: &str, lat: f32, lon: f32, minute: u8) -> EventRecord {
 }
 
 #[test]
+fn local_landing_tracks_the_committed_flight_until_arrival() {
+    for local in [false, true] {
+        let mut view = GlobeViewState::from_focus(GeoPoint { lat: 0., lon: 0. });
+        view.local_mode = local;
+        let mut follow = EventFollow::default();
+        let mut story = event("a", 31., 35., 1);
+        let landing = story.location;
+        follow.enable(std::slice::from_ref(&story));
+        assert!(follow.local_landing(0.).is_none());
+        follow.tick(&mut view, 0.);
+        story.location.lon += 1.;
+        follow.observe(&[story]);
+        let duration = follow.flight.as_ref().unwrap().duration;
+        assert_eq!(follow.local_landing(duration / 2.), local.then_some((landing, 9.5)));
+        assert!(follow.local_landing(duration).is_none());
+        follow.release_camera();
+        assert!(follow.local_landing(0.).is_none());
+    }
+}
+
+#[test]
 fn regional_cards_fade_only_after_arrival_and_disappear_during_wide_travel() {
     for local in [false, true] {
         let mut view = GlobeViewState::from_focus(GeoPoint { lat: 0.0, lon: 0.0 });

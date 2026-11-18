@@ -18,7 +18,8 @@ pub(super) fn reset() {
 
 pub(super) fn load(
     root: Option<&Path>,
-    anchor: GeoPoint,
+    landing: Option<srtm_focus_cache::TileKey>,
+    publication: Publication,
     center: GeoPoint,
     source_zoom: f32,
     view_zoom: f32,
@@ -38,7 +39,8 @@ pub(super) fn load(
     let primary = load_earth_source_region(
         cache.get_or_init(|| Mutex::new(LocalRegionCache::default())),
         root,
-        anchor,
+        landing.map_or(BuildAt::Viewport, BuildAt::Landing),
+        publication,
         center,
         source_zoom,
         prefetch_radius,
@@ -58,7 +60,8 @@ pub(super) fn load(
     let base = load_earth_source_region(
         EARTH_BASE_CONTOUR_CACHE.get_or_init(|| Mutex::new(LocalRegionCache::default())),
         root,
-        anchor,
+        if landing.is_some() { BuildAt::CachedOnly } else { BuildAt::Viewport },
+        publication,
         center,
         BASE_ZOOM,
         radius,

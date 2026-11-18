@@ -94,6 +94,7 @@ pub(super) fn assets_for(
     };
     let step = spec.half_extent_deg * 0.45;
     let key = LocalManifestKey {
+        build_at: BuildAt::Viewport,
         root: root.map(Path::to_path_buf),
         center_lat_bucket: (center.lat / step).round() as i32,
         center_lon_bucket: (center.lon / step).round() as i32,
@@ -166,6 +167,7 @@ mod tests {
     use super::*;
     fn key(x: i32) -> LocalManifestKey {
         LocalManifestKey {
+            build_at: BuildAt::Viewport,
             root: None,
             center_lat_bucket: 0,
             center_lon_bucket: x,

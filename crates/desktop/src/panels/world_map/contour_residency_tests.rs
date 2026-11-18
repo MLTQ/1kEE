@@ -56,6 +56,18 @@ fn keeps_crossing_lines_and_rejects_fully_offscreen_geometry() {
 }
 
 #[test]
+fn unread_earth_tiles_use_the_core_that_can_reach_the_screen() {
+    let mut view = viewport();
+    view.rect = egui::Rect::from_min_max(egui::pos2(0.2, -0.1), egui::pos2(0.3, 0.1));
+    view.projection.z_factor = 0.0;
+    let tile = CacheKey { zoom_bucket: 4, ..key(0) };
+    // The source extends 0.55° either side. Earth only draws its 0.12375° half-core.
+    assert!(!view.intersects(view.footprint(&tile, false)));
+    view.body = ActiveBody::Moon;
+    assert!(view.intersects(view.footprint(&tile, false)));
+}
+
+#[test]
 fn rotated_box_is_rejected_even_when_its_screen_aabb_overlaps() {
     let mut view = viewport();
     view.projection.yaw_cos = std::f32::consts::FRAC_1_SQRT_2;
@@ -157,6 +169,7 @@ fn culled_disk_tiles_finish_progress_without_being_reloaded() {
         Bounds::from_contours(&line((0.0, 0.0), (0.5, 0.0), 0.0)),
     );
     state.manifest_requested_key = Some(LocalManifestKey {
+        build_at: BuildAt::Viewport,
         root: None,
         center_lat_bucket: 0,
         center_lon_bucket: 0,
@@ -185,6 +198,7 @@ fn culled_disk_tiles_finish_progress_without_being_reloaded() {
                 pending_assets: 0,
             },
         },
+        Publication::Merged,
     );
     assert_eq!(snapshot.status.ready_assets, snapshot.status.total_assets);
     assert_eq!(snapshot.fractions[&(0, 0)], 1.0);

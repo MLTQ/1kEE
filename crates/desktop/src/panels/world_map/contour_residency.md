@@ -14,8 +14,10 @@ Cache files remain unchanged; small bounds records avoid repeat offscreen reads.
 - `prune` drops decoded tiles and progress, invalidating the background merge.
 
 ## Contracts
-- Unknown tiles use the legacy footprint and conservative planetary heights;
-  decoded tiles use their actual geometry bounds. Empty tiles retain core coverage.
+- Before decode, Earth uses the owned core because the reader clips all Earth
+  geometry to it. Moon and Mars use the overlapping legacy footprint. All
+  three use conservative heights until the worker measures the geometry bounds.
+  Empty tiles retain core coverage.
 - Eight logical pixels of edge margin cover stroke feathers and roundoff.
 - No geometry scan or disk I/O runs during paint. Metadata retention is bounded.
 - Late readers record bounds but cannot publish offscreen geometry.

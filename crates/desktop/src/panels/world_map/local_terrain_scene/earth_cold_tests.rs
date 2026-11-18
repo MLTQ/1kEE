@@ -59,7 +59,7 @@ fn cold_earth_local_nine_tiles() {
     loop {
         let load = contour_asset::load_srtm_lod_region(
             selected,
-            center,
+            None,
             center,
             zoom,
             zoom,
@@ -86,6 +86,166 @@ fn cold_earth_local_nine_tiles() {
         assert!(
             start.elapsed() < Duration::from_secs(180),
             "only {count} tiles rendered"
+        );
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    srtm_focus_cache::shutdown_terrain_jobs();
+}
+
+/// Time the center and its eight neighboring tiles through a real Follow Events
+/// flight and the Local renderer's composition, instance and GPU publication.
+#[test]
+#[ignore = "requires isolated settings, ONEKEE_SRTM_ROOT and the RTX 4090"]
+fn cold_follow_event_arrival() {
+    use crate::model::{EventRecord, EventSeverity, FactalBrief};
+    use local_contour_pass::LocalBatchId;
+    use std::collections::HashSet;
+
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("Derived")).unwrap();
+    let source = std::fs::canonicalize(std::env::var_os("ONEKEE_SRTM_ROOT").unwrap()).unwrap();
+    std::os::unix::fs::symlink(source, root.path().join("SRTM_GL1_srtm")).unwrap();
+    let mut screen = Harness::new([960, 540]);
+    gpu_terrain::register_desktop_adapter(screen.adapter_info.clone());
+    assert!(gpu_terrain::enabled());
+    assert!(srtm_focus_cache::recovery::isolated_root().is_none());
+
+    let mut model = AppModel::new();
+    model.selected_root = Some(root.path().to_owned());
+    model.active_body = crate::model::ActiveBody::Earth;
+    model.show_contours = true;
+    model.contour_occlusion = false;
+    model.globe_view.local_mode = true;
+    model.globe_view.local_zoom = 9.5;
+    model.globe_view.local_center = GeoPoint {
+        lat: 39.93,
+        lon: 32.86,
+    };
+    let step = lod::step(model.active_body, 5.0);
+    let stop = GeoPoint {
+        lat: 126. * step,
+        lon: 143. * step,
+    };
+    model.event_follow.enable(&[EventRecord {
+        id: "factal-benchmark".into(),
+        title: "Benchmark".into(),
+        summary: String::new(),
+        severity: EventSeverity::Advisory,
+        location_name: String::new(),
+        location: stop,
+        source: "fixture".into(),
+        occurred_at: String::new(),
+        factal_brief: Some(FactalBrief {
+            factal_id: "benchmark".into(),
+            severity_value: Some(1),
+            occurred_at_raw: None,
+            point_wkt: None,
+            vertical: None,
+            subvertical: None,
+            topics: vec![],
+            content: None,
+            raw_json_pretty: String::new(),
+        }),
+    }]);
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960., 540.));
+    let layout = layout(rect);
+    let painter = screen.ctx.layer_painter(egui::LayerId::background());
+    let start = Instant::now();
+    let mut previous = None;
+    let mut milestones = [false; 3];
+    let mut arrival = None;
+    loop {
+        let now = start.elapsed().as_secs_f64();
+        model.event_follow.tick(&mut model.globe_view, now);
+        let view = &model.globe_view;
+        let center = view.local_center;
+        if arrival.is_none() && model.event_follow.event_label_opacity(now) > 0.0 {
+            arrival = Some(now);
+            eprintln!("FOLLOW_LOCAL arrival_s={now:.3}");
+        }
+        let zoom = local_render_zoom(view.local_zoom);
+        let extent = visual_half_extent_for_zoom(zoom) * 111.32;
+        let projection = projection::local_projection_params(
+            &layout,
+            view,
+            center,
+            (extent * center.lat.to_radians().cos().abs().max(0.2)).max(1.),
+            extent.max(1.),
+        );
+        contour_asset::set_local_viewport(model.active_body, projection, rect);
+        let viewport = contour_asset::residency::Viewport {
+            body: model.active_body,
+            projection,
+            rect: rect.expand(8.),
+        };
+        let selection = lod::select(model.active_body, zoom, previous);
+        previous = Some(selection);
+        let load = earth_contours_for_view(&model, selection, now, &screen.ctx);
+        let frame = handoff::prepare(model.selected_root.as_deref(), viewport, &load, &screen.ctx);
+        let prepared = batches(&model, &frame.tiles, &painter);
+        screen.render(&prepared, &projection, false, rect, &[]);
+        let display = handoff::select(viewport, frame, prepared, true, &screen.ctx);
+        let inner: HashSet<_> = display
+            .batches
+            .iter()
+            .filter_map(|batch| match batch.id {
+                LocalBatchId::Contour(id)
+                    if id.zoom_bucket == 4
+                        && (id.lat_bucket - 126).abs() <= 1
+                        && (id.lon_bucket - 143).abs() <= 1
+                        && !batch.instances.is_empty() =>
+                {
+                    Some((id.lat_bucket, id.lon_bucket))
+                }
+                _ => None,
+            })
+            .collect();
+        for (i, (name, ready)) in [
+            ("center", inner.contains(&(126, 143))),
+            ("five", inner.len() >= 5),
+            ("nine", inner.len() == 9),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if ready && !milestones[i] {
+                milestones[i] = true;
+                screen.render(&display.batches, &projection, false, rect, &[]);
+                assert!(screen.pixels().chunks_exact(4).any(|px| px[0] > 30));
+                eprintln!("FOLLOW_LOCAL {name}_s={:.3}", start.elapsed().as_secs_f64());
+            }
+        }
+        if milestones.iter().all(|m| *m)
+            && arrival.is_some()
+            && load.status.total_assets > 0
+            && load.status.ready_assets == load.status.total_assets
+        {
+            let displayed: HashSet<_> = display.batches.iter().map(|b| b.id).collect();
+            let visible: Vec<_> = load
+                .tiles
+                .iter()
+                .filter(|t| {
+                    !t.contours.is_empty()
+                        && viewport.intersects(composition::visible_bounds(model.active_body, t))
+                })
+                .collect();
+            if !visible.is_empty()
+                && visible
+                    .iter()
+                    .all(|t| displayed.contains(&LocalBatchId::Contour(t.id)))
+            {
+                screen.render(&display.batches, &projection, false, rect, &[]);
+                eprintln!(
+                    "FOLLOW_LOCAL visible_s={:.3} visible_tiles={}",
+                    start.elapsed().as_secs_f64(),
+                    visible.len()
+                );
+                break;
+            }
+        }
+        assert!(
+            now < 90.,
+            "event core milestones {milestones:?}, visible {inner:?}"
         );
         std::thread::sleep(Duration::from_millis(16));
     }

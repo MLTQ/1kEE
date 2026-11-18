@@ -232,8 +232,16 @@ struct CacheKey {
     zoom_bucket: i32,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BuildAt {
+    Viewport,
+    Landing(srtm_focus_cache::TileKey),
+    CachedOnly,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct LocalManifestKey {
+    build_at: BuildAt,
     root: Option<PathBuf>,
     center_lat_bucket: i32,
     center_lon_bucket: i32,
@@ -1102,7 +1110,7 @@ where
 
 pub fn load_srtm_region_for_view(
     selected_root: Option<&Path>,
-    scene_anchor: GeoPoint,
+    _scene_anchor: GeoPoint,
     viewport_center: GeoPoint,
     zoom: f32,
     prefetch_radius: i32,
@@ -1110,23 +1118,34 @@ pub fn load_srtm_region_for_view(
     ctx: egui::Context,
 ) -> LocalContourLoad {
     fallback::load(
-        selected_root, scene_anchor, viewport_center, zoom, zoom,
+        selected_root, None, Publication::Merged, viewport_center, zoom, zoom,
         prefetch_radius, build_radius, ctx,
     )
 }
 
 /// Local scene entry with camera scale independent of the bounded source grid.
 pub(crate) fn load_srtm_lod_region(
-    root: Option<&Path>, anchor: GeoPoint, center: GeoPoint,
+    root: Option<&Path>, landing: Option<srtm_focus_cache::TileKey>, center: GeoPoint,
     source_zoom: f32, view_zoom: f32, radius: i32, ctx: egui::Context,
 ) -> LocalContourLoad {
-    fallback::load(root, anchor, center, source_zoom, view_zoom, radius, radius, ctx)
+    fallback::load(root, landing, Publication::Decoded, center, source_zoom, view_zoom, radius, radius, ctx)
 }
 
-fn local_tiles(cache: &LocalRegionCache) -> Vec<LocalTileGeometry> {
-    // Snapshot only the tiles represented by this CPU merge. Taking progress
-    // under a later lock must not pair an old merge with newly published cells.
-    cache.entries.iter().filter(|(key, contours)| cache.published_tiles.contains(*key) || contours.is_empty())
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Publication {
+    Decoded,
+    Merged,
+}
+
+impl Publication {
+    fn ready(self, cache: &LocalRegionCache, key: &CacheKey, contours: &[ContourPath]) -> bool {
+        self == Self::Decoded || contours.is_empty() || cache.published_tiles.contains(key)
+    }
+}
+
+fn local_tiles(cache: &LocalRegionCache, publication: Publication) -> Vec<LocalTileGeometry> {
+    // Merged-path callers need matching geometry. The scene composes each decoded tile directly.
+    cache.entries.iter().filter(|(key, contours)| publication.ready(cache, key, contours))
     .map(|(key, contours)| LocalTileGeometry {
         id: super::local_contour_pass::LocalTileId {
             zoom_bucket: key.zoom_bucket,
@@ -1141,7 +1160,8 @@ fn local_tiles(cache: &LocalRegionCache) -> Vec<LocalTileGeometry> {
 fn load_earth_source_region(
     cache: &'static Mutex<LocalRegionCache>,
     selected_root: Option<&Path>,
-    _scene_anchor: GeoPoint,
+    build_at: BuildAt,
+    publication: Publication,
     viewport_center: GeoPoint,
     zoom: f32,
     prefetch_radius: i32,
@@ -1161,6 +1181,7 @@ fn load_earth_source_region(
         zoom_bucket: srtm_focus_cache::zoom_bucket_for_zoom(zoom),
         prefetch_radius,
         build_radius,
+        build_at,
     };
     let manifest_root = selected_root.map(Path::to_path_buf);
     let assets = local_manifest_assets(
@@ -1170,13 +1191,29 @@ fn load_earth_source_region(
         "earth-local-contour-manifest",
         srtm_focus_cache::db::focus_cache_db_path,
         move || {
+            // The live camera may cross many source grids in a single flight.
+            // Build at the committed landing and keep reading cached flyover tiles.
+            if let BuildAt::Landing(tile) = build_at {
+                let zoom = srtm_focus_cache::zoom::ZOOMS[tile.zoom_bucket as usize];
+                let step = srtm_focus_cache::half_extent_for_zoom(zoom) * 0.45;
+                let center = GeoPoint {
+                    lat: tile.lat_bucket as f32 * step,
+                    lon: tile.lon_bucket as f32 * step,
+                };
+                // Two rings give the drive useful work after the first nine tiles
+                // while limiting speculation if the operator interrupts the flight.
+                const LANDING_RADIUS: i32 = 2;
+                srtm_focus_cache::ensure_focus_contour_region(
+                    manifest_root.as_deref(), center, zoom, LANDING_RADIUS, LANDING_RADIUS,
+                );
+            }
             let viewport = cache.lock().ok().and_then(|guard| guard.residency.viewport);
             srtm_focus_cache::ensure_local_contour_region(
                 manifest_root.as_deref(),
                 viewport_center,
                 zoom,
                 prefetch_radius,
-                build_radius,
+                (build_at == BuildAt::Viewport).then_some(build_radius),
                 viewport,
             )
         },
@@ -1232,28 +1269,26 @@ fn load_earth_source_region(
         );
     }
 
-    // Flattening the complete source envelope is intentionally asynchronous:
-    // decode arrivals can contain thousands of paths, and cloning them on the
-    // paint thread caused the visible tile-arrival hitch.
+    // The Local renderer composes the decoded per-tile geometry itself.
+    // Only the merged-path API needs a separate flattened source snapshot.
     let (contours, merge, tiles) = if let Ok(mut guard) = cache.lock() {
-        let tiles = local_tiles(&guard);
-        let merge = begin_local_merge(
-            &mut guard,
-            LocalMergeSpec {
-                center_lat_bucket,
-                center_lon_bucket,
-                source_radius: prefetch_radius,
+        let tiles = local_tiles(&guard, publication);
+        if publication == Publication::Merged {
+            let merge = begin_local_merge(&mut guard, LocalMergeSpec {
+                center_lat_bucket, center_lon_bucket, source_radius: prefetch_radius,
                 partition_bucket_step: None,
-            },
-        );
-        (guard.merged.clone(), merge, tiles)
+            });
+            (guard.merged.clone(), merge, tiles)
+        } else {
+            (None, None, tiles)
+        }
     } else {
         (None, None, Vec::new())
     };
     if let Some(work) = merge {
         spawn_local_merge(cache, work, ctx.clone(), "earth-local-contour-merge");
     }
-    let loading = loading::snapshot(cache, &assets, state);
+    let loading = loading::snapshot(cache, &assets, state, publication);
     LocalContourLoad {
         source_zoom: zoom,
         build_radius,
@@ -1290,6 +1325,7 @@ pub fn load_lunar_region_for_view(
     let center_lat_bucket = (viewport_center.lat / bucket_step).round() as i32;
     let center_lon_bucket = (viewport_center.lon / bucket_step).round() as i32;
     let manifest_key = LocalManifestKey {
+        build_at: BuildAt::Viewport,
         root: selected_root.map(Path::to_path_buf),
         center_lat_bucket,
         center_lon_bucket,
@@ -1371,14 +1407,14 @@ pub fn load_lunar_region_for_view(
                 partition_bucket_step: Some(bucket_step),
             },
         );
-        (guard.merged.clone(), merge, local_tiles(&guard))
+        (guard.merged.clone(), merge, local_tiles(&guard, Publication::Merged))
     } else {
         (None, None, Vec::new())
     };
     if let Some(work) = merge {
         spawn_local_merge(cache, work, ctx.clone(), "lunar-local-contour-merge");
     }
-    let loading = loading::snapshot(cache, &assets, state);
+    let loading = loading::snapshot(cache, &assets, state, Publication::Merged);
     LocalContourLoad {
         source_zoom: zoom,
         build_radius,
@@ -1415,6 +1451,7 @@ pub fn load_mars_region_for_view(
     let center_lat_bucket = (viewport_center.lat / bucket_step).round() as i32;
     let center_lon_bucket = (viewport_center.lon / bucket_step).round() as i32;
     let manifest_key = LocalManifestKey {
+        build_at: BuildAt::Viewport,
         root: selected_root.map(Path::to_path_buf),
         center_lat_bucket,
         center_lon_bucket,
@@ -1495,14 +1532,14 @@ pub fn load_mars_region_for_view(
                 partition_bucket_step: Some(bucket_step),
             },
         );
-        (guard.merged.clone(), merge, local_tiles(&guard))
+        (guard.merged.clone(), merge, local_tiles(&guard, Publication::Merged))
     } else {
         (None, None, Vec::new())
     };
     if let Some(work) = merge {
         spawn_local_merge(cache, work, ctx.clone(), "mars-local-contour-merge");
     }
-    let loading = loading::snapshot(cache, &assets, state);
+    let loading = loading::snapshot(cache, &assets, state, Publication::Merged);
     LocalContourLoad {
         source_zoom: zoom,
         build_radius,
@@ -2445,11 +2482,15 @@ mod tests {
         cache.entries.insert(arriving.clone(), Arc::new(vec![test_contour(100.0)]));
         cache.entries.insert(empty, Arc::new(Vec::new()));
         cache.published_tiles.insert(old);
-        let snapshot = local_tiles(&cache);
+        let decoded = local_tiles(&cache, Publication::Decoded);
+        assert_eq!(decoded.len(), 3);
+        assert!(Arc::ptr_eq(&decoded.iter().find(|tile| tile.id.lat_bucket == 1).unwrap().contours,
+            cache.entries.get(&arriving).unwrap()));
+        let snapshot = local_tiles(&cache, Publication::Merged);
         assert_eq!(snapshot.len(), 2);
         assert!(!snapshot.iter().any(|tile| tile.id.lat_bucket == 1));
         cache.published_tiles.insert(arriving);
-        assert_eq!(local_tiles(&cache).len(), 3);
+        assert_eq!(local_tiles(&cache, Publication::Merged).len(), 3);
         // Publishing a later merge cannot change an already returned snapshot.
         assert_eq!(snapshot.len(), 2);
     }
@@ -2678,6 +2719,7 @@ mod tests {
     #[test]
     fn stale_manifest_worker_cannot_replace_the_latest_window() {
         let stale_key = LocalManifestKey {
+            build_at: BuildAt::Viewport,
             root: None,
             center_lat_bucket: 0,
             center_lon_bucket: 0,
@@ -2720,6 +2762,7 @@ mod tests {
     #[test]
     fn compatible_manifest_pan_fallback_keeps_overlapping_tiles_ready() {
         let source_key = LocalManifestKey {
+            build_at: BuildAt::Viewport,
             root: Some(PathBuf::from("terrain-root")),
             center_lat_bucket: 0,
             center_lon_bucket: 0,

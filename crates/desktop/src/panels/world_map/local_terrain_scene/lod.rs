@@ -2,7 +2,7 @@
 use super::super::srtm_focus_cache::zoom;
 use crate::model::ActiveBody;
 
-pub(super) const ZOOMS: [f32; 11] = [0.5, 1.5, 2.5, 3.5, 5.0, 8.0, 12.0, 16.0, 25.0, 35.0, 50.0];
+pub(super) use zoom::ZOOMS;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Selection {

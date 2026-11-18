@@ -232,8 +232,8 @@ fn local_region_state_from_assets(
     spec: FocusContourSpec,
     radius: i32,
     max_abs_lat: Option<f32>,
-    pending_tiles: HashSet<TileKey>,
-    sourceless_tiles: HashSet<TileKey>,
+    pending_tiles: &HashSet<TileKey>,
+    sourceless: &dyn Fn(&TileKey) -> bool,
 ) -> LocalContourRegionState {
     let radius = bounded_region_radius(radius);
     let bucket_step = spec.half_extent_deg * 0.45;
@@ -260,28 +260,29 @@ fn local_region_state_from_assets(
     let ready_assets = ready_buckets.len();
     let mut total_assets = 0usize;
     let mut pending_assets = 0usize;
-    for (lat_bucket, lon_bucket) in
-        ordered_tile_buckets(center_lat_bucket, center_lon_bucket, radius)
-    {
-        if !bucket_has_latitude_coverage(lat_bucket, bucket_step, spec, max_abs_lat) {
-            ready_buckets.insert((lat_bucket, lon_bucket));
-            continue;
-        }
-        let tile = TileKey {
-            zoom_bucket: spec.zoom_bucket,
-            lat_bucket,
-            lon_bucket,
-        };
-        if !ready_buckets.contains(&(lat_bucket, lon_bucket)) && sourceless_tiles.contains(&tile) {
-            // Open ocean: no source terrain exists here, so the bucket is
-            // resolved rather than loading. It is neither an asset the region
-            // is waiting on nor a tile the pulse grid should keep animating.
-            ready_buckets.insert((lat_bucket, lon_bucket));
-            continue;
-        }
-        total_assets += 1;
-        if !ready_buckets.contains(&(lat_bucket, lon_bucket)) && pending_tiles.contains(&tile) {
-            pending_assets += 1;
+    // This pass counts cells. Center-first sorting is only needed when admitting builds.
+    for lat_bucket in center_lat_bucket.saturating_sub(radius)..=center_lat_bucket.saturating_add(radius) {
+        for lon_bucket in center_lon_bucket.saturating_sub(radius)..=center_lon_bucket.saturating_add(radius) {
+            if !bucket_has_latitude_coverage(lat_bucket, bucket_step, spec, max_abs_lat) {
+                ready_buckets.insert((lat_bucket, lon_bucket));
+                continue;
+            }
+            let tile = TileKey {
+                zoom_bucket: spec.zoom_bucket,
+                lat_bucket,
+                lon_bucket,
+            };
+            if !ready_buckets.contains(&(lat_bucket, lon_bucket)) && sourceless(&tile) {
+                // Open ocean: no source terrain exists here, so the bucket is
+                // resolved rather than loading. It is neither an asset the region
+                // is waiting on nor a tile the pulse grid should keep animating.
+                ready_buckets.insert((lat_bucket, lon_bucket));
+                continue;
+            }
+            total_assets += 1;
+            if !ready_buckets.contains(&(lat_bucket, lon_bucket)) && pending_tiles.contains(&tile) {
+                pending_assets += 1;
+            }
         }
     }
 
@@ -305,45 +306,20 @@ pub fn local_contour_region_state(
     zoom: f32,
     radius: i32,
 ) -> LocalContourRegionState {
-    match active_body {
-        crate::model::ActiveBody::Earth => local_region_state_from_assets(
-            assets,
-            focus,
-            zoom::spec_for_zoom(zoom),
-            radius,
-            None,
-            builders::pending_set()
-                .lock()
-                .map(|guard| guard.clone())
-                .unwrap_or_default(),
-            builders::sourceless_tile_set(),
-        ),
-        // The lunar and Mars sources are global rasters, so every in-latitude
-        // bucket has source coverage; only SRTM has ocean gaps.
-        crate::model::ActiveBody::Moon => local_region_state_from_assets(
-            assets,
-            focus,
-            zoom::lunar_spec_for_zoom(zoom),
-            radius,
-            Some(60.0),
-            builders::lunar_pending_set()
-                .lock()
-                .map(|guard| guard.clone())
-                .unwrap_or_default(),
-            HashSet::new(),
-        ),
-        crate::model::ActiveBody::Mars => local_region_state_from_assets(
-            assets,
-            focus,
-            zoom::mars_spec_for_zoom(zoom),
-            radius,
-            Some(80.0),
-            builders::mars_pending_set()
-                .lock()
-                .map(|guard| guard.clone())
-                .unwrap_or_default(),
-            HashSet::new(),
-        ),
+    use crate::model::ActiveBody;
+    let (spec, limit, pending) = match active_body {
+        ActiveBody::Earth => (zoom::spec_for_zoom(zoom), None, builders::pending_set()),
+        ActiveBody::Moon => (zoom::lunar_spec_for_zoom(zoom), Some(60.0), builders::lunar_pending_set()),
+        ActiveBody::Mars => (zoom::mars_spec_for_zoom(zoom), Some(80.0), builders::mars_pending_set()),
+    };
+    let pending = pending.lock().map(|set| set.clone()).unwrap_or_default();
+    let count = |sourceless: &dyn Fn(&TileKey) -> bool| {
+        local_region_state_from_assets(assets, focus, spec, radius, limit, &pending, sourceless)
+    };
+    if active_body == ActiveBody::Earth {
+        builders::with_sourceless_tiles(count)
+    } else {
+        count(&|_| false)
     }
 }
 
@@ -387,7 +363,7 @@ pub fn ensure_focus_contour_region(
     prefetch_radius: i32,
     build_radius: i32,
 ) -> Vec<FocusContourAsset> {
-    ensure_local_contour_region(selected_root, focus, zoom, prefetch_radius, build_radius, None)
+    ensure_local_contour_region(selected_root, focus, zoom, prefetch_radius, Some(build_radius), None)
 }
 
 pub(super) fn ensure_local_contour_region(
@@ -395,12 +371,12 @@ pub(super) fn ensure_local_contour_region(
     focus: GeoPoint,
     zoom: f32,
     prefetch_radius: i32,
-    build_radius: i32,
+    build_radius: Option<i32>,
     viewport: Option<super::contour_asset::residency::Viewport>,
 ) -> Vec<FocusContourAsset> {
     // SRTM root is only needed to spawn on-demand GDAL builds for uncached tiles.
     // Pre-built tiles in the SQLite cache are returned even without SRTM access.
-    let srtm_root = terrain_assets::find_srtm_root(selected_root);
+    let srtm_root = build_radius.and_then(|_| terrain_assets::find_srtm_root(selected_root));
     let Some(cache_root) = db::focus_cache_root(selected_root) else {
         return Vec::new();
     };
@@ -417,7 +393,8 @@ pub(super) fn ensure_local_contour_region(
     let bucket_step = spec.half_extent_deg * 0.45;
     let center_lat_bucket = (focus.lat / bucket_step).round() as i32;
     let center_lon_bucket = (focus.lon / bucket_step).round() as i32;
-    let (prefetch_radius, build_radius) = region_radii(prefetch_radius, build_radius);
+    let build_missing = build_radius.is_some();
+    let (prefetch_radius, build_radius) = region_radii(prefetch_radius, build_radius.unwrap_or(0));
     let min_lat_bucket = center_lat_bucket.saturating_sub(prefetch_radius);
     let max_lat_bucket = center_lat_bucket.saturating_add(prefetch_radius);
     let min_lon_bucket = center_lon_bucket.saturating_sub(prefetch_radius);
@@ -441,7 +418,7 @@ pub(super) fn ensure_local_contour_region(
         buckets.sort_by_cached_key(|&(lat, lon)| !view.intersects_earth_core(lat, lon, bucket_step));
     }
     for (lat_bucket, lon_bucket) in buckets {
-        let allow_build = tile_ring_distance(
+        let allow_build = build_missing && tile_ring_distance(
             lat_bucket,
             lon_bucket,
             center_lat_bucket,
@@ -1064,8 +1041,8 @@ mod tests {
             spec,
             1,
             None,
-            HashSet::new(),
-            sourceless,
+            &HashSet::new(),
+            &|tile| sourceless.contains(tile),
         );
 
         // Every bucket in the window is resolved, so nothing keeps animating.

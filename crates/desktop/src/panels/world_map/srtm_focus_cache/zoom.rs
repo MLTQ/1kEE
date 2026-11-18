@@ -1,6 +1,8 @@
 use super::{FocusContourSpec, GeoBounds};
 use crate::model::GeoPoint;
 
+pub(crate) const ZOOMS: [f32; 11] = [0.5, 1.5, 2.5, 3.5, 5.0, 8.0, 12.0, 16.0, 25.0, 35.0, 50.0];
+
 pub fn half_extent_for_zoom(zoom: f32) -> f32 {
     spec_for_zoom(zoom).half_extent_deg
 }

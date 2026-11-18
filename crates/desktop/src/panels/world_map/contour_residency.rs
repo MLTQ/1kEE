@@ -120,17 +120,16 @@ impl Viewport {
     }
 
     fn footprint(self, key: &CacheKey, empty: bool) -> Bounds {
-        let zooms = [0.5, 1.5, 2.5, 3.5, 5.0, 8.0, 12.0, 16.0, 25.0, 35.0, 50.0];
-        let zoom = zooms[key.zoom_bucket.clamp(0, 10) as usize];
+        let zoom = srtm_focus_cache::zoom::ZOOMS[key.zoom_bucket.clamp(0, 10) as usize];
         let spec = match self.body {
             ActiveBody::Earth => srtm_focus_cache::zoom::spec_for_zoom(zoom),
             ActiveBody::Moon => srtm_focus_cache::zoom::lunar_spec_for_zoom(zoom),
             ActiveBody::Mars => srtm_focus_cache::zoom::mars_spec_for_zoom(zoom),
         };
         let step = spec.half_extent_deg * 0.45;
-        // Unknown legacy tiles can extend far beyond their core. Only use the
-        // small core for a decoded empty tile, whose footprint tracks coverage.
-        let half = if empty {
+        // The Earth reader clips even legacy contours to their owned core.
+        // Moon and Mars retain full overlapping source bounds until decode.
+        let half = if empty || self.body == ActiveBody::Earth {
             step * 0.5
         } else {
             spec.half_extent_deg

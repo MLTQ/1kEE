@@ -110,18 +110,15 @@ fn record_threedep_uncovered(tile: TileKey) {
 /// Tiles known to have no source terrain, from either SRTM's local mirror or
 /// 3DEP's published coverage. Region state treats them as resolved terrain
 /// rather than tiles that are still loading.
-pub fn sourceless_tile_set() -> HashSet<TileKey> {
-    let mut tiles = sourceless_tiles()
-        .lock()
-        .map(|guard| guard.tiles.clone())
-        .unwrap_or_default();
-    if let Ok(guard) = threedep_uncovered_tiles().lock() {
-        tiles.extend(guard.iter().copied());
-    }
-    if let Ok(guard) = international_uncovered_tiles().lock() {
-        tiles.extend(guard.iter().copied());
-    }
-    tiles
+pub(super) fn with_sourceless_tiles<T>(query: impl FnOnce(&dyn Fn(&TileKey) -> bool) -> T) -> T {
+    let srtm = sourceless_tiles().lock().ok();
+    let us = threedep_uncovered_tiles().lock().ok();
+    let international = international_uncovered_tiles().lock().ok();
+    query(&|tile| {
+        srtm.as_ref().is_some_and(|set| set.tiles.contains(tile))
+            || us.as_ref().is_some_and(|set| set.contains(tile))
+            || international.as_ref().is_some_and(|set| set.contains(tile))
+    })
 }
 
 /// Memoized "no source file overlaps this bucket" check.
@@ -705,5 +702,31 @@ mod tests {
         clear_failed_build_gate(&gate);
         assert!(retry_allowed(&failures, tile));
         assert!(retry_gate_allows(&gate));
+    }
+}
+
+#[cfg(test)]
+#[test]
+#[ignore = "process-local coverage history benchmark; run in a fresh process"]
+fn event_region_progress_with_coverage_history() {
+    use crate::model::ActiveBody;
+    let center = GeoPoint { lat: 31.185, lon: 35.3925 };
+    for entries in [0, MAX_TRACKED_SOURCELESS_TILES] {
+        let fill = |set: &mut HashSet<TileKey>, zoom_bucket| {
+            set.extend((0..entries).map(|i| TileKey {
+                zoom_bucket, lat_bucket: (i % 64) as i32, lon_bucket: (i / 64) as i32,
+            }));
+        };
+        fill(&mut sourceless_tiles().lock().unwrap().tiles, 4);
+        fill(&mut threedep_uncovered_tiles().lock().unwrap(), 7);
+        fill(&mut international_uncovered_tiles().lock().unwrap(), 8);
+        let start = Instant::now();
+        for _ in 0..2000 {
+            let state = super::local_contour_region_state(ActiveBody::Earth, &[], center, 5., 4);
+            assert_eq!(state.status.total_assets, 81);
+            std::hint::black_box(state);
+        }
+        eprintln!("FOLLOW_PROGRESS history={} mean_us={:.2}", entries * 3,
+            start.elapsed().as_secs_f64() * 1e6 / 2000.);
     }
 }
