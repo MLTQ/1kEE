@@ -18,10 +18,11 @@ Its single-flight epochs reject results from workers started before the reset.
 - The Earth Local scene sends each decoded tile directly to the geographic
   compositor. The merged-path API still waits for a matching flattened
   snapshot. GPU upload and display publication retain their own readiness checks.
-- During a Follow Events flight, the manifest worker requests the center tile
-  and two rings at the landing coordinates and arrival detail level. Transit
-  frames can read existing tiles from disk. Arrival restores normal viewport
-  build scheduling, including the outer rings.
+- During a Follow Events flight, the manifest worker uses the landing detail
+  level and its selected grid radius. It admits missing tiles from the center
+  outward through the same worker pool used at arrival. Transit frames can
+  read existing tiles along the route. On arrival the viewport determines
+  which cells get priority.
 
 ### Earth source fallback
 - `contour_fallback.rs` selects the loading grid independently of camera zoom

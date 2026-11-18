@@ -28,12 +28,13 @@ pub(super) fn snapshot(
     if let Some(cache) = guard.as_ref()
         && let Some(window) = cache.manifest_requested_key.as_ref()
     {
-        let path = assets
+        // Residency keeps decoded bounds under the reader's full key. Repaired
+        // tiles in one window can each live in a different SQLite database.
+        let paths: HashMap<_, _> = assets
             .display_assets()
-            .first()
-            .map(|a| a.path.clone())
-            .or_else(|| cache.entries.keys().next().map(|k| k.path.clone()))
-            .unwrap_or_default();
+            .iter()
+            .map(|asset| ((asset.lat_bucket, asset.lon_bucket), asset.path.as_path()))
+            .collect();
         for lat in window.center_lat_bucket - window.build_radius
             ..=window.center_lat_bucket + window.build_radius
         {
@@ -41,7 +42,7 @@ pub(super) fn snapshot(
                 ..=window.center_lon_bucket + window.build_radius
             {
                 let key = CacheKey {
-                    path: path.clone(),
+                    path: paths.get(&(lat, lon)).map(|p| p.to_path_buf()).unwrap_or_default(),
                     zoom_bucket: window.zoom_bucket,
                     lat_bucket: lat,
                     lon_bucket: lon,

@@ -204,3 +204,66 @@ fn culled_disk_tiles_finish_progress_without_being_reloaded() {
     assert_eq!(snapshot.fractions[&(0, 0)], 1.0);
     assert!(snapshot.culled_buckets.contains(&(0, 0)));
 }
+
+#[test]
+fn repaired_tiles_use_their_own_decoded_bounds_for_loading_progress() {
+    let visible = key(0);
+    let repaired = CacheKey {
+        path: "repairs/6_0_1/terrain.sqlite".into(),
+        ..key(1)
+    };
+    let unread = key(-1);
+    let mut state = LocalRegionCache::default();
+    state.residency.viewport = Some(viewport());
+    state.entries.insert(
+        visible.clone(),
+        Arc::new(line((0.0, 0.0), (0.01, 0.0), 0.0)),
+    );
+    // The unread footprint reaches the viewport. The known elevated line does not.
+    assert!(state.residency.wanted(&repaired));
+    state.residency.record(
+        repaired.clone(),
+        Bounds::from_contours(&line((0.04, 0.0), (0.06, 0.0), 100.0)),
+    );
+    assert!(!state.residency.wanted(&repaired));
+    state.manifest_requested_key = Some(LocalManifestKey {
+        build_at: BuildAt::Viewport,
+        root: None,
+        center_lat_bucket: 0,
+        center_lon_bucket: 0,
+        zoom_bucket: 6,
+        prefetch_radius: 1,
+        build_radius: 1,
+    });
+    let assets = LocalManifestAssetViews {
+        assets: [visible, repaired, unread]
+            .into_iter()
+            .map(|k| srtm_focus_cache::FocusContourAsset {
+                path: k.path,
+                zoom_bucket: k.zoom_bucket,
+                lat_bucket: k.lat_bucket,
+                lon_bucket: k.lon_bucket,
+                simplify_step: 1,
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let result = loading::snapshot(
+        &Mutex::new(state),
+        &assets,
+        srtm_focus_cache::LocalContourRegionState {
+            ready_buckets: HashSet::from([(0, 0), (0, 1), (0, -1)]),
+            status: srtm_focus_cache::FocusContourRegionStatus {
+                ready_assets: 3,
+                pending_assets: 0,
+                total_assets: 9,
+            },
+        },
+        Publication::Decoded,
+    );
+    assert!(result.culled_buckets.contains(&(0, 1)));
+    assert!(result.ready_buckets.contains(&(0, 1)));
+    assert!(result.ready_buckets.contains(&(0, 0)));
+    assert!(!result.ready_buckets.contains(&(0, -1)));
+    assert_eq!(result.stages.reading, 1);
+}

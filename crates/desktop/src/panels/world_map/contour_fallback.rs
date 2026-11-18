@@ -18,7 +18,7 @@ pub(super) fn reset() {
 
 pub(super) fn load(
     root: Option<&Path>,
-    landing: Option<srtm_focus_cache::TileKey>,
+    landing: Option<LandingRegion>,
     publication: Publication,
     center: GeoPoint,
     source_zoom: f32,

@@ -97,6 +97,23 @@ fn cold_earth_local_nine_tiles() {
 #[test]
 #[ignore = "requires isolated settings, ONEKEE_SRTM_ROOT and the RTX 4090"]
 fn cold_follow_event_arrival() {
+    let step = lod::step(ActiveBody::Earth, 5.0);
+    measure_follow_arrival(GeoPoint {
+        lat: 126. * step,
+        lon: 143. * step,
+    });
+}
+
+#[test]
+#[ignore = "requires isolated settings, ONEKEE_SRTM_ROOT and the RTX 4090"]
+fn cold_follow_tiraspol_arrival() {
+    measure_follow_arrival(GeoPoint {
+        lat: 46.84275,
+        lon: 29.6284,
+    });
+}
+
+fn measure_follow_arrival(stop: GeoPoint) {
     use crate::model::{EventRecord, EventSeverity, FactalBrief};
     use local_contour_pass::LocalBatchId;
     use std::collections::HashSet;
@@ -108,7 +125,18 @@ fn cold_follow_event_arrival() {
     let mut screen = Harness::new([960, 540]);
     gpu_terrain::register_desktop_adapter(screen.adapter_info.clone());
     assert!(gpu_terrain::enabled());
-    assert!(srtm_focus_cache::recovery::isolated_root().is_none());
+    if let Some(repairs) = srtm_focus_cache::recovery::isolated_root() {
+        assert_eq!(
+            std::env::var_os("ONEKEE_TERRAIN_REPAIR_ROOT").as_deref(),
+            Some(repairs.as_os_str()),
+            "use an explicit temporary repair root instead of saved desktop settings"
+        );
+        assert_eq!(
+            repairs.read_dir().unwrap().count(),
+            0,
+            "expected an empty temporary repair root"
+        );
+    }
 
     let mut model = AppModel::new();
     model.selected_root = Some(root.path().to_owned());
@@ -122,10 +150,8 @@ fn cold_follow_event_arrival() {
         lon: 32.86,
     };
     let step = lod::step(model.active_body, 5.0);
-    let stop = GeoPoint {
-        lat: 126. * step,
-        lon: 143. * step,
-    };
+    let lat_bucket = (stop.lat / step).round() as i32;
+    let lon_bucket = (stop.lon / step).round() as i32;
     model.event_follow.enable(&[EventRecord {
         id: "factal-benchmark".into(),
         title: "Benchmark".into(),
@@ -154,6 +180,7 @@ fn cold_follow_event_arrival() {
     let mut previous = None;
     let mut milestones = [false; 3];
     let mut arrival = None;
+    let mut next_report = 10.0;
     loop {
         let now = start.elapsed().as_secs_f64();
         model.event_follow.tick(&mut model.globe_view, now);
@@ -191,8 +218,8 @@ fn cold_follow_event_arrival() {
             .filter_map(|batch| match batch.id {
                 LocalBatchId::Contour(id)
                     if id.zoom_bucket == 4
-                        && (id.lat_bucket - 126).abs() <= 1
-                        && (id.lon_bucket - 143).abs() <= 1
+                        && (id.lat_bucket - lat_bucket).abs() <= 1
+                        && (id.lon_bucket - lon_bucket).abs() <= 1
                         && !batch.instances.is_empty() =>
                 {
                     Some((id.lat_bucket, id.lon_bucket))
@@ -201,7 +228,7 @@ fn cold_follow_event_arrival() {
             })
             .collect();
         for (i, (name, ready)) in [
-            ("center", inner.contains(&(126, 143))),
+            ("center", inner.contains(&(lat_bucket, lon_bucket))),
             ("five", inner.len() >= 5),
             ("nine", inner.len() == 9),
         ]
@@ -214,6 +241,17 @@ fn cold_follow_event_arrival() {
                 assert!(screen.pixels().chunks_exact(4).any(|px| px[0] > 30));
                 eprintln!("FOLLOW_LOCAL {name}_s={:.3}", start.elapsed().as_secs_f64());
             }
+        }
+        if now >= next_report {
+            next_report += 10.0;
+            eprintln!(
+                "FOLLOW_LOCAL elapsed_s={now:.1} ready={}/{} pending={} decoded={} displayed={}",
+                load.status.ready_assets,
+                load.status.total_assets,
+                load.status.pending_assets,
+                load.tiles.len(),
+                display.batches.len(),
+            );
         }
         if milestones.iter().all(|m| *m)
             && arrival.is_some()

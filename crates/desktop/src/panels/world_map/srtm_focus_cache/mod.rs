@@ -363,7 +363,14 @@ pub fn ensure_focus_contour_region(
     prefetch_radius: i32,
     build_radius: i32,
 ) -> Vec<FocusContourAsset> {
-    ensure_local_contour_region(selected_root, focus, zoom, prefetch_radius, Some(build_radius), None)
+    ensure_local_contour_region(
+        selected_root, focus, zoom, prefetch_radius, Some(build_radius), EarthRegionUse::Display(None),
+    )
+}
+
+pub(super) enum EarthRegionUse {
+    Display(Option<super::contour_asset::residency::Viewport>),
+    PrebuildLanding,
 }
 
 pub(super) fn ensure_local_contour_region(
@@ -372,8 +379,17 @@ pub(super) fn ensure_local_contour_region(
     zoom: f32,
     prefetch_radius: i32,
     build_radius: Option<i32>,
-    viewport: Option<super::contour_asset::residency::Viewport>,
+    request: EarthRegionUse,
 ) -> Vec<FocusContourAsset> {
+    let spec = zoom::spec_for_zoom(zoom);
+    // Landing selection only feeds builders. Resume on the next worker completion.
+    // Display selection must still enumerate cached assets while builders are busy.
+    let prebuild_native = matches!(request, EarthRegionUse::PrebuildLanding)
+        && !zoom::spec_uses_threedep(&spec);
+    let busy = || prebuild_native && work_slots::processing().is_full();
+    if busy() {
+        return Vec::new();
+    }
     // SRTM root is only needed to spawn on-demand GDAL builds for uncached tiles.
     // Pre-built tiles in the SQLite cache are returned even without SRTM access.
     let srtm_root = build_radius.and_then(|_| terrain_assets::find_srtm_root(selected_root));
@@ -389,7 +405,6 @@ pub(super) fn ensure_local_contour_region(
     let Ok(connection) = open_region_cache_db(&cache_db_path) else {
         return Vec::new();
     };
-    let spec = zoom::spec_for_zoom(zoom);
     let bucket_step = spec.half_extent_deg * 0.45;
     let center_lat_bucket = (focus.lat / bucket_step).round() as i32;
     let center_lon_bucket = (focus.lon / bucket_step).round() as i32;
@@ -399,7 +414,7 @@ pub(super) fn ensure_local_contour_region(
     let max_lat_bucket = center_lat_bucket.saturating_add(prefetch_radius);
     let min_lon_bucket = center_lon_bucket.saturating_sub(prefetch_radius);
     let max_lon_bucket = center_lon_bucket.saturating_add(prefetch_radius);
-    let Ok(manifest) = db::contour_manifest_window(
+    let Ok(manifest) = db::source_contour_manifest_window(
         &connection,
         spec.zoom_bucket,
         min_lat_bucket,
@@ -412,12 +427,15 @@ pub(super) fn ensure_local_contour_region(
     let mut assets = Vec::new();
 
     let mut buckets = ordered_tile_buckets(center_lat_bucket, center_lon_bucket, prefetch_radius);
-    if let Some(view) = viewport {
+    if let EarthRegionUse::Display(Some(view)) = request {
         // Stable partition retains center-first ring order within each group.
         // Keep the offscreen prefetch ring eligible once visible jobs are served.
         buckets.sort_by_cached_key(|&(lat, lon)| !view.intersects_earth_core(lat, lon, bucket_step));
     }
     for (lat_bucket, lon_bucket) in buckets {
+        if busy() {
+            break;
+        }
         let allow_build = build_missing && tile_ring_distance(
             lat_bucket,
             lon_bucket,

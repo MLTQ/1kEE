@@ -341,7 +341,15 @@ pub fn ensure_bucket_asset(
     };
     let repaired_path = super::recovery::build_path(cache_db_path, tile, manifest_contour_count, allow_build)?;
     let manifest_contour_count = if repaired_path != cache_db_path {
-        super::recovery::count(&repaired_path, tile).ok().flatten()
+        match super::recovery::count(&repaired_path, tile) {
+            Ok(count) => count,
+            Err(error) => {
+                if super::recovery::corrupt(&error) {
+                    super::recovery::report(&repaired_path, tile);
+                }
+                return None;
+            }
+        }
     } else { manifest_contour_count };
     let cache_root = if repaired_path != cache_db_path { repaired_path.parent()? } else { cache_root };
     let cache_db_path = repaired_path.as_path();

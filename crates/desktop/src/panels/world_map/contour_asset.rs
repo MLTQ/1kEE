@@ -233,9 +233,15 @@ struct CacheKey {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct LandingRegion {
+    pub tile: srtm_focus_cache::TileKey,
+    pub radius: i32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum BuildAt {
     Viewport,
-    Landing(srtm_focus_cache::TileKey),
+    Landing(LandingRegion),
     CachedOnly,
 }
 
@@ -1124,8 +1130,8 @@ pub fn load_srtm_region_for_view(
 }
 
 /// Local scene entry with camera scale independent of the bounded source grid.
-pub(crate) fn load_srtm_lod_region(
-    root: Option<&Path>, landing: Option<srtm_focus_cache::TileKey>, center: GeoPoint,
+pub(super) fn load_srtm_lod_region(
+    root: Option<&Path>, landing: Option<LandingRegion>, center: GeoPoint,
     source_zoom: f32, view_zoom: f32, radius: i32, ctx: egui::Context,
 ) -> LocalContourLoad {
     fallback::load(root, landing, Publication::Decoded, center, source_zoom, view_zoom, radius, radius, ctx)
@@ -1193,18 +1199,18 @@ fn load_earth_source_region(
         move || {
             // The live camera may cross many source grids in a single flight.
             // Build at the committed landing and keep reading cached flyover tiles.
-            if let BuildAt::Landing(tile) = build_at {
+            if let BuildAt::Landing(LandingRegion { tile, radius }) = build_at {
                 let zoom = srtm_focus_cache::zoom::ZOOMS[tile.zoom_bucket as usize];
                 let step = srtm_focus_cache::half_extent_for_zoom(zoom) * 0.45;
                 let center = GeoPoint {
                     lat: tile.lat_bucket as f32 * step,
                     lon: tile.lon_bucket as f32 * step,
                 };
-                // Two rings give the drive useful work after the first nine tiles
-                // while limiting speculation if the operator interrupts the flight.
-                const LANDING_RADIUS: i32 = 2;
-                srtm_focus_cache::ensure_focus_contour_region(
-                    manifest_root.as_deref(), center, zoom, LANDING_RADIUS, LANDING_RADIUS,
+                // Use the arrival footprint in center-first order. A warm center
+                // leaves the bounded workers free to build missing outer tiles.
+                srtm_focus_cache::ensure_local_contour_region(
+                    manifest_root.as_deref(), center, zoom, radius, Some(radius),
+                    srtm_focus_cache::EarthRegionUse::PrebuildLanding,
                 );
             }
             let viewport = cache.lock().ok().and_then(|guard| guard.residency.viewport);
@@ -1214,7 +1220,7 @@ fn load_earth_source_region(
                 zoom,
                 prefetch_radius,
                 (build_at == BuildAt::Viewport).then_some(build_radius),
-                viewport,
+                srtm_focus_cache::EarthRegionUse::Display(viewport),
             )
         },
     );

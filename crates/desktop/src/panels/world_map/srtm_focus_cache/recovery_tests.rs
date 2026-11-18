@@ -104,6 +104,17 @@ fn shadowed_manifest_never_advertises_old_geometry_and_new_missing_tiles_use_saf
     insert(&c, tile(10), &geometry());
     let replaced = replacement(&path, tile(9));
     std::fs::create_dir_all(replaced.parent().unwrap()).unwrap();
+    let source = db::source_contour_manifest_window(&c, 0, 9, 10, 27, 27).unwrap();
+    let select = |lat| {
+        builders::ensure_bucket_asset(
+            None, dir.path(), &path, source.get(&(lat, 27)).copied(), false,
+            super::super::zoom::spec_for_zoom(0.5), lat, 27, 1.0,
+        )
+    };
+    // Both primary rows still exist, but the repair marker shadows just tile 9.
+    assert_eq!(source.len(), 2);
+    assert!(select(9).is_none());
+    assert_eq!(select(10).unwrap().path, path);
     let m = db::contour_manifest_window(&c, 0, 9, 10, 27, 27).unwrap();
     assert!(!m.contains_key(&(9, 27)));
     assert_eq!(m.get(&(10, 27)), Some(&1));
@@ -114,6 +125,7 @@ fn shadowed_manifest_never_advertises_old_geometry_and_new_missing_tiles_use_saf
     let r = db::open_cache_db(&replaced).unwrap();
     insert(&r, tile(9), &geometry());
     drop(r);
+    assert_eq!(select(9).unwrap().path, replaced);
     let m = db::contour_manifest_window(&c, 0, 9, 10, 27, 27).unwrap();
     assert_eq!(m.len(), 2);
     assert!(db::tile_exists(&c, tile(9)).unwrap());

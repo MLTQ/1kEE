@@ -201,16 +201,30 @@ fn original_contour_manifest_window(
     Ok(manifest)
 }
 
-pub fn contour_manifest_window(
-    connection: &Connection, zoom_bucket: i32,
-    min_lat_bucket: i32, max_lat_bucket: i32, min_lon_bucket: i32, max_lon_bucket: i32,
+/// Read the primary index. Earth selection resolves replacement databases in
+/// scheduling order, so it can admit the center before opening outer tiles.
+pub(super) fn source_contour_manifest_window(
+    connection: &Connection,
+    zoom_bucket: i32,
+    min_lat_bucket: i32,
+    max_lat_bucket: i32,
+    min_lon_bucket: i32,
+    max_lon_bucket: i32,
 ) -> rusqlite::Result<HashMap<(i32, i32), i64>> {
-    let original = original_contour_manifest_window(connection, zoom_bucket, min_lat_bucket, max_lat_bucket, min_lon_bucket, max_lon_bucket);
-    let mut manifest = match original {
-        Ok(m) => m,
+    let original = original_contour_manifest_window(
+        connection,
+        zoom_bucket,
+        min_lat_bucket,
+        max_lat_bucket,
+        min_lon_bucket,
+        max_lon_bucket,
+    );
+    match original {
+        Ok(m) => Ok(m),
         Err(e) if super::recovery::corrupt(&e) => {
             if let Some(path) = connection.path() {
-                super::recovery::mark_database(Path::new(path)).map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+                super::recovery::mark_database(Path::new(path))
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
             }
             // A damaged manifest index must not stop every new tile in a view.
             // Try individual keys so readable neighbours remain available.
@@ -224,10 +238,17 @@ pub fn contour_manifest_window(
                     }
                 }
             }
-            m
+            Ok(m)
         }
-        Err(e) => return Err(e),
-    };
+        Err(e) => Err(e),
+    }
+}
+
+pub fn contour_manifest_window(
+    connection: &Connection, zoom_bucket: i32,
+    min_lat_bucket: i32, max_lat_bucket: i32, min_lon_bucket: i32, max_lon_bucket: i32,
+) -> rusqlite::Result<HashMap<(i32, i32), i64>> {
+    let mut manifest = source_contour_manifest_window(connection, zoom_bucket, min_lat_bucket, max_lat_bucket, min_lon_bucket, max_lon_bucket)?;
     if let Some(path) = connection.path() {
         let path = Path::new(path);
         for lat in min_lat_bucket..=max_lat_bucket {

@@ -20,6 +20,8 @@ into the local scene's progress snapshot without filesystem work on paint.
 | Root/zoom changes | Keys include full asset path and zoom; clears remove publication state | Reusing old published tiles in a new scene |
 
 Viewport-culled cells are marked complete without requiring resident geometry.
+Each cell uses its own manifest path to look up the decoded bounds, including
+windows that read a different repair database for each tile.
 `culled_buckets` is distinct from missing/no-source coverage and passes to the
 fine-tier fallback check, preventing offscreen eviction from blocking takeover.
 

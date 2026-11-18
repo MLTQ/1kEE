@@ -17,6 +17,10 @@ impl Slots {
         }
     }
 
+    pub(super) fn is_full(&self) -> bool {
+        self.active.load(Ordering::Relaxed) >= self.limit
+    }
+
     pub fn try_acquire(&self) -> Option<Permit<'_>> {
         self.active
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {

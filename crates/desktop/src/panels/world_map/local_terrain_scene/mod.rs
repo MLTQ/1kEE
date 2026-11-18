@@ -1015,10 +1015,13 @@ fn earth_contours_for_view(
     let landing = model.event_follow.local_landing(time).map(|(center, zoom)| {
         let arrival = lod::select(model.active_body, zoom, Some(selection));
         let step = lod::step(model.active_body, arrival.zoom);
-        srtm_focus_cache::TileKey {
-            zoom_bucket: srtm_focus_cache::zoom_bucket_for_zoom(arrival.zoom),
-            lat_bucket: (center.lat / step).round() as i32,
-            lon_bucket: (center.lon / step).round() as i32,
+        contour_asset::LandingRegion {
+            tile: srtm_focus_cache::TileKey {
+                zoom_bucket: srtm_focus_cache::zoom_bucket_for_zoom(arrival.zoom),
+                lat_bucket: (center.lat / step).round() as i32,
+                lon_bucket: (center.lon / step).round() as i32,
+            },
+            radius: arrival.radius,
         }
     });
     contour_asset::load_srtm_lod_region(
