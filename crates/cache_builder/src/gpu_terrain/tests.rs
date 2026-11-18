@@ -554,6 +554,25 @@ fn file_order_reads_preserve_chunk_positions_and_reuse_only_current_edge_blocks(
             assert_eq!(f32::from(sample), expected);
         }
     }
+    // With room for two blocks, touching the first must protect it from eviction.
+    let mut small = deflate::BlockCache::with_capacity(2);
+    let mut read_post = |x| {
+        let needed = Window {
+            x,
+            y: 0,
+            width: 1,
+            height: 1,
+        };
+        window::load_cached(window::open(&path).unwrap(), &path, needed, &mut small)
+            .unwrap()
+            .hits
+    };
+    assert_eq!(
+        [0, 512, 0, 1024, 0, 512].map(&mut read_post),
+        [0, 0, 1, 0, 1, 0]
+    );
+    assert_eq!(small.usage_mib(), (1., 1.));
+
     write(7);
     std::fs::File::open(&path)
         .unwrap()

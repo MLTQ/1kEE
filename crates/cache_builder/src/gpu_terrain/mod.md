@@ -22,10 +22,14 @@ are aligned to TIFF chunk boundaries; strip-based files necessarily read the
 full width of each needed strip. For native 512×512 single-band Deflate blocks
 with no predictor, the reader sorts the requested offsets and combines up to
 four nearby blocks per read. A single disk reader can prepare one pending batch
-while libdeflate checks and expands the current one. The worker retains up to
-32 MiB of decoded blocks that straddle a requested window boundary for reuse
-by neighboring tiles. Entries are keyed by source path, size, modification time
-and block index. Other layouts use the TIFF decoder.
+while libdeflate checks and expands the current one. The worker retains decoded
+blocks that straddle a requested window boundary for reuse by neighboring tiles.
+The process-wide cache grows by 512 KiB per retained block. On 64-bit Linux its
+ceiling is one quarter of reported physical RAM, up to 12 GiB. If the worker
+cannot read Linux memory information, the default is 1 GiB on 64-bit hosts.
+A hash index identifies each block by source path, size, modification time and
+block index. At capacity, the least recently used block supplies the next decode
+buffer. Other layouts use the TIFF decoder.
 
 The uploaded source window contains signed 16-bit elevations, two per GPU word.
 The shader expands each signed sample before bilinear interpolation. Normal OS
@@ -68,8 +72,9 @@ caches, alternating execution order and reporting cold/warm worker timings.
 
 Cold-build diagnostics emit one `[terrain-gpu-source]` line per cache miss:
 bytes read by the counted file reader, newly decoded and reused block counts,
-window pixel count, time inside reads/seeks, decode time and buffer-upload
-submission time. The Deflate reader overlaps I/O with decompression. Its
+window pixel count, time inside reads/seeks, decode time, buffer-upload
+submission time and resident decoded block MiB alongside the cache ceiling.
+The Deflate reader overlaps I/O with decompression. Its
 `decode_ms` measures decompression, sample validation, and copying into the
 source window. The general reader times processing outside I/O. These are host timings; completed GPU work is synchronized in
 compute/readback. Per-build `worker_wait_ms` includes first-use initialization

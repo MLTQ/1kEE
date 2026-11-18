@@ -2854,6 +2854,7 @@ dependencies = [
  "eframe",
  "egui",
  "flate2",
+ "hashlink",
  "image",
  "libdeflater",
  "osmpbf",

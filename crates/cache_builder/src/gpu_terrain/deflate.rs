@@ -1,11 +1,11 @@
 //! Read native 512² Deflate tiles in file order and inflate while the drive reads ahead.
 use super::window::{TiffReader, Window};
+use hashlink::lru_cache::LruCache;
 use libdeflater::Decompressor;
 use std::{
-    collections::VecDeque,
     io::{self, Read, Seek, SeekFrom},
-    path::{Path, PathBuf},
-    sync::mpsc,
+    path::Path,
+    sync::{Arc, mpsc},
     time::{Duration, Instant, SystemTime},
 };
 use tiff::{
@@ -16,19 +16,66 @@ use tiff::{
 const SIDE: u32 = 512;
 const COLUMNS: u32 = 3601u32.div_ceil(SIDE);
 const TILE_BYTES: usize = (SIDE * SIDE * 2) as usize;
-// Retain only blocks that straddle the requested window, up to 32 MiB.
-const CACHE_BLOCKS: usize = 32 * 1024 * 1024 / TILE_BYTES;
 
-struct Entry {
-    path: PathBuf,
+#[derive(PartialEq, Eq, Hash)]
+struct BlockKey {
+    path: Arc<Path>,
     modified: SystemTime,
     size: u64,
     index: u32,
-    pixels: Vec<i16>,
 }
 
-#[derive(Default)]
-pub(super) struct BlockCache(VecDeque<Entry>);
+pub(super) struct BlockCache(LruCache<BlockKey, Vec<i16>>);
+
+// Units stay in KiB so a 12 GiB host budget is representable on every target.
+fn cache_blocks(total_kib: Option<u64>) -> usize {
+    let budget_kib = total_kib.map_or(1024 * 1024, |total| total / 4);
+    let max_kib = (12 * 1024 * 1024).min(usize::MAX as u64 / 1024 / 4);
+    (budget_kib.min(max_kib) / (TILE_BYTES / 1024) as u64).max(1) as usize
+}
+
+impl Default for BlockCache {
+    fn default() -> Self {
+        let total_kib = std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|info| {
+                info.lines().find_map(|line| {
+                    line.strip_prefix("MemTotal:")?
+                        .split_whitespace()
+                        .next()?
+                        .parse()
+                        .ok()
+                })
+            });
+        Self::with_capacity(cache_blocks(total_kib))
+    }
+}
+
+impl BlockCache {
+    pub(super) fn with_capacity(blocks: usize) -> Self {
+        Self(LruCache::new(blocks))
+    }
+
+    pub(super) fn usage_mib(&self) -> (f64, f64) {
+        let block_mib = TILE_BYTES as f64 / (1024. * 1024.);
+        (
+            self.0.len() as f64 * block_mib,
+            self.0.capacity() as f64 * block_mib,
+        )
+    }
+}
+
+#[cfg(all(test, target_pointer_width = "64"))]
+#[test]
+fn cache_budget_scales_with_host_ram_and_allocates_on_demand() {
+    let gib_in_kib = 1024 * 1024;
+    assert_eq!(cache_blocks(None), 2048);
+    assert_eq!(cache_blocks(Some(8 * gib_in_kib)), 4096);
+    for gib in [48, 52, 256] {
+        let cache = BlockCache::with_capacity(cache_blocks(Some(gib * gib_in_kib)));
+        assert_eq!(cache.usage_mib(), (0., 12. * 1024.));
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Block {
@@ -161,24 +208,26 @@ pub(super) fn read_window(
     let reader = decoder.inner();
     let meta = reader.get_ref().file.metadata()?;
     let modified = meta.modified().ok();
+    let path: Arc<Path> = path.into();
+    let key = |index| {
+        modified.map(|modified| BlockKey {
+            path: Arc::clone(&path),
+            modified,
+            size: meta.len(),
+            index,
+        })
+    };
     let mut hits = 0;
     let mut cpu = Duration::ZERO;
     let mut missing = Vec::new();
     for y in (window.y..window.y + window.height).step_by(SIDE as usize) {
         for x in (window.x..window.x + window.width).step_by(SIDE as usize) {
             let index = y / SIDE * COLUMNS + x / SIDE;
-            if let Some(pos) = cache.0.iter().position(|e| {
-                e.index == index
-                    && Some(e.modified) == modified
-                    && e.size == meta.len()
-                    && e.path == path
-            }) {
-                let entry = cache.0.remove(pos).unwrap();
+            if let Some(pixels) = key(index).and_then(|key| cache.0.get(&key)) {
                 let start = Instant::now();
-                copy_block(index, &entry.pixels, window, samples)?;
+                copy_block(index, pixels, window, samples)?;
                 cpu += start.elapsed();
                 hits += 1;
-                cache.0.push_back(entry);
                 continue;
             }
             let offset = *offsets
@@ -224,21 +273,15 @@ pub(super) fn read_window(
             }
             let bounds = copy_block(block.index, &pixels, window, samples)?;
             if !needed.contains(bounds)
-                && let Some(modified) = modified
+                && let Some(key) = key(block.index)
             {
                 // Recycle the evicted block as the next decoder scratch area.
-                let next = if cache.0.len() == CACHE_BLOCKS {
-                    cache.0.pop_front().unwrap().pixels
+                let next = if cache.0.len() == cache.0.capacity() {
+                    cache.0.remove_lru().unwrap().1
                 } else {
                     vec![0i16; TILE_BYTES / 2]
                 };
-                cache.0.push_back(Entry {
-                    path: path.into(),
-                    modified,
-                    size: meta.len(),
-                    index: block.index,
-                    pixels: std::mem::replace(&mut pixels, next),
-                });
+                cache.0.insert(key, std::mem::replace(&mut pixels, next));
             }
         }
         cpu += start.elapsed();

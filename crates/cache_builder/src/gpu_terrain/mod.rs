@@ -333,8 +333,9 @@ impl Worker {
             bytemuck::cast_slice(&decoded.samples),
             wgpu::BufferUsages::STORAGE,
         );
+        let (resident_mib, limit_mib) = self.block_cache.usage_mib();
         eprintln!(
-            "[terrain-gpu-source] file={} chunks={} reused_blocks={} bytes_read={} decoded_pixels={} io_ms={:.3} decode_ms={:.3} upload_submit_ms={:.3}",
+            "[terrain-gpu-source] file={} chunks={} reused_blocks={} bytes_read={} decoded_pixels={} io_ms={:.3} decode_ms={:.3} upload_submit_ms={:.3} block_cache_mib={resident_mib:.1} block_cache_limit_mib={limit_mib:.1}",
             path.file_name().unwrap_or_default().to_string_lossy(),
             decoded.chunks,
             decoded.hits,

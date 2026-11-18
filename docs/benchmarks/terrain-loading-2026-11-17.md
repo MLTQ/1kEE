@@ -4,8 +4,8 @@
 
 On the RTX 4090, the new reader keeps native signed 16-bit SRTM posts through
 GPU upload. On the tested 512×512 Deflate TIFFs it reads requested blocks in
-file-offset order, overlaps reading with decompression and shares up to 32 MiB
-of decoded boundary blocks across requests. The two GPU generations below both
+file-offset order and overlaps reading with decompression. The build measured
+in the first comparison used a 32 MiB decoded boundary-block cache. The two GPU generations below both
 build native-resolution contour geometry.
 
 | Nine-tile region | Reader and source drive | First draw | Five tiles | All nine |
@@ -47,6 +47,27 @@ window capacity requirement, from 594 to 297 MiB for twelve full windows.
 The old and new GPU builds produced identical ordered contour geometry for
 Yemen tile 0/9/27, covering 58,996 paths and 1,531,831 segments. Both 63,833,458-byte
 geometry exports had SHA-256 `673a1e6da4138f0bfa94ffbf425c84e1d38a26a3d34120965f3da3103e41ffe8`.
+
+### Sizing the decoded block cache
+
+The worker now has an on-demand 12 GiB ceiling on the test machine. The table
+compares three fresh processes per version and region. Both versions used the
+same 3×3 draw benchmark, source-page eviction and an empty SQLite destination.
+The run order on the external drive was old, new, new, old, old, new. The
+internal SSD used the same 36 Yemen files and the opposite order.
+
+| Nine-tile region and source | Median reused blocks, 32 MiB → 12 GiB | Peak decoded blocks in RAM at 12 GiB | Median time to all nine, 32 MiB → 12 GiB |
+| --- | ---: | ---: | ---: |
+| Wide Yemen, external USB drive | 30 → 164 | 152 MiB | 12.90 → 14.90 s |
+| Wide Yemen, internal SSD | 17 → 164 | 152 MiB | 4.41 → 4.35 s |
+| Dead Sea, external USB drive | 30 → 30 | 18 MiB | 1.63 → 1.56 s |
+
+On the wide USB runs the median TIFF bytes requested fell from 301.4 to
+275.8 MB. OS block reads charged to the process and children were 291.8 and
+291.6 MB, and median time in reads and seeks rose from 10.44 to 12.52 s.
+The external drive also served other reads during the session. The increase
+in block hits was repeatable. The cold timings show a slowdown on that drive
+and little change on the SSD. Both nine-tile working sets fit inside 1 GiB.
 
 ## Original GDAL and GPU comparison from an empty cache
 
