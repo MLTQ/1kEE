@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use super::cell_loader::{LoadedPolyline, load_features_from_cells};
+use super::tree_geometry as geometry;
 use super::local_terrain_scene::{
     LocalLayout, local_geo_bounds, project_local, visual_half_extent_for_zoom,
 };
@@ -28,7 +29,60 @@ struct InfraCache {
     covered_max_lat: f32,
     covered_min_lon: f32,
     covered_max_lon: f32,
-    features: Vec<LoadedPolyline>,
+    features: Vec<InfraFeature>,
+}
+
+struct InfraFeature {
+    way_id: i64,
+    class: String,
+    name: Option<String>,
+    points: Vec<(GeoPoint, f32)>,
+    fill: Option<geometry::Fill>,
+}
+
+impl InfraFeature {
+    fn prepare(feature: LoadedPolyline, prefix: &str) -> Self {
+        // Preserve this layer's existing map-plane placement. Topology is
+        // prepared before projection, and never rebuilt during camera motion.
+        let mut points: Vec<_> = feature.points.into_iter().map(|p| (p, 0.)).collect();
+        geometry::unwrap(&mut points);
+        let area = if prefix == "aeroway" {
+            // Old caches mark even closed runway ways as lines. A closed
+            // source footprint still has usable area; an open strip stays open.
+            matches!(feature.class.as_str(), "runway" | "terminal" | "helipad")
+        } else {
+            feature.is_polygon
+        };
+        let fill = area.then(|| geometry::tessellate(&points)).flatten();
+        Self { way_id: feature.way_id, class: feature.class, name: feature.name, points, fill }
+    }
+
+    fn shapes(
+        &self, clip: egui::Rect, stroke: egui::Stroke, color: Option<egui::Color32>,
+        project: impl Fn(GeoPoint, f32) -> Option<egui::Pos2> + Copy,
+    ) -> Vec<egui::Shape> {
+        let mut shapes = Vec::new();
+        if let (Some(fill), Some(color)) = (&self.fill, color) {
+            let mesh = geometry::project_fill(fill, color, clip, project);
+            if !mesh.is_empty() { shapes.push(egui::Shape::mesh(mesh)); }
+        }
+        shapes.extend(geometry::outlines(&self.points, stroke, project));
+        shapes
+    }
+}
+
+fn aeroway_stroke(class: &str) -> egui::Stroke {
+    match class {
+        "runway" | "airstrip" => egui::Stroke::new(2.5_f32, theme::runway_color()),
+        "intl_airport" | "dom_airport" | "airfield" => {
+            egui::Stroke::new(0.7_f32, theme::aeroway_color().gamma_multiply(0.6))
+        }
+        _ => egui::Stroke::new(1.2_f32, theme::runway_color()),
+    }
+}
+
+fn aeroway_fill(class: &str) -> Option<egui::Color32> {
+    matches!(class, "runway" | "terminal" | "helipad").then(theme::aeroway_color)
 }
 
 struct InfraCacheStore {
@@ -143,7 +197,8 @@ fn draw_infra(
 
             let root_buf = root.to_path_buf();
             std::thread::spawn(move || {
-                let features = load_features_from_cells(&root_buf, prefix, load_bounds);
+                let features = load_features_from_cells(&root_buf, prefix, load_bounds)
+                    .into_iter().map(|feature| InfraFeature::prepare(feature, prefix)).collect();
 
                 if let Ok(mut store) = cache_fn().lock() {
                     store.cache = Some(InfraCache {
@@ -169,29 +224,19 @@ fn draw_infra(
     let Some(cache) = &store.cache else { return };
 
     for feat in &cache.features {
-        let pts: Vec<egui::Pos2> = feat
-            .points
-            .iter()
-            .filter_map(|&pt| {
-                project_local(layout, view, viewport_center, pt, 0.0, extent_x_km, extent_y_km)
-                    .map(|p| p.pos)
-            })
-            .collect();
-
-        if pts.len() < 2 {
-            continue;
-        }
-
+        let Some((anchor, _)) = feat.points.first() else { continue };
+        let shift = ((viewport_center.lon - anchor.lon) / 360.).round() * 360.;
+        let project = |mut point: GeoPoint, height| {
+            point.lon += shift;
+            project_local(layout, view, viewport_center, point, height, extent_x_km, extent_y_km)
+                .map(|p| p.pos)
+        };
         let stroke = stroke_for_class(&feat.class);
-
-        if feat.is_polygon {
-            if let Some(fill) = fill_for_class(&feat.class) {
-                painter.add(egui::Shape::convex_polygon(pts.clone(), fill, stroke));
-                continue;
-            }
-        }
+        let shapes = feat.shapes(painter.clip_rect(), stroke, fill_for_class(&feat.class), project);
         if prefix == "pipeline" && let Some(pointer) = super::infrastructure_hover::pointer() {
-            let distance = pts.windows(2).map(|p| super::infrastructure_hover::line_distance(pointer,p[0],p[1]))
+            let distance = shapes.iter().filter_map(|shape| match shape {
+                egui::Shape::Path(path) => Some(&path.points), _ => None,
+            }).flat_map(|pts| pts.windows(2)).map(|p| super::infrastructure_hover::line_distance(pointer,p[0],p[1]))
                 .fold(f32::INFINITY,f32::min);
             if distance <= super::infrastructure_hover::RADIUS {
                 super::infrastructure_hover::pipeline(&tile_archive::pipelines::Info {
@@ -202,7 +247,7 @@ fn draw_infra(
                 },distance);
             }
         }
-        painter.add(egui::Shape::line(pts, stroke));
+        painter.extend(shapes);
     }
 }
 
@@ -275,16 +320,8 @@ pub(super) fn draw_aeroways(
         painter, layout, view, selected_root, viewport_center, show,
         aeroway_cache,
         "aeroway",
-        |cls| {
-            let width = if cls == "runway" { 2.5 } else { 1.2 };
-            egui::Stroke::new(width, theme::runway_color())
-        },
-        |cls| match cls {
-            "intl_airport" | "dom_airport" | "airfield" | "airstrip" | "terminal" => {
-                Some(theme::aeroway_color())
-            }
-            _ => None,
-        },
+        aeroway_stroke,
+        aeroway_fill,
     );
 }
 
@@ -401,3 +438,7 @@ pub(super) fn draw_surveillance(
         |_| None,
     );
 }
+
+#[cfg(test)]
+#[path = "infra_layer_tests.rs"]
+mod tests;

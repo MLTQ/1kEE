@@ -1,8 +1,8 @@
 # tree_geometry.rs
 
 ## Purpose
-Prepare arbitrary concave forest footprints before projecting their measured
-vertex elevations. Filled egui paths support convex shapes only; their closed
+Prepare arbitrary concave forest and infrastructure footprints before projecting
+their retained vertex elevations. Filled egui paths support convex shapes only; their closed
 antialias miters can expand almost reversing edges far across the screen.
 
 ## Components
@@ -17,6 +17,8 @@ antialias miters can expand almost reversing edges far across the screen.
   endpoint, with breaks at missing/invalid points. No forced polygon closures.
 
 ## Contracts
-Tessellation runs on the tree loader worker; changing camera or Layer Spread
-only reprojects the retained topology. Terrain heights remain source-derived.
-No filled `PathShape` or closed-path miter goes into the tree paint stream.
+The module is shared by `tree_layer` and `infra_layer`. Tessellation runs on their
+loader workers; changing camera or Layer Spread only reprojects retained
+topology. Forest terrain heights remain source-derived, and infrastructure keeps
+its existing map-plane placement. Neither layer submits a filled `PathShape` or
+closed-path miter.

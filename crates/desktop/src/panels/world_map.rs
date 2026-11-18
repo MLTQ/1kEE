@@ -65,6 +65,7 @@ pub(crate) use gravity_layer::controls as gravity_controls;
 pub(crate) use swot_layer::controls as swot_controls;
 mod line_upload;
 mod tree_layer;
+mod tree_geometry;
 mod water_layer;
 mod waterway_layer;
 

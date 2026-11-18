@@ -8,8 +8,7 @@ use super::cell_loader::{LoadedPolyline, load_features_from_cells};
 use super::local_terrain_scene::{LocalLayout, local_geo_bounds, visual_half_extent_for_zoom};
 use super::srtm_stream;
 
-#[path = "tree_geometry.rs"]
-mod geometry;
+use super::tree_geometry as geometry;
 
 const ELEVATION_OFFSET_M: f32 = 0.5;
 const GEO_MARGIN_FACTOR: f32 = 0.75;
