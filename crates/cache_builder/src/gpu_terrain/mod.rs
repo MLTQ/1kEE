@@ -12,6 +12,7 @@ use std::{
 };
 use tile_archive::contour_grid::{Bounds, CoreTile};
 
+mod deflate;
 mod window;
 use window::Window;
 
@@ -145,6 +146,7 @@ struct Worker {
     sample_pipeline: wgpu::ComputePipeline,
     contour_pipeline: wgpu::ComputePipeline,
     sources: Vec<Source>,
+    block_cache: deflate::BlockCache,
     segment_buffer: Option<wgpu::Buffer>,
 }
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
@@ -243,6 +245,7 @@ impl Worker {
             sample_pipeline,
             contour_pipeline,
             sources: Vec::new(),
+            block_cache: Default::default(),
             segment_buffer: None,
         })
     }
@@ -321,8 +324,9 @@ impl Worker {
             self.sources.push(entry);
             return Ok(self.sources.len() - 1);
         }
-        validate_source(path, lat, lon)?;
-        let decoded = window::load(path, needed)?;
+        let mut decoder = window::open(path)?;
+        validate_source(&mut decoder, path, lat, lon)?;
+        let decoded = window::load_cached(decoder, path, needed, &mut self.block_cache)?;
         let upload_start = Instant::now();
         let buffer = self.buffer(
             "resident SRTM",
@@ -330,9 +334,10 @@ impl Worker {
             wgpu::BufferUsages::STORAGE,
         );
         eprintln!(
-            "[terrain-gpu-source] file={} chunks={} bytes_read={} decoded_pixels={} io_ms={:.3} decode_ms={:.3} upload_submit_ms={:.3}",
+            "[terrain-gpu-source] file={} chunks={} reused_blocks={} bytes_read={} decoded_pixels={} io_ms={:.3} decode_ms={:.3} upload_submit_ms={:.3}",
             path.file_name().unwrap_or_default().to_string_lossy(),
             decoded.chunks,
+            decoded.hits,
             decoded.bytes_read,
             decoded.samples.len(),
             decoded.io_ms,
@@ -548,10 +553,14 @@ fn axes(b: Bounds, n: u32, lat: i32, lon: i32) -> Vec<f32> {
         }))
         .collect()
 }
-fn validate_source(path: &Path, lat: i32, lon: i32) -> Result<(), String> {
-    use tiff::{decoder::Decoder, tags::Tag};
-    let check = || -> Result<bool, Box<dyn std::error::Error>> {
-        let mut d = Decoder::new(std::fs::File::open(path)?)?;
+fn validate_source(
+    d: &mut window::TiffReader,
+    path: &Path,
+    lat: i32,
+    lon: i32,
+) -> Result<(), String> {
+    use tiff::tags::Tag;
+    let mut check = || -> Result<bool, Box<dyn std::error::Error>> {
         let scale = d.get_tag_f64_vec(Tag::ModelPixelScaleTag)?;
         let tie = d.get_tag_f64_vec(Tag::ModelTiepointTag)?;
         let keys = d.get_tag_u16_vec(Tag::GeoKeyDirectoryTag)?;

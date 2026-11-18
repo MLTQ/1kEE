@@ -9,6 +9,7 @@ eframe = { version = "0.31", default-features = false, features = ["wgpu", "defa
 egui = "0.31"
 image = { version = "0.25", default-features = false, features = ["tiff"] }
 tiff = "0.11"
+libdeflater = "1"
 osmpbf = "0.2"
 rayon = "1"
 smallvec = "1"
@@ -22,3 +23,6 @@ ring = "0.17"
 tempfile = "3"
 
 bytemuck = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+flate2 = "1"

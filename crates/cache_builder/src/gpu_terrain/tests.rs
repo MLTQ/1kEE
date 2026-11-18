@@ -118,7 +118,14 @@ fn gpu_matches_cpu_cases_saddles_negative_levels_and_voids() {
 #[ignore = "requires a compute GPU"]
 fn gpu_bilinear_interpolation_and_nodata() {
     let worker = Worker::new().unwrap();
-    let source = upload(&worker, &[0., 10., 20., 30.]);
+    let packed = |values: &[i16]| {
+        worker.buffer(
+            "packed source",
+            bytemuck::cast_slice(values),
+            wgpu::BufferUsages::STORAGE,
+        )
+    };
+    let source = packed(&[0, 10, 20, 30]);
     let axes = upload(&worker, &[0., 0.5, 0., 0.5]);
     let params = worker.buffer(
         "test parameters",
@@ -134,7 +141,7 @@ fn gpu_bilinear_interpolation_and_nodata() {
     let bytes = worker.read(&grid, 16).unwrap();
     assert_eq!(bytemuck::cast_slice::<u8, f32>(&bytes), &[0., 5., 10., 15.]);
     let grid = upload(&worker, &[NODATA; 4]);
-    let source = upload(&worker, &[0., NODATA, 20., 30.]);
+    let source = packed(&[0, i16::MIN, 20, 30]);
     worker.dispatch(
         &worker.sample_pipeline,
         &[&params, &source, &axes, &grid],
@@ -398,7 +405,7 @@ fn windowed_strips_preserve_edges_nodata_and_skip_unneeded_rows() {
         for (i, &sample) in decoded.samples.iter().enumerate() {
             let x = decoded.window.x + i as u32 % decoded.window.width;
             let y = decoded.window.y + i as u32 / decoded.window.width;
-            assert_eq!(sample, f32::from(value(x, y)));
+            assert_eq!(sample, value(x, y));
         }
     }
     assert!(
@@ -469,4 +476,119 @@ fn desktop_compute_selects_only_the_validated_card_and_honors_overrides() {
     card.device = 0x2684;
     card.backend = wgpu::Backend::Gl;
     assert!(!select_compute(None, Some(&card)));
+}
+
+#[test]
+fn file_order_reads_preserve_chunk_positions_and_reuse_only_current_edge_blocks() {
+    use flate2::{Compression, write::ZlibEncoder};
+    use std::io::{Read, Seek, SeekFrom, Write};
+    use tiff::{encoder::TiffEncoder, tags::Tag};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("blocks.tif");
+    let write = |bias: i16| {
+        let mut encoder = TiffEncoder::new(std::fs::File::create(&path).unwrap()).unwrap();
+        let mut ifd = encoder.image_directory().unwrap();
+        for (tag, value) in [
+            (Tag::ImageWidth, 3601u32),
+            (Tag::ImageLength, 3601),
+            (Tag::TileWidth, 512),
+            (Tag::TileLength, 512),
+        ] {
+            ifd.write_tag(tag, value).unwrap();
+        }
+        for (tag, value) in [
+            (Tag::BitsPerSample, 16u16),
+            (Tag::SampleFormat, 2),
+            (Tag::Compression, 8),
+            (Tag::PhotometricInterpretation, 1),
+        ] {
+            ifd.write_tag(tag, value).unwrap();
+        }
+        let mut offsets = [0u32; 64];
+        let mut sizes = [0u32; 64];
+        for i in (0..64).rev() {
+            let mut raw = vec![i as i16 - 32 + bias; 512 * 512];
+            raw[0] = i16::MIN;
+            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+            encoder.write_all(bytemuck::cast_slice(&raw)).unwrap();
+            let bytes = encoder.finish().unwrap();
+            offsets[i] = ifd.write_data(bytes.as_slice()).unwrap() as u32;
+            sizes[i] = bytes.len() as u32;
+        }
+        ifd.write_tag(Tag::TileOffsets, offsets.as_slice()).unwrap();
+        ifd.write_tag(Tag::TileByteCounts, sizes.as_slice())
+            .unwrap();
+        ifd.finish().unwrap();
+    };
+    write(0);
+    let mut cache = deflate::BlockCache::default();
+    let mut read = |x, y, width, height| {
+        window::load_cached(
+            window::open(&path).unwrap(),
+            &path,
+            Window {
+                x,
+                y,
+                width,
+                height,
+            },
+            &mut cache,
+        )
+        .unwrap()
+    };
+    let first = read(2000, 2000, 700, 600);
+    assert_eq!((first.chunks, first.hits), (9, 0));
+    let neighbor = read(2699, 2000, 902, 1601);
+    assert!(neighbor.hits > 0);
+    assert_eq!(neighbor.window.x + neighbor.window.width, 3601);
+    for decoded in [first, neighbor] {
+        for (i, &sample) in decoded.samples.iter().enumerate() {
+            let x = decoded.window.x + i as u32 % decoded.window.width;
+            let y = decoded.window.y + i as u32 / decoded.window.width;
+            let expected = if x % 512 == 0 && y % 512 == 0 {
+                NODATA
+            } else {
+                ((y / 512 * 8 + x / 512) as i16 - 32) as f32
+            };
+            assert_eq!(f32::from(sample), expected);
+        }
+    }
+    write(7);
+    std::fs::File::open(&path)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH)
+        .unwrap();
+    let changed = read(2000, 2000, 700, 600);
+    assert_eq!(changed.hits, 0);
+    assert_eq!(changed.samples[1], 2);
+
+    // Fail the first payload on disk while the reader is still feeding the queue.
+    let mut decoder = window::open(&path).unwrap();
+    let offsets = decoder.get_tag_u64_vec(Tag::TileOffsets).unwrap();
+    let sizes = decoder.get_tag_u64_vec(Tag::TileByteCounts).unwrap();
+    let checksum = offsets[63] + sizes[63] - 1;
+    drop(decoder);
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    file.seek(SeekFrom::Start(checksum)).unwrap();
+    let mut byte = [0];
+    file.read_exact(&mut byte).unwrap();
+    file.seek(SeekFrom::Start(checksum)).unwrap();
+    file.write_all(&[byte[0] ^ 0xff]).unwrap();
+    assert!(
+        window::load(
+            &path,
+            Window {
+                x: 0,
+                y: 0,
+                width: 3601,
+                height: 3601
+            }
+        )
+        .is_err()
+    );
 }

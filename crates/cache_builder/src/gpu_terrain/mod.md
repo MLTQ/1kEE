@@ -19,7 +19,16 @@ may coexist within the same bounded LRU. Source files are never opened for writi
 Only TIFF tiles/strips intersecting the requested sample window are decoded,
 including the bilinear neighbor halo and partial chunks at file edges. Windows
 are aligned to TIFF chunk boundaries; strip-based files necessarily read the
-full width of each needed strip. Only the decoded window is uploaded. Normal OS
+full width of each needed strip. For native 512×512 single-band Deflate blocks
+with no predictor, the reader sorts the requested offsets and combines up to
+four nearby blocks per read. A single disk reader can prepare one pending batch
+while libdeflate checks and expands the current one. The worker retains up to
+32 MiB of decoded blocks that straddle a requested window boundary for reuse
+by neighboring tiles. Entries are keyed by source path, size, modification time
+and block index. Other layouts use the TIFF decoder.
+
+The uploaded source window contains signed 16-bit elevations, two per GPU word.
+The shader expands each signed sample before bilinear interpolation. Normal OS
 readahead remains enabled: forcing random-access scheduling reduced block-read
 counts but did not improve elapsed time on the tested USB 2.0 connection.
 
@@ -43,7 +52,7 @@ GDAL's f64 output need not have identical vertex/path counts or byte order.
 One reusable segment buffer grows on overflow up to four million segments.
 The worker releases its lock before grouping the output by elevation. Sorting and
 stitching run in parallel across elevations with deterministic tie ordering. Source buffers use
-up to about 594 MiB when all twelve windows span full source files; raster/segments/readback add roughly 290 MiB at the
+up to about 297 MiB when all twelve windows span full source files; raster/segments/readback add roughly 290 MiB at the
 limits of 6000² samples and four million segments. These are separate from the
 renderer residency budgets. Allocation failures disable the worker for the
 process; unsupported grids, bad inputs, and segment overflow reject that job.
@@ -58,9 +67,11 @@ caches, alternating execution order and reporting cold/warm worker timings.
 
 
 Cold-build diagnostics emit one `[terrain-gpu-source]` line per cache miss:
-compressed bytes read by the counted file reader, chunk count, decoded pixels,
-time inside reads/seeks, remaining decode/allocation time, and buffer-upload
-submission time. These are host timings; completed GPU work is synchronized in
+bytes read by the counted file reader, newly decoded and reused block counts,
+window pixel count, time inside reads/seeks, decode time and buffer-upload
+submission time. The Deflate reader overlaps I/O with decompression. Its
+`decode_ms` measures decompression, sample validation, and copying into the
+source window. The general reader times processing outside I/O. These are host timings; completed GPU work is synchronized in
 compute/readback. Per-build `worker_wait_ms` includes first-use initialization
 and lock contention, and `total_ms` now includes that wait. TIFF read counts
 include buffered readahead/metadata and are not physical-device I/O counters.

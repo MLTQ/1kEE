@@ -1,6 +1,54 @@
 # Terrain loading measurements, 17 November 2026
 
-## From an empty Earth contour cache to a Local draw
+## Cold source reads and decoding
+
+On the RTX 4090, the new reader keeps native signed 16-bit SRTM posts through
+GPU upload. On the tested 512×512 Deflate TIFFs it reads requested blocks in
+file-offset order, overlaps reading with decompression and shares up to 32 MiB
+of decoded boundary blocks across requests. The two GPU generations below both
+build native-resolution contour geometry.
+
+| Nine-tile region | Reader and source drive | First draw | Five tiles | All nine |
+| --- | --- | ---: | ---: | ---: |
+| Wide Yemen | Previous, external HDD | 2.34 s | 6.90 s | 10.55 s |
+| Wide Yemen | New, external HDD | 2.11 s | 5.79 s | 9.10 s |
+| Wide Yemen | New, internal SSD | 1.30 s | 2.68 s | 4.12 s |
+| Dead Sea | Previous, external HDD | 0.54 s | 1.20 s | 1.46 s |
+| Dead Sea | New, external HDD | 0.49 s | 0.91 s | 1.34 s |
+
+Each cell is the median of three fresh processes running
+`cold_earth_local_nine_tiles`. On the HDD the sequence was new, previous,
+previous, new, new, previous, measuring both regions on each pass. Every run
+requested Linux file-page eviction for its source files and started with an empty
+SQLite cache on the internal SSD. The SSD comparison used temporary copies of
+the same 36 Yemen GeoTIFFs, flushed to storage before source-page eviction.
+Copy time is outside the draw timings. First-draw time varies with worker
+scheduling. The wide HDD ranges were 1.77–2.72 s previously and 1.62–2.15 s
+with the new reader.
+
+| Median for nine tiles on the HDD | Wide, previous | Wide, new | Dead Sea, previous | Dead Sea, new |
+| --- | ---: | ---: | ---: | ---: |
+| Source bytes read by the TIFF reader | 336.4 MB | 302.2 MB | 15.3 MB | 9.0 MB |
+| OS block reads charged to process and children | 299.7 MB | 291.9 MB | 13.3 MB | 10.9 MB |
+| Blocks decoded | 1,764 | 1,736 | 72 | 42 |
+| Time preparing source windows and submitting resampling | 9.16 s | 7.61 s | 0.50 s | 0.37 s |
+| Time inside source reads and seeks | 6.17 s | 7.11 s | 0.27 s | 0.30 s |
+| Reported decode time | 2.58 s | 1.21 s | 0.16 s | 0.07 s |
+| Process peak resident memory | 1,805 MiB | 1,788 MiB | 1,101 MiB | 1,139 MiB |
+
+OS block reads use `wait4.ru_inblock × 512` and include activity outside the
+input reader. The new reader includes TIFF validation in its byte count.
+Decode timings are approximate. The old timer measured window work
+outside file I/O. The new timer measures inflation, validation and copying, which
+can overlap the next disk read. On the SSD, preparing the wide group's source
+windows took 1.78 s. The 16-bit source format also halves the GPU source
+window capacity requirement, from 594 to 297 MiB for twelve full windows.
+
+The old and new GPU builds produced identical ordered contour geometry for
+Yemen tile 0/9/27, covering 58,996 paths and 1,531,831 segments. Both 63,833,458-byte
+geometry exports had SHA-256 `673a1e6da4138f0bfa94ffbf425c84e1d38a26a3d34120965f3da3103e41ffe8`.
+
+## Original GDAL and GPU comparison from an empty cache
 
 On the RTX 4090, the desktop now uses Vulkan compute for native SRTM resampling
 and contour extraction. One observed 5.61 s GDAL build of Yemen tile 0/9/27

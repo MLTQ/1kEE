@@ -44,8 +44,8 @@ impl Window {
         })
     }
 }
-struct CountedFile {
-    file: File,
+pub(super) struct CountedFile {
+    pub(super) file: File,
     bytes: u64,
     io_seconds: f64,
 }
@@ -70,20 +70,50 @@ impl Seek for CountedFile {
 }
 pub(super) struct Decoded {
     pub window: Window,
-    pub samples: Vec<f32>,
+    pub samples: Vec<i16>,
     pub chunks: u32,
+    pub hits: u32,
     pub bytes_read: u64,
     pub io_ms: f64,
     pub cpu_ms: f64,
 }
+pub(super) fn copy_heights(output: &mut [i16], source: &[i16]) -> Result<(), &'static str> {
+    if source
+        .iter()
+        .any(|&v| v != i16::MIN && !(-12000..=10000).contains(&v))
+    {
+        return Err("unexpected SRTM elevation range");
+    }
+    output.copy_from_slice(source);
+    Ok(())
+}
+
+pub(super) type TiffReader = Decoder<BufReader<CountedFile>>;
+
+pub(super) fn open(path: &Path) -> Result<TiffReader, String> {
+    let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Decoder::new(BufReader::new(CountedFile {
+        file,
+        bytes: 0,
+        io_seconds: 0.0,
+    }))
+    .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+#[cfg(test)]
 pub(super) fn load(path: &Path, needed: Window) -> Result<Decoded, String> {
+    load_cached(open(path)?, path, needed, &mut Default::default())
+}
+
+pub(super) fn load_cached(
+    mut decoder: TiffReader,
+    path: &Path,
+    needed: Window,
+    cache: &mut super::deflate::BlockCache,
+) -> Result<Decoded, String> {
     let start = Instant::now();
-    let read = || -> Result<Decoded, Box<dyn std::error::Error>> {
-        let mut decoder = Decoder::new(BufReader::new(CountedFile {
-            file: File::open(path)?,
-            bytes: 0,
-            io_seconds: 0.0,
-        }))?;
+    let initial_io_seconds = decoder.inner().get_ref().io_seconds;
+    let mut read = || -> Result<Decoded, Box<dyn std::error::Error>> {
         if decoder.dimensions()? != (3601, 3601)
             || decoder.colortype()? != tiff::ColorType::Gray(16)
             || needed.width == 0
@@ -117,7 +147,21 @@ pub(super) fn load(path: &Path, needed: Window) -> Result<Decoded, String> {
             width: right - x,
             height: bottom - y,
         };
-        let mut samples = vec![super::NODATA; window.width as usize * window.height as usize];
+        let mut samples = vec![0i16; window.width as usize * window.height as usize];
+        if let Some(stats) =
+            super::deflate::read_window(&mut decoder, path, cache, needed, window, &mut samples)?
+        {
+            let reader = decoder.inner().get_ref();
+            return Ok(Decoded {
+                window,
+                samples,
+                chunks: window.width.div_ceil(cw) * window.height.div_ceil(ch) - stats.hits,
+                hits: stats.hits,
+                bytes_read: reader.bytes,
+                io_ms: reader.io_seconds * 1000.,
+                cpu_ms: stats.cpu.as_secs_f64() * 1000.,
+            });
+        }
         let columns = 3601u32.div_ceil(cw);
         let mut chunks = 0;
         for row in (y..bottom).step_by(ch as usize) {
@@ -139,15 +183,10 @@ pub(super) fn load(path: &Path, needed: Window) -> Result<Decoded, String> {
                 for dy in 0..height as usize {
                     let output = (row as usize - y as usize + dy) * window.width as usize
                         + (col - x) as usize;
-                    for (dst, &v) in samples[output..output + width as usize]
-                        .iter_mut()
-                        .zip(&data[dy * width as usize..(dy + 1) * width as usize])
-                    {
-                        if v != i16::MIN && !(-12000..=10000).contains(&v) {
-                            return Err("Unexpected SRTM elevation range".into());
-                        }
-                        *dst = f32::from(v);
-                    }
+                    copy_heights(
+                        &mut samples[output..output + width as usize],
+                        &data[dy * width as usize..(dy + 1) * width as usize],
+                    )?;
                 }
                 chunks += 1;
             }
@@ -157,9 +196,11 @@ pub(super) fn load(path: &Path, needed: Window) -> Result<Decoded, String> {
             window,
             samples,
             chunks,
+            hits: 0,
             bytes_read: reader.bytes,
             io_ms: reader.io_seconds * 1000.0,
-            cpu_ms: (start.elapsed().as_secs_f64() - reader.io_seconds) * 1000.0,
+            cpu_ms: (start.elapsed().as_secs_f64() - (reader.io_seconds - initial_io_seconds))
+                * 1000.0,
         })
     };
     read().map_err(|e| format!("SRTM window {}: {e}", path.display()))
