@@ -340,7 +340,7 @@ pub fn clear_contour_build_backoffs() {
 fn open_region_cache_db(path: &Path) -> rusqlite::Result<Connection> {
     match db::open_cache_db_read_only(path) {
         Ok(connection) => Ok(connection),
-        Err(_) if !path.exists() && recovery::isolated_root().is_none() => db::open_cache_db(path),
+        Err(_) if !path.exists() && recovery::isolated_root_for(path).is_none() => db::open_cache_db(path),
         Err(_) if !path.exists() => {
             let connection = Connection::open_in_memory()?;
             db::ensure_cache_schema_with_connection(&connection)?;

@@ -38,7 +38,7 @@ fn is_native_path(path: &Path) -> bool {
 pub fn open_cache_db_read_only(path: &Path) -> rusqlite::Result<Connection> {
     // Isolated recovery treats the original volume as a checkpointed read-only
     // source: immutable avoids even SQLite shared-memory sidecar writes there.
-    let snapshot_only = super::recovery::isolated_root().is_some_and(|root| !path.starts_with(root));
+    let snapshot_only = super::recovery::isolated_root_for(path).is_some_and(|root| !path.starts_with(root));
     let opened = if snapshot_only {
         Connection::open_with_flags(immutable_read_uri(path), OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI)
     } else {
@@ -517,7 +517,21 @@ pub fn focus_cache_root(selected_root: Option<&Path>) -> Option<PathBuf> {
 }
 
 pub fn focus_cache_db_path(selected_root: Option<&Path>) -> Option<PathBuf> {
-    Some(focus_cache_root(selected_root)?.join(tile_archive::contour_grid::SRTM_NATIVE_DB_NAME))
+    let directory = focus_cache_directory(selected_root);
+    let original = directory.join(tile_archive::contour_grid::SRTM_NATIVE_DB_NAME);
+    let path = native_archive_path(original);
+    if path.parent() == Some(directory.as_path()) {
+        fs::create_dir_all(directory).ok()?;
+    }
+    Some(path)
+}
+
+pub(super) fn native_archive_path(original: PathBuf) -> PathBuf {
+    crate::settings_store::with_app_settings(|settings| {
+        settings.native_contour_store.as_ref()
+            .filter(|store| store.original == original && store.database.is_absolute())
+            .map(|store| store.database.clone())
+    }).unwrap_or(original)
 }
 
 /// Keep existing hosted detail available; coarse SRTM caches are never used as

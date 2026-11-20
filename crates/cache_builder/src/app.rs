@@ -1,5 +1,7 @@
 #[path = "atlas_panel.rs"]
 mod atlas_panel;
+#[path = "recovery_panel.rs"]
+mod recovery_panel;
 
 use crate::args::{BboxCommand, ContoursBboxCommand, PlanetAllCommand};
 use crate::job::{BuildEvent, BuildJob, JobHandle, spawn_job};
@@ -16,6 +18,7 @@ use std::time::Duration;
 
 #[derive(Clone, Copy, PartialEq)]
 enum ActiveTab {
+    Recovery,
     Atlas,
     OsmContours,
     Lunar,
@@ -132,6 +135,7 @@ pub struct BuilderApp {
     // ── Lunar tab ─────────────────────────────────────────────────────────────
     active_tab: ActiveTab,
     atlas_form: atlas_panel::Form,
+    recovery_form: crate::contour_recovery::Command,
     lunar_form: LunarForm,
     lunar_drag_start: Option<egui::Pos2>,
     /// Lunar tiles already in lunar_focus_cache.sqlite
@@ -258,6 +262,7 @@ impl BuilderApp {
             live_tiles: Vec::new(),
             active_tab: ActiveTab::OsmContours,
             atlas_form: Default::default(),
+            recovery_form: Default::default(),
             lunar_form: LunarForm {
                 jp2_path: String::new(),
                 lunar_db: std::env::current_dir()
@@ -648,7 +653,7 @@ impl BuilderApp {
                         }
                     }
                     self.active_job = None;
-                    if self.active_job_tab != Some(ActiveTab::Atlas) {
+                    if !matches!(self.active_job_tab, Some(ActiveTab::Atlas | ActiveTab::Recovery)) {
                         self.refresh_inspector();
                     }
                     self.active_job_tab = None;
@@ -1392,7 +1397,7 @@ impl BuilderApp {
 impl eframe::App for BuilderApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_job();
-        if self.active_tab != ActiveTab::Atlas { self.dashboard.poll(&self.form.cache_dir, &self.form.planet_tmp_dir, self.form.compact_nodes, ctx); }
+        if !matches!(self.active_tab, ActiveTab::Atlas | ActiveTab::Recovery) { self.dashboard.poll(&self.form.cache_dir, &self.form.planet_tmp_dir, self.form.compact_nodes, ctx); }
         if self.active_job.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -1422,9 +1427,11 @@ impl eframe::App for BuilderApp {
                     ui.selectable_value(&mut self.active_tab, ActiveTab::Atlas, "Atlas");
                     ui.selectable_value(&mut self.active_tab, ActiveTab::Lunar, "Lunar (SLDEM)");
                     ui.selectable_value(&mut self.active_tab, ActiveTab::Mars, "Mars");
+                    ui.selectable_value(&mut self.active_tab, ActiveTab::Recovery, "Recover terrain");
                 });
                 ui.separator();
 
+                if self.active_tab == ActiveTab::Recovery { self.show_recovery_controls(ui); return; }
                 if self.active_tab == ActiveTab::Atlas { self.show_atlas_panel(ui); return; }
                 if self.active_tab == ActiveTab::Lunar {
                     self.show_lunar_panel(ui);
@@ -1835,6 +1842,7 @@ impl eframe::App for BuilderApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().id_salt("builder_dashboard").show(ui, |ui| {
+                if self.active_tab == ActiveTab::Recovery { self.show_recovery_log(ui); return; }
                 if self.active_tab == ActiveTab::Atlas { self.show_atlas_dashboard(ui); return; }
                 self.dashboard.show(ui, &self.status, &self.progress_detail, self.active_job.is_some(), &self.log_lines, &[
                     ("road", self.assets.roads), ("waterway", self.assets.water),

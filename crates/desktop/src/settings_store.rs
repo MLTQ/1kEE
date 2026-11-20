@@ -47,6 +47,14 @@ pub(crate) const MAX_LOCAL_CONTOUR_VRAM_BUDGET_GB: f32 = 24.0;
 pub(crate) const MIN_THREEDEP_CACHE_BUDGET_GB: f32 = 1.0;
 pub(crate) const MAX_THREEDEP_CACHE_BUDGET_GB: f32 = 512.0;
 
+/// A recovered native archive belongs to one specific original terrain path.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct NativeContourStore {
+    pub original: PathBuf,
+    pub database: PathBuf,
+    pub repair_root: PathBuf,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AppSettings {
     #[serde(default = "default_show_loading_animation")]
@@ -88,6 +96,8 @@ pub struct AppSettings {
     /// Isolated write destination when source terrain cache storage is unreliable.
     #[serde(default)]
     pub terrain_repair_root: Option<String>,
+    #[serde(default)]
+    pub(crate) native_contour_store: Option<NativeContourStore>,
     #[serde(default)]
     pub srtm_root: Option<String>,
     #[serde(default)]
@@ -148,6 +158,7 @@ impl Default for AppSettings {
             data_root: None,
             derived_root: None,
             terrain_repair_root: None,
+            native_contour_store: None,
             srtm_root: None,
             planet_path: None,
             gdal_bin_dir: None,
@@ -293,11 +304,17 @@ fn normalize_optional_contour_stroke_width_px(value: Option<f32>) -> Option<f32>
 }
 
 pub fn load_app_settings() -> AppSettings {
-    settings_cache()
-        .lock()
-        .ok()
-        .and_then(|guard| guard.clone())
-        .unwrap_or_else(load_uncached)
+    with_app_settings(Clone::clone)
+}
+
+/// Tile path resolution runs per tile and only needs a few settings fields.
+pub(crate) fn with_app_settings<T>(read: impl FnOnce(&AppSettings) -> T) -> T {
+    if let Ok(guard) = settings_cache().lock()
+        && let Some(settings) = guard.as_ref()
+    {
+        return read(settings);
+    }
+    read(&load_uncached())
 }
 
 pub fn save_app_settings(settings: &AppSettings) -> std::io::Result<()> {

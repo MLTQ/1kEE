@@ -85,6 +85,13 @@ fn contour_buffer_wgpu_setup() -> eframe::egui_wgpu::WgpuSetup {
 
 pub fn run_desktop() -> eframe::Result<()> {
     let args: Vec<_> = std::env::args().collect();
+    if args.get(1).is_some_and(|arg| arg == "--use-native-cache") {
+        if let Err(err) = configure_recovered_cache(&args[2..]) {
+            eprintln!("[1kEE] {err}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     if args.get(1).is_some_and(|arg| arg == "--repair-native-tile") {
         let result = (|| -> Result<(), String> {
             if args.len() != 7 {
@@ -136,4 +143,56 @@ pub fn run_desktop() -> eframe::Result<()> {
         options,
         Box::new(move |cc| Ok(Box::new(DashboardApp::new(cc, share_map)))),
     )
+}
+
+fn configure_recovered_cache(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use std::path::PathBuf;
+    let [original, database, repair_root] = args else {
+        return Err("Usage: --use-native-cache <original native database> <recovered native database> <repair directory>".into());
+    };
+    let original = PathBuf::from(original);
+    let database = PathBuf::from(database);
+    let repair_root = PathBuf::from(repair_root);
+    if !original.is_absolute()
+        || !database.is_absolute()
+        || !repair_root.is_absolute()
+        || original == database
+        || database.starts_with(&repair_root)
+        || original.starts_with(&repair_root)
+        || [&original, &database].iter().any(|p| {
+            p.file_name().and_then(|n| n.to_str())
+                != Some(tile_archive::contour_grid::SRTM_NATIVE_DB_NAME)
+        })
+    {
+        return Err("Use absolute native database paths and a separate repair directory".into());
+    }
+    let db = rusqlite::Connection::open_with_flags(
+        &database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    if !tile_archive::native_contours::is_native(&db)?
+        || !db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM cache_recovery_digests)",
+            [],
+            |r| r.get::<_, bool>(0),
+        )?
+    {
+        return Err("Choose a native cache published by Recover terrain".into());
+    }
+    std::fs::create_dir_all(&repair_root)?;
+    let mut settings = settings_store::load_app_settings();
+    let summary = format!(
+        "Using {} for {}, with new tiles in {}",
+        database.display(),
+        original.display(),
+        repair_root.display()
+    );
+    settings.native_contour_store = Some(settings_store::NativeContourStore {
+        original,
+        database,
+        repair_root,
+    });
+    settings_store::save_app_settings(&settings)?;
+    println!("{summary}");
+    Ok(())
 }

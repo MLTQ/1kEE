@@ -20,16 +20,24 @@ pub fn invalid_geometry(error: &Error) -> bool {
         )
 }
 
+#[cfg(test)]
 pub fn isolated_root() -> Option<PathBuf> {
-    std::env::var_os("ONEKEE_TERRAIN_REPAIR_ROOT")
-        .map(PathBuf::from)
-        .or_else(|| {
-            crate::settings_store::load_app_settings()
-                .terrain_repair_root
-                .filter(|s| !s.trim().is_empty())
-                .map(PathBuf::from)
-        })
-        .filter(|p| p.is_absolute())
+    isolated_root_for(Path::new(""))
+}
+
+pub(super) fn isolated_root_for(path: &Path) -> Option<PathBuf> {
+    if let Some(root) = std::env::var_os("ONEKEE_TERRAIN_REPAIR_ROOT") {
+        return Some(PathBuf::from(root)).filter(|p| p.is_absolute());
+    }
+    crate::settings_store::with_app_settings(|settings| {
+        if let Some(store) = &settings.native_contour_store
+            && (path == store.database || path.starts_with(&store.repair_root))
+            && store.repair_root.is_absolute()
+        {
+            return Some(store.repair_root.clone());
+        }
+        settings.terrain_repair_root.as_deref().map(PathBuf::from).filter(|p| p.is_absolute())
+    })
 }
 
 fn root_for(path: &Path, isolated: Option<&Path>) -> PathBuf {
@@ -54,7 +62,7 @@ fn root_for(path: &Path, isolated: Option<&Path>) -> PathBuf {
 }
 
 pub(super) fn root(path: &Path) -> PathBuf {
-    root_for(path, isolated_root().as_deref())
+    root_for(path, isolated_root_for(path).as_deref())
 }
 
 fn replacement(path: &Path, tile: TileKey) -> PathBuf {
@@ -94,7 +102,7 @@ pub fn build_path(
     if resolved != path {
         return Some(resolved);
     }
-    if count.is_none() && allow_build && (isolated_root().is_some() || root(path).is_dir()) {
+    if count.is_none() && allow_build && (isolated_root_for(path).is_some() || root(path).is_dir()) {
         let target = replacement(path, tile);
         if let Err(e) = std::fs::create_dir_all(target.parent()?) {
             eprintln!("[1kEE] Cannot create terrain replacement: {e}");
@@ -179,7 +187,7 @@ pub fn discard(path: &Path, tile: TileKey) -> Result<(), String> {
     if resolve(path, tile) != path {
         return Ok(());
     }
-    let outcome = if isolated_root().is_some_and(|root| !path.starts_with(root)) {
+    let outcome = if isolated_root_for(path).is_some_and(|root| !path.starts_with(root)) {
         // The source volume may reject writes: do not open it writable, even
         // for a rollback-only attempt. Shadow only a confirmed unreadable tile.
         let current = db::open_cache_db_read_only(path).and_then(|c| readable(&c, tile));

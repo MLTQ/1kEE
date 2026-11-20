@@ -8,6 +8,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 pub enum BuildJob {
+    RecoverContours(crate::contour_recovery::Command),
     Atlas(crate::atlas::Command),
     PackArchive(crate::archive_pack::Command),
     Bbox(BboxCommand),
@@ -34,6 +35,13 @@ pub enum BuildEvent {
 pub fn spawn_job(job: BuildJob) -> JobHandle {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || match job {
+        BuildJob::RecoverContours(command) => {
+            let result = crate::contour_recovery::run(&command, &mut |message| {
+                let _ = tx.send(BuildEvent::Log(message));
+            })
+            .map_err(|e| format!("{e:#}"));
+            let _ = tx.send(BuildEvent::Finished(result));
+        }
         BuildJob::Atlas(command) => {
             let mut last_update: Option<std::time::Instant> = None;
             let result = crate::atlas::run(command, &mut |p| {

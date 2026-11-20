@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 pub enum Command {
     Gui,
+    RecoverContours(crate::contour_recovery::Command),
     Atlas(crate::atlas::Command),
     ContourRegion(Vec<String>),
     AdminLods(PathBuf),
@@ -108,6 +109,7 @@ where
     };
 
     match command.as_str() {
+        "recover-contours" => crate::contour_recovery::parse(args).map(Command::RecoverContours),
         "gui" => Ok(Command::Gui),
         "atlas" => crate::atlas::parse(args).map(Command::Atlas),
         "contour-region" => Ok(Command::ContourRegion(args.collect())),
@@ -450,6 +452,8 @@ fn usage() -> String {
       --out <Derived/terrain/atlas_heights_v1.sqlite> [--srtm-root <folder>]
       [--tiers overview,terrain,land] [--gdal-bin-dir <folder>]
       [--min-lon W --min-lat S --max-lon E --max-lat N]
+  one-thousand-electric-eye-cache-builder recover-contours [--cache FILE]... [--repairs DIRECTORY]...
+      --output FILE [--remove-inputs | --cleanup-only]
   one-thousand-electric-eye-cache-builder contour-region pack CACHE REGION WEST SOUTH EAST NORTH
   one-thousand-electric-eye-cache-builder contour-region verify REGION
   one-thousand-electric-eye-cache-builder contour-region install REGION TERRAIN_DIRECTORY

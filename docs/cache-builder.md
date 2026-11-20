@@ -194,3 +194,30 @@ improves portability, but does not itself reduce the amount of geometry.
 - `1kee-jw1`: investigate the full node store's OS read error before any repair
   or replacement. The evidence does not isolate hardware versus filesystem/file
   damage; no source deletion or destructive repair was attempted.
+
+## Recovering the native Earth contour cache
+
+Open **Recover terrain** in the cache builder, add old native cache files and repair folders, then choose a new output file. Use the filename `srtm_native_v1.sqlite` for a cache the desktop will render. Allow space for the consolidated file on the destination drive. The map can continue running during the build.
+
+The equivalent command accepts repeated input paths.
+
+```sh
+one-thousand-electric-eye-cache-builder recover-contours \
+  --cache /old/Derived/terrain/srtm_native_v1.sqlite \
+  --repairs /old/Derived/terrain/.tile-repairs \
+  --repairs /data/terrain-repairs \
+  --output /new/terrain/srtm_native_v1.sqlite
+```
+
+The builder recovers readable native contours, coastlines and recorded empty tiles independently. Valid repairs take priority over the original. Within each group the newest build time wins, with the last input winning ties. It checks the manifest count, feature IDs, elevations and geometry, then reopens the new database and reads every tile by its map coordinates to verify its SHA-256 digest before publishing. An interrupted build leaves the original files available. Select a fresh filename for each build.
+
+Enable **Retire matching inputs after validation** or add `--remove-inputs` to delete each fully matched source. To retire sources later, run the same command with `--cleanup-only`. Each input must still match the published cache, including empty tiles. Damaged, changed, busy and partially recovered files are retained. Other terrain layers under the same repair root are preserved. A retained source and the published cache can both be supplied to a later build.
+
+To switch the desktop after publication, close the map, run the command below with absolute paths, then reopen it. The first argument identifies the original native cache for the chosen terrain collection. The last argument is where the desktop should write future native tiles, typically on a local SSD.
+
+```sh
+one-thousand-electric-eye-desktop --use-native-cache \
+  /old/Derived/terrain/srtm_native_v1.sqlite \
+  /new/terrain/srtm_native_v1.sqlite \
+  /local/ssd/native-terrain-repairs
+```

@@ -52,6 +52,11 @@ pub(crate) fn load(root: Option<&Path>) -> Vec<Cache> {
     .into_iter()
     .map(|(label, name)| {
         let path = directory.join(name);
+        let path = if name == tile_archive::contour_grid::SRTM_NATIVE_DB_NAME {
+            db::native_archive_path(path)
+        } else {
+            path
+        };
         inspect(label, &path, recovery::root(&path), |tile| {
             recovery::resolve(&path, tile)
         })
