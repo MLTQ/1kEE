@@ -210,66 +210,75 @@ fn build_bathy_mesh(
     view: &GlobeViewState,
     tex_id: egui::TextureId,
 ) -> egui::epaint::Mesh {
-    const STEP: f32 = 2.0;
-    const HALF: f32 = STEP / 2.0;
+    const ROWS: usize = 90;
+    const COLS: usize = 180;
+    const LAT_VERTICES: usize = ROWS + 1;
+    const LON_VERTICES: usize = COLS + 1;
+    const TOTAL_VERTICES: usize = LAT_VERTICES * LON_VERTICES;
 
-    let mut mesh = egui::epaint::Mesh::default();
-    mesh.texture_id = tex_id;
+    struct SphereGridVertex {
+        x: f32,
+        y: f32,
+        z: f32,
+        uv: egui::Pos2,
+    }
 
-    let mut lat = -90.0_f32 + STEP;
-    while lat <= 90.0 {
-        let mut lon = -180.0_f32 + STEP;
-        while lon <= 180.0 {
-            // Four corners of this 2°×2° cell, ordered CCW on the sphere.
-            let corners: [(f32, f32); 4] = [
-                (lat + HALF, lon - HALF), // NW
-                (lat + HALF, lon + HALF), // NE
-                (lat - HALF, lon + HALF), // SE
-                (lat - HALF, lon - HALF), // SW
-            ];
-
-            // UV: equirectangular — u=0 at 180°W, v=0 at 90°N.
-            let uvs: [(f32, f32); 4] =
-                corners.map(|(clat, clon)| ((clon + 180.0) / 360.0, (90.0 - clat) / 180.0));
-
-            // Project all four corners; skip if any is back-facing.
-            let mut positions = [egui::Pos2::ZERO; 4];
-            let mut ok = true;
-            for (k, &(clat, clon)) in corners.iter().enumerate() {
-                match project_geo(
-                    layout,
-                    view,
-                    GeoPoint {
-                        lat: clat,
-                        lon: clon,
-                    },
-                    0.0,
-                ) {
-                    Some(p) if p.front_facing => positions[k] = p.pos,
-                    _ => {
-                        ok = false;
-                        break;
-                    }
-                }
-            }
-            if !ok {
-                lon += STEP;
-                continue;
-            }
-
-            let i = mesh.vertices.len() as u32;
-            for k in 0..4 {
-                mesh.vertices.push(egui::epaint::Vertex {
-                    pos: positions[k],
-                    uv: egui::pos2(uvs[k].0, uvs[k].1),
-                    color: egui::Color32::WHITE, // texture carries the colour
+    static GRID: std::sync::OnceLock<Vec<SphereGridVertex>> = std::sync::OnceLock::new();
+    let grid = GRID.get_or_init(|| {
+        let mut verts = Vec::with_capacity(TOTAL_VERTICES);
+        for r in 0..LAT_VERTICES {
+            let clat = -89.0_f32 + (r as f32) * 2.0;
+            let lat_rad = clat.to_radians();
+            let lat_cos = lat_rad.cos();
+            let lat_sin = lat_rad.sin();
+            let v = (90.0 - clat) / 180.0;
+            for c in 0..LON_VERTICES {
+                let clon = -179.0_f32 + (c as f32) * 2.0;
+                let lon_rad = clon.to_radians();
+                let u = (clon + 180.0) / 360.0;
+                verts.push(SphereGridVertex {
+                    x: lat_cos * lon_rad.cos(),
+                    y: lat_sin,
+                    z: lat_cos * lon_rad.sin(),
+                    uv: egui::pos2(u, v),
                 });
             }
-            mesh.indices
-                .extend_from_slice(&[i, i + 1, i + 2, i, i + 2, i + 3]);
-            lon += STEP;
         }
-        lat += STEP;
+        verts
+    });
+
+    let xf = super::projection::GlobeXform::from_view(layout, view);
+    let mut mesh = egui::epaint::Mesh::with_texture(tex_id);
+    mesh.vertices.reserve(TOTAL_VERTICES / 2 + 256);
+    mesh.indices.reserve((ROWS * COLS / 2) * 6);
+
+    let mut vert_indices = vec![u32::MAX; TOTAL_VERTICES];
+    for (idx, gv) in grid.iter().enumerate() {
+        if let Some(p) = xf.apply(gv.x, gv.y, gv.z) {
+            if p.front_facing {
+                let out_idx = mesh.vertices.len() as u32;
+                mesh.vertices.push(egui::epaint::Vertex {
+                    pos: p.pos,
+                    uv: gv.uv,
+                    color: egui::Color32::WHITE,
+                });
+                vert_indices[idx] = out_idx;
+            }
+        }
+    }
+
+    for r in 0..ROWS {
+        let row_sw = r * LON_VERTICES;
+        let row_nw = (r + 1) * LON_VERTICES;
+        for c in 0..COLS {
+            let nw = vert_indices[row_nw + c];
+            let ne = vert_indices[row_nw + c + 1];
+            let se = vert_indices[row_sw + c + 1];
+            let sw = vert_indices[row_sw + c];
+            if nw != u32::MAX && ne != u32::MAX && se != u32::MAX && sw != u32::MAX {
+                mesh.indices.extend_from_slice(&[nw, ne, se, nw, se, sw]);
+            }
+        }
     }
     mesh
 }

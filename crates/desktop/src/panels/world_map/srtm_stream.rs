@@ -23,7 +23,22 @@ struct SrtmTile {
 
 struct CachedTile {
     path: PathBuf,
+    root: PathBuf,
+    lat_base: i32,
+    lon_base: i32,
     tile: SrtmTile,
+}
+
+impl CachedTile {
+    fn new(root: PathBuf, path: PathBuf, point: GeoPoint, tile: SrtmTile) -> Self {
+        Self {
+            path,
+            root,
+            lat_base: point.lat.floor() as i32,
+            lon_base: point.lon.floor() as i32,
+            tile,
+        }
+    }
 }
 
 struct TileCache {
@@ -103,7 +118,7 @@ pub fn sample_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> Opti
     if let Ok(mut guard) = cache.lock() {
         // Check once more in case another thread simultaneously loaded it to prevent duplicates
         if !guard.tiles.iter().any(|t| t.path == path) {
-            guard.tiles.insert(0, CachedTile { path, tile });
+            guard.tiles.insert(0, CachedTile::new(root, path, point, tile));
             if guard.tiles.len() > MAX_CACHED_TILES {
                 guard.tiles.pop();
             }
@@ -134,12 +149,44 @@ pub fn peek_elevation_m(selected_root: Option<&Path>, point: GeoPoint) -> Option
     Some(value)
 }
 
+/// Zero-allocation batch sampler over already-decoded SRTM tiles.
+/// Acquires `tile_cache().try_lock()` once for the entire closure.
+pub(super) struct CachedSrtmSampler<'a> {
+    root: Option<&'a Path>,
+    guard: Option<std::sync::MutexGuard<'static, TileCache>>,
+}
+
+impl<'a> CachedSrtmSampler<'a> {
+    #[inline]
+    pub(super) fn sample(&self, point: GeoPoint) -> Option<f32> {
+        let root = self.root?;
+        let guard = self.guard.as_ref()?;
+        let lat_base = point.lat.floor() as i32;
+        let lon_base = point.lon.floor() as i32;
+        let value = guard
+            .tiles
+            .iter()
+            .find(|t| t.lat_base == lat_base && t.lon_base == lon_base && t.root == root)?
+            .tile
+            .sample_elevation_m(point);
+        (value.is_finite() && (-12_000. ..=10_000.).contains(&value)).then_some(value)
+    }
+}
+
+pub(super) fn with_cached_sampler<R>(
+    root: Option<&Path>,
+    f: impl FnOnce(&CachedSrtmSampler<'_>) -> R,
+) -> R {
+    let guard = root.and_then(|_| tile_cache().try_lock().ok());
+    let sampler = CachedSrtmSampler { root, guard };
+    f(&sampler)
+}
+
 /// Read an already decoded tile using a pre-resolved root. No disk access or
 /// background work is started by coverage-outline painting.
-pub(super) fn cached_tile_elevation_m(root:Option<&Path>,point:GeoPoint)->Option<f32> {
-    let path=tile_path(root?,point);
-    let value=tile_cache().try_lock().ok()?.tiles.iter().find(|t|t.path==path)?.tile.sample_elevation_m(point);
-    (value.is_finite() && (-12_000. ..=10_000.).contains(&value)).then_some(value)
+#[allow(dead_code)]
+pub(super) fn cached_tile_elevation_m(root: Option<&Path>, point: GeoPoint) -> Option<f32> {
+    with_cached_sampler(root, |s| s.sample(point))
 }
 
 /// Nonblocking 1 m 3DEP lookup, resolving the derived-asset root the chunk
@@ -191,7 +238,7 @@ pub fn request_elevation_preload(selected_root: Option<&Path>, point: GeoPoint) 
                 cache.loading.remove(&path);
                 if let Some(tile) = tile {
                     if !cache.tiles.iter().any(|cached| cached.path == path) {
-                        cache.tiles.insert(0, CachedTile { path, tile });
+                        cache.tiles.insert(0, CachedTile::new(root, path, point, tile));
                         if cache.tiles.len() > MAX_CACHED_TILES {
                             cache.tiles.pop();
                         }
@@ -345,15 +392,9 @@ fn load_tile_via_gdal(src: &Path) -> Option<SrtmTile> {
         })
         .collect();
 
-    // Write a compact cache file (raw LE Int16 + 8-byte header: u32 width, u32 height).
-    if let Ok(mut f) = std::fs::File::create(&raw_path) {
-        use std::io::Write;
-        let _ = f.write_all(&width.to_le_bytes());
-        let _ = f.write_all(&height.to_le_bytes());
-        for &s in &samples {
-            let _ = f.write_all(&s.to_le_bytes());
-        }
-    }
+    // Write a compact cache file (raw LE Int16 + 8-byte header: u32 width, u32 height)
+    // via a single buffered write and atomic rename so readers never observe partial data.
+    let _ = write_raw_int16(&raw_path, width, height, &samples);
     let _ = std::fs::remove_file(&hdr_path);
     let _ = std::fs::remove_file(&bil_path);
     let _ = std::fs::remove_file(raw_path.with_extension("prj"));
@@ -364,6 +405,35 @@ fn load_tile_via_gdal(src: &Path) -> Option<SrtmTile> {
         height,
         samples,
     })
+}
+
+fn write_raw_int16(raw_path: &Path, width: u32, height: u32, samples: &[i16]) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp_path = raw_path.with_extension(format!("srtm_raw.tmp.{}", std::process::id()));
+    let write_res = (|| -> std::io::Result<()> {
+        let file = std::fs::File::create(&tmp_path)?;
+        let mut writer = std::io::BufWriter::with_capacity(256 * 1024, file);
+        writer.write_all(&width.to_le_bytes())?;
+        writer.write_all(&height.to_le_bytes())?;
+        #[cfg(target_endian = "little")]
+        {
+            writer.write_all(bytemuck::cast_slice(samples))?;
+        }
+        #[cfg(not(target_endian = "little"))]
+        {
+            for &s in samples {
+                writer.write_all(&s.to_le_bytes())?;
+            }
+        }
+        writer.flush()
+    })();
+    match write_res {
+        Ok(()) => std::fs::rename(&tmp_path, raw_path),
+        Err(err) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            Err(err)
+        }
+    }
 }
 
 /// Load a tile from the compact `.srtm_raw` cache format:

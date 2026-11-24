@@ -91,6 +91,23 @@ pub fn load_features_from_cells(
                     if f.points.len() < 2 {
                         continue;
                     }
+                    let mut min_lat = f32::INFINITY;
+                    let mut max_lat = f32::NEG_INFINITY;
+                    let mut min_lon = f32::INFINITY;
+                    let mut max_lon = f32::NEG_INFINITY;
+                    for p in &f.points {
+                        min_lat = min_lat.min(p.lat);
+                        max_lat = max_lat.max(p.lat);
+                        min_lon = min_lon.min(p.lon);
+                        max_lon = max_lon.max(p.lon);
+                    }
+                    if !(min_lat <= bounds.max_lat
+                        && max_lat >= bounds.min_lat
+                        && min_lon <= bounds.max_lon
+                        && max_lon >= bounds.min_lon)
+                    {
+                        continue;
+                    }
                     results.push(LoadedPolyline {
                         way_id: f.way_id,
                         class: decode_class(&tag, f.class).to_owned(),
@@ -126,22 +143,6 @@ pub fn load_features_from_cells(
             };
 
             for feature in features {
-                let props = feature.get("properties").unwrap_or(&Value::Null);
-                let way_id = props
-                    .get("way_id")
-                    .and_then(Value::as_i64)
-                    .unwrap_or_default();
-                let class = props
-                    .get("class")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-                let name = props
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned)
-                    .filter(|n| !n.is_empty());
-
                 let Some(geometry) = feature.get("geometry") else {
                     continue;
                 };
@@ -159,6 +160,39 @@ pub fn load_features_from_cells(
                 if points.len() < 2 {
                     continue;
                 }
+                let mut min_lat = f32::INFINITY;
+                let mut max_lat = f32::NEG_INFINITY;
+                let mut min_lon = f32::INFINITY;
+                let mut max_lon = f32::NEG_INFINITY;
+                for p in &points {
+                    min_lat = min_lat.min(p.lat);
+                    max_lat = max_lat.max(p.lat);
+                    min_lon = min_lon.min(p.lon);
+                    max_lon = max_lon.max(p.lon);
+                }
+                if !(min_lat <= bounds.max_lat
+                    && max_lat >= bounds.min_lat
+                    && min_lon <= bounds.max_lon
+                    && max_lon >= bounds.min_lon)
+                {
+                    continue;
+                }
+
+                let props = feature.get("properties").unwrap_or(&Value::Null);
+                let way_id = props
+                    .get("way_id")
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default();
+                let class = props
+                    .get("class")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                let name = props
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .filter(|n| !n.is_empty());
 
                 results.push(LoadedPolyline {
                     elevations: None,
@@ -172,24 +206,6 @@ pub fn load_features_from_cells(
         }
     }
 
-    results.retain(|f| {
-        let min_lat = f.points.iter().map(|p| p.lat).fold(f32::INFINITY, f32::min);
-        let max_lat = f
-            .points
-            .iter()
-            .map(|p| p.lat)
-            .fold(f32::NEG_INFINITY, f32::max);
-        let min_lon = f.points.iter().map(|p| p.lon).fold(f32::INFINITY, f32::min);
-        let max_lon = f
-            .points
-            .iter()
-            .map(|p| p.lon)
-            .fold(f32::NEG_INFINITY, f32::max);
-        min_lat <= bounds.max_lat
-            && max_lat >= bounds.min_lat
-            && min_lon <= bounds.max_lon
-            && max_lon >= bounds.min_lon
-    });
     results
 }
 

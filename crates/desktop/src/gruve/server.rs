@@ -16,7 +16,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use crossbeam_channel::Sender;
@@ -32,7 +32,7 @@ const APP_CSS: &str = include_str!("web/app.css");
 const GRUVE_SDK_JS: &str = include_str!("web/gruve-sdk.js");
 
 pub(super) struct ServerShared {
-    pub snapshot: Mutex<Snapshot>,
+    pub snapshot: RwLock<Arc<Snapshot>>,
     pub surface: Arc<super::surface::Surface>,
     pub commands: Sender<Command>,
     pub stop: AtomicBool,
@@ -147,31 +147,32 @@ fn handle(mut stream: TcpStream, shared: &ServerShared) -> std::io::Result<()> {
     // skipping serialization entirely. No `gen` param → always a full 200 body, so
     // older clients keep working unchanged.
     let client_gen = query_u64(query, "gen");
-    let api = {
-        let snap = shared.snapshot.lock().unwrap_or_else(|p| p.into_inner());
-        let slice_gen = match route {
-            "/state" => Some(snap.gens.state),
-            "/events" => Some(snap.gens.events),
-            "/cameras" => Some(snap.gens.cameras),
-            "/tracks" => Some(snap.gens.tracks),
-            "/flights" => Some(snap.gens.flights),
-            _ => None,
-        };
-        slice_gen.map(|g| {
-            if client_gen == Some(g) {
-                (g, None) // poller is current — no body needed
-            } else {
-                let body = match route {
-                    "/state" => snap.state_json(),
-                    "/events" => snap.events_json(),
-                    "/cameras" => snap.cameras_json(),
-                    "/tracks" => snap.tracks_json(),
-                    _ => snap.flights_json(),
-                };
-                (g, Some(body))
-            }
-        })
+    let snap = {
+        let guard = shared.snapshot.read().unwrap_or_else(|p| p.into_inner());
+        Arc::clone(&guard)
     };
+    let slice_gen = match route {
+        "/state" => Some(snap.gens.state),
+        "/events" => Some(snap.gens.events),
+        "/cameras" => Some(snap.gens.cameras),
+        "/tracks" => Some(snap.gens.tracks),
+        "/flights" => Some(snap.gens.flights),
+        _ => None,
+    };
+    let api = slice_gen.map(|g| {
+        if client_gen == Some(g) {
+            (g, None) // poller is current — no body needed
+        } else {
+            let body = match route {
+                "/state" => snap.state_json(),
+                "/events" => snap.events_json(),
+                "/cameras" => snap.cameras_json(),
+                "/tracks" => snap.tracks_json(),
+                _ => snap.flights_json(),
+            };
+            (g, Some(body))
+        }
+    });
 
     match api {
         Some((g, Some(body))) => write_api_response(&mut stream, 200, g, body.as_bytes()),

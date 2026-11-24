@@ -7,23 +7,48 @@ use crate::model::{GeoPoint, GlobeViewState};
 use crate::osm_ingest;
 use crate::theme;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use super::cell_loader::{LoadedPolyline, load_features_from_cells};
 use super::local_terrain_scene::{
-    LocalLayout, local_geo_bounds, project_local, visual_half_extent_for_zoom,
+    LocalLayout, local_geo_bounds, projection::local_projection_params, visual_half_extent_for_zoom,
 };
 
 const GEO_MARGIN_FACTOR: f32 = 0.75;
+static HAS_POWER_CACHE: AtomicBool = AtomicBool::new(false);
 
 // ── LOD thresholds (local_zoom values) ───────────────────────────────────────
-// local_zoom ~ 1.0 is regional (≈200 km), ~ 6.0 is city-level (≈5 km)
 const ZOOM_SHOW_HIGH: f32 = 1.5;   // 100-299 kV visible from here
 const ZOOM_SHOW_MED: f32 = 3.0;    // 50-99 kV
 const ZOOM_SHOW_LOW: f32 = 5.0;    // <50 kV
 const ZOOM_SHOW_MINOR: f32 = 7.0;  // minor/service lines
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
+
+struct PowerFeature {
+    bounds: [f32; 4],
+    polyline: LoadedPolyline,
+}
+
+impl PowerFeature {
+    fn new(polyline: LoadedPolyline) -> Self {
+        let mut min_lon = f32::INFINITY;
+        let mut max_lon = f32::NEG_INFINITY;
+        let mut min_lat = f32::INFINITY;
+        let mut max_lat = f32::NEG_INFINITY;
+        for &p in &polyline.points {
+            min_lon = min_lon.min(p.lon);
+            max_lon = max_lon.max(p.lon);
+            min_lat = min_lat.min(p.lat);
+            max_lat = max_lat.max(p.lat);
+        }
+        Self {
+            bounds: [min_lon, min_lat, max_lon, max_lat],
+            polyline,
+        }
+    }
+}
 
 struct PowerCache {
     data_gen: u64,
@@ -32,11 +57,11 @@ struct PowerCache {
     covered_max_lat: f32,
     covered_min_lon: f32,
     covered_max_lon: f32,
-    features: Vec<LoadedPolyline>,
+    features: Vec<PowerFeature>,
 }
 
 struct PowerCacheStore {
-    cache: Option<PowerCache>,
+    cache: Option<Arc<PowerCache>>,
     building: Option<osm_ingest::GeoBounds>,
 }
 
@@ -66,8 +91,11 @@ pub(super) fn draw_power(
     show: bool,
 ) {
     if !show {
-        if let Ok(mut g) = power_cache().lock() {
+        if HAS_POWER_CACHE.load(Ordering::Relaxed)
+            && let Ok(mut g) = power_cache().lock()
+        {
             g.cache = None;
+            HAS_POWER_CACHE.store(false, Ordering::Relaxed);
         }
         return;
     }
@@ -83,7 +111,7 @@ pub(super) fn draw_power(
     let current_gen = osm_ingest::road_data_generation();
     let zoom = view.local_zoom;
 
-    {
+    let cache = {
         let mut store = match power_cache().lock() {
             Ok(g) => g,
             Err(_) => return,
@@ -110,36 +138,66 @@ pub(super) fn draw_power(
             let (covered_min_lon, covered_max_lon) = (load_bounds.min_lon, load_bounds.max_lon);
 
             store.building = Some(load_bounds);
+            let snapshot = store.cache.clone();
             drop(store);
 
             let root_buf = root.to_path_buf();
             std::thread::spawn(move || {
-                let features = load_features_from_cells(&root_buf, "power", load_bounds);
-                if let Ok(mut store) = power_cache().lock() {
-                    store.cache = Some(PowerCache {
-                        data_gen: current_gen,
-                        last_root: root_buf,
-                        covered_min_lat,
-                        covered_max_lat,
-                        covered_min_lon,
-                        covered_max_lon,
-                        features,
-                    });
+                let features = load_features_from_cells(&root_buf, "power", load_bounds)
+                    .into_iter()
+                    .map(PowerFeature::new)
+                    .collect();
+                let next = Arc::new(PowerCache {
+                    data_gen: current_gen,
+                    last_root: root_buf,
+                    covered_min_lat,
+                    covered_max_lat,
+                    covered_min_lon,
+                    covered_max_lon,
+                    features,
+                });
+                let retired = if let Ok(mut store) = power_cache().lock() {
+                    let old = store.cache.replace(next);
                     store.building = None;
-                }
+                    HAS_POWER_CACHE.store(true, Ordering::Relaxed);
+                    old
+                } else {
+                    None
+                };
+                drop(retired);
                 crate::app::request_repaint();
             });
+            snapshot
+        } else {
+            store.cache.clone()
         }
-    }
-
-    let store = match power_cache().lock() {
-        Ok(g) => g,
-        Err(_) => return,
     };
-    let Some(cache) = &store.cache else { return };
 
-    for feat in &cache.features {
-        // Voltage LOD: skip tiers that are below the current zoom level
+    let Some(cache) = cache else { return };
+
+    let params = local_projection_params(layout, view, viewport_center, extent_x_km, extent_y_km);
+    let view_bounds = params
+        .ground_bounds(painter.clip_rect().expand(8.0))
+        .unwrap_or([-180.0, -90.0, 180.0, 90.0]);
+    let span = layout.width.max(layout.height) * 8.0;
+
+    let c_area = theme::power_area_color();
+    let c_ultra = theme::power_ultra_color();
+    let c_high = theme::power_high_color();
+    let c_med = theme::power_med_color();
+    let c_low = theme::power_low_color();
+    let c_minor = theme::power_minor_color();
+    let area_stroke = egui::Stroke::new(1.0_f32, c_ultra);
+
+    for item in &cache.features {
+        if item.bounds[3] < view_bounds[1]
+            || item.bounds[1] > view_bounds[3]
+            || item.bounds[2] < view_bounds[0]
+            || item.bounds[0] > view_bounds[2]
+        {
+            continue;
+        }
+        let feat = &item.polyline;
         let visible = match feat.class.as_str() {
             "line_ultra" | "substation" | "power_plant" => true,
             "line_high" => zoom >= ZOOM_SHOW_HIGH,
@@ -152,14 +210,13 @@ pub(super) fn draw_power(
             continue;
         }
 
-        let pts: Vec<egui::Pos2> = feat
-            .points
-            .iter()
-            .filter_map(|&pt| {
-                project_local(layout, view, viewport_center, pt, 0.0, extent_x_km, extent_y_km)
-                    .map(|p| p.pos)
-            })
-            .collect();
+        let mut pts = Vec::with_capacity(feat.points.len());
+        for &pt in &feat.points {
+            let (x, y, _) = params.project_logical(pt, 0.0);
+            if x.is_finite() && y.is_finite() && x.abs() < span && y.abs() < span {
+                pts.push(egui::pos2(x, y));
+            }
+        }
 
         if pts.len() < 2 {
             continue;
@@ -167,17 +224,15 @@ pub(super) fn draw_power(
 
         match feat.class.as_str() {
             "substation" | "power_plant" => {
-                let fill = theme::power_area_color();
-                let stroke = egui::Stroke::new(1.0, theme::power_ultra_color());
-                painter.add(egui::Shape::convex_polygon(pts, fill, stroke));
+                painter.add(egui::Shape::convex_polygon(pts, c_area, area_stroke));
             }
             cls => {
                 let (color, width) = match cls {
-                    "line_ultra" => (theme::power_ultra_color(), 2.2),
-                    "line_high" => (theme::power_high_color(), 1.8),
-                    "line_med" => (theme::power_med_color(), 1.3),
-                    "line_low" => (theme::power_low_color(), 1.0),
-                    _ => (theme::power_minor_color(), 0.7),
+                    "line_ultra" => (c_ultra, 2.2_f32),
+                    "line_high" => (c_high, 1.8_f32),
+                    "line_med" => (c_med, 1.3_f32),
+                    "line_low" => (c_low, 1.0_f32),
+                    _ => (c_minor, 0.7_f32),
                 };
                 painter.add(egui::Shape::line(pts, egui::Stroke::new(width, color)));
             }

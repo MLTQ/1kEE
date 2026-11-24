@@ -80,6 +80,14 @@ fn detail_texture_visible(
         max_edge: ctx.input(|i| i.max_texture_side).clamp(16, 8192),
         epoch: cache.epoch(),
     };
+    // Steady-state fast path: if the active snapshot already covers `visible`
+    // at compatible resolution, return it immediately without locking RECENT or
+    // mutating egui temp storage every frame.
+    if let Some((current_key, current_val)) = cache.current()
+        && current_key.reusable_for(&request, visible)
+    {
+        return Some(Arc::clone(current_val));
+    }
     if let Some(previous) =
         ctx.data(|d| d.get_temp::<DetailRequest>(egui::Id::new(("atlas-wanted", local))))
         && previous.reusable_for(&request, visible)
@@ -121,7 +129,7 @@ fn detail_texture_visible(
             result.ok()
         },
     );
-    if result.is_none() {
+    if result.is_none() && cache.loading_state().1 > 0 {
         ctx.request_repaint_after(std::time::Duration::from_millis(250));
     }
     result

@@ -1,7 +1,6 @@
 //! Windowed GeoTIFF decoding and newest-measured-pixel fusion, without Python/GDAL.
 use rusqlite::{Connection, OpenFlags, params};
 use std::{
-    collections::HashMap,
     fs::File,
     io::BufReader,
     path::{Path, PathBuf},
@@ -26,7 +25,11 @@ fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
-fn checked_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
+fn checked_path_with_canon(
+    root: &Path,
+    root_canon: Option<&Path>,
+    relative: &str,
+) -> Result<PathBuf, String> {
     let relative = Path::new(relative);
     if relative.is_absolute()
         || relative.components().any(|c| {
@@ -39,13 +42,14 @@ fn checked_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
         return Err("Archive receipt escapes the lidar root".into());
     }
     let path = root.join(relative);
-    if path.exists()
-        && !path
-            .canonicalize()
-            .map_err(err)?
-            .starts_with(root.canonicalize().map_err(err)?)
-    {
-        return Err("Archive receipt resolves outside the lidar root".into());
+    if path.exists() {
+        let resolved_root = match root_canon {
+            Some(canon) => canon.to_path_buf(),
+            None => root.canonicalize().map_err(err)?,
+        };
+        if !path.canonicalize().map_err(err)?.starts_with(&resolved_root) {
+            return Err("Archive receipt resolves outside the lidar root".into());
+        }
     }
     Ok(path)
 }
@@ -101,40 +105,53 @@ pub fn read_mean(path: &Path, [w, s, e, n]: [f64; 4]) -> Result<Vec<f32>, String
         .get_tag_ascii_string(Tag::GdalNodata)
         .ok()
         .and_then(|s| s.trim_end_matches('\0').parse::<f32>().ok());
-    let mut chunks: HashMap<u32, Vec<(usize, usize, usize)>> = HashMap::new();
+    // Precompute monotonically non-decreasing source row/col -> chunk mappings
+    // so we read touched TIFF chunks in ascending chunk-index order without
+    // allocating a multi-megabyte HashMap of pixel tuples.
+    let mut y_entries: Vec<(usize, u32, usize)> = Vec::with_capacity(SIZE);
     for y in 0..SIZE {
         let lat = n - (y as f64 + 0.5) * (n - s) / SIZE as f64;
         let row = ((origin_y - lat) / scale[1]).floor();
-        if row < 0. || row >= height as f64 {
-            continue;
+        if row >= 0. && row < height as f64 {
+            let row = row as u32;
+            y_entries.push((y, row / ch, (row % ch) as usize));
         }
-        for x in 0..SIZE {
-            let lon = w + (x as f64 + 0.5) * (e - w) / SIZE as f64;
-            let col = ((lon - origin_x) / scale[0]).floor();
-            if col < 0. || col >= width as f64 {
-                continue;
-            }
-            let (col, row) = (col as u32, row as u32);
-            let chunk = row / ch * columns + col / cw + if planar == 2 { 2 * planes } else { 0 };
-            chunks.entry(chunk).or_default().push((
-                y * SIZE + x,
-                (col % cw) as usize,
-                (row % ch) as usize,
-            ));
+    }
+    let mut x_entries: Vec<(usize, u32, usize)> = Vec::with_capacity(SIZE);
+    for x in 0..SIZE {
+        let lon = w + (x as f64 + 0.5) * (e - w) / SIZE as f64;
+        let col = ((lon - origin_x) / scale[0]).floor();
+        if col >= 0. && col < width as f64 {
+            let col = col as u32;
+            x_entries.push((x, col / cw, (col % cw) as usize));
         }
     }
     let mut result = vec![f32::NAN; SIZE * SIZE];
-    for (chunk, pixels) in chunks {
-        let (chunk_width, _) = decoder.chunk_data_dimensions(chunk);
-        let DecodingResult::F32(data) = decoder.read_chunk(chunk).map_err(err)? else {
-            return Err("Numeric lidar raster must contain float32 samples".into());
-        };
-        for (dest, x, y) in pixels {
-            let pixel = y * chunk_width as usize + x;
-            let index = if planar == 2 { pixel } else { pixel * 4 + 2 };
-            let value = *data.get(index).ok_or("Truncated numeric raster chunk")?;
-            if value.is_finite() && nodata != Some(value) {
-                result[dest] = value;
+    if y_entries.is_empty() || x_entries.is_empty() {
+        return Ok(result);
+    }
+    let plane_offset = if planar == 2 { 2 * planes } else { 0 };
+    for y_group in y_entries.chunk_by(|a, b| a.1 == b.1) {
+        let crow = y_group[0].1;
+        for x_group in x_entries.chunk_by(|a, b| a.1 == b.1) {
+            let ccol = x_group[0].1;
+            let chunk = crow * columns + ccol + plane_offset;
+            let (chunk_width, _) = decoder.chunk_data_dimensions(chunk);
+            let DecodingResult::F32(data) = decoder.read_chunk(chunk).map_err(err)? else {
+                return Err("Numeric lidar raster must contain float32 samples".into());
+            };
+            let cw_actual = chunk_width as usize;
+            for &(dest_y, _, in_y) in y_group {
+                let row_dst = dest_y * SIZE;
+                let row_src = in_y * cw_actual;
+                for &(dest_x, _, in_x) in x_group {
+                    let pixel = row_src + in_x;
+                    let index = if planar == 2 { pixel } else { pixel * 4 + 2 };
+                    let value = *data.get(index).ok_or("Truncated numeric raster chunk")?;
+                    if value.is_finite() && nodata != Some(value) {
+                        result[row_dst + dest_x] = value;
+                    }
+                }
             }
         }
     }
@@ -291,6 +308,7 @@ fn render_impl(
     }
     let catalog =
         Connection::open_with_flags(catalog, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;
+    let root_canon = root.canonicalize().ok();
     let mut values = vec![f32::NAN; SIZE * SIZE];
     let mut credits = Vec::new();
     let mut overview_zoom: Option<u8> = None;
@@ -298,7 +316,7 @@ fn render_impl(
         if active.is_some_and(|p| !p.is_file()) {
             return Err("Camera moved".into());
         }
-        let file = checked_path(root, &path)?;
+        let file = checked_path_with_canon(root, root_canon.as_deref(), &path)?;
         if !file.is_file() {
             continue;
         }

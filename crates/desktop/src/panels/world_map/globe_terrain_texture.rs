@@ -9,7 +9,6 @@ struct Refinement {
     source: Arc<Prepared>,
     uniforms: ContourUniforms,
     viewport: Viewport,
-    bind: wgpu::BindGroup,
     target: Target,
     next: usize,
 }
@@ -30,7 +29,10 @@ pub(super) struct Cache {
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     warp: wgpu::Buffer,
+    frozen_uniform_buf: Option<wgpu::Buffer>,
+    frozen_bind: Option<wgpu::BindGroup>,
     paint_bind: Option<wgpu::BindGroup>,
+    paint_bind_dirty: bool,
     size: [u32; 2],
     preview: Option<Target>,
     full: Option<Target>,
@@ -133,7 +135,10 @@ impl Cache {
             layout,
             sampler,
             warp,
+            frozen_uniform_buf: None,
+            frozen_bind: None,
             paint_bind: None,
+            paint_bind_dirty: true,
             size: [0, 0],
             preview: None,
             full: None,
@@ -217,6 +222,7 @@ impl Cache {
             self.spare = None;
             self.uniforms = None;
             self.preview = Some(self.target(device, format));
+            self.paint_bind_dirty = true;
         }
         let changed = self.source.as_ref().is_none_or(|s| !Arc::ptr_eq(s, frame))
             || self
@@ -252,30 +258,38 @@ impl Cache {
                 .as_ref()
                 .is_some_and(|u| same_camera(u, uniforms));
         if !self.complete && self.working.is_none() {
-            // Freeze a complete camera/source snapshot. Movement must not
-            // restart it, or a continuously moving globe can never refine.
-            let mut bytes =
-                vec![0; UNIFORM_STRIDE as usize * (ContourLayer::SrtmGlobe.slot() as usize + 1)];
-            let offset = ContourLayer::SrtmGlobe.slot() as usize * UNIFORM_STRIDE as usize;
-            bytes[offset..offset + std::mem::size_of::<ContourUniforms>()]
-                .copy_from_slice(bytemuck::bytes_of(uniforms));
-            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("frozen terrain camera"),
-                contents: &bytes,
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-            let frozen_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &pipeline.get_bind_group_layout(0),
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &buffer,
-                        offset: 0,
-                        size: wgpu::BufferSize::new(std::mem::size_of::<ContourUniforms>() as u64),
-                    }),
-                }],
-            });
+            // Freeze a complete camera/source snapshot into a persistent buffer
+            // instead of allocating a new GPU buffer + bind group per refinement.
+            let offset = ContourLayer::SrtmGlobe.slot() as u64 * UNIFORM_STRIDE;
+            if self.frozen_uniform_buf.is_none() {
+                let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("frozen terrain camera"),
+                    size: UNIFORM_STRIDE * (ContourLayer::SrtmGlobe.slot() as u64 + 1),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let frozen_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &pipeline.get_bind_group_layout(0),
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &buf,
+                            offset: 0,
+                            size: wgpu::BufferSize::new(
+                                std::mem::size_of::<ContourUniforms>() as u64,
+                            ),
+                        }),
+                    }],
+                });
+                self.frozen_uniform_buf = Some(buf);
+                self.frozen_bind = Some(frozen_bind);
+            }
+            queue.write_buffer(
+                self.frozen_uniform_buf.as_ref().unwrap(),
+                offset,
+                bytemuck::bytes_of(uniforms),
+            );
             let target = self
                 .spare
                 .take()
@@ -284,7 +298,6 @@ impl Cache {
                 source: frame.clone(),
                 uniforms: *uniforms,
                 viewport,
-                bind: frozen_bind,
                 target,
                 next: 0,
             });
@@ -293,7 +306,7 @@ impl Cache {
             let (next, done) = render(
                 encoder,
                 pipeline,
-                &job.bind,
+                self.frozen_bind.as_ref().unwrap(),
                 &job.target.view,
                 &job.source,
                 tiles,
@@ -308,6 +321,7 @@ impl Cache {
             if done {
                 let job = self.working.take().unwrap();
                 self.spare = self.full.replace(job.target);
+                self.paint_bind_dirty = true;
                 self.complete =
                     Arc::ptr_eq(&job.source, frame) && same_camera(&job.uniforms, uniforms);
                 self.full_source = Some(job.source);
@@ -333,30 +347,33 @@ impl Cache {
         };
         queue.write_buffer(&self.warp, 0, bytemuck::bytes_of(&warp));
         self.palette_changed = false;
-        let preview = self.preview.as_ref().unwrap();
-        let full = self.full.as_ref().unwrap_or(preview);
-        self.paint_bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&preview.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&full.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: self.warp.as_entire_binding(),
-                },
-            ],
-        }));
+        if self.paint_bind_dirty || self.paint_bind.is_none() {
+            let preview = self.preview.as_ref().unwrap();
+            let full = self.full.as_ref().unwrap_or(preview);
+            self.paint_bind = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &self.layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&preview.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&full.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.warp.as_entire_binding(),
+                    },
+                ],
+            }));
+            self.paint_bind_dirty = false;
+        }
         !self.complete
     }
     pub fn paint(&self, pass: &mut wgpu::RenderPass<'static>) {

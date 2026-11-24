@@ -16,12 +16,17 @@ const EUMET_RING: &str = "https://view.eumetsat.int/geoserver/mumi/worldcloudmap
 pub(super) const MAX_BYTES: u64 = 40 << 20;
 
 pub(super) fn client() -> Result<Client, String> {
-    Client::builder()
-        .user_agent("1kEE global weather imagery")
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(90))
-        .build()
-        .map_err(|e| e.to_string())
+    static SHARED: std::sync::OnceLock<Result<Client, String>> = std::sync::OnceLock::new();
+    SHARED
+        .get_or_init(|| {
+            Client::builder()
+                .user_agent("1kEE global weather imagery")
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(90))
+                .build()
+                .map_err(|e| e.to_string())
+        })
+        .clone()
 }
 
 fn check_ir_time(stamp: &str, warning: &str) -> Result<(), String> {

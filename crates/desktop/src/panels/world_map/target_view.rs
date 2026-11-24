@@ -566,14 +566,12 @@ fn flight_input(s: &mut Session, response: &egui::Response, ctx: &egui::Context,
     }
     if s.camera.looking {
         s.camera.speed = (s.camera.speed * (scroll * 0.002).exp()).clamp(1., 10_000.);
+        let mouse_delta = if looking { mouse } else { egui::Vec2::ZERO };
         // Ignore the initial capture-frame pointer warp.
-        s.camera.step(
-            movement,
-            if looking { mouse } else { egui::Vec2::ZERO },
-            dt,
-            fast,
-        );
-        ctx.request_repaint();
+        s.camera.step(movement, mouse_delta, dt, fast);
+        if movement != [0., 0., 0.] || mouse_delta != egui::Vec2::ZERO || scroll != 0.0 {
+            ctx.request_repaint();
+        }
     }
 }
 fn heatmap_legend(ui: &mut egui::Ui, range: heatmap::HeightRange, unit: &str) {

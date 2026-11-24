@@ -242,82 +242,102 @@ fn compose_resident(
     let regions = ownership(bucket, sources, &bounds);
     let mut keys: Vec<_> = sources.keys().copied().collect();
     keys.sort();
-    let mut tiles = Vec::new();
-    let mut pieces = HashMap::new();
-    for cell in keys {
-        let source = sources[&cell].clone();
-        let owned = &regions[&cell];
-        let tile = if let Some(old) = previous.get(&cell)
-            && Arc::ptr_eq(&old.source, &source)
-            && old.regions == *owned
-        {
-            old.tile.clone()
-        } else {
-            let raw = LocalTileGeometry {
-                id: tile_id(bucket, cell),
-                contours: source.clone(),
-                bounds: bounds[&cell],
-            };
-            let contours = composition::clip_contours(&raw, owned);
-            let bounds = if Arc::ptr_eq(&contours, &source) {
-                raw.bounds
+
+    use rayon::prelude::*;
+    let built: Vec<(Cell, Piece, LocalTileGeometry)> = keys
+        .into_par_iter()
+        .map(|cell| {
+            let source = sources[&cell].clone();
+            let owned = &regions[&cell];
+            let tile = if let Some(old) = previous.get(&cell)
+                && Arc::ptr_eq(&old.source, &source)
+                && old.regions == *owned
+            {
+                old.tile.clone()
             } else {
-                residency::Bounds::from_contours(&contours)
+                let raw = LocalTileGeometry {
+                    id: tile_id(bucket, cell),
+                    contours: source.clone(),
+                    bounds: bounds[&cell],
+                };
+                let contours = composition::clip_contours(&raw, owned);
+                let bounds = if Arc::ptr_eq(&contours, &source) {
+                    raw.bounds
+                } else {
+                    residency::Bounds::from_contours(&contours)
+                };
+                LocalTileGeometry {
+                    contours,
+                    bounds,
+                    ..raw
+                }
             };
-            LocalTileGeometry {
-                contours,
-                bounds,
-                ..raw
-            }
-        };
-        pieces.insert(
-            cell,
-            Piece {
+            let piece = Piece {
                 source,
                 raw_bounds: bounds[&cell],
                 regions: owned.clone(),
                 tile: tile.clone(),
-            },
-        );
+            };
+            (cell, piece, tile)
+        })
+        .collect();
+
+    let mut tiles = Vec::with_capacity(built.len());
+    let mut pieces = HashMap::with_capacity(built.len());
+    for (cell, piece, tile) in built {
+        pieces.insert(cell, piece);
         tiles.push(tile);
     }
     // Previous generations remain disjoint tiles too. A new tile only clips
     // fallback tiles it actually overlaps; unchanged neighbors keep their Arc.
-    let mut retained = Vec::new();
-    if let Some(fallback) = fallback {
+    let mut retained: Vec<LocalTileGeometry> = if let Some(fallback) = fallback {
         let mut ordered: Vec<_> = regions.iter().collect();
         ordered.sort_by_key(|(cell, _)| **cell);
-        for tile in &fallback.tiles {
-            let Some(bounds) = tile.bounds else {
-                continue;
-            };
-            let mut remaining = vec![footprint(bounds)];
-            for (_, owned) in &ordered {
-                for &r in *owned {
-                    remaining = remaining
-                        .into_iter()
-                        .flat_map(|space| composition::subtract(space, r))
-                        .collect();
+        fallback
+            .tiles
+            .par_iter()
+            .filter_map(|tile| {
+                let bounds = tile.bounds?;
+                let mut remaining = vec![footprint(bounds)];
+                let mut next = Vec::new();
+                for (_, owned) in &ordered {
+                    for &r in *owned {
+                        next.clear();
+                        for &space in &remaining {
+                            if intersection(space, r).is_some() {
+                                next.extend(composition::subtract(space, r));
+                            } else {
+                                next.push(space);
+                            }
+                        }
+                        std::mem::swap(&mut remaining, &mut next);
+                        if remaining.is_empty() {
+                            break;
+                        }
+                    }
+                    if remaining.is_empty() {
+                        break;
+                    }
                 }
-                if remaining.is_empty() {
-                    break;
+                let contours = composition::clip_contours(tile, &remaining);
+                if contours.is_empty() {
+                    return None;
                 }
-            }
-            let contours = composition::clip_contours(tile, &remaining);
-            if !contours.is_empty() {
                 let bounds = if Arc::ptr_eq(&contours, &tile.contours) {
                     tile.bounds
                 } else {
                     residency::Bounds::from_contours(&contours)
                 };
-                retained.push(LocalTileGeometry {
+                Some(LocalTileGeometry {
                     contours,
                     bounds,
                     ..tile.clone()
-                });
-            }
-        }
-    }
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut bytes: usize = tiles
         .iter()
         .chain(&retained)

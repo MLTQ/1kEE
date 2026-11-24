@@ -23,16 +23,35 @@ struct Pool {
     retirement: Duration,
     reused: usize,
 }
+#[inline]
+pub(super) fn alloc_bytes(raw: usize) -> usize {
+    // Power-of-two buckets up to 64 KiB, then 64 KiB multiples (max ~6% slack)
+    // so retired partial-bin buffers are reused while strictly respecting budgets.
+    let bytes = raw.max(4096);
+    if bytes <= 65_536 {
+        bytes.next_power_of_two()
+    } else {
+        (bytes + 65_535) & !65_535
+    }
+}
+
+#[inline]
+fn bucket_size(bytes: u64) -> u64 {
+    alloc_bytes(bytes as usize) as u64
+}
+
 impl Pool {
     fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, jobs: Requests) -> Completed {
         let mut out = Vec::with_capacity(jobs.len());
         for (tile, index) in jobs {
             let data = &tile.chunks[index].instances;
             let bytes = bytemuck::cast_slice(data);
-            let size = bytes.len() as u64;
+            let raw_size = bytes.len() as u64;
+            let alloc_size = bucket_size(raw_size);
             let start = Instant::now();
-            let buffer = if let Some(buffer) = self.buffers.get_mut(&size).and_then(Vec::pop) {
-                self.bytes -= size;
+            let buffer = if let Some(buffer) = self.buffers.get_mut(&alloc_size).and_then(Vec::pop)
+            {
+                self.bytes -= alloc_size;
                 self.reused += 1;
                 queue.write_buffer(&buffer, 0, bytes);
                 self.copy += start.elapsed();
@@ -40,14 +59,14 @@ impl Pool {
             } else {
                 let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("globe terrain chunk"),
-                    size,
+                    size: alloc_size,
                     usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: true,
                 });
                 self.allocation += start.elapsed();
                 let start = Instant::now();
                 buffer
-                    .slice(..)
+                    .slice(..raw_size)
                     .get_mapped_range_mut()
                     .copy_from_slice(bytes);
                 buffer.unmap();

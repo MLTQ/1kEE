@@ -138,14 +138,14 @@ impl Generations {
     }
 }
 
-/// The full snapshot stored behind the bridge mutex. Cloned cheaply each frame.
+/// The full snapshot stored behind the bridge RwLock. Unchanged slices are shared via `Arc`.
 #[derive(Clone)]
 pub struct Snapshot {
     pub view: ViewDto,
     pub show: ShowFlags,
     pub selected: SelectedDto,
-    pub events: Vec<EventDto>,
-    pub cameras: Vec<CameraDto>,
+    pub events: Arc<Vec<EventDto>>,
+    pub cameras: Arc<Vec<CameraDto>>,
     // Already `Arc<Vec<…>>` in the model — clone is a refcount bump, not the data.
     pub tracks: Arc<Vec<MovingTrack>>,
     pub flights: Arc<Vec<FlightTrack>>,
@@ -154,70 +154,84 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    /// Build the per-frame snapshot from the live model. Cheap by construction.
+    /// Build the initial snapshot from the live model.
     pub fn from_model(model: &AppModel) -> Self {
-        let view = &model.globe_view;
-        let centre = if view.local_mode { view.local_center } else { view.globe_center_latlon() };
         Snapshot {
-            view: ViewDto {
-                lat: centre.lat,
-                lon: centre.lon,
-                body: body_str(model.active_body),
-                theme: model.map_theme.label(),
-                local_mode: view.local_mode,
-                zoom: if view.local_mode { view.local_zoom } else { view.zoom },
-            },
-            show: ShowFlags {
-                events: model.show_event_markers,
-                ships: model.show_ships,
-                flights: model.show_flights,
-            },
-            selected: SelectedDto {
-                event: model.selected_event_id.clone(),
-                camera: model.selected_camera_id.clone(),
-                vessel: model.selected_track_mmsi,
-                flight: model.selected_flight_icao24.clone(),
-            },
-            events: model.events.iter().map(event_dto).collect(),
-            cameras: model.cameras.iter().map(camera_dto).collect(),
+            view: view_dto(model),
+            show: show_flags(model),
+            selected: selected_dto(model),
+            events: Arc::new(model.events.iter().map(event_dto).collect()),
+            cameras: Arc::new(model.cameras.iter().map(camera_dto).collect()),
             tracks: model.tracks.clone(),
             flights: model.flights.clone(),
             gens: Generations::fresh(),
         }
     }
 
-    /// Carry `prev`'s generation counters forward, bumping a slice's counter only
-    /// when that slice actually changed. Runs once per frame in `publish`, so the
-    /// comparisons stay cheap: pointer equality for the big Arc'd vecs, plain
-    /// equality for the small DTO vecs and the scalar view state.
-    pub fn carry_generations(&mut self, prev: &Snapshot) {
-        let mut g = prev.gens;
-        // `/state` serializes view + show + selected + the four slice counts.
-        let counts_changed = self.events.len() != prev.events.len()
-            || self.cameras.len() != prev.cameras.len()
-            || self.tracks.len() != prev.tracks.len()
-            || self.flights.len() != prev.flights.len();
-        if counts_changed
-            || self.view != prev.view
-            || self.show != prev.show
-            || self.selected != prev.selected
+    /// Build a successor snapshot only if something actually changed relative to `prev`.
+    /// Unchanged `events`/`cameras` slices are reused via `Arc::clone` with zero allocations.
+    pub fn update_from_model(prev: &Snapshot, model: &AppModel) -> Option<Self> {
+        let view = view_dto(model);
+        let show = show_flags(model);
+        let selected_changed = !selected_matches(model, &prev.selected);
+        let tracks_changed = !Arc::ptr_eq(&model.tracks, &prev.tracks);
+        let flights_changed = !Arc::ptr_eq(&model.flights, &prev.flights);
+        let events_changed = !events_match(&model.events, &prev.events);
+        let cameras_changed = !cameras_match(&model.cameras, &prev.cameras);
+
+        let counts_changed = model.events.len() != prev.events.len()
+            || model.cameras.len() != prev.cameras.len()
+            || model.tracks.len() != prev.tracks.len()
+            || model.flights.len() != prev.flights.len();
+        let state_changed =
+            counts_changed || view != prev.view || show != prev.show || selected_changed;
+
+        if !(state_changed
+            || events_changed
+            || cameras_changed
+            || tracks_changed
+            || flights_changed)
         {
+            return None;
+        }
+
+        let mut g = prev.gens;
+        if state_changed {
             g.state += 1;
         }
-        if self.events != prev.events {
+        let events = if events_changed {
             g.events += 1;
-        }
-        if self.cameras != prev.cameras {
+            Arc::new(model.events.iter().map(event_dto).collect())
+        } else {
+            prev.events.clone()
+        };
+        let cameras = if cameras_changed {
             g.cameras += 1;
-        }
-        // Refreshed wholesale when a provider poll completes — pointer compare only.
-        if !Arc::ptr_eq(&self.tracks, &prev.tracks) {
+            Arc::new(model.cameras.iter().map(camera_dto).collect())
+        } else {
+            prev.cameras.clone()
+        };
+        if tracks_changed {
             g.tracks += 1;
         }
-        if !Arc::ptr_eq(&self.flights, &prev.flights) {
+        if flights_changed {
             g.flights += 1;
         }
-        self.gens = g;
+
+        Some(Snapshot {
+            view,
+            show,
+            selected: if selected_changed {
+                selected_dto(model)
+            } else {
+                prev.selected.clone()
+            },
+            events,
+            cameras,
+            tracks: model.tracks.clone(),
+            flights: model.flights.clone(),
+            gens: g,
+        })
     }
 
     /// `/state` — small, polled often: view + selection + layer flags + counts.
@@ -251,11 +265,11 @@ impl Snapshot {
     }
 
     pub fn events_json(&self) -> String {
-        serde_json::to_string(&self.events).unwrap_or_else(|_| "[]".into())
+        serde_json::to_string(self.events.as_slice()).unwrap_or_else(|_| "[]".into())
     }
 
     pub fn cameras_json(&self) -> String {
-        serde_json::to_string(&self.cameras).unwrap_or_else(|_| "[]".into())
+        serde_json::to_string(self.cameras.as_slice()).unwrap_or_else(|_| "[]".into())
     }
 
     pub fn tracks_json(&self) -> String {
@@ -279,6 +293,80 @@ impl Snapshot {
         };
         serde_json::to_string(&resp).unwrap_or_else(|_| "{}".into())
     }
+}
+
+fn view_dto(model: &AppModel) -> ViewDto {
+    let view = &model.globe_view;
+    let centre = if view.local_mode {
+        view.local_center
+    } else {
+        view.globe_center_latlon()
+    };
+    ViewDto {
+        lat: centre.lat,
+        lon: centre.lon,
+        body: body_str(model.active_body),
+        theme: model.map_theme.label(),
+        local_mode: view.local_mode,
+        zoom: if view.local_mode {
+            view.local_zoom
+        } else {
+            view.zoom
+        },
+    }
+}
+
+fn show_flags(model: &AppModel) -> ShowFlags {
+    ShowFlags {
+        events: model.show_event_markers,
+        ships: model.show_ships,
+        flights: model.show_flights,
+    }
+}
+
+fn selected_dto(model: &AppModel) -> SelectedDto {
+    SelectedDto {
+        event: model.selected_event_id.clone(),
+        camera: model.selected_camera_id.clone(),
+        vessel: model.selected_track_mmsi,
+        flight: model.selected_flight_icao24.clone(),
+    }
+}
+
+fn selected_matches(model: &AppModel, prev: &SelectedDto) -> bool {
+    model.selected_event_id == prev.event
+        && model.selected_camera_id == prev.camera
+        && model.selected_track_mmsi == prev.vessel
+        && model.selected_flight_icao24 == prev.flight
+}
+
+fn events_match(live: &[EventRecord], prev: &[EventDto]) -> bool {
+    live.len() == prev.len()
+        && live.iter().zip(prev.iter()).all(|(e, d)| {
+            e.id == d.id
+                && e.location.lat == d.lat
+                && e.location.lon == d.lon
+                && e.severity.label() == d.severity
+                && e.occurred_at == d.occurred_at
+                && e.title == d.title
+                && e.summary == d.summary
+                && e.location_name == d.location_name
+                && e.source == d.source
+        })
+}
+
+fn cameras_match(live: &[CameraFeed], prev: &[CameraDto]) -> bool {
+    live.len() == prev.len()
+        && live.iter().zip(prev.iter()).all(|(c, d)| {
+            c.id == d.id
+                && c.location.lat == d.lat
+                && c.location.lon == d.lon
+                && c.status.label() == d.status
+                && c.last_seen == d.last_seen
+                && c.label == d.label
+                && c.provider == d.provider
+                && c.kind == d.kind
+        })
 }
 
 fn body_str(body: ActiveBody) -> &'static str {

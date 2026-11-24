@@ -73,16 +73,24 @@ impl Coverage {
         {
             return;
         }
+        let bounds_covered = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| contains(s.bounds, bounds));
+        if bounds_covered
+            && self
+                .checked
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(30))
+        {
+            return;
+        }
         let modified = path.metadata().and_then(|m| m.modified()).ok();
         let fresh = self
             .snapshot
             .as_ref()
             .is_some_and(|s| contains(s.bounds, bounds) && s.modified == modified);
-        if fresh
-            && self
-                .checked
-                .is_some_and(|t| t.elapsed() < Duration::from_secs(30))
-        {
+        if fresh {
+            self.checked = Some(Instant::now());
             return;
         }
         if !fresh
@@ -117,42 +125,92 @@ impl Coverage {
             return;
         };
         let srtm = crate::terrain_assets::find_srtm_root(root);
-        let project = |point: GeoPoint| {
-            let height = if fine {
-                crate::threedep::cached_elevation_m(point)
-            } else {
-                None
-            }
-            .or_else(|| super::srtm_stream::cached_tile_elevation_m(srtm.as_deref(), point))
-            .unwrap_or(0.);
-            let (x, y, _) = projection.project_logical(point, height);
-            egui::pos2(x, y)
-        };
-        for path in &snapshot.paths {
-            if path.len() == 1
-                && let Some(p) = path.first()
-            {
-                let p = GeoPoint {
-                    lon: unwrap(p.lon, (bounds[0] + bounds[2]) * 0.5),
-                    ..*p
+        let stroke = egui::Stroke::new(1.3_f32, COLOR);
+        crate::threedep::with_cached_sampler(fine, |fine_sampler| {
+            super::srtm_stream::with_cached_sampler(srtm.as_deref(), |srtm_sampler| {
+                let project = |point: GeoPoint| {
+                    let height = fine_sampler
+                        .sample(point)
+                        .or_else(|| srtm_sampler.sample(point))
+                        .unwrap_or(0.);
+                    let (x, y, _) = projection.project_logical(point, height);
+                    egui::pos2(x, y)
                 };
-                if p.lon >= bounds[0]
-                    && p.lon <= bounds[2]
-                    && p.lat >= bounds[1]
-                    && p.lat <= bounds[3]
-                {
-                    painter.circle_stroke(project(p), 3., egui::Stroke::new(1.3_f32, COLOR));
-                }
-            }
-            for pair in path.windows(2) {
-                if let Some([a, b]) = clip(pair[0], pair[1], bounds) {
-                    let [a, b] = [project(a), project(b)];
-                    if a.is_finite() && b.is_finite() {
-                        painter.line_segment([a, b], egui::Stroke::new(1.3_f32, COLOR));
+                let mut run: Vec<egui::Pos2> = Vec::new();
+                for path in &snapshot.paths {
+                    if path.len() == 1
+                        && let Some(p) = path.first()
+                    {
+                        let p = GeoPoint {
+                            lon: unwrap(p.lon, (bounds[0] + bounds[2]) * 0.5),
+                            ..*p
+                        };
+                        if p.lon >= bounds[0]
+                            && p.lon <= bounds[2]
+                            && p.lat >= bounds[1]
+                            && p.lat <= bounds[3]
+                        {
+                            painter.circle_stroke(project(p), 3., stroke);
+                        }
+                        continue;
+                    }
+                    let mut last_geo: Option<GeoPoint> = None;
+                    for pair in path.windows(2) {
+                        if let Some([a, b]) = clip(pair[0], pair[1], bounds) {
+                            let continues = last_geo
+                                .is_some_and(|prev| prev.lat == a.lat && prev.lon == a.lon);
+                            if continues {
+                                let pb = project(b);
+                                if pb.is_finite() {
+                                    run.push(pb);
+                                    last_geo = Some(b);
+                                } else {
+                                    if run.len() >= 2 {
+                                        painter.add(egui::Shape::line(
+                                            std::mem::take(&mut run),
+                                            stroke,
+                                        ));
+                                    } else {
+                                        run.clear();
+                                    }
+                                    last_geo = None;
+                                }
+                            } else {
+                                if run.len() >= 2 {
+                                    painter.add(egui::Shape::line(
+                                        std::mem::take(&mut run),
+                                        stroke,
+                                    ));
+                                } else {
+                                    run.clear();
+                                }
+                                let pa = project(a);
+                                let pb = project(b);
+                                if pa.is_finite() && pb.is_finite() {
+                                    run.push(pa);
+                                    run.push(pb);
+                                    last_geo = Some(b);
+                                } else {
+                                    last_geo = None;
+                                }
+                            }
+                        } else if !run.is_empty() {
+                            if run.len() >= 2 {
+                                painter.add(egui::Shape::line(std::mem::take(&mut run), stroke));
+                            } else {
+                                run.clear();
+                            }
+                            last_geo = None;
+                        }
+                    }
+                    if run.len() >= 2 {
+                        painter.add(egui::Shape::line(std::mem::take(&mut run), stroke));
+                    } else {
+                        run.clear();
                     }
                 }
-            }
-        }
+            });
+        });
     }
 }
 fn contains(a: [f32; 4], b: [f32; 4]) -> bool {

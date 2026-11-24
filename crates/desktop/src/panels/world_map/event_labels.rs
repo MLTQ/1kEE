@@ -14,7 +14,7 @@ mod layout;
 pub(super) fn draw<'a>(
     painter: &egui::Painter,
     viewport: Rect,
-    events: impl Iterator<Item = &'a EventRecord>,
+    mut events: impl Iterator<Item = &'a EventRecord>,
     markers: &[MapMarker],
     opacity: f32,
     selected: Option<&str>,
@@ -38,22 +38,17 @@ pub(super) fn draw<'a>(
     }
     let now = painter.ctx().input(|input| input.time);
     layout.begin_frame(bounds, now);
-    let markers: HashMap<_, _> = markers
+    // Direct lookup for the single selected event — avoids building a full HashMap of all markers.
+    let Some(marker) = markers
         .iter()
-        .filter(|marker| layout.accepts_anchor(&marker.id, marker.base, viewport))
-        .map(|marker| (marker.id.as_str(), marker))
-        .collect();
-    let mut visible: Vec<_> = events
-        .filter(|event| event.id == selected)
-        .filter_map(|event| {
-            markers
-                .get(event.id.as_str())
-                .map(|marker| (event, *marker))
-        })
-        .collect();
-    // Polling can reorder records; stable ordering keeps overlapping cards from
-    // trading places merely because the event payload was refreshed.
-    visible.sort_unstable_by(|(a, _), (b, _)| a.id.cmp(&b.id));
+        .find(|m| m.id == selected && layout.accepts_anchor(&m.id, m.base, viewport))
+    else {
+        return;
+    };
+    let Some(event) = events.find(|e| e.id == selected) else {
+        return;
+    };
+    let visible = [(event, marker)];
 
     let mut painter = painter.with_clip_rect(viewport);
     painter.multiply_opacity(opacity);

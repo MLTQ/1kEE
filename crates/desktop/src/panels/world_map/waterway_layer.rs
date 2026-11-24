@@ -2,20 +2,23 @@ use crate::model::{GeoPoint, GlobeViewState};
 use crate::osm_ingest;
 use crate::theme;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use super::cell_loader::{LoadedPolyline, load_features_from_cells};
 use super::local_terrain_scene::{
-    LocalLayout, local_geo_bounds, project_local, visual_half_extent_for_zoom,
+    LocalLayout, local_geo_bounds, projection::local_projection_params, visual_half_extent_for_zoom,
 };
 use super::srtm_stream;
 
 const ELEVATION_OFFSET_M: f32 = 2.0;
 const GEO_MARGIN_FACTOR: f32 = 0.75;
+static HAS_WATERWAY_CACHE: AtomicBool = AtomicBool::new(false);
 
 // ── Waterway layer ─────────────────────────────────────────────────────────────
 
 struct ElevatedWaterway {
+    bounds: [f32; 4],
     points: Vec<(GeoPoint, f32)>,
 }
 
@@ -28,7 +31,20 @@ impl ElevatedWaterway {
             ELEVATION_OFFSET_M,
             |pt| srtm_stream::sample_elevation_m(selected_root, pt),
         );
-        Self { points }
+        let mut min_lon = f32::INFINITY;
+        let mut max_lon = f32::NEG_INFINITY;
+        let mut min_lat = f32::INFINITY;
+        let mut max_lat = f32::NEG_INFINITY;
+        for &(p, _) in &points {
+            min_lon = min_lon.min(p.lon);
+            max_lon = max_lon.max(p.lon);
+            min_lat = min_lat.min(p.lat);
+            max_lat = max_lat.max(p.lat);
+        }
+        Self {
+            bounds: [min_lon, min_lat, max_lon, max_lat],
+            points,
+        }
     }
 }
 
@@ -43,7 +59,7 @@ struct WaterwayCache {
 }
 
 struct WaterwayCacheStore {
-    cache: Option<WaterwayCache>,
+    cache: Option<Arc<WaterwayCache>>,
     building: Option<osm_ingest::GeoBounds>,
 }
 
@@ -74,8 +90,11 @@ pub(super) fn draw_waterways(
     let _ = render_zoom; // zoom no longer drives cache invalidation
 
     if !show_waterways {
-        if let Ok(mut g) = waterway_cache().lock() {
+        if HAS_WATERWAY_CACHE.load(Ordering::Relaxed)
+            && let Ok(mut g) = waterway_cache().lock()
+        {
             g.cache = None;
+            HAS_WATERWAY_CACHE.store(false, Ordering::Relaxed);
         }
         return;
     }
@@ -92,7 +111,7 @@ pub(super) fn draw_waterways(
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
     let current_gen = osm_ingest::road_data_generation();
 
-    {
+    let cache = {
         let mut store = match waterway_cache().lock() {
             Ok(g) => g,
             Err(_) => return,
@@ -119,6 +138,7 @@ pub(super) fn draw_waterways(
             let (covered_min_lon, covered_max_lon) = (load_bounds.min_lon, load_bounds.max_lon);
 
             store.building = Some(load_bounds);
+            let snapshot = store.cache.clone();
             drop(store);
 
             let root_buf = root.to_path_buf();
@@ -128,50 +148,58 @@ pub(super) fn draw_waterways(
                     .iter()
                     .map(|p| ElevatedWaterway::from_polyline(p, Some(&root_buf)))
                     .collect();
+                let next = Arc::new(WaterwayCache {
+                    data_gen: current_gen,
+                    last_root: root_buf,
+                    covered_min_lat,
+                    covered_max_lat,
+                    covered_min_lon,
+                    covered_max_lon,
+                    features,
+                });
 
-                if let Ok(mut store) = waterway_cache().lock() {
-                    store.cache = Some(WaterwayCache {
-                        data_gen: current_gen,
-                        last_root: root_buf.clone(),
-                        covered_min_lat,
-                        covered_max_lat,
-                        covered_min_lon,
-                        covered_max_lon,
-                        features,
-                    });
+                let retired = if let Ok(mut store) = waterway_cache().lock() {
+                    let old = store.cache.replace(next);
                     store.building = None;
-                }
+                    HAS_WATERWAY_CACHE.store(true, Ordering::Relaxed);
+                    old
+                } else {
+                    None
+                };
+                drop(retired);
                 crate::app::request_repaint();
             });
+            snapshot
+        } else {
+            store.cache.clone()
         }
-    }
-
-    let store = match waterway_cache().lock() {
-        Ok(g) => g,
-        Err(_) => return,
     };
-    let Some(cache) = &store.cache else {
+
+    let Some(cache) = cache else {
         return;
     };
 
-    let stroke = egui::Stroke::new(1.2, theme::waterway_color());
+    let params = local_projection_params(layout, view, viewport_center, extent_x_km, extent_y_km);
+    let view_bounds = params
+        .ground_bounds(painter.clip_rect().expand(8.0))
+        .unwrap_or([-180.0, -90.0, 180.0, 90.0]);
+    let span = layout.width.max(layout.height) * 8.0;
+    let stroke = egui::Stroke::new(1.2_f32, theme::waterway_color());
 
     for feat in &cache.features {
+        if feat.bounds[3] < view_bounds[1]
+            || feat.bounds[1] > view_bounds[3]
+            || feat.bounds[2] < view_bounds[0]
+            || feat.bounds[0] > view_bounds[2]
+        {
+            continue;
+        }
         let mut pts = Vec::with_capacity(feat.points.len());
         for &(pt, elev) in &feat.points {
-            let Some(pos) = project_local(
-                layout,
-                view,
-                viewport_center,
-                pt,
-                elev,
-                extent_x_km,
-                extent_y_km,
-            )
-            .map(|p| p.pos) else {
-                continue;
-            };
-            pts.push(pos);
+            let (x, y, _) = params.project_logical(pt, elev);
+            if x.is_finite() && y.is_finite() && x.abs() < span && y.abs() < span {
+                pts.push(egui::pos2(x, y));
+            }
         }
         if pts.len() >= 2 {
             painter.add(egui::Shape::line(pts, stroke));

@@ -40,7 +40,7 @@ impl Archive {
 
     pub(super) fn remember(&mut self, stamp: String, image: SatelliteLayer, keep: Option<&str>) {
         self.loaded.retain(|(time, _)| *time != stamp);
-        if self.loaded.len() >= 3
+        if self.loaded.len() >= 16
             && let Some(i) = self
                 .loaded
                 .iter()

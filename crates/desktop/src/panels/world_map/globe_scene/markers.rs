@@ -4,100 +4,171 @@ use crate::theme;
 
 use super::{ProjectedMarker, ProjectedPoint};
 
-/// Draw all live AIS vessels as small ship markers on the globe.
+const RING_SIDES: usize = 10;
+
+/// Precomputed unit-circle offsets for fast batched marker rings/discs.
+fn unit_ring() -> [(f32, f32); RING_SIDES] {
+    let mut out = [(0.0_f32, 0.0_f32); RING_SIDES];
+    for (i, slot) in out.iter_mut().enumerate() {
+        let a = (i as f32) * (std::f32::consts::TAU / RING_SIDES as f32);
+        *slot = (a.cos(), a.sin());
+    }
+    out
+}
+
+#[inline]
+fn push_ring(
+    mesh: &mut egui::epaint::Mesh,
+    ring: &[(f32, f32); RING_SIDES],
+    pos: egui::Pos2,
+    inner_r: f32,
+    outer_r: f32,
+    col: egui::Color32,
+) {
+    let start = mesh.vertices.len() as u32;
+    for &(cx, cy) in ring {
+        mesh.colored_vertex(egui::pos2(pos.x + cx * inner_r, pos.y + cy * inner_r), col);
+        mesh.colored_vertex(egui::pos2(pos.x + cx * outer_r, pos.y + cy * outer_r), col);
+    }
+    for i in 0..RING_SIDES as u32 {
+        let next = (i + 1) % RING_SIDES as u32;
+        let i0 = start + i * 2;
+        let i1 = start + next * 2;
+        mesh.add_triangle(i0, i0 + 1, i1);
+        mesh.add_triangle(i0 + 1, i1 + 1, i1);
+    }
+}
+
+#[inline]
+fn push_disc(
+    mesh: &mut egui::epaint::Mesh,
+    ring: &[(f32, f32); RING_SIDES],
+    pos: egui::Pos2,
+    r: f32,
+    col: egui::Color32,
+) {
+    let center = mesh.vertices.len() as u32;
+    mesh.colored_vertex(pos, col);
+    for &(cx, cy) in ring {
+        mesh.colored_vertex(egui::pos2(pos.x + cx * r, pos.y + cy * r), col);
+    }
+    for i in 0..RING_SIDES as u32 {
+        let next = (i + 1) % RING_SIDES as u32;
+        mesh.add_triangle(center, center + 1 + i, center + 1 + next);
+    }
+}
+
+#[inline]
+fn push_heading_tri(
+    mesh: &mut egui::epaint::Mesh,
+    pos: egui::Pos2,
+    heading_deg: f32,
+    fwd: f32,
+    back: f32,
+    wing: f32,
+    col: egui::Color32,
+) {
+    let angle = heading_deg.to_radians() - std::f32::consts::FRAC_PI_2;
+    let (sin_a, cos_a) = angle.sin_cos();
+    // Perpendicular vector (angle + pi/2) is (-sin_a, cos_a); zero extra trig calls.
+    let tip = egui::pos2(pos.x + cos_a * fwd, pos.y + sin_a * fwd);
+    let bx = pos.x - cos_a * back;
+    let by = pos.y - sin_a * back;
+    let left = egui::pos2(bx - sin_a * wing, by + cos_a * wing);
+    let right = egui::pos2(bx + sin_a * wing, by - cos_a * wing);
+    let base_i = mesh.vertices.len() as u32;
+    mesh.colored_vertex(tip, col);
+    mesh.colored_vertex(left, col);
+    mesh.colored_vertex(right, col);
+    mesh.add_triangle(base_i, base_i + 1, base_i + 2);
+}
+
+/// Draw all live AIS vessels as small ship markers on the globe in a single batched mesh.
 pub(super) fn draw_ships(
     painter: &egui::Painter,
     tracks: &[MovingTrack],
     projected_tracks: &[ProjectedMarker],
     selected_mmsi: Option<u64>,
 ) {
-    // Cyan-teal — distinct from event (red/orange) and camera (blue) markers.
+    if projected_tracks.is_empty() {
+        return;
+    }
     let ship_color = egui::Color32::from_rgb(40, 210, 180);
     let selected_color = egui::Color32::from_rgb(255, 230, 80);
+    let ship_halo = ship_color.gamma_multiply(0.12);
+    let selected_halo = selected_color.gamma_multiply(0.12);
+    let ring = unit_ring();
+
+    let mut mesh = egui::epaint::Mesh::default();
+    mesh.vertices.reserve(projected_tracks.len() * (RING_SIDES * 2 + 4));
+    mesh.indices.reserve(projected_tracks.len() * (RING_SIDES * 6 + 3));
+    let mut selected_pos = None;
 
     for projected in projected_tracks {
         let track = &tracks[projected.source_index];
         let is_selected = selected_mmsi == Some(track.mmsi);
-        let col = if is_selected {
-            selected_color
+        let (col, halo) = if is_selected {
+            (selected_color, selected_halo)
         } else {
-            ship_color
+            (ship_color, ship_halo)
         };
         let pos = projected.point.pos;
 
-        // Glow halo
-        painter.circle_stroke(pos, 6.0, egui::Stroke::new(4.0, col.gamma_multiply(0.12)));
+        // Soft glow halo (center radius 6.0, stroke width 4.0 -> [4.0, 8.0])
+        push_ring(&mut mesh, &ring, pos, 4.0, 8.0, halo);
 
-        // Heading arrow: draw a small directional triangle if heading is known.
         if let Some(heading) = track.heading_deg {
-            let angle = heading.to_radians() - std::f32::consts::FRAC_PI_2;
-            let fwd: f32 = 7.0;
-            let back: f32 = 3.5;
-            let wing: f32 = 3.0;
-
-            // Tip of triangle (in heading direction)
-            let tip = egui::pos2(pos.x + angle.cos() * fwd, pos.y + angle.sin() * fwd);
-            // Left and right wing points (perpendicular to heading, slightly back)
-            let angle_l = angle + std::f32::consts::FRAC_PI_2;
-            let angle_r = angle - std::f32::consts::FRAC_PI_2;
-            let left = egui::pos2(
-                pos.x - angle.cos() * back + angle_l.cos() * wing,
-                pos.y - angle.sin() * back + angle_l.sin() * wing,
-            );
-            let right = egui::pos2(
-                pos.x - angle.cos() * back + angle_r.cos() * wing,
-                pos.y - angle.sin() * back + angle_r.sin() * wing,
-            );
-
-            // Filled triangle (mesh)
-            let mut mesh = egui::epaint::Mesh::default();
-            let base_i = mesh.vertices.len() as u32;
-            for &p in &[tip, left, right] {
-                mesh.vertices.push(egui::epaint::Vertex {
-                    pos: p,
-                    uv: egui::pos2(0.0, 0.0),
-                    color: col,
-                });
-            }
-            mesh.indices
-                .extend_from_slice(&[base_i, base_i + 1, base_i + 2]);
-            painter.add(egui::Shape::mesh(mesh));
+            push_heading_tri(&mut mesh, pos, heading, 7.0, 3.5, 3.0, col);
         } else {
-            // No heading: draw a simple filled dot
-            painter.circle_filled(pos, 3.0, col);
+            push_disc(&mut mesh, &ring, pos, 3.0, col);
         }
 
-        // Selection ring
         if is_selected {
-            painter.circle_stroke(pos, 9.0, egui::Stroke::new(1.5, selected_color));
+            selected_pos = Some(pos);
         }
+    }
+
+    if !mesh.indices.is_empty() {
+        painter.add(egui::Shape::mesh(mesh));
+    }
+    if let Some(pos) = selected_pos {
+        painter.circle_stroke(pos, 9.0, egui::Stroke::new(1.5, selected_color));
     }
 }
 
-/// Draw all live ADS-B flights as small directional markers on the globe.
-///
-/// Colour scheme: callsign-derived category colours from the active theme,
-/// so markers integrate with Topo / Phosphor / Thermal / Ghost / Akira palettes.
-/// Vertical rate adds a subtle brightness modifier.  The selected flight gets
-/// an outer selection ring so it stands out from the crowd.
+/// Draw all live ADS-B flights as small directional markers on the globe in a single batched mesh.
 pub(super) fn draw_flights(
     painter: &egui::Painter,
     flights: &[FlightTrack],
     projected_flights: &[ProjectedMarker],
     selected_icao24: Option<&str>,
 ) {
+    if projected_flights.is_empty() {
+        return;
+    }
+    // Hoist all 5 theme palette lookups outside the per-flight loop.
+    let c_airline = theme::flight_airline_color();
+    let c_cargo = theme::flight_cargo_color();
+    let c_military = theme::flight_military_color();
+    let c_ga = theme::flight_ga_color();
+    let c_unknown = theme::flight_unknown_color();
+    let ring = unit_ring();
+
+    let mut mesh = egui::epaint::Mesh::default();
+    mesh.vertices.reserve(projected_flights.len() * (RING_SIDES * 2 + 4));
+    mesh.indices.reserve(projected_flights.len() * (RING_SIDES * 6 + 3));
+    let mut selected_ring: Option<(egui::Pos2, egui::Color32)> = None;
+
     for projected in projected_flights {
         let flight = &flights[projected.source_index];
-        // ── Category → base colour (theme-aware) ───────────────────────────
-        let cat_col: egui::Color32 = match flight.category() {
-            FlightCategory::Airline => theme::flight_airline_color(),
-            FlightCategory::Cargo => theme::flight_cargo_color(),
-            FlightCategory::Military => theme::flight_military_color(),
-            FlightCategory::GA => theme::flight_ga_color(),
-            FlightCategory::Unknown => theme::flight_unknown_color(),
+        let cat_col = match flight.category() {
+            FlightCategory::Airline => c_airline,
+            FlightCategory::Cargo => c_cargo,
+            FlightCategory::Military => c_military,
+            FlightCategory::GA => c_ga,
+            FlightCategory::Unknown => c_unknown,
         };
 
-        // ── Vertical-rate brightness modifier ──────────────────────────────
         let col = match flight.vertical_rate_fpm {
             Some(r) if r > 100.0 => cat_col.gamma_multiply(1.20),
             Some(r) if r < -100.0 => cat_col.gamma_multiply(0.80),
@@ -105,47 +176,26 @@ pub(super) fn draw_flights(
         };
         let pos = projected.point.pos;
 
-        // Soft glow halo
-        painter.circle_stroke(pos, 5.5, egui::Stroke::new(3.5, col.gamma_multiply(0.10)));
+        // Soft glow halo (center radius 5.5, width 3.5 -> [3.75, 7.25])
+        push_ring(&mut mesh, &ring, pos, 3.75, 7.25, col.gamma_multiply(0.10));
 
         if let Some(heading) = flight.heading_deg {
-            // Small filled triangle pointing in the direction of travel.
-            let angle = heading.to_radians() - std::f32::consts::FRAC_PI_2;
-            let fwd: f32 = 6.0;
-            let back: f32 = 3.0;
-            let wing: f32 = 2.5;
-
-            let tip = egui::pos2(pos.x + angle.cos() * fwd, pos.y + angle.sin() * fwd);
-            let left = egui::pos2(
-                pos.x - angle.cos() * back + (angle + std::f32::consts::FRAC_PI_2).cos() * wing,
-                pos.y - angle.sin() * back + (angle + std::f32::consts::FRAC_PI_2).sin() * wing,
-            );
-            let right = egui::pos2(
-                pos.x - angle.cos() * back + (angle - std::f32::consts::FRAC_PI_2).cos() * wing,
-                pos.y - angle.sin() * back + (angle - std::f32::consts::FRAC_PI_2).sin() * wing,
-            );
-
-            let mut mesh = egui::epaint::Mesh::default();
-            let base_i = mesh.vertices.len() as u32;
-            for &p in &[tip, left, right] {
-                mesh.vertices.push(egui::epaint::Vertex {
-                    pos: p,
-                    uv: egui::pos2(0.0, 0.0),
-                    color: col,
-                });
-            }
-            mesh.indices
-                .extend_from_slice(&[base_i, base_i + 1, base_i + 2]);
-            painter.add(egui::Shape::mesh(mesh));
+            push_heading_tri(&mut mesh, pos, heading, 6.0, 3.0, 2.5, col);
         } else {
-            painter.circle_filled(pos, 2.5, col);
+            push_disc(&mut mesh, &ring, pos, 2.5, col);
         }
 
-        // ── Selection ring ─────────────────────────────────────────────────
         if selected_icao24 == Some(flight.icao24.as_str()) {
-            painter.circle_stroke(pos, 10.0, egui::Stroke::new(2.0, col));
-            painter.circle_stroke(pos, 12.5, egui::Stroke::new(1.0, col.gamma_multiply(0.4)));
+            selected_ring = Some((pos, col));
         }
+    }
+
+    if !mesh.indices.is_empty() {
+        painter.add(egui::Shape::mesh(mesh));
+    }
+    if let Some((pos, col)) = selected_ring {
+        painter.circle_stroke(pos, 10.0, egui::Stroke::new(2.0, col));
+        painter.circle_stroke(pos, 12.5, egui::Stroke::new(1.0, col.gamma_multiply(0.4)));
     }
 }
 

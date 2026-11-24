@@ -15,6 +15,8 @@ pub fn open_cache_db(path: &Path) -> rusqlite::Result<Connection> {
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "synchronous", "NORMAL")?;
     connection.pragma_update(None, "temp_store", "MEMORY")?;
+    connection.pragma_update(None, "cache_size", -65536)?;
+    let _ = connection.pragma_update(None, "mmap_size", 268_435_456i64);
     ensure_cache_schema_with_connection(&connection)?;
     if is_native_path(path) {
         tile_archive::native_contours::initialize(&connection)?;
@@ -73,6 +75,8 @@ fn configure_read_connection(connection: Connection) -> rusqlite::Result<Connect
     // a full terrain volume cannot turn an otherwise read-only query into an
     // `SQLITE_FULL` failure.
     connection.pragma_update(None, "temp_store", "MEMORY")?;
+    connection.pragma_update(None, "cache_size", -65536)?;
+    let _ = connection.pragma_update(None, "mmap_size", 268_435_456i64);
     Ok(connection)
 }
 
@@ -138,9 +142,6 @@ pub fn ensure_cache_schema_with_connection(connection: &Connection) -> rusqlite:
             geom BLOB NOT NULL,
             PRIMARY KEY (zoom_bucket, lat_bucket, lon_bucket, fid)
         );
-
-        CREATE INDEX IF NOT EXISTS idx_coastline_tiles_lookup
-            ON coastline_tiles (zoom_bucket, lat_bucket, lon_bucket, fid);
         ",
     )?;
     Ok(())
@@ -308,6 +309,52 @@ fn import_tile_into_cache_clipped_inner(
     let open_timer = super::timings::StageTimer::new(tile, "cache_open");
     let source = Connection::open_with_flags(gpkg_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     source.busy_timeout(Duration::from_secs(30))?;
+    let table_exists: bool = source
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='contour'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false);
+
+    // Read and clip all source rows BEFORE taking the SQLite write lock so
+    // concurrent builders do not stall behind one another in `writer_wait`.
+    let mut prepared_rows: Vec<(i64, f32, Vec<u8>)> = Vec::new();
+    let mut geometry_bytes = 0u64;
+    if table_exists {
+        let total: u64 = source.query_row("SELECT COUNT(*) FROM contour", [], |r| r.get(0))?;
+        prepared_rows.reserve(total as usize);
+        let mut source_rows =
+            source.prepare("SELECT fid, geom, elevation_m FROM contour ORDER BY fid")?;
+        let mut rows = source_rows.query([])?;
+        let mut processed = 0u64;
+        while let Some(row) = rows.next()? {
+            processed += 1;
+            if processed % 128 == 0 {
+                if let Some(progress) = &progress {
+                    progress.imported_rows(processed, total);
+                }
+            }
+            let fid: i64 = row.get(0)?;
+            let geometry = row.get_ref(1)?.as_blob()?;
+            let blob = if let Some(bounds) = bounds {
+                let Some(bytes) = tile_archive::contour_clip::clip_gpkg(geometry, bounds)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?
+                else {
+                    continue;
+                };
+                bytes
+            } else {
+                geometry.to_vec()
+            };
+            geometry_bytes += blob.len() as u64;
+            let elevation_m: f32 = row.get(2)?;
+            prepared_rows.push((fid, elevation_m, blob));
+        }
+    }
+    drop(source);
+
     let mut cache = open_cache_db(cache_db_path)?;
     open_timer.finish(0, 0);
     let wait_timer = super::timings::StageTimer::new(tile, "writer_wait");
@@ -325,61 +372,22 @@ fn import_tile_into_cache_clipped_inner(
         params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
     )?;
 
-    let table_exists: bool = source
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='contour'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|n| n > 0)
-        .unwrap_or(false);
-
-    let mut contour_count = 0usize;
-    let mut geometry_bytes = 0u64;
-    if table_exists {
-        // Stream in primary-key order, without sorting/copying geometry blobs.
-        // Preparing once matters for the thousands of features in a 3DEP tile.
-        let total: u64 = source.query_row("SELECT COUNT(*) FROM contour", [], |r| r.get(0))?;
-        let mut source_rows =
-            source.prepare("SELECT fid, geom, elevation_m FROM contour ORDER BY fid")?;
-        let mut insert = transaction.prepare(
+    let contour_count = prepared_rows.len();
+    if !prepared_rows.is_empty() {
+        let mut insert = transaction.prepare_cached(
             "INSERT INTO contour_tiles
                 (zoom_bucket, lat_bucket, lon_bucket, fid, elevation_m, geom)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
-        let mut rows = source_rows.query([])?;
-        let mut processed = 0u64;
-        while let Some(row) = rows.next()? {
-            processed += 1;
-            if processed % 128 == 0 {
-                if let Some(progress) = &progress {
-                    progress.imported_rows(processed, total);
-                }
-            }
-            let fid: i64 = row.get(0)?;
-            let geometry = row.get_ref(1)?.as_blob()?;
-            let clipped;
-            let geometry = if let Some(bounds) = bounds {
-                clipped = tile_archive::contour_clip::clip_gpkg(geometry, bounds)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
-                let Some(ref bytes) = clipped else {
-                    continue;
-                };
-                bytes.as_slice()
-            } else {
-                geometry
-            };
-            geometry_bytes += geometry.len() as u64;
-            let elevation_m: f32 = row.get(2)?;
+        for (fid, elevation_m, geometry) in &prepared_rows {
             insert.execute(params![
                 tile.zoom_bucket,
                 tile.lat_bucket,
                 tile.lon_bucket,
                 fid,
                 elevation_m,
-                geometry
+                geometry.as_slice()
             ])?;
-            contour_count += 1;
         }
     }
 
@@ -432,8 +440,30 @@ pub fn import_coastline_into_cache_clipped(
         .map(|n| n > 0)
         .unwrap_or(false);
 
+    let mut prepared_rows: Vec<(i64, Vec<u8>)> = Vec::new();
+    if table_exists {
+        let mut stmt = source.prepare("SELECT fid, geom FROM contour ORDER BY fid")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let fid: i64 = row.get(0)?;
+            let geometry = row.get_ref(1)?.as_blob()?;
+            let blob = if let Some(bounds) = bounds {
+                let Some(bytes) = tile_archive::contour_clip::clip_gpkg(geometry, bounds)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?
+                else {
+                    continue;
+                };
+                bytes
+            } else {
+                geometry.to_vec()
+            };
+            prepared_rows.push((fid, blob));
+        }
+    }
+    drop(source);
+
     let mut cache = open_cache_db(cache_db_path)?;
-    let transaction = cache.transaction()?;
+    let transaction = cache.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     transaction.execute(
         "DELETE FROM coastline_tiles WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
         params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
@@ -443,36 +473,20 @@ pub fn import_coastline_into_cache_clipped(
         params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
     )?;
 
-    let mut line_count = 0usize;
-    if table_exists {
-        let mut stmt = source.prepare("SELECT fid, geom FROM contour ORDER BY fid")?;
-        let mut insert = transaction.prepare(
+    let line_count = prepared_rows.len();
+    if !prepared_rows.is_empty() {
+        let mut insert = transaction.prepare_cached(
             "INSERT INTO coastline_tiles (zoom_bucket, lat_bucket, lon_bucket, fid, geom)
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let fid: i64 = row.get(0)?;
-            let geometry = row.get_ref(1)?.as_blob()?;
-            let clipped;
-            let geometry = if let Some(bounds) = bounds {
-                clipped = tile_archive::contour_clip::clip_gpkg(geometry, bounds)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
-                let Some(ref bytes) = clipped else {
-                    continue;
-                };
-                bytes.as_slice()
-            } else {
-                geometry
-            };
+        for (fid, geometry) in &prepared_rows {
             insert.execute(params![
                 tile.zoom_bucket,
                 tile.lat_bucket,
                 tile.lon_bucket,
                 fid,
-                geometry
+                geometry.as_slice()
             ])?;
-            line_count += 1;
         }
     }
 

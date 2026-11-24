@@ -88,32 +88,46 @@ impl Ticket {
         c.busy_timeout(Duration::from_millis(100))
             .map_err(|e| e.to_string())?;
         validate(&c)?;
-        let row: Option<(usize, u32)> = c
-            .query_row(
-                "SELECT length(payload), crc FROM views WHERE key=?1",
-                [&self.key],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()
-            .map_err(|e| e.to_string())?;
-        let Some((length, crc)) = row else {
-            return Ok(None);
-        };
         let count = self.size[0] * self.size[1];
-        if length > lz4_flex::block::get_maximum_output_size(count * 4) {
-            return Err("Invalid Atlas recent-view size".into());
-        }
-        let payload: Vec<u8> = c
-            .query_row("SELECT payload FROM views WHERE key=?1", [&self.key], |r| {
-                r.get(0)
-            })
-            .map_err(|e| e.to_string())?;
+        let max_compressed = lz4_flex::block::get_maximum_output_size(count * 4);
         let mut metres = vec![0f32; count];
-        let bytes = bytemuck::cast_slice_mut(&mut metres);
-        let written =
-            lz4_flex::block::decompress_into(&payload, bytes).map_err(|e| e.to_string())?;
-        if written != count * 4 || crc32fast::hash(bytes) != crc {
-            return Err("Damaged Atlas recent view; regenerate from original terrain".into());
+        let mut found = false;
+        let mut decode_error: Option<String> = None;
+        let query_result: rusqlite::Result<Option<()>> = c
+            .query_row(
+                "SELECT payload, crc FROM views WHERE key=?1",
+                [&self.key],
+                |r| {
+                    found = true;
+                    let payload = r.get_ref(0)?.as_blob()?;
+                    let crc: u32 = r.get(1)?;
+                    if payload.len() > max_compressed {
+                        decode_error = Some("Invalid Atlas recent-view size".into());
+                        return Ok(());
+                    }
+                    let bytes = bytemuck::cast_slice_mut(&mut metres);
+                    match lz4_flex::block::decompress_into(payload, bytes) {
+                        Ok(written) if written == count * 4 && crc32fast::hash(bytes) == crc => {}
+                        Ok(_) => {
+                            decode_error = Some(
+                                "Damaged Atlas recent view; regenerate from original terrain"
+                                    .into(),
+                            );
+                        }
+                        Err(e) => {
+                            decode_error = Some(e.to_string());
+                        }
+                    }
+                    Ok(())
+                },
+            )
+            .optional();
+        query_result.map_err(|e| e.to_string())?;
+        if !found {
+            return Ok(None);
+        }
+        if let Some(err) = decode_error {
+            return Err(err);
         }
         #[cfg(target_endian = "big")]
         for value in &mut metres {
@@ -142,37 +156,45 @@ impl Ticket {
         if !exists {
             return Ok(None);
         }
-        let row: Option<(usize, u32, i32)> = c
+        let max_compressed = lz4_flex::block::get_maximum_output_size(bytes);
+        let mut colors: Option<Vec<u8>> = None;
+        let mut decode_error: Option<String> = None;
+        let query_result: rusqlite::Result<Option<()>> = c
             .query_row(
-                "SELECT length(payload),crc,version FROM materials WHERE key=?1",
+                "SELECT payload, crc, version FROM materials WHERE key=?1",
                 [&self.key],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| {
+                    let version: i32 = r.get(2)?;
+                    if version != MATERIAL_VERSION {
+                        return Ok(());
+                    }
+                    let payload = r.get_ref(0)?.as_blob()?;
+                    let crc: u32 = r.get(1)?;
+                    if payload.len() > max_compressed {
+                        decode_error = Some("Invalid Atlas material size".into());
+                        return Ok(());
+                    }
+                    let mut buf = vec![0; bytes];
+                    match lz4_flex::block::decompress_into(payload, &mut buf) {
+                        Ok(written) if written == bytes && crc32fast::hash(&buf) == crc => {
+                            colors = Some(buf);
+                        }
+                        Ok(_) => {
+                            decode_error = Some("Damaged Atlas material".into());
+                        }
+                        Err(e) => {
+                            decode_error = Some(e.to_string());
+                        }
+                    }
+                    Ok(())
+                },
             )
-            .optional()
-            .map_err(|e| e.to_string())?;
-        let Some((length, crc, version)) = row else {
-            return Ok(None);
-        };
-        if version != MATERIAL_VERSION {
-            return Ok(None);
+            .optional();
+        query_result.map_err(|e| e.to_string())?;
+        if let Some(err) = decode_error {
+            return Err(err);
         }
-        if length > lz4_flex::block::get_maximum_output_size(bytes) {
-            return Err("Invalid Atlas material size".into());
-        }
-        let payload: Vec<u8> = c
-            .query_row(
-                "SELECT payload FROM materials WHERE key=?1",
-                [&self.key],
-                |r| r.get(0),
-            )
-            .map_err(|e| e.to_string())?;
-        let mut colors = vec![0; bytes];
-        let written =
-            lz4_flex::block::decompress_into(&payload, &mut colors).map_err(|e| e.to_string())?;
-        if written != bytes || crc32fast::hash(&colors) != crc {
-            return Err("Damaged Atlas material".into());
-        }
-        Ok(Some(colors))
+        Ok(colors)
     }
     fn store(&self, raster: &Raster) -> Result<()> {
         self.store_with_budget(raster, crate::gpu_config::settings().atlas_disk_bytes)
@@ -194,10 +216,15 @@ impl Ticket {
         let bytes = bytemuck::cast_slice(&swapped);
         #[cfg(target_endian = "little")]
         let bytes = bytemuck::cast_slice(&raster.heights);
-        let crc = crc32fast::hash(bytes);
-        let payload = lz4_flex::block::compress(bytes);
-        let colors_crc = crc32fast::hash(&raster.colors);
-        let colors = lz4_flex::block::compress(&raster.colors);
+        let ((crc, payload), (colors_crc, colors)) = rayon::join(
+            || (crc32fast::hash(bytes), lz4_flex::block::compress(bytes)),
+            || {
+                (
+                    crc32fast::hash(&raster.colors),
+                    lz4_flex::block::compress(&raster.colors),
+                )
+            },
+        );
         let incoming = payload.len() + colors.len();
         if incoming > budget {
             return Ok(());
@@ -213,7 +240,7 @@ impl Ticket {
             c.execute_batch(&format!("PRAGMA auto_vacuum=INCREMENTAL; BEGIN IMMEDIATE; PRAGMA application_id={APPLICATION_ID}; PRAGMA user_version=1; CREATE TABLE views(key TEXT PRIMARY KEY,payload BLOB NOT NULL,crc INTEGER NOT NULL); COMMIT;")).map_err(|e| e.to_string())?;
         }
         // A separate table keeps existing height-only entries usable in place.
-        c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-2048; CREATE TABLE IF NOT EXISTS materials(key TEXT PRIMARY KEY,payload BLOB NOT NULL,crc INTEGER NOT NULL,version INTEGER NOT NULL);").map_err(|e| e.to_string())?;
+        c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-32768; CREATE TABLE IF NOT EXISTS materials(key TEXT PRIMARY KEY,payload BLOB NOT NULL,crc INTEGER NOT NULL,version INTEGER NOT NULL);").map_err(|e| e.to_string())?;
         let page_size: usize = c
             .pragma_query_value(None, "page_size", |r| r.get(0))
             .map_err(|e| e.to_string())?;
@@ -230,24 +257,37 @@ impl Ticket {
             [],
         )
         .map_err(|e| e.to_string())?;
-        loop {
-            let used: usize = tx.query_row(
-                "SELECT coalesce(sum(length(v.payload)+coalesce(length(m.payload),0)),0) FROM views v LEFT JOIN materials m USING(key)",
-                [], |r| r.get(0),
-            ).map_err(|e| e.to_string())?;
-            if used + incoming <= budget {
-                break;
+        // Single-pass FIFO eviction instead of O(N²) repeated SUM() scans.
+        let entries: Vec<(i64, String, usize)> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT v.rowid, v.key, length(v.payload)+coalesce(length(m.payload),0) \
+                     FROM views v LEFT JOIN materials m USING(key) ORDER BY v.rowid ASC",
+                )
+                .map_err(|e| e.to_string())?;
+            let mapped = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .map_err(|e| e.to_string())?;
+            mapped
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())?
+        };
+        let mut used: usize = entries.iter().map(|(_, _, sz)| *sz).sum();
+        if used + incoming > budget {
+            let mut del_mat = tx
+                .prepare("DELETE FROM materials WHERE key=?1")
+                .map_err(|e| e.to_string())?;
+            let mut del_view = tx
+                .prepare("DELETE FROM views WHERE rowid=?1")
+                .map_err(|e| e.to_string())?;
+            for (rowid, key, sz) in entries {
+                if used + incoming <= budget {
+                    break;
+                }
+                del_mat.execute([&key]).map_err(|e| e.to_string())?;
+                del_view.execute([rowid]).map_err(|e| e.to_string())?;
+                used = used.saturating_sub(sz);
             }
-            tx.execute(
-                "DELETE FROM materials WHERE key=(SELECT key FROM views ORDER BY rowid LIMIT 1)",
-                [],
-            )
-            .map_err(|e| e.to_string())?;
-            tx.execute(
-                "DELETE FROM views WHERE rowid=(SELECT min(rowid) FROM views)",
-                [],
-            )
-            .map_err(|e| e.to_string())?;
         }
         tx.execute(
             "INSERT INTO views VALUES (?1,?2,?3)",
@@ -260,7 +300,7 @@ impl Ticket {
         )
         .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
-        c.execute_batch("PRAGMA incremental_vacuum(4096); PRAGMA wal_checkpoint(TRUNCATE);")
+        c.execute_batch("PRAGMA incremental_vacuum(4096); PRAGMA wal_checkpoint(PASSIVE);")
             .map_err(|e| e.to_string())?;
         Ok(())
     }

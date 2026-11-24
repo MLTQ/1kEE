@@ -1,21 +1,21 @@
 use crate::model::{GeoPoint, GlobeViewState};
 use crate::osm_ingest::{self, WaterPolyline};
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use super::local_terrain_scene::{
-    LocalLayout, local_geo_bounds, project_local, road_tile_zoom, visual_half_extent_for_zoom,
+    LocalLayout, local_geo_bounds, projection::local_projection_params, road_tile_zoom,
+    visual_half_extent_for_zoom,
 };
 use super::srtm_stream;
 
-// ── Water layer ────────────────────────────────────────────────────────────────
-//
-// Mirrors the road layer architecture: a static WaterCache holds pre-projected
-// vertices so that `draw_water` is pure painter calls on every frame.
+static HAS_WATER_CACHE: AtomicBool = AtomicBool::new(false);
 
 /// A water feature with elevation pre-sampled at every vertex.
 struct ElevatedWater {
-    points: Vec<(GeoPoint, f32)>, // (position, elevation_m)
+    bounds: [f32; 4], // [min_lon, min_lat, max_lon, max_lat]
+    points: Vec<(GeoPoint, f32)>,
     is_area: bool,
 }
 
@@ -24,20 +24,30 @@ impl ElevatedWater {
         let pts = &poly.points;
         if pts.is_empty() {
             return Self {
+                bounds: [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY],
                 points: Vec::new(),
                 is_area: poly.is_area,
             };
         }
+        let mut min_lon = f32::INFINITY;
+        let mut max_lon = f32::NEG_INFINITY;
+        let mut min_lat = f32::INFINITY;
+        let mut max_lat = f32::NEG_INFINITY;
         let points = pts
             .iter()
             .copied()
             .map(|pt| {
+                min_lon = min_lon.min(pt.lon);
+                max_lon = max_lon.max(pt.lon);
+                min_lat = min_lat.min(pt.lat);
+                max_lat = max_lat.max(pt.lat);
                 let elevation =
                     srtm_stream::sample_elevation_m(selected_root, pt).unwrap_or(0.0) + 1.5;
                 (pt, elevation)
             })
             .collect();
         Self {
+            bounds: [min_lon, min_lat, max_lon, max_lat],
             points,
             is_area: poly.is_area,
         }
@@ -51,12 +61,11 @@ struct WaterCache {
     covered_min_lon: f32,
     covered_max_lon: f32,
     water_gen: u64,
-    /// Elevation-enriched features, built off the render thread.
     features_elevated: Vec<ElevatedWater>,
 }
 
 struct WaterCacheStore {
-    cache: Option<WaterCache>,
+    cache: Option<Arc<WaterCache>>,
     building: Option<osm_ingest::GeoBounds>,
 }
 
@@ -74,6 +83,7 @@ fn water_cache() -> &'static Mutex<WaterCacheStore> {
 pub fn invalidate_water_cache() {
     if let Ok(mut g) = water_cache().lock() {
         g.cache = None;
+        HAS_WATER_CACHE.store(false, Ordering::Relaxed);
     }
 }
 
@@ -92,8 +102,11 @@ pub(super) fn draw_water(
     show_water: bool,
 ) {
     if !show_water {
-        if let Ok(mut g) = water_cache().lock() {
+        if HAS_WATER_CACHE.load(Ordering::Relaxed)
+            && let Ok(mut g) = water_cache().lock()
+        {
             g.cache = None;
+            HAS_WATER_CACHE.store(false, Ordering::Relaxed);
         }
         return;
     }
@@ -107,8 +120,7 @@ pub(super) fn draw_water(
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
     let current_gen = osm_ingest::water_data_generation();
 
-    // ── Stale check + background build launch ─────────────────────────────
-    {
+    let cache = {
         let mut store = match water_cache().lock() {
             Ok(g) => g,
             Err(_) => return,
@@ -136,6 +148,7 @@ pub(super) fn draw_water(
             let (covered_min_lon, covered_max_lon) = (load_bounds.min_lon, load_bounds.max_lon);
 
             store.building = Some(load_bounds);
+            let snapshot = store.cache.clone();
             drop(store);
 
             let root_buf = selected_root.map(|p| p.to_path_buf());
@@ -146,62 +159,66 @@ pub(super) fn draw_water(
                         .into_iter()
                         .map(|poly| ElevatedWater::from_polyline(&poly, root_ref))
                         .collect();
+                let next = Arc::new(WaterCache {
+                    tile_zoom,
+                    covered_min_lat,
+                    covered_max_lat,
+                    covered_min_lon,
+                    covered_max_lon,
+                    water_gen: current_gen,
+                    features_elevated,
+                });
 
-                if let Ok(mut store) = water_cache().lock() {
-                    store.cache = Some(WaterCache {
-                        tile_zoom,
-                        covered_min_lat,
-                        covered_max_lat,
-                        covered_min_lon,
-                        covered_max_lon,
-                        water_gen: current_gen,
-                        features_elevated,
-                    });
+                let retired = if let Ok(mut store) = water_cache().lock() {
+                    let old = store.cache.replace(next);
                     store.building = None;
-                }
+                    HAS_WATER_CACHE.store(true, Ordering::Relaxed);
+                    old
+                } else {
+                    None
+                };
+                drop(retired);
                 crate::app::request_repaint();
             });
+            snapshot
+        } else {
+            store.cache.clone()
         }
-    }
-
-    let mut store = match water_cache().lock() {
-        Ok(g) => g,
-        Err(_) => return,
     };
-    let Some(cache) = &mut store.cache else {
+
+    let Some(cache) = cache else {
         return;
     };
-    let features = &cache.features_elevated;
+
+    let params = local_projection_params(layout, view, viewport_center, extent_x_km, extent_y_km);
+    let view_bounds = params
+        .ground_bounds(painter.clip_rect().expand(8.0))
+        .unwrap_or([-180.0, -90.0, 180.0, 90.0]);
+    let span = layout.width.max(layout.height) * 8.0;
 
     let water_col = crate::theme::water_color();
-    let line_stroke = egui::Stroke::new(1.2, water_col);
+    let line_stroke = egui::Stroke::new(1.2_f32, water_col);
 
-    for feat in features {
-        let mut pts = Vec::with_capacity(feat.points.len());
+    for feat in &cache.features_elevated {
+        if feat.bounds[3] < view_bounds[1]
+            || feat.bounds[1] > view_bounds[3]
+            || feat.bounds[2] < view_bounds[0]
+            || feat.bounds[0] > view_bounds[2]
+        {
+            continue;
+        }
+        let mut pts = Vec::with_capacity(feat.points.len() + usize::from(feat.is_area));
         for &(pt, elev) in &feat.points {
-            let Some(pos) = project_local(
-                layout,
-                view,
-                viewport_center,
-                pt,
-                elev,
-                extent_x_km,
-                extent_y_km,
-            )
-            .map(|p| p.pos) else {
-                continue;
-            };
-            pts.push(pos);
+            let (x, y, _) = params.project_logical(pt, elev);
+            if x.is_finite() && y.is_finite() && x.abs() < span && y.abs() < span {
+                pts.push(egui::pos2(x, y));
+            }
         }
 
         if pts.len() < 2 {
             continue;
         }
 
-        // For area features (lakes, reservoirs) close the ring so it draws as a
-        // loop.  Do NOT use convex_polygon — OSM shorelines are non-convex and
-        // the fan triangulation produces the sharp spike artifacts seen in the
-        // screenshots.
         if feat.is_area && pts.len() >= 3 {
             pts.push(pts[0]);
         }

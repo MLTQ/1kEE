@@ -2,7 +2,8 @@ use crate::model::{GeoPoint, GlobeViewState};
 use crate::osm_ingest;
 use crate::theme;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use super::cell_loader::{LoadedPolyline, load_features_from_cells};
 use super::local_terrain_scene::{LocalLayout, local_geo_bounds, visual_half_extent_for_zoom};
@@ -12,10 +13,12 @@ use super::tree_geometry as geometry;
 
 const ELEVATION_OFFSET_M: f32 = 0.5;
 const GEO_MARGIN_FACTOR: f32 = 0.75;
+static HAS_TREE_CACHE: AtomicBool = AtomicBool::new(false);
 
 // ── Tree / forest polygon layer ────────────────────────────────────────────────
 
 struct ElevatedTree {
+    bounds: [f32; 4], // [min_lon, min_lat, max_lon, max_lat]
     points: Vec<(GeoPoint, f32)>,
     is_polygon: bool,
     fill: Option<geometry::Fill>,
@@ -31,11 +34,22 @@ impl ElevatedTree {
             |pt| srtm_stream::sample_elevation_m(selected_root, pt),
         );
         geometry::unwrap(&mut points);
+        let mut min_lon = f32::INFINITY;
+        let mut max_lon = f32::NEG_INFINITY;
+        let mut min_lat = f32::INFINITY;
+        let mut max_lat = f32::NEG_INFINITY;
+        for &(p, _) in &points {
+            min_lon = min_lon.min(p.lon);
+            max_lon = max_lon.max(p.lon);
+            min_lat = min_lat.min(p.lat);
+            max_lat = max_lat.max(p.lat);
+        }
         let fill = poly
             .is_polygon
             .then(|| geometry::tessellate(&points))
             .flatten();
         Self {
+            bounds: [min_lon, min_lat, max_lon, max_lat],
             points,
             is_polygon: poly.is_polygon,
             fill,
@@ -54,7 +68,7 @@ struct TreeCache {
 }
 
 struct TreeCacheStore {
-    cache: Option<TreeCache>,
+    cache: Option<Arc<TreeCache>>,
     building: bool,
 }
 
@@ -80,8 +94,11 @@ pub(super) fn draw_trees(
     let _ = render_zoom; // zoom no longer drives cache invalidation
 
     if !show_trees {
-        if let Ok(mut g) = tree_cache().lock() {
+        if HAS_TREE_CACHE.load(Ordering::Relaxed)
+            && let Ok(mut g) = tree_cache().lock()
+        {
             g.cache = None;
+            HAS_TREE_CACHE.store(false, Ordering::Relaxed);
         }
         return;
     }
@@ -98,7 +115,7 @@ pub(super) fn draw_trees(
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
     let current_gen = osm_ingest::road_data_generation();
 
-    {
+    let cache = {
         let mut store = match tree_cache().lock() {
             Ok(g) => g,
             Err(_) => return,
@@ -125,6 +142,7 @@ pub(super) fn draw_trees(
             let (covered_min_lon, covered_max_lon) = (load_bounds.min_lon, load_bounds.max_lon);
 
             store.building = true;
+            let snapshot = store.cache.clone();
             drop(store);
 
             let root_buf = root.to_path_buf();
@@ -134,29 +152,34 @@ pub(super) fn draw_trees(
                     .iter()
                     .map(|p| ElevatedTree::from_polyline(p, Some(&root_buf)))
                     .collect();
+                let next = Arc::new(TreeCache {
+                    data_gen: current_gen,
+                    last_root: root_buf,
+                    covered_min_lat,
+                    covered_max_lat,
+                    covered_min_lon,
+                    covered_max_lon,
+                    features,
+                });
 
-                if let Ok(mut store) = tree_cache().lock() {
-                    store.cache = Some(TreeCache {
-                        data_gen: current_gen,
-                        last_root: root_buf.clone(),
-                        covered_min_lat,
-                        covered_max_lat,
-                        covered_min_lon,
-                        covered_max_lon,
-                        features,
-                    });
+                let retired = if let Ok(mut store) = tree_cache().lock() {
+                    let old = store.cache.replace(next);
                     store.building = false;
-                }
+                    HAS_TREE_CACHE.store(true, Ordering::Relaxed);
+                    old
+                } else {
+                    None
+                };
+                drop(retired);
                 crate::app::request_repaint();
             });
+            snapshot
+        } else {
+            store.cache.clone()
         }
-    }
-
-    let store = match tree_cache().lock() {
-        Ok(g) => g,
-        Err(_) => return,
     };
-    let Some(cache) = &store.cache else {
+
+    let Some(cache) = cache else {
         return;
     };
 
@@ -171,7 +194,20 @@ pub(super) fn draw_trees(
         extent_x_km,
         extent_y_km,
     );
-    paint_features(painter, &cache.features, &params, viewport_center);
+    let view_bounds = params
+        .ground_bounds(painter.clip_rect().expand(8.0))
+        .unwrap_or([-180.0, -90.0, 180.0, 90.0]);
+    paint_features(painter, &cache.features, &params, viewport_center, view_bounds);
+}
+
+#[inline]
+fn bbox_intersects(a: [f32; 4], b: [f32; 4]) -> bool {
+    if a[3] < b[1] || a[1] > b[3] {
+        return false;
+    }
+    (a[2] >= b[0] && a[0] <= b[2])
+        || (a[2] + 360.0 >= b[0] && a[0] + 360.0 <= b[2])
+        || (a[2] - 360.0 >= b[0] && a[0] - 360.0 <= b[2])
 }
 
 fn paint_features(
@@ -179,9 +215,22 @@ fn paint_features(
     features: &[ElevatedTree],
     params: &super::local_terrain_scene::projection::LocalProjectionParams,
     focus: GeoPoint,
+    view_bounds: [f32; 4],
 ) {
     let color = theme::tree_color();
+    let poly_stroke = egui::Stroke::new(0.6_f32, egui::Color32::from_rgb(20, 80, 30));
+    let line_stroke = egui::Stroke::new(0.8_f32, color);
+    let clip = painter.clip_rect();
+
+    // Batch all visible tree fills into one mesh instead of one mesh per forest polygon.
+    let mut fill_mesh = egui::Mesh::default();
+    let mut pos_scratch = Vec::new();
+    let mut outline_shapes = Vec::new();
+
     for feature in features {
+        if !bbox_intersects(feature.bounds, view_bounds) {
+            continue;
+        }
         let Some((anchor, _)) = feature
             .points
             .iter()
@@ -197,17 +246,20 @@ fn paint_features(
             p.is_finite().then_some(p)
         };
         if let Some(fill) = &feature.fill {
-            let mesh = geometry::project_fill(fill, color, painter.clip_rect(), project);
-            if !mesh.is_empty() {
-                painter.add(egui::Shape::mesh(mesh));
-            }
+            geometry::append_fill(fill, color, clip, project, &mut fill_mesh, &mut pos_scratch);
         }
         let stroke = if feature.is_polygon {
-            egui::Stroke::new(0.6, egui::Color32::from_rgb(20, 80, 30))
+            poly_stroke
         } else {
-            egui::Stroke::new(0.8, color)
+            line_stroke
         };
-        painter.extend(geometry::outlines(&feature.points, stroke, project));
+        outline_shapes.extend(geometry::outlines(&feature.points, stroke, project));
+    }
+    if !fill_mesh.is_empty() {
+        painter.add(egui::Shape::mesh(fill_mesh));
+    }
+    if !outline_shapes.is_empty() {
+        painter.extend(outline_shapes);
     }
 }
 

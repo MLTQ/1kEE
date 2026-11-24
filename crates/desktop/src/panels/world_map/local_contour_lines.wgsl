@@ -77,9 +77,10 @@ struct VsOut {
 }
 
 // Project (lon, lat, elevation_m) to physical-pixel screen space.
-// Returns (x_px, y_px, valid); valid < 0 means the point projected to a
-// degenerate or wildly out-of-range position.
-fn project(geo: vec3<f32>) -> vec3<f32> {
+// Returns (x_px, y_px, y_yaw, valid); valid < 0 means the point projected to a
+// degenerate or wildly out-of-range position. Carrying `y_yaw` eliminates
+// recomputing `local_ground` + yaw rotation in `depth()`.
+fn project(geo: vec3<f32>) -> vec4<f32> {
     let offset = local_ground(geo.xy, vec2<f32>(u.focus_lon,u.focus_lat), u.ground_chart.x);
     let x = offset.x * u.x_factor;
     let y = offset.y * u.y_factor;
@@ -109,9 +110,9 @@ fn project(geo: vec3<f32>) -> vec3<f32> {
     let px = logical * u.pixels_per_point;
     let span = max(u.viewport_size_x, u.viewport_size_y) * 8.0;
     if (!(abs(px.x) < span && abs(px.y) < span)) {
-        return vec3<f32>(0.0, 0.0, -1.0);
+        return vec4<f32>(0.0, 0.0, 0.0, -1.0);
     }
-    return vec3<f32>(px, 1.0);
+    return vec4<f32>(px, y_yaw, 1.0);
 }
 
 @vertex
@@ -119,7 +120,7 @@ fn vs_main(in: VsIn) -> VsOut {
     var out: VsOut;
     let pa = project(in.a);
     let pb = project(in.b);
-    if (pa.z < 0.0 || pb.z < 0.0) {
+    if (pa.w < 0.0 || pb.w < 0.0) {
         // Behind the clip volume so the quad rasterizes nothing, matching the
         // CPU path dropping the segment.
         out.clip = vec4<f32>(0.0, 0.0, 2.0, 1.0);
@@ -131,18 +132,10 @@ fn vs_main(in: VsIn) -> VsOut {
         return out;
     }
 
-    // Quad corner from vertex index: two triangles (0,1,2) (3,4,5).
-    // t = position along the segment, side = perpendicular sign.
-    var t: f32;
-    var side: f32;
-    switch in.vidx {
-        case 0u: { t = 0.0; side = -1.0; }
-        case 1u: { t = 1.0; side = -1.0; }
-        case 2u: { t = 1.0; side = 1.0; }
-        case 3u: { t = 0.0; side = -1.0; }
-        case 4u: { t = 1.0; side = 1.0; }
-        default: { t = 0.0; side = 1.0; }
-    }
+    // Quad corner from 4-vertex TriangleStrip:
+    //   0: (t=0, side=-1), 1: (t=1, side=-1), 2: (t=0, side=+1), 3: (t=1, side=+1).
+    let t = f32(in.vidx & 1u);
+    let side = select(-1.0, 1.0, in.vidx >= 2u);
 
     let is_major = in.major != 0u;
     let stroke_half_px = select(u.stroke_half_px_minor, u.stroke_half_px_major, is_major);
@@ -171,7 +164,8 @@ fn vs_main(in: VsIn) -> VsOut {
         / vec2<f32>(u.viewport_size_x, u.viewport_size_y);
     let ndc = vec2<f32>(rel.x * 2.0 - 1.0, 1.0 - rel.y * 2.0);
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
-    out.ground_depth = mix(depth(in.a), depth(in.b), t);
+    let ground = mix(pa.z, pb.z, t);
+    out.ground_depth = 0.5 + (ground - u.depth_center) * u.depth_scale;
     out.color = in.color;
     if (u.palette_enabled > 0.5) {
         out.color = select(u.minor_color, u.major_color, in.major != 0u);
@@ -184,8 +178,8 @@ fn vs_main(in: VsIn) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let tolerance = max(abs(dpdx(in.ground_depth)), abs(dpdy(in.ground_depth))) * 2.0 + u.depth_bias;
     if (u.occlusion_enabled > 0.5) {
+        let tolerance = max(abs(dpdx(in.ground_depth)), abs(dpdy(in.ground_depth))) * 2.0 + u.depth_bias;
         let size = textureDimensions(terrain_depth);
         let uv = (in.clip.xy - vec2<f32>(u.viewport_min_x, u.viewport_min_y))
             / vec2<f32>(u.viewport_size_x, u.viewport_size_y);
@@ -209,21 +203,17 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
 // Ground distance remains constant down a vertical contour curtain. For the
 // affine local view this is a valid depth ordering without inventing a DEM.
-fn depth(geo: vec3<f32>) -> f32 {
-    let offset = local_ground(geo.xy, vec2<f32>(u.focus_lon,u.focus_lat), u.ground_chart.x);
-    let ground = offset.x*u.x_factor*u.yaw_sin + offset.y*u.y_factor*u.yaw_cos;
-    return 0.5 + (ground-u.depth_center)*u.depth_scale;
-}
 @vertex
 fn vs_curtain(in: VsIn) -> @builtin(position) vec4<f32> {
-    if (project(in.a).z < 0.0 || project(in.b).z < 0.0) {
+    let pa = project(in.a);
+    let pb = project(in.b);
+    if (pa.w < 0.0 || pb.w < 0.0) {
         return vec4<f32>(0.0,0.0,2.0,1.0);
     }
-    let geo = select(in.a, in.b, (in.vidx & 1u) != 0u);
-    let p = project(geo);
-    if (p.z < 0.0) { return vec4<f32>(0.0,0.0,2.0,1.0); }
+    let p = select(pa, pb, (in.vidx & 1u) != 0u);
     let rel = (p.xy-vec2<f32>(u.viewport_min_x,u.viewport_min_y))
         / vec2<f32>(u.viewport_size_x,u.viewport_size_y);
     let top = 1.0-2.0*(rel.y+u.screen_guard/u.viewport_size_y);
-    return vec4<f32>(rel.x*2.0-1.0, select(max(-1.0,top),-1.0,in.vidx>=2u), depth(geo), 1.0);
+    let depth = 0.5 + (p.z - u.depth_center) * u.depth_scale;
+    return vec4<f32>(rel.x*2.0-1.0, select(max(-1.0,top),-1.0,in.vidx>=2u), depth, 1.0);
 }

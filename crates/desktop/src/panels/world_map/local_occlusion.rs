@@ -23,7 +23,11 @@ struct Target {
     view: wgpu::TextureView,
     bind: wgpu::BindGroup,
 }
-fn target(device: &wgpu::Device, size: [u32; 2]) -> Target {
+fn target(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    size: [u32; 2],
+) -> Target {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("contour occlusion depth"),
         size: wgpu::Extent3d {
@@ -41,7 +45,7 @@ fn target(device: &wgpu::Device, size: [u32; 2]) -> Target {
     let view = texture.create_view(&Default::default());
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("contour occlusion depth binding"),
-        layout: &texture_layout(device),
+        layout,
         entries: &[wgpu::BindGroupEntry {
             binding: 0,
             resource: wgpu::BindingResource::TextureView(&view),
@@ -56,10 +60,12 @@ fn target(device: &wgpu::Device, size: [u32; 2]) -> Target {
 
 pub(super) struct Resources {
     pipeline: wgpu::RenderPipeline,
+    texture_bgl: wgpu::BindGroupLayout,
     dummy: Target,
     target: Option<Target>,
     size: [u32; 2],
     pub(super) key: Vec<u8>,
+    scratch_key: Vec<u8>,
     last_used: u64,
     #[cfg(test)]
     pub renders: usize,
@@ -92,12 +98,16 @@ impl Resources {
             }),
             fragment: None, multisample: Default::default(), multiview: None, cache: None,
         });
+        let texture_bgl = texture_layout(device);
+        let dummy = target(device, &texture_bgl, [1, 1]);
         Self {
             pipeline,
-            dummy: target(device, [1, 1]),
+            texture_bgl,
+            dummy,
             target: None,
             size: [0, 0],
             key: vec![],
+            scratch_key: vec![],
             last_used: 0,
             #[cfg(test)]
             renders: 0,
@@ -140,7 +150,9 @@ impl Resources {
         depth_uniforms.palette_enabled = 0.0;
         depth_uniforms.major_color = [0.0; 4];
         depth_uniforms.minor_color = [0.0; 4];
-        let mut key = bytemuck::bytes_of(&depth_uniforms).to_vec();
+        self.scratch_key.clear();
+        self.scratch_key
+            .extend_from_slice(bytemuck::bytes_of(&depth_uniforms));
         let mut drawable: Vec<_> = batches
             .iter()
             .filter_map(|b| {
@@ -155,20 +167,37 @@ impl Resources {
         drawable.sort_by(|(a, _), (b, _)| {
             center_depth(u, a)
                 .total_cmp(&center_depth(u, b))
-                .then_with(|| format!("{:?}", a.id).cmp(&format!("{:?}", b.id)))
+                .then_with(|| a.id.cmp(&b.id))
         });
         for (batch, _) in &drawable {
-            key.extend_from_slice(format!("{:?}", batch.id).as_bytes());
-            key.extend_from_slice(&batch.version.to_le_bytes());
+            match batch.id {
+                LocalBatchId::Contour(id) => {
+                    self.scratch_key.push(0);
+                    self.scratch_key
+                        .extend_from_slice(&id.zoom_bucket.to_le_bytes());
+                    self.scratch_key
+                        .extend_from_slice(&id.lat_bucket.to_le_bytes());
+                    self.scratch_key
+                        .extend_from_slice(&id.lon_bucket.to_le_bytes());
+                }
+                LocalBatchId::Road { major, chunk } => {
+                    self.scratch_key.push(1);
+                    self.scratch_key.push(u8::from(major));
+                    self.scratch_key
+                        .extend_from_slice(&(chunk as u64).to_le_bytes());
+                }
+            }
+            self.scratch_key
+                .extend_from_slice(&batch.version.to_le_bytes());
         }
-        if self.target.is_some() && self.size == size && self.key == key {
+        if self.target.is_some() && self.size == size && self.key == self.scratch_key {
             return;
         }
         if self.target.is_none() || self.size != size {
-            self.target = Some(target(device, size));
+            self.target = Some(target(device, &self.texture_bgl, size));
             self.size = size;
         }
-        self.key = key;
+        std::mem::swap(&mut self.key, &mut self.scratch_key);
         #[cfg(test)]
         {
             self.renders += 1;

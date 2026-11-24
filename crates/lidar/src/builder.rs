@@ -148,15 +148,18 @@ pub fn convert(source: &Path, output: &Path, zoom: u8) -> Result<(Grid, Stats)> 
     let mut reader = las::Reader::from_path(source).map_err(err)?;
     let expected = reader.header().number_of_points();
     let (mut seen, mut accepted) = (0u64, 0u64);
+    let mut xs = Vec::with_capacity(250_000);
+    let mut ys = Vec::with_capacity(250_000);
+    let mut zs = Vec::with_capacity(250_000);
     loop {
         let data = reader.read_points(250_000).map_err(err)?;
         if data.is_empty() {
             break;
         }
         seen += data.len() as u64;
-        let mut xs = Vec::with_capacity(data.len());
-        let mut ys = Vec::with_capacity(data.len());
-        let mut zs = Vec::with_capacity(data.len());
+        xs.clear();
+        ys.clear();
+        zs.clear();
         for point in data.points() {
             let p = point.map_err(err)?;
             if p.is_withheld || matches!(u8::from(p.classification), 7 | 18) {
@@ -167,7 +170,7 @@ pub fn convert(source: &Path, output: &Path, zoom: u8) -> Result<(Grid, Stats)> 
             zs.push(p.z);
         }
         transform.transform_coords(&mut xs, &mut ys)?;
-        for ((x, y), z) in xs.into_iter().zip(ys).zip(zs) {
+        for ((&x, &y), &z) in xs.iter().zip(&ys).zip(&zs) {
             if !x.is_finite() || !y.is_finite() || !z.is_finite() {
                 return Err("Nonfinite transformed measurement".into());
             }
@@ -660,6 +663,9 @@ pub fn run(args: impl Iterator<Item = String>) -> Result<()> {
     fs2::FileExt::try_lock_exclusive(&lock)
         .map_err(|e| format!("Another conversion is running: {e}"))?;
     let db = Connection::open(folder.join("index.sqlite")).map_err(err)?;
+    db.busy_timeout(std::time::Duration::from_secs(10)).map_err(err)?;
+    db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+        .map_err(err)?;
     db.execute_batch(SCHEMA).map_err(err)?;
     for asset in planned {
         let start = Instant::now();

@@ -611,10 +611,33 @@ fn sample_cache() -> &'static Mutex<SampleCache> {
 /// Returns a value only when the covering chunk is already decoded in memory.
 /// Otherwise it schedules the download/decode and returns `None` so the caller
 /// falls back to SRTM for now; the chunk is used from the next repaint on.
+/// Batch cache-only overlay sampler: acquires `sample_cache().try_lock()` once
+/// for the entire closure instead of per vertex.
+pub(crate) struct CachedThreeDepSampler {
+    guard: Option<std::sync::MutexGuard<'static, SampleCache>>,
+}
+
+impl CachedThreeDepSampler {
+    #[inline]
+    pub(crate) fn sample(&self, point: GeoPoint) -> Option<f32> {
+        let guard = self.guard.as_ref()?;
+        let key = chunk_key_for(point);
+        guard.tiles.iter().find(|t| t.key == key)?.sample(point)
+    }
+}
+
+pub(crate) fn with_cached_sampler<R>(
+    enabled: bool,
+    f: impl FnOnce(&CachedThreeDepSampler) -> R,
+) -> R {
+    let guard = enabled.then(|| sample_cache().try_lock().ok()).flatten();
+    f(&CachedThreeDepSampler { guard })
+}
+
 /// Cache-only overlay lookup: never schedules a raster request or decoder.
+#[allow(dead_code)]
 pub(crate) fn cached_elevation_m(point:GeoPoint)->Option<f32> {
-    let key=chunk_key_for(point);
-    sample_cache().try_lock().ok()?.tiles.iter().find(|t|t.key==key)?.sample(point)
+    with_cached_sampler(true, |s| s.sample(point))
 }
 
 pub fn peek_elevation_m(derived_root: &Path, point: GeoPoint) -> Option<f32> {

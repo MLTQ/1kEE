@@ -19,8 +19,11 @@ fn database(path: &Path) -> rusqlite::Result<Connection> {
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     }
     let db = Connection::open(path)?;
+    db.busy_timeout(std::time::Duration::from_secs(5))?;
     db.execute_batch(
-        "CREATE TABLE IF NOT EXISTS frames (
+        "PRAGMA journal_mode=WAL;
+         PRAGMA synchronous=NORMAL;
+         CREATE TABLE IF NOT EXISTS frames (
             product TEXT PRIMARY KEY, stamp TEXT NOT NULL, png BLOB NOT NULL);
          CREATE TABLE IF NOT EXISTS history (
             product TEXT NOT NULL, stamp TEXT NOT NULL, png BLOB NOT NULL, used INTEGER NOT NULL,
@@ -115,20 +118,20 @@ pub(super) fn store_history(
 // Regional PNGs are optional. The last good whole-Earth frames occupy their
 // own table and never participate in this eviction policy.
 pub(super) fn detail_png(path: &Path, key: &str) -> Option<Vec<u8>> {
-    let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE).ok()?;
-    let bytes = db
-        .query_row(
-            "SELECT png FROM detail WHERE key=?1 AND length(png)<=?2",
-            params![key, MAX_BYTES],
-            |r| r.get(0),
-        )
-        .ok()?;
-    let _ = db.execute("UPDATE detail SET used=unixepoch() WHERE key=?1", [key]);
-    Some(bytes)
+    let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let _ = db.busy_timeout(std::time::Duration::from_secs(5));
+    db.query_row(
+        "SELECT png FROM detail WHERE key=?1 AND length(png)<=?2",
+        params![key, MAX_BYTES],
+        |r| r.get(0),
+    )
+    .ok()
 }
 
 pub(super) fn store_detail(path: &Path, key: &str, bytes: &[u8]) -> rusqlite::Result<()> {
     let mut db = Connection::open(path)?;
+    db.busy_timeout(std::time::Duration::from_secs(5))?;
+    db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
     let tx = db.transaction()?;
     tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS detail (key TEXT UNIQUE, used INTEGER, png BLOB)",

@@ -221,9 +221,22 @@ impl Writer {
         get(&self.connection, key, Some(source)).map(|v| v.is_some())
     }
     pub fn put(&self, key: Key, source: &str, values: &[f32]) -> Result<()> {
-        let bytes: Vec<_> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        if !key.valid() || values.len() != key.tier.side().pow(2) {
+            return Err(format!(
+                "Invalid Atlas tile {key:?}: size/checksum mismatch"
+            ));
+        }
+        if values
+            .iter()
+            .any(|v| !v.is_nan() && (!v.is_finite() || !(-12000.0..=10000.0).contains(v)))
+        {
+            return Err(format!("Invalid Atlas heights in {key:?}"));
+        }
+        let mut bytes = Vec::with_capacity(values.len() * 4);
+        for &v in values {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
         let crc = i64::from(crc32fast::hash(&bytes));
-        decode(&bytes, crc, key)?;
         self.connection
             .execute(
                 "INSERT OR REPLACE INTO heights VALUES (?1,?2,?3,?4,?5,?6)",
@@ -397,16 +410,26 @@ fn interpolation(coordinate: f64, side: usize) -> (usize, f32) {
     let lower = (value.floor() as usize).min(side - 2);
     (lower, (value - lower as f64) as f32)
 }
+#[inline]
 fn bilinear(values: &[f32], side: usize, origin: usize, fx: f32, fy: f32) -> f32 {
+    let v00 = values[origin];
+    let v10 = values[origin + 1];
+    let v01 = values[origin + side];
+    let v11 = values[origin + side + 1];
+    // Fast branchless path when all 4 neighbors are finite (99.9%+ of samples).
+    if (v00 + v10 + v01 + v11).is_finite() {
+        let top = v00 + (v10 - v00) * fx;
+        let bot = v01 + (v11 - v01) * fx;
+        return top + (bot - top) * fy;
+    }
     let mut sum = 0.;
     let mut weight = 0.;
-    for (index, w) in [
-        (origin, (1. - fx) * (1. - fy)),
-        (origin + 1, fx * (1. - fy)),
-        (origin + side, (1. - fx) * fy),
-        (origin + side + 1, fx * fy),
+    for (value, w) in [
+        (v00, (1. - fx) * (1. - fy)),
+        (v10, fx * (1. - fy)),
+        (v01, (1. - fx) * fy),
+        (v11, fx * fy),
     ] {
-        let value = values[index];
         if value.is_finite() {
             sum += value * w;
             weight += w;

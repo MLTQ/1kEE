@@ -75,7 +75,7 @@ impl LocalContourPass {
 }
 
 /// Identity of one source contour tile.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct LocalTileId {
     pub zoom_bucket: i32,
     pub lat_bucket: i32,
@@ -83,7 +83,7 @@ pub struct LocalTileId {
 }
 
 /// Keep road chunks and contour tiles in disjoint GPU-cache namespaces.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum LocalBatchId {
     Contour(LocalTileId),
     Road { major: bool, chunk: usize },
@@ -514,7 +514,7 @@ impl LocalContourPassResources {
                 })],
             }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
                 ..Default::default()
             },
             depth_stencil: None,
@@ -741,7 +741,7 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
                     used: frame,
                 });
                 pending.used = frame;
-                if !pending.lines.advance(device, &mut res.uploads) {
+                if !pending.lines.advance(device, queue, &mut res.uploads) {
                     self.ctx.request_repaint();
                     continue;
                 }
@@ -779,7 +779,7 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
                 let mask = tile.pending_mask.get_or_insert_with(|| {
                     super::line_upload::Upload::new(batch.occlusion.segments.clone())
                 });
-                if mask.advance(device, &mut res.uploads) {
+                if mask.advance(device, queue, &mut res.uploads) {
                     let uploaded = tile.pending_mask.take().unwrap();
                     tile.bytes += uploaded.bytes();
                     res.resident_bytes += uploaded.bytes();
@@ -838,7 +838,7 @@ impl egui_wgpu::CallbackTrait for LocalContourCallback {
                     continue;
                 }
                 render_pass.set_vertex_buffer(0, chunk.buffer.slice(..));
-                render_pass.draw(0..6, 0..chunk.count);
+                render_pass.draw(0..4, 0..chunk.count);
             }
         }
     }

@@ -168,6 +168,125 @@ fn cached(
         terrain_only,
     )
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReaderKey {
+    path: PathBuf,
+    region: Option<tile_archive::atlas::regions::Region>,
+}
+
+type FileStamp = (u64, Option<std::time::SystemTime>, u64, Option<std::time::SystemTime>);
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mut wal_os = path.as_os_str().to_os_string();
+    wal_os.push("-wal");
+    let wal_meta = std::fs::metadata(Path::new(&wal_os)).ok();
+    Some((
+        meta.len(),
+        meta.modified().ok(),
+        wal_meta.as_ref().map_or(0, |m| m.len()),
+        wal_meta.and_then(|m| m.modified().ok()),
+    ))
+}
+
+struct PooledReader {
+    key: ReaderKey,
+    stamp: FileStamp,
+    reader: tile_archive::atlas::Reader,
+}
+
+static ATLAS_READER_POOL: std::sync::OnceLock<std::sync::Mutex<Vec<PooledReader>>> =
+    std::sync::OnceLock::new();
+
+struct ReaderLease {
+    key: ReaderKey,
+    stamp: FileStamp,
+    reader: Option<tile_archive::atlas::Reader>,
+}
+
+impl ReaderLease {
+    fn open(path: &Path) -> Result<Self, String> {
+        let key = ReaderKey {
+            path: path.to_path_buf(),
+            region: None,
+        };
+        let stamp = file_stamp(path).ok_or_else(|| format!("Cannot stat {}", path.display()))?;
+        if let Some(reader) = Self::take(&key, stamp) {
+            return Ok(Self {
+                key,
+                stamp,
+                reader: Some(reader),
+            });
+        }
+        let reader = tile_archive::atlas::Reader::open(path)?;
+        Ok(Self {
+            key,
+            stamp,
+            reader: Some(reader),
+        })
+    }
+
+    fn open_region(
+        directory: &Path,
+        region: tile_archive::atlas::regions::Region,
+    ) -> Result<Self, String> {
+        let file = region.path(directory);
+        let key = ReaderKey {
+            path: directory.to_path_buf(),
+            region: Some(region),
+        };
+        let stamp = file_stamp(&file).ok_or_else(|| format!("Cannot stat {}", file.display()))?;
+        if let Some(reader) = Self::take(&key, stamp) {
+            return Ok(Self {
+                key,
+                stamp,
+                reader: Some(reader),
+            });
+        }
+        let reader = tile_archive::atlas::Reader::open_region(directory, region)?;
+        Ok(Self {
+            key,
+            stamp,
+            reader: Some(reader),
+        })
+    }
+
+    fn take(key: &ReaderKey, stamp: FileStamp) -> Option<tile_archive::atlas::Reader> {
+        let pool = ATLAS_READER_POOL.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+        let mut guard = pool.lock().ok()?;
+        let idx = guard.iter().position(|e| e.key == *key)?;
+        let entry = guard.swap_remove(idx);
+        if entry.stamp == stamp {
+            Some(entry.reader)
+        } else {
+            None
+        }
+    }
+
+    fn reader_mut(&mut self) -> &mut tile_archive::atlas::Reader {
+        self.reader.as_mut().expect("reader leased")
+    }
+}
+
+impl Drop for ReaderLease {
+    fn drop(&mut self) {
+        let Some(reader) = self.reader.take() else {
+            return;
+        };
+        let pool = ATLAS_READER_POOL.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+        if let Ok(mut guard) = pool.lock() {
+            if guard.len() >= 12 {
+                guard.remove(0);
+            }
+            guard.push(PooledReader {
+                key: self.key.clone(),
+                stamp: self.stamp,
+                reader,
+            });
+        }
+    }
+}
+
 fn cached_file_mode(
     path: &Path,
     region: Region,
@@ -175,22 +294,23 @@ fn cached_file_mode(
     has_srtm: bool,
     terrain_only: bool,
 ) -> Result<Option<Detail>, String> {
-    use tile_archive::atlas::{Reader, Tier};
+    use tile_archive::atlas::Tier;
     let directory = path.with_file_name("regions");
     let [w, s, e, n] = region.bounds().map(f64::from);
     let area = tile_archive::atlas::regions::Region::at((w + e) * 0.5, (s + n) * 0.5);
     let mut error = None;
     let mut main = if path.is_file() {
-        Reader::open(path).map_err(|e| error = Some(e)).ok()
+        ReaderLease::open(path).map_err(|e| error = Some(e)).ok()
     } else {
         None
     };
     let span = region.span();
     if !terrain_only && span[0] <= 8. && span[1] <= 8. {
         if let Some(cache) = &mut main {
-            match cache.has_tier(Tier::Land).and_then(|has| {
+            let reader = cache.reader_mut();
+            match reader.has_tier(Tier::Land).and_then(|has| {
                 if has {
-                    sampled(cache, region, max_edge, Tier::Land)
+                    sampled(reader, region, max_edge, Tier::Land)
                 } else {
                     Ok(None)
                 }
@@ -205,8 +325,8 @@ fn cached_file_mode(
         }
     }
     if area.path(&directory).is_file() {
-        match Reader::open_region(&directory, area)
-            .and_then(|mut r| sampled(&mut r, region, max_edge, Tier::Terrain))
+        match ReaderLease::open_region(&directory, area)
+            .and_then(|mut r| sampled(r.reader_mut(), region, max_edge, Tier::Terrain))
         {
             Ok(Some(detail)) => return Ok(Some(detail)),
             Ok(None) => {}
@@ -214,7 +334,7 @@ fn cached_file_mode(
         }
     }
     if let Some(cache) = &mut main
-        && let Some(detail) = sampled(cache, region, max_edge, Tier::Terrain)?
+        && let Some(detail) = sampled(cache.reader_mut(), region, max_edge, Tier::Terrain)?
     {
         return Ok(Some(detail));
     }

@@ -445,16 +445,32 @@ fn interp(v0: f32, v1: f32, threshold: f32) -> f32 {
 // ── Segment chaining ──────────────────────────────────────────────────────────
 
 pub(crate) fn chain_segments(segments: Vec<[(f32, f32); 2]>) -> Vec<Vec<(f32, f32)>> {
-    // Map: bit-exact endpoint key → segment indices sharing that endpoint.
-    let mut ep_map = HashMap::<_, smallvec::SmallVec<[usize; 2]>>::with_capacity(segments.len());
+    if segments.is_empty() {
+        return Vec::new();
+    }
+    const EMPTY: u32 = u32::MAX;
+    // Compact [u32; 2] inline slots handle 99.9%+ of contour vertices (degree <= 2)
+    // without heap-allocating SmallVecs; degree > 2 saddles spill into `overflow`.
+    let mut ep_map: HashMap<u64, [u32; 2]> = HashMap::with_capacity(segments.len() + 16);
+    let mut overflow: HashMap<u64, Vec<u32>> = HashMap::new();
     for (i, seg) in segments.iter().enumerate() {
+        let idx = i as u32;
         for &pt in seg {
-            ep_map.entry(ebits(pt)).or_default().push(i);
+            let key = ebits(pt);
+            let slot = ep_map.entry(key).or_insert([EMPTY, EMPTY]);
+            if slot[0] == EMPTY {
+                slot[0] = idx;
+            } else if slot[1] == EMPTY {
+                slot[1] = idx;
+            } else {
+                overflow.entry(key).or_default().push(idx);
+            }
         }
     }
 
     let mut used = vec![false; segments.len()];
     let mut polylines = Vec::new();
+    let mut poly: VecDeque<(f32, f32)> = VecDeque::new();
 
     for start in 0..segments.len() {
         if used[start] {
@@ -462,19 +478,20 @@ pub(crate) fn chain_segments(segments: Vec<[(f32, f32); 2]>) -> Vec<Vec<(f32, f3
         }
         used[start] = true;
 
-        let mut poly: VecDeque<(f32, f32)> = VecDeque::new();
+        poly.clear();
         poly.push_back(segments[start][0]);
         poly.push_back(segments[start][1]);
 
         // Extend from tail
         loop {
             let tail = *poly.back().unwrap();
-            match find_next(&ep_map, &used, tail) {
+            let tail_bits = ebits(tail);
+            match find_next(&ep_map, &overflow, &used, tail_bits) {
                 None => break,
                 Some(next_idx) => {
                     used[next_idx] = true;
                     let seg = &segments[next_idx];
-                    let new_pt = if ebits(seg[0]) == ebits(tail) {
+                    let new_pt = if ebits(seg[0]) == tail_bits {
                         seg[1]
                     } else {
                         seg[0]
@@ -487,12 +504,13 @@ pub(crate) fn chain_segments(segments: Vec<[(f32, f32); 2]>) -> Vec<Vec<(f32, f3
         // Extend from head
         loop {
             let head = *poly.front().unwrap();
-            match find_next(&ep_map, &used, head) {
+            let head_bits = ebits(head);
+            match find_next(&ep_map, &overflow, &used, head_bits) {
                 None => break,
                 Some(next_idx) => {
                     used[next_idx] = true;
                     let seg = &segments[next_idx];
-                    let new_pt = if ebits(seg[0]) == ebits(head) {
+                    let new_pt = if ebits(seg[0]) == head_bits {
                         seg[1]
                     } else {
                         seg[0]
@@ -502,8 +520,11 @@ pub(crate) fn chain_segments(segments: Vec<[(f32, f32); 2]>) -> Vec<Vec<(f32, f3
             }
         }
 
-        let v: Vec<(f32, f32)> = poly.into_iter().collect();
-        if v.len() >= 2 {
+        if poly.len() >= 2 {
+            let mut v = Vec::with_capacity(poly.len());
+            let (front, back) = poly.as_slices();
+            v.extend_from_slice(front);
+            v.extend_from_slice(back);
             polylines.push(v);
         }
     }
@@ -511,14 +532,28 @@ pub(crate) fn chain_segments(segments: Vec<[(f32, f32); 2]>) -> Vec<Vec<(f32, f3
     polylines
 }
 
-fn ebits(p: (f32, f32)) -> (u32, u32) {
-    (p.0.to_bits(), p.1.to_bits())
+#[inline]
+fn ebits(p: (f32, f32)) -> u64 {
+    ((p.0.to_bits() as u64) << 32) | (p.1.to_bits() as u64)
 }
 
+#[inline]
 fn find_next(
-    ep_map: &HashMap<(u32, u32), smallvec::SmallVec<[usize; 2]>>,
+    ep_map: &HashMap<u64, [u32; 2]>,
+    overflow: &HashMap<u64, Vec<u32>>,
     used: &[bool],
-    pt: (f32, f32),
+    key: u64,
 ) -> Option<usize> {
-    ep_map.get(&ebits(pt))?.iter().find(|&&i| !used[i]).copied()
+    let slot = ep_map.get(&key)?;
+    if slot[0] != u32::MAX && !used[slot[0] as usize] {
+        return Some(slot[0] as usize);
+    }
+    if slot[1] != u32::MAX && !used[slot[1] as usize] {
+        return Some(slot[1] as usize);
+    }
+    overflow
+        .get(&key)?
+        .iter()
+        .find(|&&i| !used[i as usize])
+        .map(|&i| i as usize)
 }

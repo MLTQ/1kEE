@@ -30,7 +30,11 @@ struct Slot {
     target: Option<Target>,
     key: Vec<u8>,
     coverage: Option<wgpu::Texture>,
+    coverage_view: Option<wgpu::TextureView>,
     coverage_bytes: Vec<u8>,
+    uniform_buf: Option<wgpu::Buffer>,
+    uniform_cap: usize,
+    uniform_bind: Option<wgpu::BindGroup>,
 }
 pub(super) struct Resources {
     format: Option<wgpu::TextureFormat>,
@@ -137,8 +141,10 @@ impl Resources {
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(
+                            std::mem::size_of::<Uniforms>() as u64,
+                        ),
                     },
                     count: None,
                 },
@@ -520,12 +526,14 @@ impl Resources {
             }
         }
         if state.coverage.is_none() {
-            state.coverage = Some(texture(
+            let tex = texture(
                 device,
                 [COLS as u32, ROWS as u32],
                 wgpu::TextureFormat::R8Uint,
                 wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-            ));
+            );
+            state.coverage_view = Some(tex.create_view(&Default::default()));
+            state.coverage = Some(tex);
         }
         if state.coverage_bytes != coverage {
             queue.write_texture(
@@ -544,13 +552,9 @@ impl Resources {
             );
             state.coverage_bytes = coverage;
         }
-        let coverage_view = state
-            .coverage
-            .as_ref()
-            .unwrap()
-            .create_view(&Default::default());
-        let mut draws = Vec::new();
-        let mut key = state.coverage_bytes.clone();
+        // Build all uniforms and the cache key on CPU first so stationary frames
+        // return without allocating any GPU buffers or bind groups.
+        let mut draw_specs: Vec<(u64, Uniforms, u64)> = Vec::with_capacity(state.active.len());
         for (index, id) in state.active.iter().enumerate() {
             let raster = &state.sources[id].raster;
             let mut u = callback.uniforms[index.min(callback.uniforms.len() - 1)].reframe(raster);
@@ -566,6 +570,12 @@ impl Resources {
                         .ceil()
                         .min((raster.size[axis] - 1) as f32);
                 }
+            } else if slot == 1 {
+                // Keep >=2 mesh vertices per physical pixel while avoiding 33.5M-tri grids.
+                for axis in 0..2 {
+                    let screen_cap = (u.viewport[2 + axis] * ppp * 2.0).ceil().max(64.0);
+                    u.grid[axis] = u.grid[axis].min(screen_cap);
+                }
             }
             let forest_id = callback
                 .forest
@@ -573,79 +583,81 @@ impl Resources {
                 .filter(|mask| mask.raster_id == *id && state.sources[id].forest.ready(mask))
                 .map_or(0, |mask| mask.id);
             u.appearance[2] = u32::from(forest_id != 0) as f32;
+            draw_specs.push((*id, u, forest_id));
+        }
+        if callback.slot == 1 && draw_specs.len() > 1 {
+            let lo = draw_specs
+                .iter()
+                .map(|(_, u, _)| u.grid[2] - 0.45 / u.grid[3])
+                .fold(f32::INFINITY, f32::min);
+            let hi = draw_specs
+                .iter()
+                .map(|(_, u, _)| u.grid[2] + 0.45 / u.grid[3])
+                .fold(f32::NEG_INFINITY, f32::max);
+            let mid = (lo + hi) * 0.5;
+            let scale = 0.9 / (hi - lo).max(1.0);
+            for (_, u, _) in &mut draw_specs {
+                // Every local source shares one monotonic depth range.
+                u.grid[2] = mid;
+                u.grid[3] = scale;
+            }
+        }
+        let mut key = Vec::with_capacity(
+            state.coverage_bytes.len()
+                + draw_specs.len() * (16 + std::mem::size_of::<Uniforms>()),
+        );
+        if !(callback.slot == 1 && draw_specs.len() > 1) {
+            key.extend_from_slice(&state.coverage_bytes);
+        }
+        for (id, u, forest_id) in &draw_specs {
             key.extend_from_slice(&forest_id.to_le_bytes());
             key.extend_from_slice(&id.to_le_bytes());
-            key.extend_from_slice(bytemuck::bytes_of(&u));
-            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
-                contents: bytemuck::bytes_of(&u),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &self.uniforms_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: buffer.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&coverage_view),
-                    },
-                ],
-            });
-            draws.push((*id, u, buffer, bind));
-        }
-        if callback.slot == 1 && draws.len() > 1 {
-            let lo = draws
-                .iter()
-                .map(|(_, u, _, _)| u.grid[2] - 0.45 / u.grid[3])
-                .fold(f32::INFINITY, f32::min);
-            let hi = draws
-                .iter()
-                .map(|(_, u, _, _)| u.grid[2] + 0.45 / u.grid[3])
-                .fold(f32::NEG_INFINITY, f32::max);
-            key.clear();
-            for (id, u, buffer, _) in &mut draws {
-                u.grid[2] = (lo + hi) * 0.5;
-                u.grid[3] = 0.9 / (hi - lo).max(1.0);
-                // Every local source shares one monotonic depth range.
-                *buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: None,
-                    contents: bytemuck::bytes_of(u),
-                    usage: wgpu::BufferUsages::UNIFORM,
-                });
-                let forest_id = callback
-                    .forest
-                    .as_ref()
-                    .filter(|mask| mask.raster_id == *id && state.sources[id].forest.ready(mask))
-                    .map_or(0, |mask| mask.id);
-                key.extend_from_slice(&forest_id.to_le_bytes());
-                key.extend_from_slice(&id.to_le_bytes());
-                key.extend_from_slice(bytemuck::bytes_of(u));
-            }
-            for (_, _, buffer, bind) in &mut draws {
-                *bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: None,
-                    layout: &self.uniforms_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: buffer.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&coverage_view),
-                        },
-                    ],
-                });
-            }
+            key.extend_from_slice(bytemuck::bytes_of(u));
         }
         if key == state.key {
             return;
         }
         state.key = key;
+        let stride = std::mem::size_of::<Uniforms>();
+        if draw_specs.len() > state.uniform_cap || state.uniform_bind.is_none() {
+            let cap = draw_specs.len().next_power_of_two().max(16);
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Atlas surface uniforms"),
+                size: (cap * stride) as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let coverage_view = state.coverage_view.as_ref().unwrap();
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Atlas surface uniforms bind"),
+                layout: &self.uniforms_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &buffer,
+                            offset: 0,
+                            size: wgpu::BufferSize::new(stride as u64),
+                        }),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(coverage_view),
+                    },
+                ],
+            });
+            state.uniform_buf = Some(buffer);
+            state.uniform_cap = cap;
+            state.uniform_bind = Some(bind);
+        }
+        if !draw_specs.is_empty() {
+            let uniform_slice: Vec<Uniforms> = draw_specs.iter().map(|(_, u, _)| *u).collect();
+            queue.write_buffer(
+                state.uniform_buf.as_ref().unwrap(),
+                0,
+                bytemuck::cast_slice(&uniform_slice),
+            );
+        }
         let target = state.target.as_ref().unwrap();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Atlas true 3D surface"),
@@ -661,7 +673,7 @@ impl Resources {
                 view: &target.depth,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(1.),
-                    store: wgpu::StoreOp::Store,
+                    store: wgpu::StoreOp::Discard,
                 }),
                 stencil_ops: None,
             }),
@@ -669,8 +681,9 @@ impl Resources {
             occlusion_query_set: None,
         });
         pass.set_pipeline(&self.surface);
-        for (id, u, _, bind) in &draws {
-            pass.set_bind_group(0, bind, &[]);
+        let uniform_bind = state.uniform_bind.as_ref().unwrap();
+        for (index, (id, u, _)) in draw_specs.iter().enumerate() {
+            pass.set_bind_group(0, uniform_bind, &[(index * stride) as u32]);
             pass.set_bind_group(1, &state.sources[id].bind, &[]);
             pass.draw(0..(u.grid[0] as u32 + 1) * 2, 0..u.grid[1] as u32);
         }

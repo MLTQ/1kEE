@@ -451,7 +451,7 @@ pub(crate) struct InstanceChunk {
 /// backends account for alignment padding on top of the requested size, and
 /// never returns zero — a stride larger than the whole budget still has to
 /// produce one instance per buffer rather than an infinite split.
-fn instances_per_buffer(max_buffer_size: u64, stride: usize) -> usize {
+pub(crate) fn instances_per_buffer(max_buffer_size: u64, stride: usize) -> usize {
     let stride = stride.max(1);
     let budget = (max_buffer_size as usize).saturating_sub(1 << 20);
     (budget / stride).max(1)
@@ -752,7 +752,7 @@ impl egui_wgpu::CallbackTrait for ContourCallback {
         if gpu.version != self.version || gpu.pending.is_some() {
             let (version, upload) = gpu.pending.get_or_insert_with(||
                 (self.version, super::line_upload::Upload::new(self.instances.clone())));
-            if upload.advance(device, &mut res.uploads) {
+            if upload.advance(device, queue, &mut res.uploads) {
                 gpu.version = *version;
                 gpu.chunks = gpu.pending.take().unwrap().1.chunks;
             }

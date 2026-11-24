@@ -1,4 +1,4 @@
-use std::sync::{OnceLock, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 mod admin;
 mod fade;
@@ -7,6 +7,7 @@ mod tests;
 
 // ── Theme enum ────────────────────────────────────────────────────────────────
 
+#[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum MapTheme {
     /// Cream paper, mineral elevation tints and sculpted blue bathymetry.
@@ -149,15 +150,40 @@ impl Palette {
     }
 
     fn apply(self, ctx: &egui::Context) {
-        *theme_lock().write().unwrap_or_else(|e| e.into_inner()) = self;
+        ACTIVE_PALETTE.store(self.pack(), Ordering::Relaxed);
         apply_egui_style(ctx, self);
+    }
+
+    const fn pack(self) -> u64 {
+        (self.map as u8 as u64) | ((self.night_mix.to_bits() as u64) << 32)
+    }
+
+    fn unpack(raw: u64) -> Self {
+        let map = match (raw & 0xFF) as u8 {
+            0 => MapTheme::Atlas,
+            1 => MapTheme::Sodium,
+            2 => MapTheme::Topo,
+            3 => MapTheme::Phosphor,
+            4 => MapTheme::Thermal,
+            5 => MapTheme::Ghost,
+            6 => MapTheme::Akira,
+            7 => MapTheme::Lunar,
+            8 => MapTheme::Mars,
+            9 => MapTheme::MarsDark,
+            _ => MapTheme::Topo,
+        };
+        let night_mix = f32::from_bits((raw >> 32) as u32);
+        Self { map, night_mix }
     }
 }
 
-fn theme_lock() -> &'static RwLock<Palette> {
-    static T: OnceLock<RwLock<Palette>> = OnceLock::new();
-    T.get_or_init(|| RwLock::new(Palette::default()))
-}
+static ACTIVE_PALETTE: AtomicU64 = AtomicU64::new(
+    Palette {
+        map: MapTheme::Topo,
+        night_mix: 0.0,
+    }
+    .pack(),
+);
 
 pub fn is_atlas() -> bool {
     current() == MapTheme::Atlas
@@ -177,7 +203,7 @@ fn current() -> MapTheme {
 }
 
 fn active_palette() -> Palette {
-    *theme_lock().read().unwrap_or_else(|e| e.into_inner())
+    Palette::unpack(ACTIVE_PALETTE.load(Ordering::Relaxed))
 }
 
 /// Apply a new theme.  Call this whenever the user changes the picker.

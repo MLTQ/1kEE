@@ -80,6 +80,7 @@ fn candidates(catalog: &Path, region: Region) -> Result<(Vec<Source>, bool)> {
         ORDER BY CASE WHEN west<=?5 AND east>=?5 AND south<=?6 AND north>=?6 THEN 0 ELSE 1 END,date DESC,id LIMIT 257",
         )
         .map_err(err)?;
+    let samples = point_sources::sample_points(region);
     let mut candidates = query
         .query_map(params![e, w, n, s, region.lon, region.lat], |r| {
             Ok((
@@ -96,7 +97,8 @@ fn candidates(catalog: &Path, region: Region) -> Result<(Vec<Source>, bool)> {
         .map_err(err)?
         .into_iter()
         .map(|(source, geometry)| {
-            let (center, mask) = point_sources::footprint_mask(&geometry, region);
+            let (center, mask) =
+                point_sources::footprint_mask_with_samples(&geometry, region.lon, region.lat, &samples);
             (u32::from(center) * 10_000 + mask.count_ones(), source, mask)
         })
         .collect::<Vec<_>>();
@@ -201,14 +203,9 @@ fn stream_resume(
     }
     let cache = root.join("fused/v1/ept-cache");
     fs::create_dir_all(&cache).map_err(err)?;
-    prune_cache(&cache)?;
+    prune_cache_throttled(&cache)?;
     let mut fetch = Fetch {
-        client: Client::builder()
-            .user_agent("1kEE Target point viewer")
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(err)?,
+        client: shared_target_client()?,
         folder: &cache,
         active,
         transferred: 0,
@@ -220,7 +217,7 @@ fn stream_resume(
             catalog, region, source, active, max_points, &mut fetch, cursor, resources, project,
             &mut emit,
         );
-        prune_cache(&cache)?;
+        prune_cache_throttled(&cache)?;
         return result;
     }
     let id = source
@@ -256,7 +253,7 @@ fn stream_resume(
     )?;
     summary.source = source.id.clone();
     summary.transferred_bytes = fetch.transferred;
-    prune_cache(&cache)?;
+    prune_cache_throttled(&cache)?;
     Ok(summary)
 }
 
@@ -346,7 +343,7 @@ fn walk_resume(
             let bytes = get(&format!("ept-data/{key}.laz"))?;
             let mut reader = las::Reader::with_options(
                 Cursor::new(bytes),
-                las::ReaderOptions::default().with_laz_parallelism(las::LazParallelism::No),
+                las::ReaderOptions::default().with_laz_parallelism(las::LazParallelism::Yes),
             )
             .map_err(err)?;
             if reader.header().number_of_points() != count as u64 {

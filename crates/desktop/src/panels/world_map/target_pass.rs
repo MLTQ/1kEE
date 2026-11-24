@@ -43,6 +43,7 @@ pub(crate) struct Draw {
 struct GpuBatch {
     chunks: Vec<(wgpu::Buffer, u32)>,
     uploaded: usize,
+    per_buffer: usize,
 }
 struct TargetTexture {
     size: [u32; 2],
@@ -60,10 +61,13 @@ pub(crate) struct Resources {
     uniform: wgpu::Buffer,
     bind: wgpu::BindGroup,
     texture_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
     texture: Option<TargetTexture>,
     batches: HashMap<u64, GpuBatch>,
     indices: Option<(u64, wgpu::Buffer, u32)>,
     session: u64,
+    render_key: Vec<u8>,
+    scratch_key: Vec<u8>,
 }
 const ATTRS: [wgpu::VertexAttribute; 3] =
     wgpu::vertex_attr_array![0=>Float32x3,1=>Unorm8x4,2=>Uint32];
@@ -236,6 +240,11 @@ impl Resources {
             multiview: None,
             cache: None,
         });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         Self {
             point,
             surface,
@@ -244,15 +253,18 @@ impl Resources {
             uniform,
             bind,
             texture_layout,
+            sampler,
             texture: None,
             batches: HashMap::new(),
             indices: None,
             session: 0,
+            render_key: Vec::new(),
+            scratch_key: Vec::new(),
         }
     }
-    fn ensure_texture(&mut self, device: &wgpu::Device, size: [u32; 2]) {
+    fn ensure_texture(&mut self, device: &wgpu::Device, size: [u32; 2]) -> bool {
         if self.texture.as_ref().is_some_and(|t| t.size == size) {
-            return;
+            return false;
         }
         let desc = |format, usage| wgpu::TextureDescriptor {
             label: Some("Target offscreen"),
@@ -280,11 +292,6 @@ impl Resources {
             wgpu::TextureUsages::RENDER_ATTACHMENT,
         ));
         let depth = depth_texture.create_view(&Default::default());
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Target image"),
             layout: &self.texture_layout,
@@ -295,7 +302,7 @@ impl Resources {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
                 },
             ],
         });
@@ -307,42 +314,97 @@ impl Resources {
             depth,
             bind,
         });
+        true
     }
-    fn upload(&mut self, device: &wgpu::Device, source: &Batch, budget: &mut usize) {
+    fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        source: &Batch,
+        budget: &mut usize,
+    ) {
+        if source.points.is_empty() {
+            return;
+        }
         let batch = self.batches.entry(source.id).or_insert_with(|| GpuBatch {
             chunks: Vec::new(),
             uploaded: 0,
+            per_buffer: 0,
         });
+        if batch.uploaded >= source.points.len() {
+            return;
+        }
         let stride = std::mem::size_of::<Vertex>();
-        let max = ((*budget).min(device.limits().max_buffer_size as usize) / stride)
-            .min(8 * 1024 * 1024 / stride);
-        while batch.uploaded < source.points.len() && *budget >= stride && max > 0 {
-            let allowance = max.min(*budget / stride) / 2 * 2;
+        if batch.chunks.is_empty() {
+            let max_items = ((device.limits().max_buffer_size as usize).saturating_sub(1 << 20)
+                / stride)
+                / 2
+                * 2;
+            let per_buffer = max_items.max(2);
+            batch.per_buffer = per_buffer;
+            let total = source.points.len();
+            let mut start = 0;
+            while start < total {
+                let count = (total - start).min(per_buffer);
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Target measured point batch"),
+                    size: (count * stride) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                batch.chunks.push((buffer, count as u32));
+                start += count;
+            }
+        }
+        while batch.uploaded < source.points.len() && *budget >= stride * 2 {
+            let buf_idx = batch.uploaded / batch.per_buffer;
+            let buf_start = buf_idx * batch.per_buffer;
+            let buf_end = (buf_start + batch.chunks[buf_idx].1 as usize).min(source.points.len());
+            let remaining_in_buf = buf_end - batch.uploaded;
+            let allowance = (*budget / stride / 2) * 2;
             if allowance == 0 {
                 break;
             }
-            let count = (source.points.len() - batch.uploaded).min(allowance);
-            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Target measured point chunk"),
-                contents: bytemuck::cast_slice(
-                    &source.points[batch.uploaded..batch.uploaded + count],
-                ),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            batch.chunks.push((buffer, count as u32));
+            let count = if remaining_in_buf <= allowance {
+                remaining_in_buf
+            } else {
+                allowance
+            };
+            let byte_offset = ((batch.uploaded - buf_start) * stride) as u64;
+            queue.write_buffer(
+                &batch.chunks[buf_idx].0,
+                byte_offset,
+                bytemuck::cast_slice(&source.points[batch.uploaded..batch.uploaded + count]),
+            );
             batch.uploaded += count;
-            *budget -= count * stride;
+            *budget = budget.saturating_sub(count * stride);
         }
     }
+    #[cfg(test)]
     fn prepare(
         &mut self,
         draw: &Draw,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) -> wgpu::CommandBuffer {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Target scene test"),
+        });
+        self.prepare_into(draw, device, queue, &mut encoder);
+        encoder.finish()
+    }
+
+    fn prepare_into(
+        &mut self,
+        draw: &Draw,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
         if self.session != draw.session {
             self.batches.clear();
             self.indices = None;
+            self.render_key.clear();
             self.session = draw.session;
         }
         let ppp = draw.ctx.pixels_per_point();
@@ -357,7 +419,7 @@ impl Resources {
                 .round()
                 .clamp(1., maximum as f32) as u32,
         ];
-        self.ensure_texture(device, size);
+        let resized = self.ensure_texture(device, size);
         let sources = draw
             .terrain
             .iter()
@@ -367,9 +429,11 @@ impl Resources {
             .collect::<Vec<_>>();
         let keep = sources.iter().map(|b| b.id).collect::<HashSet<_>>();
         self.batches.retain(|id, _| keep.contains(id));
-        let mut budget = 8 * 1024 * 1024;
+        let mut budget = crate::gpu_config::settings()
+            .upload_bytes
+            .max(8 * 1024 * 1024);
         for batch in &sources {
-            self.upload(device, batch, &mut budget);
+            self.upload(device, queue, batch, &mut budget);
         }
         if sources.iter().any(|b| {
             self.batches
@@ -431,74 +495,101 @@ impl Resources {
                 [r, g, b, 1.]
             }),
         };
+        // Skip re-rendering the entire multi-million-point scene on stationary UI repaints.
+        self.scratch_key.clear();
+        self.scratch_key.extend_from_slice(&size[0].to_le_bytes());
+        self.scratch_key.extend_from_slice(&size[1].to_le_bytes());
+        self.scratch_key.push(
+            u8::from(draw.points)
+                | (u8::from(draw.surface) << 1)
+                | (u8::from(draw.context_visible) << 2),
+        );
+        self.scratch_key
+            .extend_from_slice(bytemuck::bytes_of(&uniforms));
+        for b in &sources {
+            self.scratch_key.extend_from_slice(&b.id.to_le_bytes());
+            let uploaded = self.batches.get(&b.id).map_or(0, |g| g.uploaded) as u64;
+            self.scratch_key.extend_from_slice(&uploaded.to_le_bytes());
+        }
+        if !resized && self.render_key == self.scratch_key {
+            return;
+        }
+        std::mem::swap(&mut self.render_key, &mut self.scratch_key);
+
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniforms));
         let texture = self.texture.as_ref().unwrap();
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Target scene"),
-        });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Target depth-tested scene"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &texture.view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.006,
-                            g: 0.012,
-                            b: 0.018,
-                            a: 1.,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &texture.depth,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(0.),
-                        store: wgpu::StoreOp::Store,
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Target depth-tested scene"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &texture.view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.006,
+                        g: 0.012,
+                        b: 0.018,
+                        a: 1.,
                     }),
-                    stencil_ops: None,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &texture.depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(0.),
+                    store: wgpu::StoreOp::Discard,
                 }),
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            });
-            pass.set_bind_group(0, &self.bind, &[]);
-            if draw.surface
-                && let (Some(terrain), Some((id, indices, count))) = (&draw.terrain, &self.indices)
-                && *id == terrain.batch.id
-                && let Some(batch) = self.batches.get(id)
-                && batch.uploaded == terrain.batch.points.len()
-                && batch.chunks.len() == 1
-            {
-                pass.set_pipeline(&self.surface);
-                pass.set_vertex_buffer(0, batch.chunks[0].0.slice(..));
-                pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..*count, 0, 0..1);
-            }
-            if draw.points {
-                pass.set_pipeline(&self.point);
-                for source in &draw.clouds {
-                    if let Some(batch) = self.batches.get(&source.id) {
-                        for (buffer, count) in &batch.chunks {
-                            pass.set_vertex_buffer(0, buffer.slice(..));
-                            pass.draw(0..6, 0..*count);
+                stencil_ops: None,
+            }),
+            occlusion_query_set: None,
+            timestamp_writes: None,
+        });
+        pass.set_bind_group(0, &self.bind, &[]);
+        if draw.surface
+            && let (Some(terrain), Some((id, indices, count))) = (&draw.terrain, &self.indices)
+            && *id == terrain.batch.id
+            && let Some(batch) = self.batches.get(id)
+            && batch.uploaded == terrain.batch.points.len()
+            && batch.chunks.len() == 1
+        {
+            pass.set_pipeline(&self.surface);
+            pass.set_vertex_buffer(0, batch.chunks[0].0.slice(..));
+            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..*count, 0, 0..1);
+        }
+        if draw.points {
+            pass.set_pipeline(&self.point);
+            for source in &draw.clouds {
+                if let Some(batch) = self.batches.get(&source.id) {
+                    let mut remaining = batch.uploaded;
+                    for (buffer, cap) in &batch.chunks {
+                        let count = remaining.min(*cap as usize) as u32;
+                        if count == 0 {
+                            break;
                         }
+                        pass.set_vertex_buffer(0, buffer.slice(..));
+                        pass.draw(0..3, 0..count);
+                        remaining -= count as usize;
                     }
                 }
             }
-            if draw.context_visible
-                && let Some(context) = &draw.context
-                && let Some(batch) = self.batches.get(&context.batch.id)
-            {
-                pass.set_pipeline(&self.lines);
-                for (buffer, count) in &batch.chunks {
-                    pass.set_vertex_buffer(0, buffer.slice(..));
-                    pass.draw(0..*count, 0..1);
+        }
+        if draw.context_visible
+            && let Some(context) = &draw.context
+            && let Some(batch) = self.batches.get(&context.batch.id)
+        {
+            pass.set_pipeline(&self.lines);
+            let mut remaining = batch.uploaded;
+            for (buffer, cap) in &batch.chunks {
+                let count = remaining.min(*cap as usize) as u32;
+                if count == 0 {
+                    break;
                 }
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..count, 0..1);
+                remaining -= count as usize;
             }
         }
-        encoder.finish()
     }
 }
 impl egui_wgpu::CallbackTrait for Draw {
@@ -507,13 +598,13 @@ impl egui_wgpu::CallbackTrait for Draw {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         _screen: &egui_wgpu::ScreenDescriptor,
-        _encoder: &mut wgpu::CommandEncoder,
+        encoder: &mut wgpu::CommandEncoder,
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
-        let Some(pass) = resources.get_mut::<Resources>() else {
-            return Vec::new();
-        };
-        vec![pass.prepare(self, device, queue)]
+        if let Some(pass) = resources.get_mut::<Resources>() {
+            pass.prepare_into(self, device, queue, encoder);
+        }
+        Vec::new()
     }
     fn paint(
         &self,

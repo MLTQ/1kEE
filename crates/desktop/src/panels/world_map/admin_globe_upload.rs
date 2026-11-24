@@ -27,6 +27,7 @@ impl Geometry {
     pub fn stage(
         &mut self,
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         budget: &mut Budget,
         batch: &Batch,
         shade: bool,
@@ -66,11 +67,11 @@ impl Geometry {
         if candidate
             .lines
             .as_mut()
-            .is_some_and(|u| !u.advance(device, budget))
+            .is_some_and(|u| !u.advance(device, queue, budget))
             || candidate
                 .fill
                 .as_mut()
-                .is_some_and(|u| !u.advance(device, budget))
+                .is_some_and(|u| !u.advance(device, queue, budget))
         {
             return false;
         }

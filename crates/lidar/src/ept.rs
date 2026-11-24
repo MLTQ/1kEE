@@ -217,7 +217,7 @@ fn sample(
         let sha = format!("{:x}", Sha256::digest(&bytes));
         let mut reader = las::Reader::with_options(
             Cursor::new(bytes),
-            las::ReaderOptions::default().with_laz_parallelism(las::LazParallelism::No),
+            las::ReaderOptions::default().with_laz_parallelism(las::LazParallelism::Yes),
         )
         .map_err(err)?;
         if reader.header().number_of_points() != count as u64 {
@@ -390,6 +390,51 @@ impl Fetch<'_> {
     }
 }
 
+fn shared_ept_client() -> Result<Client> {
+    static CLIENT: std::sync::OnceLock<Result<Client>> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            Client::builder()
+                .user_agent("1kEE lidar preparation")
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(30))
+                .build()
+                .map_err(err)
+        })
+        .clone()
+}
+
+fn shared_target_client() -> Result<Client> {
+    static CLIENT: std::sync::OnceLock<Result<Client>> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            Client::builder()
+                .user_agent("1kEE Target point viewer")
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(30))
+                .build()
+                .map_err(err)
+        })
+        .clone()
+}
+
+fn prune_cache_throttled(folder: &Path) -> Result<()> {
+    static LAST: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<std::path::PathBuf, Instant>>,
+    > = std::sync::OnceLock::new();
+    let map = LAST.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    if let Ok(mut guard) = map.lock() {
+        let now = Instant::now();
+        if let Some(prev) = guard.get(folder)
+            && now.duration_since(*prev) < Duration::from_secs(30)
+        {
+            return Ok(());
+        }
+        guard.insert(folder.to_path_buf(), now);
+    }
+    prune_cache(folder)
+}
+
 fn prune_cache(folder: &Path) -> Result<()> {
     let mut files = fs::read_dir(folder)
         .map_err(err)?
@@ -474,13 +519,11 @@ pub fn prepare(catalog: &Path, bounds: [f64; 4], zoom: u8, active: Option<&Path>
     }
     let index = Connection::open(index_path).map_err(err)?;
     index.busy_timeout(Duration::from_secs(10)).map_err(err)?;
-    index.execute_batch(SCHEMA).map_err(err)?;
-    let client = Client::builder()
-        .user_agent("1kEE lidar preparation")
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
-        .build()
+    index
+        .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
         .map_err(err)?;
+    index.execute_batch(SCHEMA).map_err(err)?;
+    let client = shared_ept_client()?;
     let mut fetch = Fetch {
         client,
         folder: &cache,

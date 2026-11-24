@@ -135,48 +135,105 @@ pub(super) fn draw_hillshade(
     let texture_id = loaded.texture.id();
     drop(guard);
 
-    let mut mesh = egui::Mesh::with_texture(texture_id);
-    let mut indices: Vec<Option<u32>> = Vec::with_capacity((DRAPE_CELLS + 1).pow(2));
+    let params = super::projection::local_projection_params(
+        layout,
+        view,
+        focus,
+        extent_x_km,
+        extent_y_km,
+    );
+    #[derive(Clone, Copy, PartialEq)]
+    struct DrapeKey {
+        texture_id: egui::TextureId,
+        bounds: [u32; 4],
+        params: [u32; 17],
+    }
+    let key = DrapeKey {
+        texture_id,
+        bounds: [
+            bounds.min_lat.to_bits(),
+            bounds.max_lat.to_bits(),
+            bounds.min_lon.to_bits(),
+            bounds.max_lon.to_bits(),
+        ],
+        params: [
+            params.focus_lon.to_bits(),
+            params.focus_lat.to_bits(),
+            params.x_factor.to_bits(),
+            params.y_factor.to_bits(),
+            params.z_factor.to_bits(),
+            params.yaw_cos.to_bits(),
+            params.yaw_sin.to_bits(),
+            params.pitch_cos.to_bits(),
+            params.pitch_sin.to_bits(),
+            params.focus_center_x.to_bits(),
+            params.focus_center_y.to_bits(),
+            params.horizontal_scale.to_bits(),
+            params.ground_pitch_scale.to_bits(),
+            params.ground_depth_scale.to_bits(),
+            params.elevation_pitch_scale.to_bits(),
+            params.elevation_depth_scale.to_bits(),
+            params.pole.to_bits(),
+        ],
+    };
 
-    for row in 0..=DRAPE_CELLS {
-        let v = row as f32 / DRAPE_CELLS as f32;
-        // Texture rows run north to south.
-        let lat = bounds.max_lat - (bounds.max_lat - bounds.min_lat) * v;
-        for col in 0..=DRAPE_CELLS {
-            let u = col as f32 / DRAPE_CELLS as f32;
-            let lon = bounds.min_lon + (bounds.max_lon - bounds.min_lon) * u;
-            let point = GeoPoint { lat, lon };
-            match project_local(layout, view, focus, point, 0.0, extent_x_km, extent_y_km) {
-                Some(projected) => {
-                    indices.push(Some(mesh.vertices.len() as u32));
+    thread_local! {
+        static DRAPE_CACHE: std::cell::RefCell<Option<(DrapeKey, std::sync::Arc<egui::Mesh>)>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    let mesh = DRAPE_CACHE.with(|cache| {
+        let mut slot = cache.borrow_mut();
+        if let Some((old_key, cached)) = slot.as_ref()
+            && *old_key == key
+        {
+            return cached.clone();
+        }
+        let span = layout.width.max(layout.height) * 8.0;
+        let stride = DRAPE_CELLS + 1;
+        let mut mesh = egui::Mesh::with_texture(texture_id);
+        mesh.vertices.reserve(stride * stride);
+        mesh.indices.reserve(DRAPE_CELLS * DRAPE_CELLS * 6);
+        let mut indices: Vec<u32> = Vec::with_capacity(stride * stride);
+
+        for row in 0..=DRAPE_CELLS {
+            let v = row as f32 / DRAPE_CELLS as f32;
+            let lat = bounds.max_lat - (bounds.max_lat - bounds.min_lat) * v;
+            for col in 0..=DRAPE_CELLS {
+                let u = col as f32 / DRAPE_CELLS as f32;
+                let lon = bounds.min_lon + (bounds.max_lon - bounds.min_lon) * u;
+                let (x, y, _) = params.project_logical(GeoPoint { lat, lon }, 0.0);
+                if x.is_finite() && y.is_finite() && x.abs() < span && y.abs() < span {
+                    indices.push(mesh.vertices.len() as u32);
                     mesh.vertices.push(egui::epaint::Vertex {
-                        pos: projected.pos,
+                        pos: egui::pos2(x, y),
                         uv: egui::pos2(u, v),
                         color: egui::Color32::WHITE,
                     });
+                } else {
+                    indices.push(u32::MAX);
                 }
-                // Behind the camera or otherwise unprojectable: the cells that
-                // touch this vertex are simply not emitted.
-                None => indices.push(None),
             }
         }
-    }
 
-    let stride = DRAPE_CELLS + 1;
-    for row in 0..DRAPE_CELLS {
-        for col in 0..DRAPE_CELLS {
-            let (Some(top_left), Some(top_right), Some(bottom_left), Some(bottom_right)) = (
-                indices[row * stride + col],
-                indices[row * stride + col + 1],
-                indices[(row + 1) * stride + col],
-                indices[(row + 1) * stride + col + 1],
-            ) else {
-                continue;
-            };
-            mesh.add_triangle(top_left, top_right, bottom_left);
-            mesh.add_triangle(top_right, bottom_right, bottom_left);
+        for row in 0..DRAPE_CELLS {
+            let r0 = row * stride;
+            let r1 = (row + 1) * stride;
+            for col in 0..DRAPE_CELLS {
+                let tl = indices[r0 + col];
+                let tr = indices[r0 + col + 1];
+                let bl = indices[r1 + col];
+                let br = indices[r1 + col + 1];
+                if tl != u32::MAX && tr != u32::MAX && bl != u32::MAX && br != u32::MAX {
+                    mesh.add_triangle(tl, tr, bl);
+                    mesh.add_triangle(tr, br, bl);
+                }
+            }
         }
-    }
+        let arc = std::sync::Arc::new(mesh);
+        *slot = Some((key, arc.clone()));
+        arc
+    });
 
     if !mesh.indices.is_empty() {
         painter.add(egui::Shape::mesh(mesh));
@@ -186,12 +243,16 @@ pub(super) fn draw_hillshade(
 /// Move a background-decoded image into a GPU texture. Texture upload needs the
 /// egui context, so it cannot happen on the fetch thread.
 fn upload_pending(ctx: &egui::Context) {
-    let Ok(mut guard) = state().lock() else {
+    let pending = {
+        let Ok(mut guard) = state().lock() else {
+            return;
+        };
+        guard.pending.take().map(|p| (guard.generation, p))
+    };
+    let Some((generation, (request, image))) = pending else {
         return;
     };
-    let Some((request, image)) = guard.pending.take() else {
-        return;
-    };
+    // Upload outside the mutex so background fetches are never blocked by GPU uploads.
     let texture = ctx.load_texture(
         "public_hillshade",
         image,
@@ -202,7 +263,11 @@ fn upload_pending(ctx: &egui::Context) {
             mipmap_mode: None,
         },
     );
-    guard.loaded = Some(LoadedShade { request, texture });
+    if let Ok(mut guard) = state().lock()
+        && guard.generation == generation
+    {
+        guard.loaded = Some(LoadedShade { request, texture });
+    }
 }
 
 /// Schedule a fetch when the cached texture no longer covers the view.

@@ -10,12 +10,14 @@ use crate::model::{GeoPoint, GlobeViewState};
 use crate::osm_ingest;
 use crate::theme;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use super::cell_loader::{LoadedPolyline, load_features_from_cells};
 use super::tree_geometry as geometry;
+#[cfg(test)]
+use super::local_terrain_scene::project_local;
 use super::local_terrain_scene::{
-    LocalLayout, local_geo_bounds, project_local, visual_half_extent_for_zoom,
+    LocalLayout, local_geo_bounds, projection::local_projection_params, visual_half_extent_for_zoom,
 };
 
 const GEO_MARGIN_FACTOR: f32 = 0.75;
@@ -36,27 +38,42 @@ struct InfraFeature {
     way_id: i64,
     class: String,
     name: Option<String>,
+    bounds: [f32; 4],
     points: Vec<(GeoPoint, f32)>,
     fill: Option<geometry::Fill>,
 }
 
 impl InfraFeature {
     fn prepare(feature: LoadedPolyline, prefix: &str) -> Self {
-        // Preserve this layer's existing map-plane placement. Topology is
-        // prepared before projection, and never rebuilt during camera motion.
         let mut points: Vec<_> = feature.points.into_iter().map(|p| (p, 0.)).collect();
         geometry::unwrap(&mut points);
+        let mut min_lon = f32::INFINITY;
+        let mut max_lon = f32::NEG_INFINITY;
+        let mut min_lat = f32::INFINITY;
+        let mut max_lat = f32::NEG_INFINITY;
+        for &(p, _) in &points {
+            min_lon = min_lon.min(p.lon);
+            max_lon = max_lon.max(p.lon);
+            min_lat = min_lat.min(p.lat);
+            max_lat = max_lat.max(p.lat);
+        }
         let area = if prefix == "aeroway" {
-            // Old caches mark even closed runway ways as lines. A closed
-            // source footprint still has usable area; an open strip stays open.
             matches!(feature.class.as_str(), "runway" | "terminal" | "helipad")
         } else {
             feature.is_polygon
         };
         let fill = area.then(|| geometry::tessellate(&points)).flatten();
-        Self { way_id: feature.way_id, class: feature.class, name: feature.name, points, fill }
+        Self {
+            way_id: feature.way_id,
+            class: feature.class,
+            name: feature.name,
+            bounds: [min_lon, min_lat, max_lon, max_lat],
+            points,
+            fill,
+        }
     }
 
+    #[cfg(test)]
     fn shapes(
         &self, clip: egui::Rect, stroke: egui::Stroke, color: Option<egui::Color32>,
         project: impl Fn(GeoPoint, f32) -> Option<egui::Pos2> + Copy,
@@ -86,7 +103,7 @@ fn aeroway_fill(class: &str) -> Option<egui::Color32> {
 }
 
 struct InfraCacheStore {
-    cache: Option<InfraCache>,
+    cache: Option<Arc<InfraCache>>,
     building: Option<osm_ingest::GeoBounds>,
 }
 
@@ -166,7 +183,7 @@ fn draw_infra(
     let extent_y_km = (half_extent_deg * km_per_deg_lat).max(1.0);
     let current_gen = osm_ingest::road_data_generation();
 
-    {
+    let cache = {
         let mut store = match cache_fn().lock() {
             Ok(g) => g,
             Err(_) => return,
@@ -193,61 +210,117 @@ fn draw_infra(
             let (covered_min_lon, covered_max_lon) = (load_bounds.min_lon, load_bounds.max_lon);
 
             store.building = Some(load_bounds);
+            let snapshot = store.cache.clone();
             drop(store);
 
             let root_buf = root.to_path_buf();
             std::thread::spawn(move || {
                 let features = load_features_from_cells(&root_buf, prefix, load_bounds)
-                    .into_iter().map(|feature| InfraFeature::prepare(feature, prefix)).collect();
+                    .into_iter()
+                    .map(|feature| InfraFeature::prepare(feature, prefix))
+                    .collect();
+                let next = Arc::new(InfraCache {
+                    data_gen: current_gen,
+                    last_root: root_buf,
+                    covered_min_lat,
+                    covered_max_lat,
+                    covered_min_lon,
+                    covered_max_lon,
+                    features,
+                });
 
-                if let Ok(mut store) = cache_fn().lock() {
-                    store.cache = Some(InfraCache {
-                        data_gen: current_gen,
-                        last_root: root_buf,
-                        covered_min_lat,
-                        covered_max_lat,
-                        covered_min_lon,
-                        covered_max_lon,
-                        features,
-                    });
+                let retired = if let Ok(mut store) = cache_fn().lock() {
+                    let old = store.cache.replace(next);
                     store.building = None;
-                }
+                    old
+                } else {
+                    None
+                };
+                drop(retired);
                 crate::app::request_repaint();
             });
+            snapshot
+        } else {
+            store.cache.clone()
         }
-    }
-
-    let store = match cache_fn().lock() {
-        Ok(g) => g,
-        Err(_) => return,
     };
-    let Some(cache) = &store.cache else { return };
+
+    let Some(cache) = cache else { return };
+
+    let params = local_projection_params(layout, view, viewport_center, extent_x_km, extent_y_km);
+    let clip = painter.clip_rect();
+    let view_bounds = params
+        .ground_bounds(clip.expand(8.0))
+        .unwrap_or([-180.0, -90.0, 180.0, 90.0]);
+    let span = layout.width.max(layout.height) * 8.0;
+    let hover_pointer = if prefix == "pipeline" {
+        super::infrastructure_hover::pointer()
+    } else {
+        None
+    };
+
+    // Batch all visible area fills into one shared egui::Mesh.
+    let mut fill_mesh = egui::Mesh::default();
+    let mut pos_scratch = Vec::new();
+    let mut outline_shapes = Vec::new();
 
     for feat in &cache.features {
+        if feat.bounds[3] < view_bounds[1]
+            || feat.bounds[1] > view_bounds[3]
+            || (feat.bounds[2] < view_bounds[0] && feat.bounds[2] + 360.0 < view_bounds[0])
+            || (feat.bounds[0] > view_bounds[2] && feat.bounds[0] - 360.0 > view_bounds[2])
+        {
+            continue;
+        }
         let Some((anchor, _)) = feat.points.first() else { continue };
         let shift = ((viewport_center.lon - anchor.lon) / 360.).round() * 360.;
         let project = |mut point: GeoPoint, height| {
             point.lon += shift;
-            project_local(layout, view, viewport_center, point, height, extent_x_km, extent_y_km)
-                .map(|p| p.pos)
+            let (x, y, _) = params.project_logical(point, height);
+            (x.is_finite() && y.is_finite() && x.abs() < span && y.abs() < span)
+                .then_some(egui::pos2(x, y))
         };
+        if let (Some(fill), Some(color)) = (&feat.fill, fill_for_class(&feat.class)) {
+            geometry::append_fill(fill, color, clip, project, &mut fill_mesh, &mut pos_scratch);
+        }
         let stroke = stroke_for_class(&feat.class);
-        let shapes = feat.shapes(painter.clip_rect(), stroke, fill_for_class(&feat.class), project);
-        if prefix == "pipeline" && let Some(pointer) = super::infrastructure_hover::pointer() {
-            let distance = shapes.iter().filter_map(|shape| match shape {
-                egui::Shape::Path(path) => Some(&path.points), _ => None,
-            }).flat_map(|pts| pts.windows(2)).map(|p| super::infrastructure_hover::line_distance(pointer,p[0],p[1]))
-                .fold(f32::INFINITY,f32::min);
+        let feat_outlines = geometry::outlines(&feat.points, stroke, project);
+        if let Some(pointer) = hover_pointer {
+            let distance = feat_outlines
+                .iter()
+                .filter_map(|shape| match shape {
+                    egui::Shape::Path(path) => Some(&path.points),
+                    _ => None,
+                })
+                .flat_map(|pts| pts.windows(2))
+                .map(|p| super::infrastructure_hover::line_distance(pointer, p[0], p[1]))
+                .fold(f32::INFINITY, f32::min);
             if distance <= super::infrastructure_hover::RADIUS {
-                super::infrastructure_hover::pipeline(&tile_archive::pipelines::Info {
-                    source: "osm".into(), source_id: feat.way_id.to_string(), name: feat.name.clone().unwrap_or_default(),
-                    operator: String::new(), owner: String::new(), product: feat.class.clone(),
-                    status: "Not provided in the local cache".into(), accuracy: "OpenStreetMap geometry; precision varies".into(),
-                    historical: false, planned: false, capacity: None,
-                },distance);
+                super::infrastructure_hover::pipeline(
+                    &tile_archive::pipelines::Info {
+                        source: "osm".into(),
+                        source_id: feat.way_id.to_string(),
+                        name: feat.name.clone().unwrap_or_default(),
+                        operator: String::new(),
+                        owner: String::new(),
+                        product: feat.class.clone(),
+                        status: "Not provided in the local cache".into(),
+                        accuracy: "OpenStreetMap geometry; precision varies".into(),
+                        historical: false,
+                        planned: false,
+                        capacity: None,
+                    },
+                    distance,
+                );
             }
         }
-        painter.extend(shapes);
+        outline_shapes.extend(feat_outlines);
+    }
+    if !fill_mesh.is_empty() {
+        painter.add(egui::Shape::mesh(fill_mesh));
+    }
+    if !outline_shapes.is_empty() {
+        painter.extend(outline_shapes);
     }
 }
 

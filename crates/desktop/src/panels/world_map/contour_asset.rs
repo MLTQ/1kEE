@@ -1992,30 +1992,46 @@ fn query_global_bathymetry(
         (-6000.0, feature_budget * 4 / 100),  // trenches
     ];
 
-    let mut all_contours: Vec<ContourPath> = Vec::new();
+    let mut heaps: [std::collections::BinaryHeap<std::cmp::Reverse<(usize, usize, Vec<u8>)>>; 8] =
+        std::array::from_fn(|i| std::collections::BinaryHeap::with_capacity(depth_levels[i].1 + 1));
 
-    for &(depth, per_depth_budget) in depth_levels {
-        if per_depth_budget == 0 {
+    // Single full-table scan across all 8 depth bands instead of 8 separate scans.
+    // Bounded min-heaps keep the longest blobs per depth level and skip allocating
+    // Vec<u8> for rows shorter than the current threshold.
+    let mut stmt = connection.prepare(
+        "SELECT elevation_m, geom FROM contour WHERE elevation_m <= -199.0",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut seq = 0usize;
+    while let Some(row) = rows.next()? {
+        let elev: f32 = row.get(0)?;
+        let Some((bucket_idx, &(_, per_depth_budget))) = depth_levels
+            .iter()
+            .enumerate()
+            .find(|&(_, &(depth, budget))| budget > 0 && (elev - depth).abs() < 1.0)
+        else {
             continue;
+        };
+        let blob = row.get_ref(1)?.as_blob()?;
+        let len = blob.len();
+        let heap = &mut heaps[bucket_idx];
+        if heap.len() == per_depth_budget {
+            if let Some(std::cmp::Reverse((min_len, _, _))) = heap.peek() {
+                if len <= *min_len {
+                    continue;
+                }
+            }
+            heap.pop();
         }
-        // Let SQLite do the global sort by raw byte length so we get the
-        // geographically significant features (mid-Atlantic ridge, shelf edges,
-        // trench walls) regardless of where in the table they live.
-        // Previous approach used LIMIT N without ORDER BY, which returned only
-        // the northernmost rows (N→S scan order) and missed major S-hemisphere
-        // features entirely.  Full-table scan here costs ~100 ms/depth level
-        // total — acceptable for a one-time startup load cached in a Mutex.
-        let budget = per_depth_budget as i64;
-        let mut stmt = connection.prepare(
-            "SELECT geom FROM contour \
-             WHERE ABS(elevation_m - ?1) < 1.0 \
-             ORDER BY length(geom) DESC \
-             LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![depth, budget], |row| row.get::<_, Vec<u8>>(0))?;
+        seq += 1;
+        heap.push(std::cmp::Reverse((len, seq, blob.to_vec())));
+    }
 
-        for row in rows {
-            let geometry = row?;
+    let mut all_contours: Vec<ContourPath> = Vec::with_capacity(feature_budget);
+    for (bucket_idx, &(depth, _)) in depth_levels.iter().enumerate() {
+        let mut winning: Vec<_> = heaps[bucket_idx].drain().map(|r| r.0).collect();
+        winning.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+        for (_, _, geometry) in winning {
             for line in parse_gpkg_lines(&geometry) {
                 if line.len() < 2 {
                     continue;
@@ -2258,7 +2274,7 @@ fn stream_contours_from_database(
             match tile_archive::contours::decode(&bytes) {
                 Ok(rows) => {
                     let total = rows.len();
-                    let mut contours = Vec::new();
+                    let mut contours = Vec::with_capacity(total);
                     for (i, (elevation_m, geometry)) in rows.into_iter().enumerate() {
                         selection.append(
                             &mut contours,
@@ -2320,7 +2336,7 @@ fn stream_contours_from_database(
         ).ok();
         let total = expected.unwrap_or(0);
         let mut decoded_rows = 0;
-        let mut contours = Vec::new();
+        let mut contours = Vec::with_capacity(total);
         let read_result = (|| -> rusqlite::Result<()> {
             let mut rows =
                 statement.query(params![key.zoom_bucket, key.lat_bucket, key.lon_bucket])?;
@@ -2400,25 +2416,52 @@ fn stream_contours_from_database(
 }
 
 fn select_contour_geometry(contours: &mut Vec<ContourPath>, feature_budget: usize) {
-    // Only move small Vec headers, not hundreds of MB of SQLite blobs.
-    // Stable sorting preserves fid order (including MultiLineString parts)
-    // for equal absolute elevations, exactly as the previous SQL sort did.
-    contours.sort_by(|left, right| left.elevation_m.abs().total_cmp(&right.elevation_m.abs()));
-
     if contours.len() > feature_budget {
         // Keep the longest contours rather than every Nth one.
         //
         // Stride decimation drops a 10 000-point shoreline trace and a
         // 5-point speck at the same rate, which spends the budget on noise:
         // in a 3DEP tile the longest 10% of contours hold ~73% of all
-        // geometry while the shortest 75% hold under 3%. Length-ordered
-        // selection keeps the lines that carry the shape of the terrain.
+        // geometry while the shortest 75% hold under 3%. O(N) partial selection
+        // on indices keeps exact tie-breaking parity (points.len DESC,
+        // |elevation_m| ASC, fid/input order ASC) without paying for three full sorts.
         let budget = feature_budget.max(1);
-        contours.sort_unstable_by(|left, right| right.points.len().cmp(&left.points.len()));
-        contours.truncate(budget);
-        // Restore the elevation ordering the renderer and cache expect.
-        contours.sort_by(|left, right| left.elevation_m.abs().total_cmp(&right.elevation_m.abs()));
+        let mut order: Vec<usize> = (0..contours.len()).collect();
+        order.select_nth_unstable_by(budget, |&a, &b| {
+            contours[b]
+                .points
+                .len()
+                .cmp(&contours[a].points.len())
+                .then_with(|| {
+                    contours[a]
+                        .elevation_m
+                        .abs()
+                        .total_cmp(&contours[b].elevation_m.abs())
+                })
+                .then_with(|| a.cmp(&b))
+        });
+        order.truncate(budget);
+        order.sort_unstable_by(|&a, &b| {
+            contours[a]
+                .elevation_m
+                .abs()
+                .total_cmp(&contours[b].elevation_m.abs())
+                .then_with(|| a.cmp(&b))
+        });
+        let mut slots: Vec<Option<ContourPath>> = contours.drain(..).map(Some).collect();
+        contours.reserve(budget);
+        for idx in order {
+            if let Some(item) = slots[idx].take() {
+                contours.push(item);
+            }
+        }
+        return;
     }
+
+    // Only move small Vec headers, not hundreds of MB of SQLite blobs.
+    // Stable sorting preserves fid order (including MultiLineString parts)
+    // for equal absolute elevations, exactly as the previous SQL sort did.
+    contours.sort_by(|left, right| left.elevation_m.abs().total_cmp(&right.elevation_m.abs()));
 }
 
 fn simplify_line(points: Vec<GeoPoint>, step: usize) -> Vec<GeoPoint> {

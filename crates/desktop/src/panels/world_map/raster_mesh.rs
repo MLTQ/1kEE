@@ -21,43 +21,68 @@ pub(super) fn globe(
     } else {
         2.0
     };
-    let rows = ((top - bottom) / step).ceil() as usize;
-    let cols = ((right - left) / step).ceil() as usize;
-    // Both textures use their own exact geographic edges and UV map.
-    for row in 0..rows {
-        let south = bottom + (top - bottom) * row as f32 / rows as f32;
-        let north = bottom + (top - bottom) * (row + 1) as f32 / rows as f32;
-        for col in 0..cols {
-            let west = left + (right - left) * col as f32 / cols as f32;
-            let east = left + (right - left) * (col + 1) as f32 / cols as f32;
-            let corners = [(north, west), (north, east), (south, east), (south, west)];
-            let projected =
-                corners.map(|(lat, lon)| project_surface(layout, view, GeoPoint { lat, lon }));
-            // A perspective camera sees only z >= 1/d on the unit sphere;
-            // hemisphere culling alone would paint hidden surface near the limb.
-            if !projected.iter().all(|p| {
-                p.is_some_and(|p| {
-                    p.front_facing && p.depth * 2.0 - 1.0 >= 1.0 / layout.camera_distance
-                })
-            }) {
-                continue;
-            }
-            let index = mesh.vertices.len() as u32;
-            for (i, (lat, lon)) in corners.into_iter().enumerate() {
+    let rows = ((top - bottom) / step).ceil().max(1.0) as usize;
+    let cols = ((right - left) / step).ceil().max(1.0) as usize;
+    let lat_verts = rows + 1;
+    let lon_verts = cols + 1;
+    let min_z = 1.0 / layout.camera_distance;
+
+    // Precompute lon cos/sin once per column instead of 4x per cell.
+    let mut lon_cs = Vec::with_capacity(lon_verts);
+    for c in 0..lon_verts {
+        let u = c as f32 / cols as f32;
+        let lon = (left + (right - left) * u).to_radians();
+        let (s, cs) = lon.sin_cos();
+        lon_cs.push((cs, s, u));
+    }
+
+    // Project each shared grid vertex ONCE instead of 4x per cell.
+    let mut vert_indices = vec![u32::MAX; lat_verts * lon_verts];
+    mesh.vertices.reserve((lat_verts * lon_verts) / 2 + 64);
+    mesh.indices.reserve((rows * cols / 2) * 6 + 64);
+
+    for r in 0..lat_verts {
+        let v_frac = r as f32 / rows as f32;
+        let lat_deg = bottom + (top - bottom) * v_frac;
+        let v_uv = 1.0 - v_frac;
+        let (lat_sin, lat_cos) = lat_deg.to_radians().sin_cos();
+        let row_offset = r * lon_verts;
+        for (c, &(lon_cos, lon_sin, u_uv)) in lon_cs.iter().enumerate() {
+            let p = project_surface(
+                layout,
+                view,
+                GeoPoint {
+                    lat: lat_deg,
+                    lon: left + (right - left) * u_uv,
+                },
+            );
+            let _ = (lat_sin, lat_cos, lon_cos, lon_sin);
+            if let Some(p) = p
+                && p.front_facing
+                && p.depth * 2.0 - 1.0 >= min_z
+            {
+                let out_idx = mesh.vertices.len() as u32;
                 mesh.vertices.push(egui::epaint::Vertex {
-                    pos: projected[i].unwrap().pos,
-                    uv: egui::pos2((lon - left) / (right - left), (top - lat) / (top - bottom)),
+                    pos: p.pos,
+                    uv: egui::pos2(u_uv, v_uv),
                     color: egui::Color32::WHITE,
                 });
+                vert_indices[row_offset + c] = out_idx;
             }
-            mesh.indices.extend_from_slice(&[
-                index,
-                index + 1,
-                index + 2,
-                index,
-                index + 2,
-                index + 3,
-            ]);
+        }
+    }
+
+    for r in 0..rows {
+        let row_s = r * lon_verts;
+        let row_n = (r + 1) * lon_verts;
+        for c in 0..cols {
+            let nw = vert_indices[row_n + c];
+            let ne = vert_indices[row_n + c + 1];
+            let se = vert_indices[row_s + c + 1];
+            let sw = vert_indices[row_s + c];
+            if nw != u32::MAX && ne != u32::MAX && se != u32::MAX && sw != u32::MAX {
+                mesh.indices.extend_from_slice(&[nw, ne, se, nw, se, sw]);
+            }
         }
     }
     mesh

@@ -196,7 +196,7 @@ impl egui_wgpu::CallbackTrait for Callback {
         }
         if !res
             .geometry
-            .stage(device, &mut budget, &self.batch, self.shade)
+            .stage(device, queue, &mut budget, &self.batch, self.shade)
         {
             crate::app::request_repaint();
         }

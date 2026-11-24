@@ -634,18 +634,18 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     });
 
     // Camera link lines anchor to the selected event if one exists.
-    let anchor = event_markers
-        .iter()
-        .find(|marker| model.selected_event_id.as_deref() == Some(marker.id.as_str()))
-        .or_else(|| event_markers.first())
-        .map(|marker| marker.base);
-    let nearby = model.nearby_camera_snapshot(250.0);
-    let nearby_markers: Vec<_> = camera_markers
-        .iter()
-        .filter(|marker| nearby.iter().any(|camera| camera.id == marker.id))
-        .cloned()
-        .collect();
     if model.show_camera_links {
+        let anchor = event_markers
+            .iter()
+            .find(|marker| model.selected_event_id.as_deref() == Some(marker.id.as_str()))
+            .or_else(|| event_markers.first())
+            .map(|marker| marker.base);
+        let nearby = model.nearby_camera_snapshot(250.0);
+        let nearby_markers: Vec<_> = camera_markers
+            .iter()
+            .filter(|marker| nearby.iter().any(|camera| camera.id == marker.id))
+            .cloned()
+            .collect();
         markers::draw_camera_links(painter, anchor, &nearby_markers);
     }
     if model.show_coastlines && model.active_body == crate::model::ActiveBody::Earth && !atlas_terrain {
@@ -1129,6 +1129,54 @@ fn should_show_local_event_indicators(
     active_body == crate::model::ActiveBody::Earth && show_event_markers
 }
 
+/// Compute max elevation among contours intersecting a small box around `focus`,
+/// skipping any contour below the running max and caching stationary queries.
+fn max_elevation_near(
+    contours: &[contour_asset::ContourPath],
+    focus: GeoPoint,
+    margin_deg: f32,
+) -> f32 {
+    if contours.is_empty() {
+        return 0.0;
+    }
+    let key = (
+        contours.as_ptr() as usize,
+        contours.len(),
+        focus.lat.to_bits(),
+        focus.lon.to_bits(),
+        margin_deg.to_bits(),
+    );
+    thread_local! {
+        static CACHE: std::cell::Cell<Option<((usize, usize, u32, u32, u32), f32)>> =
+            const { std::cell::Cell::new(None) };
+    }
+    if let Some((old_key, cached)) = CACHE.with(|c| c.get())
+        && old_key == key
+    {
+        return cached;
+    }
+    let min_lat = focus.lat - margin_deg;
+    let max_lat = focus.lat + margin_deg;
+    let min_lon = focus.lon - margin_deg;
+    let max_lon = focus.lon + margin_deg;
+    let mut best = 0.0_f32;
+    for contour in contours {
+        if contour.elevation_m <= best {
+            continue;
+        }
+        if contour.points.iter().any(|point| {
+            point.lat >= min_lat
+                && point.lat <= max_lat
+                && point.lon >= min_lon
+                && point.lon <= max_lon
+        }) {
+            best = contour.elevation_m;
+        }
+    }
+    CACHE.with(|c| c.set(Some((key, best))));
+    best
+}
+
 /// Cherry-red targeting beam: a vertical line falling from the sky to the
 /// terrain surface at the viewport centre. The ground contact point is
 /// projected via `project_local` so it rises over hills and drops into
@@ -1147,14 +1195,11 @@ fn draw_local_beam(
 
     // Preserve the contour-only estimate for the targeting beam and readout.
     let half_extent_deg = visual_half_extent_for_zoom(view.local_zoom);
-    let elevation_m = contours_intersecting_local_bounds(
+    let elevation_m = max_elevation_near(
         contours.unwrap_or(&[]),
         viewport_center,
         (half_extent_deg * 0.08).max(0.004),
-    )
-    .iter()
-    .map(|contour| contour.elevation_m)
-    .fold(0.0f32, f32::max);
+    );
 
     if !show {
         return elevation_m;
@@ -1323,7 +1368,7 @@ fn draw_loading_boxes(
     let t = painter.ctx().input(|i| i.time);
     let alpha = (t.sin() as f32 * 0.5 + 0.5) * 0.7 + 0.3;
 
-    let mut draw_box = |bounds: crate::osm_ingest::GeoBounds, color: egui::Color32| {
+    let draw_box = |bounds: crate::osm_ingest::GeoBounds, color: egui::Color32| {
         let p1 = GeoPoint {
             lat: bounds.min_lat,
             lon: bounds.min_lon,
@@ -1538,22 +1583,50 @@ fn project_and_draw_line(
     stroke: egui::Stroke,
     cable: Option<&crate::submarine_cables::CableInfo>,
 ) {
-    let projected: Vec<egui::Pos2> = pts
-        .iter()
-        .filter_map(|p| {
-            projection::project_local(layout, view, focus, *p, 0.0, extent_x_km, extent_y_km)
-        })
-        .map(|pp| pp.pos)
-        .collect();
+    if pts.len() < 2 {
+        return;
+    }
+    let params =
+        projection::local_projection_params(layout, view, focus, extent_x_km, extent_y_km);
+    let clip = painter.clip_rect().expand(8.0);
+    if let Some(bounds) = params.ground_bounds(clip) {
+        // Fast geographic AABB cull before projecting (critical for global submarine cables).
+        let mut min_lon = f32::INFINITY;
+        let mut max_lon = f32::NEG_INFINITY;
+        let mut min_lat = f32::INFINITY;
+        let mut max_lat = f32::NEG_INFINITY;
+        for p in pts {
+            min_lon = min_lon.min(p.lon);
+            max_lon = max_lon.max(p.lon);
+            min_lat = min_lat.min(p.lat);
+            max_lat = max_lat.max(p.lat);
+        }
+        let lon_hit = (max_lon >= bounds[0] && min_lon <= bounds[2])
+            || (max_lon + 360.0 >= bounds[0] && min_lon + 360.0 <= bounds[2])
+            || (max_lon - 360.0 >= bounds[0] && min_lon - 360.0 <= bounds[2]);
+        if max_lat < bounds[1] || min_lat > bounds[3] || !lon_hit {
+            return;
+        }
+    }
+    let span = layout.width.max(layout.height) * 8.0;
+    let mut projected = Vec::with_capacity(pts.len());
+    for &p in pts {
+        let (x, y, _) = params.project_logical(p, 0.0);
+        if x.is_finite() && y.is_finite() && x.abs() < span && y.abs() < span {
+            projected.push(egui::pos2(x, y));
+        }
+    }
+    if projected.len() < 2 {
+        return;
+    }
     if let (Some(cable), Some(pointer)) = (cable, super::infrastructure_hover::pointer()) {
-        let distance = projected.windows(2).map(|pair| {
-            super::infrastructure_hover::line_distance(pointer, pair[0], pair[1])
-        }).fold(f32::INFINITY, f32::min);
+        let distance = projected
+            .windows(2)
+            .map(|pair| super::infrastructure_hover::line_distance(pointer, pair[0], pair[1]))
+            .fold(f32::INFINITY, f32::min);
         super::infrastructure_hover::cable(cable, distance);
     }
-    if projected.len() >= 2 {
-        painter.add(egui::Shape::line(projected, stroke));
-    }
+    painter.add(egui::Shape::line(projected, stroke));
 }
 
 pub(super) fn local_geo_bounds(center: GeoPoint, view_zoom: f32) -> OsmGeoBounds {

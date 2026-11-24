@@ -44,8 +44,34 @@ pub fn clip_gpkg(blob: &[u8], bounds: Bounds) -> Result<Option<Vec<u8>>, String>
     }
     Ok(Some(encode(&parts)))
 }
+/// Clip an in-memory f32 polyline directly to `bounds` and encode as GeoPackage WKB,
+/// avoiding the redundant WKB encode -> decode -> re-encode roundtrip.
+pub fn clip_points_f32(points: &[(f32, f32)], bounds: Bounds) -> Option<Vec<u8>> {
+    if points.len() < 2 {
+        return None;
+    }
+    let line_f64: Vec<(f64, f64)> = points
+        .iter()
+        .map(|&(lon, lat)| (f64::from(lon), f64::from(lat)))
+        .collect();
+    let parts = clip_line(&line_f64, bounds);
+    if parts.is_empty() {
+        return None;
+    }
+    Some(encode(&parts))
+}
+
 pub fn encode(lines: &[Vec<(f64, f64)>]) -> Vec<u8> {
-    let mut out = b"GP\0\x01".to_vec();
+    let total_bytes = 8
+        + 1
+        + 4
+        + 4
+        + lines
+            .iter()
+            .map(|l| 1 + 4 + 4 + l.len() * 16)
+            .sum::<usize>();
+    let mut out = Vec::with_capacity(total_bytes);
+    out.extend_from_slice(b"GP\0\x01");
     out.extend_from_slice(&4326i32.to_le_bytes());
     out.push(1);
     out.extend_from_slice(&5u32.to_le_bytes());

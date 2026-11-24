@@ -75,20 +75,18 @@ pub(super) fn tessellate(points: &[(GeoPoint, f32)]) -> Option<Fill> {
     })
 }
 
-/// Preserve each triangle's original indices. An invalid projection drops only
-/// that triangle; filtering/reconnecting its surviving vertices would invent land.
-pub(super) fn project_fill(
+/// Preserve each triangle's original indices, appending into a shared mesh to
+/// avoid allocating a separate `egui::Mesh` per polygon.
+pub(super) fn append_fill(
     fill: &Fill,
     color: egui::Color32,
     clip: egui::Rect,
     project: impl Fn(GeoPoint, f32) -> Option<egui::Pos2>,
-) -> egui::Mesh {
-    let positions = fill
-        .vertices
-        .iter()
-        .map(|&(p, h)| project(p, h))
-        .collect::<Vec<_>>();
-    let mut mesh = egui::Mesh::default();
+    mesh: &mut egui::Mesh,
+    positions: &mut Vec<Option<egui::Pos2>>,
+) {
+    positions.clear();
+    positions.extend(fill.vertices.iter().map(|&(p, h)| project(p, h)));
     for triangle in fill.indices.chunks_exact(3) {
         let [Some(a), Some(b), Some(c)] = [
             positions[triangle[0] as usize],
@@ -105,11 +103,25 @@ pub(super) fn project_fill(
             continue;
         }
         let start = mesh.vertices.len() as u32;
-        for p in [a, b, c] {
-            mesh.colored_vertex(p, color);
-        }
+        mesh.colored_vertex(a, color);
+        mesh.colored_vertex(b, color);
+        mesh.colored_vertex(c, color);
         mesh.add_triangle(start, start + 1, start + 2);
     }
+}
+
+/// Preserve each triangle's original indices. An invalid projection drops only
+/// that triangle; filtering/reconnecting its surviving vertices would invent land.
+#[allow(dead_code)]
+pub(super) fn project_fill(
+    fill: &Fill,
+    color: egui::Color32,
+    clip: egui::Rect,
+    project: impl Fn(GeoPoint, f32) -> Option<egui::Pos2>,
+) -> egui::Mesh {
+    let mut mesh = egui::Mesh::default();
+    let mut positions = Vec::with_capacity(fill.vertices.len());
+    append_fill(fill, color, clip, project, &mut mesh, &mut positions);
     mesh
 }
 

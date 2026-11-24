@@ -60,51 +60,70 @@ pub(super) fn draw_beam(
 ) {
     let dx = tip.x - base.x;
     let dy = tip.y - base.y;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1e-3 || alpha <= 0.001 || scale <= 0.0 {
+        return;
+    }
+    // Unit perpendicular vector in screen space for ribbon expansion.
+    let nx = -dy / len;
+    let ny = dx / len;
 
-    // Atmospheric halos — taper in both width and alpha toward the tip.
-    const HALO_SEGS: u32 = 7;
-    for i in 0..HALO_SEGS {
-        let t0 = i as f32 / HALO_SEGS as f32;
-        let t1 = (i + 1) as f32 / HALO_SEGS as f32;
-        let tm = (t0 + t1) * 0.5;
-        let a = (1.0 - tm).powi(2) * alpha;
-        let p0 = egui::pos2(base.x + dx * t0, base.y + dy * t0);
-        let p1 = egui::pos2(base.x + dx * t1, base.y + dy * t1);
-        painter.line_segment(
-            [p0, p1],
-            egui::Stroke::new((22.0 * a).max(0.5) * scale, col.gamma_multiply(0.04 * a)),
-        );
-        painter.line_segment(
-            [p0, p1],
-            egui::Stroke::new((11.0 * a).max(0.5) * scale, col.gamma_multiply(0.08 * a)),
-        );
-        painter.line_segment(
-            [p0, p1],
-            egui::Stroke::new((4.5 * a).max(0.5) * scale, col.gamma_multiply(0.16 * a)),
+    // Emit all 3 atmospheric halo ribbons + 2 core ribbons in ONE batched egui::Mesh
+    // instead of 49 separate painter.line_segment shapes (smoother gradient + ~10x faster).
+    const HALO_STEPS: usize = 7;
+    const CORE_STEPS: usize = 10;
+    let mut mesh = egui::Mesh::default();
+    mesh.vertices.reserve((3 * (HALO_STEPS + 1) + 2 * (CORE_STEPS + 1)) * 2);
+    mesh.indices.reserve((3 * HALO_STEPS + 2 * CORE_STEPS) * 6);
+
+    let push_ribbon = |mesh: &mut egui::Mesh,
+                       steps: usize,
+                       width_fn: &dyn Fn(f32) -> f32,
+                       alpha_fn: &dyn Fn(f32) -> f32| {
+        let start = mesh.vertices.len() as u32;
+        for i in 0..=steps {
+            let t = i as f32 / steps as f32;
+            let cx = base.x + dx * t;
+            let cy = base.y + dy * t;
+            let hw = width_fn(t) * 0.5;
+            let c = col.gamma_multiply(alpha_fn(t));
+            mesh.colored_vertex(egui::pos2(cx - nx * hw, cy - ny * hw), c);
+            mesh.colored_vertex(egui::pos2(cx + nx * hw, cy + ny * hw), c);
+        }
+        for i in 0..steps as u32 {
+            let v = start + i * 2;
+            mesh.add_triangle(v, v + 1, v + 2);
+            mesh.add_triangle(v + 1, v + 3, v + 2);
+        }
+    };
+
+    // Three wide-to-narrow atmospheric halo ribbons.
+    for (w_mult, a_mult) in [(22.0_f32, 0.04_f32), (11.0, 0.08), (4.5, 0.16)] {
+        push_ribbon(
+            &mut mesh,
+            HALO_STEPS,
+            &|t| {
+                let a = (1.0 - t).powi(2) * alpha;
+                (w_mult * a).max(0.5) * scale
+            },
+            &|t| (1.0 - t).powi(2) * alpha * a_mult,
         );
     }
 
-    // Tapering core — cubic alpha, narrows to a spike.
-    const SEGS: u32 = 14;
-    for i in 0..SEGS {
-        let t0 = i as f32 / SEGS as f32;
-        let t1 = (i + 1) as f32 / SEGS as f32;
-        let tm = (t0 + t1) * 0.5;
-        let falloff = 1.0 - tm;
-        let a = falloff.powi(3) * alpha;
-        let w_glow = (4.0 * falloff.powf(0.7)).max(0.4);
-        let w_core = (1.7 * falloff.powf(0.7)).max(0.3);
-        let p0 = egui::pos2(base.x + dx * t0, base.y + dy * t0);
-        let p1 = egui::pos2(base.x + dx * t1, base.y + dy * t1);
-        painter.line_segment(
-            [p0, p1],
-            egui::Stroke::new(w_glow * scale, col.gamma_multiply(a * 0.30)),
-        );
-        painter.line_segment(
-            [p0, p1],
-            egui::Stroke::new(w_core * scale, col.gamma_multiply(a * 0.96)),
+    // Tapering glow + bright core ribbons.
+    for (w_mult, w_min, a_mult) in [(4.0_f32, 0.4_f32, 0.30_f32), (1.7, 0.3, 0.96)] {
+        push_ribbon(
+            &mut mesh,
+            CORE_STEPS,
+            &|t| {
+                let falloff = 1.0 - t;
+                (w_mult * falloff.powf(0.7)).max(w_min) * scale
+            },
+            &|t| (1.0 - t).powi(3) * alpha * a_mult,
         );
     }
+
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 pub(super) fn draw_camera_spire(

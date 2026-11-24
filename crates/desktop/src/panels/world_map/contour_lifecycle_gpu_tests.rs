@@ -175,7 +175,11 @@ fn large_layer_upload_retains_previous_generation_until_complete() {
                 layer.chunks.iter().map(|c| c.count as usize).sum::<usize>(),
                 large.len()
             );
-            assert!(layer.chunks.iter().all(|c| c.buffer.size() <= 512 * 1024));
+            assert_eq!(
+                layer.chunks.len(),
+                1,
+                "coalesced upload should avoid fragmenting one layer across many buffers"
+            );
             return;
         }
         assert_eq!(layer.version, 1);

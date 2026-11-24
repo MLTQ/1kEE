@@ -79,24 +79,47 @@ pub fn pack_cell(
             bounds(f).ok_or_else(|| "Empty/non-finite vector geometry".to_owned())
         })
         .collect::<Result<Vec<_>, _>>()?;
+    // Bucket feature indices into the 8×8 subtiles in a single O(F) pass
+    // instead of scanning every feature 64 times.
+    let mut buckets: [Vec<usize>; 64] = std::array::from_fn(|_| Vec::new());
+    let base_y = lat * DIVISIONS;
+    let base_x = lon * DIVISIONS;
+    for (idx, b) in boxes.iter().enumerate() {
+        let min_dy = (((b[0] * 8.0).floor() as i32) - base_y - 1).clamp(0, DIVISIONS - 1);
+        let max_dy = (((b[1] * 8.0).ceil() as i32) - base_y).clamp(0, DIVISIONS - 1);
+        let min_dx = (((b[2] * 8.0).floor() as i32) - base_x - 1).clamp(0, DIVISIONS - 1);
+        let max_dx = (((b[3] * 8.0).ceil() as i32) - base_x).clamp(0, DIVISIONS - 1);
+        for dy in min_dy..=max_dy {
+            let y = base_y + dy;
+            let ty0 = y as f32 / 8.0;
+            let ty1 = (y + 1) as f32 / 8.0;
+            if b[0] > ty1 || b[1] < ty0 {
+                continue;
+            }
+            for dx in min_dx..=max_dx {
+                let x = base_x + dx;
+                let tx0 = x as f32 / 8.0;
+                let tx1 = (x + 1) as f32 / 8.0;
+                if b[2] <= tx1 && b[3] >= tx0 {
+                    buckets[(dy * DIVISIONS + dx) as usize].push(idx);
+                }
+            }
+        }
+    }
+
     let mut tiles = Vec::with_capacity(64);
     let mut bytes = 0;
+    let mut selected = Vec::new();
     for dy in 0..DIVISIONS {
         for dx in 0..DIVISIONS {
-            let y = lat * DIVISIONS + dy;
-            let x = lon * DIVISIONS + dx;
-            let tile = [
-                y as f32 / 8.0,
-                (y + 1) as f32 / 8.0,
-                x as f32 / 8.0,
-                (x + 1) as f32 / 8.0,
-            ];
-            let selected = features
-                .iter()
-                .zip(&boxes)
-                .filter(|(_, b)| intersects(**b, tile))
-                .map(|(f, _)| f.clone())
-                .collect::<Vec<_>>();
+            let y = base_y + dy;
+            let x = base_x + dx;
+            let bucket = &buckets[(dy * DIVISIONS + dx) as usize];
+            selected.clear();
+            selected.reserve(bucket.len().saturating_sub(selected.capacity()));
+            for &idx in bucket {
+                selected.push(features[idx].clone());
+            }
             let data = write_cell(lat as i16, lon as i16, &[(layer, &selected)]);
             bytes += data.len();
             if bytes > crate::MAX_PAYLOAD * 2 {

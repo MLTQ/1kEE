@@ -23,7 +23,7 @@ struct XformKey {
     center_y: f32,
 }
 
-struct GlobeXform {
+pub(super) struct GlobeXform {
     key: XformKey,
     yaw_cos: f32,
     yaw_sin: f32,
@@ -35,6 +35,18 @@ struct GlobeXform {
 }
 
 impl GlobeXform {
+    pub(super) fn from_view(layout: &GlobeLayout, view: &GlobeViewState) -> Self {
+        Self::new(XformKey {
+            yaw: view.yaw,
+            pitch: view.pitch,
+            camera_distance: layout.camera_distance,
+            radius: layout.radius,
+            focal_length: layout.focal_length,
+            center_x: layout.center.x,
+            center_y: layout.center.y,
+        })
+    }
+
     fn new(key: XformKey) -> Self {
         GlobeXform {
             key,
@@ -51,7 +63,7 @@ impl GlobeXform {
     /// Apply yaw/pitch rotation and perspective projection to a pre-rotation
     /// sphere-space point `(x, y, z)`.
     #[inline]
-    fn apply(&self, x: f32, y: f32, z: f32) -> Option<ProjectedPoint> {
+    pub(super) fn apply(&self, x: f32, y: f32, z: f32) -> Option<ProjectedPoint> {
         let x_yaw = x * self.yaw_cos + z * self.yaw_sin;
         let z_yaw = -x * self.yaw_sin + z * self.yaw_cos;
         let x = x_yaw;
@@ -126,6 +138,9 @@ fn project_geo_at_radius(
 }
 
 fn terrain_radius(point: GeoPoint, altitude_scale: f32, extra_radius: f32) -> f32 {
+    if altitude_scale == 0.0 {
+        return (UNIT_SPHERE_RADIUS + extra_radius).max(MIN_TERRAIN_RADIUS);
+    }
     let elevation_signal = terrain_field::elevation(point) / 1.6;
     let signed_elevation = elevation_signal.mul_add(2.0, -1.0);
     (UNIT_SPHERE_RADIUS + signed_elevation * altitude_scale + extra_radius).max(MIN_TERRAIN_RADIUS)

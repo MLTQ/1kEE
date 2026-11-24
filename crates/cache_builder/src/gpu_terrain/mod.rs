@@ -148,6 +148,9 @@ struct Worker {
     sources: Vec<Source>,
     block_cache: deflate::BlockCache,
     segment_buffer: Option<wgpu::Buffer>,
+    count_buffer: wgpu::Buffer,
+    count_staging: wgpu::Buffer,
+    readback_staging: Option<wgpu::Buffer>,
 }
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     struct Wake(std::thread::Thread);
@@ -238,6 +241,20 @@ impl Worker {
             adapter.get_info().name,
             adapter.get_info().backend
         );
+        let count_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("segment count"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let count_staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("segment count staging"),
+            size: 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
         Ok(Self {
             device,
             queue,
@@ -247,6 +264,9 @@ impl Worker {
             sources: Vec::new(),
             block_cache: Default::default(),
             segment_buffer: None,
+            count_buffer,
+            count_staging,
+            readback_staging: None,
         })
     }
     fn buffer(&self, label: &str, data: &[u8], usage: wgpu::BufferUsages) -> wgpu::Buffer {
@@ -265,7 +285,13 @@ impl Worker {
             mapped_at_creation: false,
         })
     }
-    fn dispatch(&self, pipeline: &wgpu::ComputePipeline, buffers: &[&wgpu::Buffer], n: u32) {
+    fn encode_dispatch(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        pipeline: &wgpu::ComputePipeline,
+        buffers: &[&wgpu::Buffer],
+        n: u32,
+    ) {
         let entries: Vec<_> = buffers
             .iter()
             .enumerate()
@@ -279,15 +305,18 @@ impl Worker {
             layout: &pipeline.get_bind_group_layout(0),
             entries: &entries,
         });
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind, &[]);
+        pass.dispatch_workgroups(n.div_ceil(16), n.div_ceil(16), 1);
+    }
+    #[cfg(test)]
+    fn dispatch(&self, pipeline: &wgpu::ComputePipeline, buffers: &[&wgpu::Buffer], n: u32) {
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, &bind, &[]);
-            pass.dispatch_workgroups(n.div_ceil(16), n.div_ceil(16), 1);
-        }
+        self.encode_dispatch(&mut encoder, pipeline, buffers, n);
         self.queue.submit(Some(encoder.finish()));
     }
+    #[cfg(test)]
     fn read(&self, buffer: &wgpu::Buffer, size: u64) -> Result<Vec<u8>, String> {
         let staging = self.empty(
             "terrain readback",
@@ -298,16 +327,56 @@ impl Worker {
         encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size);
         self.queue.submit(Some(encoder.finish()));
         let (tx, rx) = std::sync::mpsc::channel();
-        staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
+        staging
+            .slice(..size)
+            .map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
         self.device.poll(wgpu::Maintain::Wait);
         rx.recv()
             .map_err(|e| e.to_string())?
             .map_err(|e| e.to_string())?;
-        let result = staging.slice(..).get_mapped_range().to_vec();
+        let out = staging.slice(..size).get_mapped_range().to_vec();
         staging.unmap();
-        Ok(result)
+        Ok(out)
+    }
+    fn read_mapped<R>(
+        &mut self,
+        buffer: &wgpu::Buffer,
+        size: u64,
+        f: impl FnOnce(&[u8]) -> R,
+    ) -> Result<R, String> {
+        if self
+            .readback_staging
+            .as_ref()
+            .is_none_or(|b| b.size() < size)
+        {
+            self.readback_staging = Some(self.empty(
+                "terrain readback",
+                size.next_power_of_two().max(4096),
+                wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            ));
+        }
+        let staging = self.readback_staging.as_ref().unwrap();
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(buffer, 0, staging, 0, size);
+        self.queue.submit(Some(encoder.finish()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        staging
+            .slice(..size)
+            .map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
+        self.device.poll(wgpu::Maintain::Wait);
+        rx.recv()
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        let out = {
+            let mapped = staging.slice(..size).get_mapped_range();
+            f(&mapped)
+        };
+        staging.unmap();
+        Ok(out)
     }
     fn source(&mut self, path: &Path, lat: i32, lon: i32, needed: Window) -> Result<usize, String> {
         let meta = path
@@ -370,12 +439,14 @@ impl Worker {
             u64::from(n) * u64::from(n) * 4,
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         );
-        let params = self.buffer(
+        let init_params = self.buffer(
             "sampling parameters",
             bytemuck::cast_slice(&[n, 3601, 3601, 0]),
             wgpu::BufferUsages::UNIFORM,
         );
-        self.dispatch(&self.initialize_pipeline, &[&params, &grid], n);
+        // Record initialize + all overlapping source resamples into a single CommandEncoder submit.
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        self.encode_dispatch(&mut encoder, &self.initialize_pipeline, &[&init_params, &grid], n);
         let mut found = false;
         for lat in bounds.min_lat.floor() as i32..=bounds.max_lat.floor() as i32 {
             for lon in bounds.min_lon.floor() as i32..=bounds.max_lon.floor() as i32 {
@@ -416,7 +487,8 @@ impl Worker {
                     bytemuck::cast_slice(&axes),
                     wgpu::BufferUsages::STORAGE,
                 );
-                self.dispatch(
+                self.encode_dispatch(
+                    &mut encoder,
                     &self.sample_pipeline,
                     &[&params, &self.sources[i].buffer, &axes, &grid],
                     n,
@@ -426,6 +498,7 @@ impl Worker {
         if !found {
             return Err("No SRTM sources for GPU tile".into());
         }
+        self.queue.submit(Some(encoder.finish()));
         Ok(grid)
     }
     fn extract(
@@ -450,7 +523,7 @@ impl Worker {
             .as_ref()
             .map_or(0, |b| (b.size() / 20) as u32);
         let mut capacity = (n * n / 4).max(64).max(previous).min(limit);
-        let (segments, count) = loop {
+        let count = loop {
             let bytes = u64::from(capacity) * 20;
             if self
                 .segment_buffer
@@ -469,19 +542,34 @@ impl Worker {
                 bytemuck::cast_slice(&[n, capacity, interval.to_bits(), 0]),
                 wgpu::BufferUsages::UNIFORM,
             );
-            let count = self.buffer(
-                "segment count",
-                bytemuck::bytes_of(&0u32),
-                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            );
-            self.dispatch(
+            self.queue
+                .write_buffer(&self.count_buffer, 0, bytemuck::bytes_of(&0u32));
+            let mut encoder = self.device.create_command_encoder(&Default::default());
+            self.encode_dispatch(
+                &mut encoder,
                 &self.contour_pipeline,
-                &[&params, grid, segments, &count],
+                &[&params, grid, segments, &self.count_buffer],
                 n,
             );
-            let count = u32::from_ne_bytes(self.read(&count, 4)?.try_into().unwrap());
+            encoder.copy_buffer_to_buffer(&self.count_buffer, 0, &self.count_staging, 0, 4);
+            self.queue.submit(Some(encoder.finish()));
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.count_staging
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |r| {
+                    let _ = tx.send(r);
+                });
+            self.device.poll(wgpu::Maintain::Wait);
+            rx.recv()
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+            let count = {
+                let mapped = self.count_staging.slice(..).get_mapped_range();
+                u32::from_ne_bytes(mapped[..4].try_into().unwrap())
+            };
+            self.count_staging.unmap();
             if count <= capacity {
-                break (segments, count);
+                break count;
             }
             if capacity == limit {
                 return Err(format!(
@@ -493,15 +581,12 @@ impl Worker {
         if count == 0 {
             return Ok(Vec::new());
         }
-        let bytes = self.read(segments, u64::from(count) * 20)?;
-        Ok(bytes
-            .as_chunks::<20>()
-            .0
-            .iter()
-            .map(|b| {
-                std::array::from_fn(|i| f32::from_ne_bytes(b[i * 4..i * 4 + 4].try_into().unwrap()))
-            })
-            .collect())
+        let segments = self.segment_buffer.take().unwrap();
+        let result = self.read_mapped(&segments, u64::from(count) * 20, |mapped| {
+            bytemuck::cast_slice::<u8, [f32; 5]>(mapped).to_vec()
+        });
+        self.segment_buffer = Some(segments);
+        result
     }
 }
 fn validate_grid(b: Bounds, n: u32) -> Result<(), String> {

@@ -9,7 +9,7 @@ pub(crate) mod viewer;
 
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use crossbeam_channel::Receiver;
 
@@ -46,7 +46,7 @@ impl GruveBridge {
         let capture = surface::Capture::new(surface.clone());
         let shared = Arc::new(ServerShared {
             surface,
-            snapshot: Mutex::new(Snapshot::from_model(model)),
+            snapshot: RwLock::new(Arc::new(Snapshot::from_model(model))),
             commands: tx,
             stop: AtomicBool::new(false),
         });
@@ -80,13 +80,23 @@ impl GruveBridge {
 
     /// Refresh the snapshot the web view polls. Cheap; call once per frame.
     pub fn publish(&self, model: &AppModel) {
-        let mut next = Snapshot::from_model(model);
-        if let Ok(mut slot) = self.shared.snapshot.lock() {
-            // Bump each slice's generation counter only if that slice changed, so
-            // pollers holding the current generation get 304s instead of bodies.
-            next.carry_generations(&slot);
-            *slot = next;
-        }
+        let prev = match self.shared.snapshot.read() {
+            Ok(slot) => Arc::clone(&slot),
+            Err(poison) => Arc::clone(&poison.into_inner()),
+        };
+        let Some(next) = Snapshot::update_from_model(&prev, model) else {
+            return;
+        };
+        let next = Arc::new(next);
+        let old = {
+            let mut slot = self
+                .shared
+                .snapshot
+                .write()
+                .unwrap_or_else(|p| p.into_inner());
+            std::mem::replace(&mut *slot, next)
+        };
+        drop(old);
     }
 
     /// Apply a bounded batch on the UI thread before the map renders.

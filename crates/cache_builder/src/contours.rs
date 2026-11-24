@@ -107,6 +107,8 @@ pub fn open_cache_db(path: &Path) -> rusqlite::Result<Connection> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "temp_store", "MEMORY")?;
+    conn.pragma_update(None, "cache_size", -65536)?;
+    let _ = conn.pragma_update(None, "mmap_size", 268_435_456i64);
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS contour_tile_manifest (
@@ -144,8 +146,6 @@ pub fn open_cache_db(path: &Path) -> rusqlite::Result<Connection> {
             geom        BLOB    NOT NULL,
             PRIMARY KEY (zoom_bucket, lat_bucket, lon_bucket, fid)
         );
-        CREATE INDEX IF NOT EXISTS idx_coastline_tiles_lookup
-            ON coastline_tiles (zoom_bucket, lat_bucket, lon_bucket, fid);
     ",
     )?;
     Ok(conn)
@@ -794,6 +794,34 @@ pub(crate) fn write_tile_native(
     contours: &[crate::marching_squares::ContourLine],
     coastlines: &[Vec<(f32, f32)>],
 ) -> rusqlite::Result<()> {
+    let core_bounds = earth_core_bounds(tile);
+
+    // Clip and encode WKB directly in parallel BEFORE taking the SQLite write transaction,
+    // eliminating the encode -> decode -> re-encode roundtrip and minimizing lock duration.
+    let encoded_contours: Vec<(i64, f32, Vec<u8>)> = contours
+        .par_iter()
+        .enumerate()
+        .filter_map(|(fid, line)| {
+            let blob = match core_bounds {
+                Some(bounds) => tile_archive::contour_clip::clip_points_f32(&line.points, bounds)?,
+                None => encode_gpkg_linestring(&line.points),
+            };
+            Some((fid as i64, line.elevation_m, blob))
+        })
+        .collect();
+
+    let encoded_coastlines: Vec<(i64, Vec<u8>)> = coastlines
+        .par_iter()
+        .enumerate()
+        .filter_map(|(fid, pts)| {
+            let blob = match core_bounds {
+                Some(bounds) => tile_archive::contour_clip::clip_points_f32(pts, bounds)?,
+                None => encode_gpkg_linestring(pts),
+            };
+            Some((fid as i64, blob))
+        })
+        .collect();
+
     let tx = conn.transaction()?;
 
     // ── Contours ──────────────────────────────────────────────────────────────
@@ -805,30 +833,31 @@ pub(crate) fn write_tile_native(
         "DELETE FROM contour_tile_manifest WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
         params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
     )?;
-    let mut contour_count = 0usize;
-    for (fid, line) in contours.iter().enumerate() {
-        let blob = encode_gpkg_linestring(&line.points);
-        let Some(blob) = clip_geometry(blob, earth_core_bounds(tile))? else {
-            continue;
-        };
-        tx.execute(
+    {
+        let mut insert_contour = tx.prepare_cached(
             "INSERT INTO contour_tiles (zoom_bucket,lat_bucket,lon_bucket,fid,elevation_m,geom)
              VALUES (?1,?2,?3,?4,?5,?6)",
-            params![
+        )?;
+        for (fid, elevation_m, blob) in &encoded_contours {
+            insert_contour.execute(params![
                 tile.zoom_bucket,
                 tile.lat_bucket,
                 tile.lon_bucket,
-                fid as i64,
-                line.elevation_m,
+                fid,
+                elevation_m,
                 blob
-            ],
-        )?;
-        contour_count += 1;
+            ])?;
+        }
     }
     tx.execute(
         "INSERT INTO contour_tile_manifest (zoom_bucket,lat_bucket,lon_bucket,contour_count,built_at)
          VALUES (?1,?2,?3,?4,unixepoch())",
-        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket, contour_count as i64],
+        params![
+            tile.zoom_bucket,
+            tile.lat_bucket,
+            tile.lon_bucket,
+            encoded_contours.len() as i64
+        ],
     )?;
 
     // ── Coastlines ────────────────────────────────────────────────────────────
@@ -840,24 +869,20 @@ pub(crate) fn write_tile_native(
         "DELETE FROM coastline_tile_manifest WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
         params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
     )?;
-    let mut coastline_count = 0usize;
-    for (fid, pts) in coastlines.iter().enumerate() {
-        let blob = encode_gpkg_linestring(pts);
-        let Some(blob) = clip_geometry(blob, earth_core_bounds(tile))? else {
-            continue;
-        };
-        tx.execute(
+    {
+        let mut insert_coast = tx.prepare_cached(
             "INSERT INTO coastline_tiles (zoom_bucket,lat_bucket,lon_bucket,fid,geom)
              VALUES (?1,?2,?3,?4,?5)",
-            params![
+        )?;
+        for (fid, blob) in &encoded_coastlines {
+            insert_coast.execute(params![
                 tile.zoom_bucket,
                 tile.lat_bucket,
                 tile.lon_bucket,
-                fid as i64,
+                fid,
                 blob
-            ],
-        )?;
-        coastline_count += 1;
+            ])?;
+        }
     }
     tx.execute(
         "INSERT INTO coastline_tile_manifest (zoom_bucket,lat_bucket,lon_bucket,line_count)
@@ -866,7 +891,7 @@ pub(crate) fn write_tile_native(
             tile.zoom_bucket,
             tile.lat_bucket,
             tile.lon_bucket,
-            coastline_count as i64
+            encoded_coastlines.len() as i64
         ],
     )?;
 

@@ -1,68 +1,149 @@
 //! Published bulk LAS/LAZ access and actual-footprint ranking for Target.
 use super::*;
 
-pub(super) fn footprint_mask(geometry: &str, region: Region) -> (bool, u64) {
-    fn ring(r: &Value, lon: f64, lat: f64) -> bool {
-        let Some(points) = r.as_array() else {
-            return false;
-        };
-        let mut inside = false;
-        for i in 0..points.len() {
-            let a = &points[i];
-            let b = &points[(i + 1) % points.len()];
-            let (Some(ax), Some(ay), Some(bx), Some(by)) =
-                (a[0].as_f64(), a[1].as_f64(), b[0].as_f64(), b[1].as_f64())
-            else {
-                continue;
-            };
-            let ax = lon + (ax - lon + 180.).rem_euclid(360.) - 180.;
-            let bx = lon + (bx - lon + 180.).rem_euclid(360.) - 180.;
-            if (ay > lat) != (by > lat) && lon < ax + (bx - ax) * (lat - ay) / (by - ay) {
-                inside = !inside;
-            }
-        }
-        inside
-    }
-    fn contains(g: &Value, lon: f64, lat: f64) -> bool {
-        let polygon = |p: &Value| {
-            p.as_array().is_some_and(|rings| {
-                rings.first().is_some_and(|r| ring(r, lon, lat))
-                    && !rings.iter().skip(1).any(|r| ring(r, lon, lat))
-            })
-        };
-        match g["type"].as_str() {
-            Some("Polygon") => polygon(&g["coordinates"]),
-            Some("MultiPolygon") => g["coordinates"]
-                .as_array()
-                .is_some_and(|p| p.iter().any(polygon)),
-            Some("GeometryCollection") => g["geometries"]
-                .as_array()
-                .is_some_and(|v| v.iter().any(|g| contains(g, lon, lat))),
-            _ => false,
-        }
-    }
-    let Ok(g) = serde_json::from_str::<Value>(geometry) else {
-        return (false, 0);
-    };
-    let center = contains(&g, region.lon, region.lat);
-    let mut mask = 0u64;
-    let mut bit = 0;
+pub(super) fn sample_points(region: Region) -> Vec<[f64; 2]> {
+    let mut pts = Vec::with_capacity(49);
     for x in -4i32..=4 {
         for y in -4i32..=4 {
             if x * x + y * y > 16 {
                 continue;
             }
-            let [lon, lat] = region.location(
+            pts.push(region.location(
                 x as f64 * region.radius_m / 4.,
                 y as f64 * region.radius_m / 4.,
-            );
-            if contains(&g, lon, lat) {
-                mask |= 1u64 << bit;
+            ));
+        }
+    }
+    pts
+}
+
+struct ParsedRing {
+    points: Vec<(f64, f64)>,
+    min_lat: f64,
+    max_lat: f64,
+}
+
+impl ParsedRing {
+    fn from_value(v: &Value) -> Option<Self> {
+        let arr = v.as_array()?;
+        let mut points = Vec::with_capacity(arr.len());
+        let mut min_lat = f64::INFINITY;
+        let mut max_lat = f64::NEG_INFINITY;
+        for pt in arr {
+            if let (Some(x), Some(y)) = (pt[0].as_f64(), pt[1].as_f64()) {
+                min_lat = min_lat.min(y);
+                max_lat = max_lat.max(y);
+                points.push((x, y));
             }
-            bit += 1;
+        }
+        (!points.is_empty()).then_some(Self {
+            points,
+            min_lat,
+            max_lat,
+        })
+    }
+
+    fn contains(&self, lon: f64, lat: f64) -> bool {
+        if lat < self.min_lat || lat > self.max_lat || self.points.is_empty() {
+            return false;
+        }
+        let mut inside = false;
+        let n = self.points.len();
+        let mut prev = self.points[n - 1];
+        for &cur in &self.points {
+            let (ax, ay) = prev;
+            let (bx, by) = cur;
+            prev = cur;
+            if (ay > lat) != (by > lat) {
+                let ax = lon + (ax - lon + 180.).rem_euclid(360.) - 180.;
+                let bx = lon + (bx - lon + 180.).rem_euclid(360.) - 180.;
+                if lon < ax + (bx - ax) * (lat - ay) / (by - ay) {
+                    inside = !inside;
+                }
+            }
+        }
+        inside
+    }
+}
+
+struct ParsedPolygon {
+    outer: ParsedRing,
+    holes: Vec<ParsedRing>,
+}
+
+impl ParsedPolygon {
+    fn from_value(v: &Value) -> Option<Self> {
+        let rings = v.as_array()?;
+        let outer = ParsedRing::from_value(rings.first()?)?;
+        let holes = rings
+            .iter()
+            .skip(1)
+            .filter_map(ParsedRing::from_value)
+            .collect();
+        Some(Self { outer, holes })
+    }
+
+    fn contains(&self, lon: f64, lat: f64) -> bool {
+        self.outer.contains(lon, lat) && !self.holes.iter().any(|h| h.contains(lon, lat))
+    }
+}
+
+fn collect_polygons(g: &Value, out: &mut Vec<ParsedPolygon>) {
+    match g["type"].as_str() {
+        Some("Polygon") => {
+            if let Some(poly) = ParsedPolygon::from_value(&g["coordinates"]) {
+                out.push(poly);
+            }
+        }
+        Some("MultiPolygon") => {
+            if let Some(polys) = g["coordinates"].as_array() {
+                for p in polys {
+                    if let Some(poly) = ParsedPolygon::from_value(p) {
+                        out.push(poly);
+                    }
+                }
+            }
+        }
+        Some("GeometryCollection") => {
+            if let Some(geoms) = g["geometries"].as_array() {
+                for sub in geoms {
+                    collect_polygons(sub, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(super) fn footprint_mask_with_samples(
+    geometry: &str,
+    center_lon: f64,
+    center_lat: f64,
+    samples: &[[f64; 2]],
+) -> (bool, u64) {
+    let Ok(g) = serde_json::from_str::<Value>(geometry) else {
+        return (false, 0);
+    };
+    let mut polygons = Vec::new();
+    collect_polygons(&g, &mut polygons);
+    if polygons.is_empty() {
+        return (false, 0);
+    }
+    let contains = |lon: f64, lat: f64| polygons.iter().any(|p| p.contains(lon, lat));
+    let center = contains(center_lon, center_lat);
+    let mut mask = 0u64;
+    for (bit, &[lon, lat]) in samples.iter().enumerate() {
+        if contains(lon, lat) {
+            mask |= 1u64 << bit;
         }
     }
     (center, mask)
+}
+
+#[cfg(test)]
+pub(super) fn footprint_mask(geometry: &str, region: Region) -> (bool, u64) {
+    let samples = sample_points(region);
+    footprint_mask_with_samples(geometry, region.lon, region.lat, &samples)
 }
 #[cfg(test)]
 fn coverage(geometry: &str, region: Region) -> u32 {
@@ -204,7 +285,7 @@ pub(super) fn stream_resume(
         let bytes = fetch.get(&url)?;
         let mut reader = las::Reader::with_options(
             Cursor::new(bytes),
-            las::ReaderOptions::default().with_laz_parallelism(las::LazParallelism::No),
+            las::ReaderOptions::default().with_laz_parallelism(las::LazParallelism::Yes),
         )
         .map_err(err)?;
         let header = reader.header();

@@ -7,6 +7,7 @@ use crate::{
 use std::{cell::RefCell, sync::Arc};
 
 type GlobeMesh = ([u32; 8], Arc<egui::Mesh>);
+type LocalMesh = ([u32; 16], Arc<egui::Mesh>);
 
 pub(crate) struct SatelliteLayer {
     name: String,
@@ -15,6 +16,7 @@ pub(crate) struct SatelliteLayer {
     bounds: [f32; 4],
     texture: egui::TextureHandle,
     globe_mesh: RefCell<Option<GlobeMesh>>,
+    local_mesh: RefCell<Option<LocalMesh>>,
 }
 
 impl SatelliteLayer {
@@ -27,6 +29,7 @@ impl SatelliteLayer {
             visible: true,
             opacity: 85,
             globe_mesh: RefCell::default(),
+            local_mesh: RefCell::default(),
         }
     }
 
@@ -93,7 +96,31 @@ impl SatelliteLayer {
         focus: GeoPoint,
         half: f32,
     ) {
-        if self.visible && self.opacity > 0 {
+        if !self.visible || self.opacity == 0 {
+            return;
+        }
+        let clip = painter.clip_rect();
+        let key = [
+            view.yaw,
+            view.pitch,
+            view.local_zoom,
+            focus.lat,
+            focus.lon,
+            half,
+            layout.center.x,
+            layout.center.y,
+            layout.width,
+            layout.height,
+            clip.min.x,
+            clip.min.y,
+            clip.max.x,
+            clip.max.y,
+            f32::from(self.opacity),
+            0.0,
+        ]
+        .map(f32::to_bits);
+        let mut cache = self.local_mesh.borrow_mut();
+        if cache.as_ref().is_none_or(|(old, _)| old != &key) {
             let mesh = raster_mesh::local(
                 layout,
                 view,
@@ -101,9 +128,14 @@ impl SatelliteLayer {
                 self.bounds,
                 focus,
                 half,
-                painter.clip_rect(),
+                clip,
             );
-            painter.add(egui::Shape::mesh(self.tint(mesh)));
+            *cache = Some((key, Arc::new(self.tint(mesh))));
+        }
+        if let Some((_, mesh)) = cache.as_ref()
+            && !mesh.indices.is_empty()
+        {
+            painter.add(egui::Shape::mesh(mesh.clone()));
         }
     }
 }

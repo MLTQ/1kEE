@@ -40,7 +40,7 @@ pub(super) fn gpu_bytes(contours: &[ContourPath]) -> usize {
         >())
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub(crate) struct Viewport {
     yaw: [f64; 2],
     pitch: [f64; 2],
@@ -56,17 +56,27 @@ impl Viewport {
         let r = f64::from(rect.right() - layout.center.x);
         let t = f64::from(layout.center.y - rect.top());
         let b = f64::from(rect.bottom() - layout.center.y);
+        let raw_planes = [
+            [-f, 0.0, -l, l * d],
+            [f, 0.0, -r, r * d],
+            [0.0, -f, -t, t * d],
+            [0.0, f, -b, b * d],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, -1.0, d - 0.05],
+        ];
+        let planes = raw_planes.map(|p| {
+            let norm = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+            if norm > 0.0 && norm.is_finite() {
+                let inv = 1.0 / norm;
+                [p[0] * inv, p[1] * inv, p[2] * inv, p[3] * inv]
+            } else {
+                p
+            }
+        });
         Self {
             yaw: [f64::from(view.yaw.sin()), f64::from(view.yaw.cos())],
             pitch: [f64::from(view.pitch.sin()), f64::from(view.pitch.cos())],
-            planes: [
-                [-f, 0.0, -l, l * d],
-                [f, 0.0, -r, r * d],
-                [0.0, -f, -t, t * d],
-                [0.0, f, -b, b * d],
-                [0.0, 0.0, 1.0, 0.0],
-                [0.0, 0.0, -1.0, d - 0.05],
-            ],
+            planes,
         }
     }
 
@@ -93,8 +103,7 @@ impl Viewport {
         let radius = 2.04 * (angle.min(std::f64::consts::PI) * 0.5).sin() + 0.006;
         self.planes.iter().all(|p| {
             let signed = p[0] * center[0] + p[1] * center[1] + p[2] * center[2] + p[3];
-            let norm = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
-            !signed.is_finite() || signed + radius * norm >= 0.0
+            !signed.is_finite() || signed + radius >= 0.0
         })
     }
 }

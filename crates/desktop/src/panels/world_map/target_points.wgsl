@@ -45,28 +45,61 @@ fn elevation_heatmap(z: f32) -> vec3<f32> {
     return linear_rgb(mix(u.heat_colors[i].rgb, u.heat_colors[i + 1u].rgb, stop - f32(i)));
 }
 @vertex fn vs_point(input: Input, @builtin(vertex_index) index: u32) -> Output {
-    let corners = array<vec2<f32>,6>(vec2<f32>(-1.,-1.),vec2<f32>(1.,-1.),vec2<f32>(-1.,1.),
-        vec2<f32>(-1.,1.),vec2<f32>(1.,-1.),vec2<f32>(1.,1.));
+    // 3-vertex circumscribing equilateral triangle inscribes the exact unit circle
+    // dot(corner, corner) <= 1.0, cutting vertex invocations in half vs a 6-vert quad.
+    let corners = array<vec2<f32>, 3>(
+        vec2<f32>(-1.7320508, -1.0),
+        vec2<f32>(1.7320508, -1.0),
+        vec2<f32>(0.0, 2.0),
+    );
     let classification = input.packed & 255u;
     var out: Output;
-    out.clip = projection(input.position);
-    out.corner = corners[index]; out.xy = input.position.xy; out.world = input.position;
-    out.clip = vec4<f32>(out.clip.xy + out.corner * u.viewport.z * 2. / u.viewport.xy * out.clip.w,
-        out.clip.zw);
-    if (u.flags.x & (1u << min(classification,31u))) == 0u {
-        out.clip = vec4<f32>(0.,0.,2.,1.);
+    let r2 = u.viewport.w * u.viewport.w;
+    if (u.flags.x & (1u << min(classification, 31u))) == 0u
+        || dot(input.position.xy, input.position.xy) > r2
+    {
+        out.clip = vec4<f32>(0., 0., 2., 1.);
+        out.color = vec4<f32>(0.);
+        out.corner = vec2<f32>(0.);
+        out.xy = vec2<f32>(0.);
+        out.world = vec3<f32>(0.);
+        return out;
     }
-    out.color = class_color(classification);
-    if u.flags.y == 1u {
-        let t = clamp((input.position.z - u.height.x) / max(u.height.y,1.),0.,1.);
-        out.color = vec4<f32>(mix(vec3<f32>(0.021981,0.223414,0.354692),vec3<f32>(1.,0.263273,0.027212),t),1.);
+    let clip = projection(input.position);
+    let corner = corners[index];
+    out.corner = corner;
+    out.xy = input.position.xy;
+    out.world = input.position;
+    out.clip = vec4<f32>(
+        clip.xy + corner * u.viewport.z * 2. / u.viewport.xy * clip.w,
+        clip.zw,
+    );
+    switch u.flags.y {
+        case 1u: {
+            let t = clamp((input.position.z - u.height.x) / max(u.height.y, 1.), 0., 1.);
+            out.color = vec4<f32>(
+                mix(vec3<f32>(0.021981, 0.223414, 0.354692), vec3<f32>(1., 0.263273, 0.027212), t),
+                1.,
+            );
+        }
+        case 2u: {
+            if (input.packed & 0x80000000u) != 0u {
+                out.color = vec4<f32>(linear_rgb(input.color.rgb), 1.);
+            } else {
+                out.color = class_color(classification);
+            }
+        }
+        case 3u: {
+            let intensity = sqrt(f32((input.packed >> 8u) & 65535u) / 65535.);
+            out.color = vec4<f32>(vec3<f32>(intensity), 1.);
+        }
+        case 4u: {
+            out.color = vec4<f32>(elevation_heatmap(input.position.z), 1.);
+        }
+        default: {
+            out.color = class_color(classification);
+        }
     }
-    if u.flags.y == 2u && (input.packed & 0x80000000u) != 0u { out.color = vec4<f32>(linear_rgb(input.color.rgb),1.); }
-    if u.flags.y == 3u {
-        let intensity = sqrt(f32((input.packed >> 8u) & 65535u) / 65535.);
-        out.color = vec4<f32>(vec3<f32>(intensity),1.);
-    }
-    if u.flags.y == 4u { out.color = vec4<f32>(elevation_heatmap(input.position.z), 1.); }
     return out;
 }
 @vertex fn vs_surface(input: Input) -> Output {
@@ -74,22 +107,22 @@ fn elevation_heatmap(z: f32) -> vec3<f32> {
     out.corner = vec2<f32>(0.); out.xy = input.position.xy; out.world = input.position; return out;
 }
 @fragment fn fs_point(input: Output) -> @location(0) vec4<f32> {
-    if dot(input.corner,input.corner) > 1. || length(input.xy) > u.viewport.w { discard; }
+    if dot(input.corner, input.corner) > 1. { discard; }
     return input.color;
 }
 @fragment fn fs_surface(input: Output) -> @location(0) vec4<f32> {
-    let normal = normalize(cross(dpdx(input.world),dpdy(input.world)));
+    let normal = normalize(cross(dpdx(input.world), dpdy(input.world)));
+    if dot(input.xy, input.xy) > u.viewport.w * u.viewport.w { discard; }
     let up = select(-normal, normal, normal.z >= 0.);
     let relief = normalize(vec3<f32>(up.xy * 3., up.z));
     let diffuse = max(dot(relief, u.light.xyz), 0.);
     let lit = clamp(0.64 + (diffuse - u.light.z) * 1.6, 0.12, 1.15);
-    let pigment = mix(vec3<f32>(0.72,0.81,0.96), vec3<f32>(1.04,1.01,0.95), min(lit,1.));
-    if length(input.xy) > u.viewport.w { discard; }
+    let pigment = mix(vec3<f32>(0.72, 0.81, 0.96), vec3<f32>(1.04, 1.01, 0.95), min(lit, 1.));
     var color = linear_rgb(input.color.rgb);
     if u.flags.y == 4u { color = elevation_heatmap(input.world.z); }
-    return vec4<f32>(color * pigment * lit,1.);
+    return vec4<f32>(color * pigment * lit, 1.);
 }
 @fragment fn fs_lines(input: Output) -> @location(0) vec4<f32> {
-    if length(input.xy) > u.viewport.w { discard; }
-    return vec4<f32>(linear_rgb(input.color.rgb),1.);
+    if dot(input.xy, input.xy) > u.viewport.w * u.viewport.w { discard; }
+    return vec4<f32>(linear_rgb(input.color.rgb), 1.);
 }

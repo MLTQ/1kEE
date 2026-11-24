@@ -91,46 +91,67 @@ pub(super) fn paint(
         .collect();
     // Fill every region before any outline so shading cannot obscure borders.
     if options.shade {
+        let mut mesh = egui::Mesh::default();
+        let mut projected_verts: Vec<Pos2> = Vec::new();
         for &(region, shift) in &visible {
             let Some(fill) = &region.fill else {
                 continue;
             };
-            let vertices: Vec<_> = fill
-                .vertices
-                .iter()
-                .map(|p| {
-                    project(GeoPoint {
-                        lon: p.lon + shift,
-                        lat: p.lat,
-                    })
+            projected_verts.clear();
+            projected_verts.extend(fill.vertices.iter().map(|p| {
+                project(GeoPoint {
+                    lon: p.lon + shift,
+                    lat: p.lat,
                 })
-                .collect();
+            }));
             let color = fill_color(
                 region.relation_id,
                 palette[(region.level - 2) as usize],
                 options.opacity * layer_opacity,
             );
-            let mut mesh = egui::Mesh::default();
             for indices in fill.indices.chunks_exact(3) {
-                let triangle = indices
-                    .iter()
-                    .map(|&i| vertices[i as usize])
-                    .collect::<Vec<_>>();
-                if !Rect::from_points(&triangle).intersects(clip) {
+                let a = projected_verts[indices[0] as usize];
+                let b = projected_verts[indices[1] as usize];
+                let c = projected_verts[indices[2] as usize];
+                let min_x = a.x.min(b.x).min(c.x);
+                let max_x = a.x.max(b.x).max(c.x);
+                let min_y = a.y.min(b.y).min(c.y);
+                let max_y = a.y.max(b.y).max(c.y);
+                if max_x < clip.min.x
+                    || min_x > clip.max.x
+                    || max_y < clip.min.y
+                    || min_y > clip.max.y
+                {
                     continue;
                 }
-                let polygon = clip_polygon(triangle, clip);
-                let start = mesh.vertices.len() as u32;
-                for p in &polygon {
-                    mesh.colored_vertex(*p, color);
+                // Fast path: triangle strictly inside clip rect — zero allocations, zero clipping.
+                if min_x >= clip.min.x
+                    && max_x <= clip.max.x
+                    && min_y >= clip.min.y
+                    && max_y <= clip.max.y
+                {
+                    let start = mesh.vertices.len() as u32;
+                    mesh.colored_vertex(a, color);
+                    mesh.colored_vertex(b, color);
+                    mesh.colored_vertex(c, color);
+                    mesh.add_triangle(start, start + 1, start + 2);
+                    continue;
                 }
-                for i in 1..polygon.len().saturating_sub(1) {
-                    mesh.add_triangle(start, start + i as u32, start + i as u32 + 1);
+                let mut poly_buf = [Pos2::ZERO; 8];
+                let count = clip_triangle_stack([a, b, c], clip, &mut poly_buf);
+                if count >= 3 {
+                    let start = mesh.vertices.len() as u32;
+                    for &p in &poly_buf[..count] {
+                        mesh.colored_vertex(p, color);
+                    }
+                    for i in 1..(count - 1) {
+                        mesh.add_triangle(start, start + i as u32, start + i as u32 + 1);
+                    }
                 }
             }
-            if !mesh.is_empty() {
-                painter.add(Shape::mesh(mesh));
-            }
+        }
+        if !mesh.is_empty() {
+            painter.add(Shape::mesh(mesh));
         }
     }
     for level in (2..=11).rev() {
@@ -144,29 +165,96 @@ pub(super) fn paint(
             }
             for ring in &region.rings {
                 let mut run = Vec::new();
-                for edge in ring.windows(2) {
-                    let [a, b] = [edge[0], edge[1]].map(|p| {
-                        project(GeoPoint {
-                            lon: p.lon + shift,
-                            lat: p.lat,
-                        })
+                let mut prev: Option<Pos2> = None;
+                for p in ring {
+                    let cur = project(GeoPoint {
+                        lon: p.lon + shift,
+                        lat: p.lat,
                     });
-                    if let Some((a, b)) = clip_segment(a, b, clip) {
-                        if run.last().is_some_and(|&last| last != a) {
+                    if let Some(a) = prev {
+                        if let Some((ca, cb)) = clip_segment(a, cur, clip) {
+                            if run.last().is_some_and(|&last| last != ca) {
+                                flush(painter, &mut run, stroke);
+                            }
+                            if run.is_empty() {
+                                run.push(ca);
+                            }
+                            run.push(cb);
+                        } else {
                             flush(painter, &mut run, stroke);
                         }
-                        if run.is_empty() {
-                            run.push(a);
-                        }
-                        run.push(b);
-                    } else {
-                        flush(painter, &mut run, stroke);
                     }
+                    prev = Some(cur);
                 }
                 flush(painter, &mut run, stroke);
             }
         }
     }
+}
+
+/// Stack-only Sutherland-Hodgman clip of a triangle against an axis-aligned Rect (0 heap allocs).
+fn clip_triangle_stack(tri: [Pos2; 3], clip: Rect, out: &mut [Pos2; 8]) -> usize {
+    let mut a = [Pos2::ZERO; 8];
+    let mut b = [Pos2::ZERO; 8];
+    a[0] = tri[0];
+    a[1] = tri[1];
+    a[2] = tri[2];
+    let mut len = 3usize;
+    let edges: [(fn(Pos2, Rect) -> bool, fn(Pos2, Pos2, Rect) -> Pos2); 4] = [
+        (
+            |p, r| p.x >= r.min.x,
+            |u, v, r| {
+                let t = (r.min.x - u.x) / (v.x - u.x);
+                Pos2::new(r.min.x, u.y + t * (v.y - u.y))
+            },
+        ),
+        (
+            |p, r| p.x <= r.max.x,
+            |u, v, r| {
+                let t = (r.max.x - u.x) / (v.x - u.x);
+                Pos2::new(r.max.x, u.y + t * (v.y - u.y))
+            },
+        ),
+        (
+            |p, r| p.y >= r.min.y,
+            |u, v, r| {
+                let t = (r.min.y - u.y) / (v.y - u.y);
+                Pos2::new(u.x + t * (v.x - u.x), r.min.y)
+            },
+        ),
+        (
+            |p, r| p.y <= r.max.y,
+            |u, v, r| {
+                let t = (r.max.y - u.y) / (v.y - u.y);
+                Pos2::new(u.x + t * (v.x - u.x), r.max.y)
+            },
+        ),
+    ];
+    for (inside, intersect) in edges {
+        if len == 0 {
+            return 0;
+        }
+        let mut next_len = 0usize;
+        let mut prev = a[len - 1];
+        let mut prev_in = inside(prev, clip);
+        for &cur in &a[..len] {
+            let cur_in = inside(cur, clip);
+            if cur_in != prev_in && next_len < 8 {
+                b[next_len] = intersect(prev, cur, clip);
+                next_len += 1;
+            }
+            if cur_in && next_len < 8 {
+                b[next_len] = cur;
+                next_len += 1;
+            }
+            prev = cur;
+            prev_in = cur_in;
+        }
+        a = b;
+        len = next_len;
+    }
+    out[..len].copy_from_slice(&a[..len]);
+    len
 }
 fn flush(painter: &egui::Painter, run: &mut Vec<Pos2>, stroke: Stroke) {
     if run.len() >= 2 {

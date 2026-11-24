@@ -4,6 +4,8 @@ struct Segment { ax: f32, ay: f32, bx: f32, by: f32, level: f32 }
 @group(0) @binding(1) var<storage, read> raster: array<f32>;
 @group(0) @binding(2) var<storage, read_write> segments: array<Segment>;
 @group(0) @binding(3) var<storage, read_write> count: atomic<u32>;
+var<workgroup> tile: array<f32, 289>; // 17x17 shared elevation tile per 16x16 workgroup
+
 fn interpolate(a: f32, b: f32, h: f32) -> f32 {
     // Work relative to the level so the tie perturbation survives f32 at
     // high elevations. GDAL considers samples equal to a level above it.
@@ -14,7 +16,6 @@ fn interpolate(a: f32, b: f32, h: f32) -> f32 {
     return clamp(-da/(db-da), 0.0, 1.0);
 }
 fn emit(a: vec2<f32>, b: vec2<f32>, h: f32) {
-    if atomicLoad(&count) > p.capacity { return; }
     let i = atomicAdd(&count, 1u);
     if i < p.capacity { segments[i] = Segment(a.x, a.y, b.x, b.y, h); }
 }
@@ -22,19 +23,44 @@ fn contour(tl: f32, tr: f32, br: f32, bl: f32, x: f32, y: f32, step: f32, h: f32
     let code = select(0u,8u,tl>=h) | select(0u,4u,tr>=h)
              | select(0u,2u,br>=h) | select(0u,1u,bl>=h);
     if code == 0u || code == 15u { return; }
-    let n = vec2(x + step * interpolate(tl,tr,h), y);
-    let e = vec2(x + step, y + step * interpolate(tr,br,h));
-    let s = vec2(x + step * interpolate(bl,br,h), y + step);
-    let w = vec2(x, y + step * interpolate(tl,bl,h));
+    // Compute only the 2 edges actually crossed by this case (4 on saddle cases).
     switch code {
-        case 1u,14u: { emit(w,s,h); }
-        case 2u,13u: { emit(s,e,h); }
-        case 3u,12u: { emit(w,e,h); }
-        case 4u,11u: { emit(n,e,h); }
-        case 6u,9u: { emit(n,s,h); }
-        case 7u,8u: { emit(n,w,h); }
+        case 1u,14u: {
+            let w = vec2(x, y + step * interpolate(tl,bl,h));
+            let s = vec2(x + step * interpolate(bl,br,h), y + step);
+            emit(w,s,h);
+        }
+        case 2u,13u: {
+            let s = vec2(x + step * interpolate(bl,br,h), y + step);
+            let e = vec2(x + step, y + step * interpolate(tr,br,h));
+            emit(s,e,h);
+        }
+        case 3u,12u: {
+            let w = vec2(x, y + step * interpolate(tl,bl,h));
+            let e = vec2(x + step, y + step * interpolate(tr,br,h));
+            emit(w,e,h);
+        }
+        case 4u,11u: {
+            let n = vec2(x + step * interpolate(tl,tr,h), y);
+            let e = vec2(x + step, y + step * interpolate(tr,br,h));
+            emit(n,e,h);
+        }
+        case 6u,9u: {
+            let n = vec2(x + step * interpolate(tl,tr,h), y);
+            let s = vec2(x + step * interpolate(bl,br,h), y + step);
+            emit(n,s,h);
+        }
+        case 7u,8u: {
+            let n = vec2(x + step * interpolate(tl,tr,h), y);
+            let w = vec2(x, y + step * interpolate(tl,bl,h));
+            emit(n,w,h);
+        }
         case 5u,10u: {
             // Fixed diagonal agrees with GDAL and avoids level crossings.
+            let n = vec2(x + step * interpolate(tl,tr,h), y);
+            let e = vec2(x + step, y + step * interpolate(tr,br,h));
+            let s = vec2(x + step * interpolate(bl,br,h), y + step);
+            let w = vec2(x, y + step * interpolate(tl,bl,h));
             emit(w,s,h); emit(n,e,h);
         }
         default: {}
@@ -44,7 +70,7 @@ fn cell(tl: f32, tr: f32, br: f32, bl: f32, x: f32, y: f32, step: f32) {
     let low = min(min(tl,tr),min(bl,br)); let high = max(max(tl,tr),max(bl,br));
     var h = ceil(low/p.interval)*p.interval;
     loop {
-        if h > high || atomicLoad(&count) > p.capacity { break; }
+        if h > high { break; }
         contour(tl,tr,br,bl,x,y,step,h);
         h += p.interval;
     }
@@ -55,11 +81,35 @@ fn midpoint(a: f32,b: f32) -> f32 {
     return (a+b)*0.5;
 }
 @compute @workgroup_size(16,16)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+fn main(
+    @builtin(global_invocation_id) id: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+    @builtin(workgroup_id) wid: vec3<u32>,
+) {
+    // Cooperatively load the 17x17 elevation patch into workgroup shared memory
+    // (cuts global raster reads ~4x).
+    let base_x = wid.x * 16u;
+    let base_y = wid.y * 16u;
+    let flat_l = lid.y * 16u + lid.x;
+    for (var k = flat_l; k < 289u; k += 256u) {
+        let tx = k % 17u;
+        let ty = k / 17u;
+        let gx = base_x + tx;
+        let gy = base_y + ty;
+        if gx < p.n && gy < p.n {
+            tile[k] = raster[gy * p.n + gx];
+        } else {
+            tile[k] = -32768.0;
+        }
+    }
+    workgroupBarrier();
+
     if id.x + 1u >= p.n || id.y + 1u >= p.n { return; }
-    let i = id.y*p.n+id.x;
-    let tl = raster[i]; let tr = raster[i+1u];
-    let bl = raster[i+p.n]; let br = raster[i+p.n+1u];
+    let li = lid.y * 17u + lid.x;
+    let tl = tile[li];
+    let tr = tile[li + 1u];
+    let bl = tile[li + 17u];
+    let br = tile[li + 18u];
     let x = f32(id.x); let y = f32(id.y);
     if min(min(tl,tr),min(bl,br)) > -32767.0 {
         cell(tl,tr,br,bl,x,y,1.0); return;

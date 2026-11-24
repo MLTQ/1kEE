@@ -54,16 +54,36 @@ pub(super) fn end_frame() {
     }
 }
 
+#[inline]
+fn lod_tier(elevation: i32) -> u8 {
+    // Coarsest LOD intervals come first so every density interval (12800..100, 1)
+    // selects a single contiguous prefix [0..end) in each chunk = 1 draw call/chunk.
+    for (tier, interval) in [12_800, 6_400, 3_200, 1_600, 800, 400, 200, 100]
+        .into_iter()
+        .enumerate()
+    {
+        if elevation.rem_euclid(interval) == 0 {
+            return tier as u8;
+        }
+    }
+    8
+}
+
+struct BinBuilder {
+    bounds: Bounds,
+    segments: Vec<(i32, SegmentInstance)>,
+}
+
 fn build_tile(tile: &LocalTileGeometry, major: egui::Color32, minor: egui::Color32) -> Tile {
-    let mut bins: HashMap<(i32, i32), Chunk> = HashMap::new();
+    let mut bins: HashMap<(i32, i32), BinBuilder> = HashMap::new();
     for contour in tile.contours.iter() {
-        let color = (
-            if (contour.elevation_m.round() as i32).rem_euclid(50) == 0 {
-                major
-            } else {
-                minor
-            }
-        ).to_array();
+        let elevation = contour.elevation_m.round() as i32;
+        let color = (if elevation.rem_euclid(50) == 0 {
+            major
+        } else {
+            minor
+        })
+        .to_array();
         let Some(&first) = contour.points.first() else {
             continue;
         };
@@ -76,15 +96,14 @@ fn build_tile(tile: &LocalTileGeometry, major: egui::Color32, minor: egui::Color
                 (points[0].lon + points[1].lon).floor() as i32,
                 (points[0].lat + points[1].lat).floor() as i32,
             );
-            let bin = bins.entry(cell).or_insert_with(|| Chunk {
+            let bin = bins.entry(cell).or_insert_with(|| BinBuilder {
                 bounds: Bounds {
                     min_lon: f64::INFINITY,
                     min_lat: f64::INFINITY,
                     max_lon: f64::NEG_INFINITY,
                     max_lat: f64::NEG_INFINITY,
                 },
-                instances: Vec::new(),
-                planes: Vec::new(),
+                segments: Vec::new(),
             });
             for p in points {
                 bin.bounds.min_lon = bin.bounds.min_lon.min(f64::from(p.lon));
@@ -92,19 +111,7 @@ fn build_tile(tile: &LocalTileGeometry, major: egui::Color32, minor: egui::Color
                 bin.bounds.min_lat = bin.bounds.min_lat.min(f64::from(p.lat));
                 bin.bounds.max_lat = bin.bounds.max_lat.max(f64::from(p.lat));
             }
-            let elevation = contour.elevation_m.round() as i32;
-            let index = bin.instances.len() as u32;
-            if let Some(last) = bin.planes.last_mut()
-                && last.elevation == elevation
-            {
-                last.range.end += 1;
-            } else {
-                bin.planes.push(density::Plane {
-                    elevation,
-                    range: index..index + 1,
-                });
-            }
-            bin.instances.push(SegmentInstance { a, b, color });
+            bin.segments.push((elevation, SegmentInstance { a, b, color }));
             a = b;
         }
     }
@@ -112,25 +119,30 @@ fn build_tile(tile: &LocalTileGeometry, major: egui::Color32, minor: egui::Color
     keys.sort();
     let mut chunks = Vec::new();
     for key in keys {
-        let bin = bins.remove(&key).unwrap();
-        for (index, part) in bin.instances.chunks(CHUNK_SEGMENTS).enumerate() {
-            let start = (index * CHUNK_SEGMENTS) as u32;
-            let end = start + part.len() as u32;
+        let mut bin = bins.remove(&key).unwrap();
+        // Group segments by coarsest LOD tier while preserving relative order inside each tier.
+        bin.segments.sort_by_key(|(elev, _)| lod_tier(*elev));
+        for part in bin.segments.chunks(CHUNK_SEGMENTS) {
+            let mut instances = Vec::with_capacity(part.len());
+            let mut planes: Vec<density::Plane> = Vec::new();
+            for (i, &(elevation, seg)) in part.iter().enumerate() {
+                let idx = i as u32;
+                if let Some(last) = planes.last_mut()
+                    && last.elevation == elevation
+                {
+                    last.range.end += 1;
+                } else {
+                    planes.push(density::Plane {
+                        elevation,
+                        range: idx..idx + 1,
+                    });
+                }
+                instances.push(seg);
+            }
             chunks.push(Chunk {
                 bounds: bin.bounds,
-                instances: part.to_vec(),
-                planes: bin
-                    .planes
-                    .iter()
-                    .filter_map(|p| {
-                        let lo = p.range.start.max(start);
-                        let hi = p.range.end.min(end);
-                        (lo < hi).then_some(density::Plane {
-                            elevation: p.elevation,
-                            range: lo.saturating_sub(start)..hi.saturating_sub(start),
-                        })
-                    })
-                    .collect(),
+                instances,
+                planes,
             });
         }
     }
@@ -241,6 +253,7 @@ pub(super) struct Gpu {
     displayed: Option<Arc<Prepared>>,
     pending: Option<Arc<Prepared>>,
     density: density::Selection,
+    density_key: Option<(u64, Viewport)>,
     texture: Option<texture::Cache>,
 }
 
@@ -256,6 +269,12 @@ impl Drop for Gpu {
 
 impl Gpu {
     fn update_density(&mut self, view: Viewport) {
+        let id = self.displayed.as_ref().map_or(0, |d| d.id);
+        let key = (id, view);
+        if self.density_key == Some(key) {
+            return;
+        }
+        self.density_key = Some(key);
         let visible: Vec<_> = self
             .displayed
             .iter()
@@ -356,7 +375,9 @@ impl Gpu {
                 ready = false;
             }
             for (index, chunk) in tile.chunks.iter().enumerate().skip(offset) {
-                if !budget.claim(std::mem::size_of_val(chunk.instances.as_slice())) {
+                if !budget.claim(buffers::alloc_bytes(std::mem::size_of_val(
+                    chunk.instances.as_slice(),
+                ))) {
                     break;
                 }
                 jobs.push((tile.clone(), index));
