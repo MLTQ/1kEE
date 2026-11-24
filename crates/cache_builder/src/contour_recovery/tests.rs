@@ -153,3 +153,43 @@ fn recovers_geometry_after_a_broken_lookup_index() {
         1
     );
 }
+
+#[test]
+fn staged_publication_and_fast_cleanup_require_an_identical_copy() {
+    let dir = tempdir().unwrap();
+    let mut cmd = command(dir.path());
+    drop(seed(&cmd.caches[0], 20., 100));
+    run(&cmd, &mut |_| {}).unwrap();
+    let stage = dir.path().join(".contour-recovery-finished");
+    fs::rename(&cmd.output, &stage).unwrap();
+    let fast = dir.path().join("ssd.sqlite");
+    let finish = Command {
+        output: cmd.output.clone(),
+        finish_staged: Some(stage.clone()),
+        verification_copy: Some(fast.clone()),
+        ..Default::default()
+    };
+    run(&finish, &mut |_| {}).unwrap();
+    assert!(fast.exists() && cmd.output.exists() && !stage.exists());
+    let db = Connection::open(&fast).unwrap();
+    db.execute("UPDATE contour_tiles SET elevation_m=25", [])
+        .unwrap();
+    drop(db);
+    cmd.cleanup_only = true;
+    cmd.verification_copy = Some(fast);
+    assert!(run(&cmd, &mut |_| {}).is_err() && cmd.caches[0].exists());
+}
+
+#[test]
+fn unfinished_stage_cannot_be_published() {
+    let dir = tempdir().unwrap();
+    let stage = dir.path().join(".contour-recovery-incomplete");
+    drop(seed(&stage, 40., 100));
+    let cmd = Command {
+        output: dir.path().join(NATIVE),
+        finish_staged: Some(stage.clone()),
+        ..Default::default()
+    };
+    assert!(run(&cmd, &mut |_| {}).is_err());
+    assert!(stage.exists() && !cmd.output.exists());
+}

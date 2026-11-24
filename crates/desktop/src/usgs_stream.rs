@@ -1,5 +1,7 @@
+use crate::model::seismic::{Provider, Quake, quake_severity};
 use crate::model::{AppModel, EventRecord, EventSeverity, FactalBrief, GeoPoint, USGS_EVENT_PREFIX};
 use reqwest::blocking::Client;
+use reqwest::header::RETRY_AFTER;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
@@ -8,9 +10,9 @@ use std::time::{Duration, Instant};
 
 const USGS_FEED_URL: &str =
     "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.geojson";
-/// The feed refreshes roughly every minute, but M2.5+ quakes are not that
-/// frequent — poll gently to be a good citizen of the public endpoint.
-const POLL_INTERVAL: Duration = Duration::from_secs(300);
+// USGS refreshes this feed once a minute.
+const POLL_INTERVAL: Duration = Duration::from_secs(60);
+const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(300);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 
 struct PollManager {
@@ -20,9 +22,15 @@ struct PollManager {
 }
 
 enum PollOutcome {
-    Success(Vec<EventRecord>),
-    RateLimited,
+    Success(QuakeFeed),
+    RateLimited(Duration),
     Error(String),
+}
+
+#[derive(Default)]
+struct QuakeFeed {
+    events: Vec<EventRecord>,
+    quakes: Vec<Quake>,
 }
 
 /// Advance the USGS earthquake polling lifecycle. Called every frame from
@@ -88,7 +96,7 @@ pub fn shutdown() {
 
 fn apply_outcome(model: &mut AppModel, outcome: PollOutcome) {
     match outcome {
-        PollOutcome::Success(events) => {
+        PollOutcome::Success(QuakeFeed { events, quakes }) => {
             let count = events.len();
             let previous = model
                 .events
@@ -99,6 +107,7 @@ fn apply_outcome(model: &mut AppModel, outcome: PollOutcome) {
             // Persist to history store before merging into live events.
             crate::event_store::upsert_events(&events);
             model.replace_usgs_events(events);
+            model.seismic.replace_quakes(quakes);
             model.usgs_stream_status = "live".into();
             if should_log {
                 model.push_log(format!(
@@ -107,7 +116,10 @@ fn apply_outcome(model: &mut AppModel, outcome: PollOutcome) {
                 ));
             }
         }
-        PollOutcome::RateLimited => {
+        PollOutcome::RateLimited(delay) => {
+            let now = Instant::now();
+            manager().lock().unwrap().next_poll_at =
+                Some(now.checked_add(delay).unwrap_or(now + RATE_LIMIT_BACKOFF));
             let was_status = model.usgs_stream_status.clone();
             model.usgs_stream_status = "rate limited".into();
             if was_status != "rate limited" {
@@ -148,7 +160,16 @@ fn fetch_latest_quakes() -> PollOutcome {
 
     match response.status().as_u16() {
         200 => {}
-        429 => return PollOutcome::RateLimited,
+        429 => {
+            let retry_after = response
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse().ok())
+                .map(Duration::from_secs)
+                .unwrap_or_default();
+            return PollOutcome::RateLimited(retry_after.max(RATE_LIMIT_BACKOFF));
+        }
         code => {
             return PollOutcome::Error(format!("USGS feed returned unexpected status {}", code));
         }
@@ -160,34 +181,34 @@ fn fetch_latest_quakes() -> PollOutcome {
     };
 
     match parse_feed(&body) {
-        Ok(events) => PollOutcome::Success(events),
+        Ok(feed) => PollOutcome::Success(feed),
         Err(error) => PollOutcome::Error(error),
     }
 }
 
-/// Parse a USGS GeoJSON summary feed body into normalized `EventRecord`s.
-fn parse_feed(body: &str) -> Result<Vec<EventRecord>, String> {
+/// Normalize the event list and collect the earthquake origins used by the globe.
+fn parse_feed(body: &str) -> Result<QuakeFeed, String> {
     let payload: Value = serde_json::from_str(body).map_err(|error| error.to_string())?;
-
-    let mut ids = HashSet::new();
-    let mut events = Vec::new();
-    for raw_feature in payload
+    let features = payload
         .get("features")
         .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        if let Some(event) = parse_feature(raw_feature) {
-            if ids.insert(event.id.clone()) {
-                events.push(event);
-            }
+        .ok_or("USGS feed is missing its features array")?;
+
+    let mut ids = HashSet::new();
+    let mut feed = QuakeFeed::default();
+    for raw_feature in features {
+        if let Some((event, quake)) = parse_feature(raw_feature)
+            && ids.insert(event.id.clone())
+        {
+            feed.events.push(event);
+            feed.quakes.extend(quake);
         }
     }
 
-    Ok(events)
+    Ok(feed)
 }
 
-fn parse_feature(raw: &Value) -> Option<EventRecord> {
+fn parse_feature(raw: &Value) -> Option<(EventRecord, Option<Quake>)> {
     let feature_id = raw
         .get("id")
         .and_then(Value::as_str)
@@ -203,6 +224,9 @@ fn parse_feature(raw: &Value) -> Option<EventRecord> {
         .and_then(Value::as_array)?;
     let lon = value_as_f64(coordinates.first())?;
     let lat = value_as_f64(coordinates.get(1))?;
+    if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+        return None;
+    }
     let depth_km = value_as_f64(coordinates.get(2));
 
     let magnitude = value_as_f64(props.get("mag"));
@@ -259,8 +283,20 @@ fn parse_feature(raw: &Value) -> Option<EventRecord> {
         EventSeverity::Unrated => 0,
     };
     let id = format!("{USGS_EVENT_PREFIX}{feature_id}");
+    // ComCat also reports quarry blasts and other seismic events.
+    let quake = (props.get("type").and_then(Value::as_str) == Some("earthquake")).then(|| Quake {
+        id: id.clone(),
+        title: title.clone(),
+        epicenter: location,
+        origin_ms: time_ms,
+        severity,
+        provider: Provider::Usgs,
+        has_station_picks: props["types"]
+            .as_str()
+            .is_some_and(|types| types.split(',').any(|kind| kind == "phase-data")),
+    });
 
-    Some(EventRecord {
+    let event = EventRecord {
         id: id.clone(),
         title,
         summary,
@@ -285,15 +321,8 @@ fn parse_feature(raw: &Value) -> Option<EventRecord> {
             content: None,
             raw_json_pretty: serde_json::to_string_pretty(raw).unwrap_or_else(|_| raw.to_string()),
         }),
-    })
-}
-
-fn quake_severity(magnitude: Option<f64>) -> EventSeverity {
-    match magnitude {
-        Some(magnitude) if magnitude >= 6.0 => EventSeverity::Critical,
-        Some(magnitude) if magnitude >= 4.5 => EventSeverity::Elevated,
-        _ => EventSeverity::Advisory,
-    }
+    };
+    Some((event, quake))
 }
 
 fn value_as_f64(value: Option<&Value>) -> Option<f64> {
@@ -320,9 +349,10 @@ mod tests {
             {
                 "type": "Feature",
                 "properties": {
+                    "type": "earthquake",
                     "mag": 6.5,
                     "place": "120 km SSW of Severo-Kuril'sk, Russia",
-                    "time": 1719900000000,
+                    "time": 1719900000123,
                     "tsunami": 1,
                     "title": "M 6.5 - 120 km SSW of Severo-Kuril'sk, Russia"
                 },
@@ -332,6 +362,7 @@ mod tests {
             {
                 "type": "Feature",
                 "properties": {
+                    "type": "earthquake",
                     "mag": 4.5,
                     "place": "10 km SSW of Guánica, Puerto Rico",
                     "time": 1719903600000,
@@ -344,6 +375,7 @@ mod tests {
             {
                 "type": "Feature",
                 "properties": {
+                    "type": "quarry blast",
                     "mag": 2.8,
                     "place": "5 km NE of Ridgecrest, CA",
                     "time": 1719907200000,
@@ -358,8 +390,9 @@ mod tests {
 
     #[test]
     fn parses_usgs_feed_features() {
-        let events = parse_feed(SAMPLE_FEED).expect("sample feed should parse");
+        let QuakeFeed { events, quakes } = parse_feed(SAMPLE_FEED).expect("sample feed should parse");
         assert_eq!(events.len(), 3);
+        assert_eq!(quakes.len(), 2);
 
         let critical = &events[0];
         assert_eq!(critical.id, "usgs-us7000quake1");
@@ -371,6 +404,10 @@ mod tests {
         assert!(critical.summary.contains("tsunami"));
         assert_eq!(critical.source, "USGS");
         assert_eq!(critical.occurred_at, "2024-07-02 06:00:00 UTC");
+        assert_eq!(quakes[0].id, critical.id);
+        assert_eq!(quakes[0].origin_ms, 1719900000123);
+        assert_eq!(quakes[0].epicenter.lat, critical.location.lat);
+        assert_eq!(quakes[0].epicenter.lon, critical.location.lon);
 
         let brief = critical.factal_brief.as_ref().expect("persistence brief");
         assert_eq!(brief.factal_id, "usgs-us7000quake1");

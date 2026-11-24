@@ -267,6 +267,8 @@ pub(crate) fn map_controls(ui: &mut egui::Ui, model: &mut AppModel) {
 
     // ── PUBLIC DATA ────────────────────────────────────────────
     section_label(ui, "PUBLIC DATA");
+    world_map::seismic_controls(ui, model);
+    ui.add_space(4.0);
     ui.checkbox(&mut model.flock.show, "Flock cameras & devices")
         .on_hover_text("Downloaded position inventory. Shows records marked active and in service; includes some non-camera equipment. These are map locations, not live feeds.");
     ui.small(egui::RichText::new(&model.flock.status).color(theme::text_muted()));

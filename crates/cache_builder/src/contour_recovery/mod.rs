@@ -3,6 +3,7 @@ mod layer;
 mod retire;
 #[cfg(test)]
 mod tests;
+mod verification;
 use anyhow::{Context, Result, anyhow, ensure};
 use layer::{Hash, Key, LAYERS, Layer};
 use rusqlite::{Connection, OpenFlags, params};
@@ -21,6 +22,8 @@ pub(crate) struct Command {
     pub output: PathBuf,
     pub remove_inputs: bool,
     pub cleanup_only: bool,
+    pub verification_copy: Option<PathBuf>,
+    pub finish_staged: Option<PathBuf>,
 }
 
 pub(crate) fn parse(args: impl Iterator<Item = String>) -> std::result::Result<Command, String> {
@@ -42,10 +45,14 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> std::result::Result<C
             "--cache" => cmd.caches.push(val.into()),
             "--repairs" => cmd.repairs.push(val.into()),
             "--output" => cmd.output = val.into(),
+            "--verification-copy" => cmd.verification_copy = Some(val.into()),
+            "--finish-staged" => cmd.finish_staged = Some(val.into()),
             _ => return Err(format!("Unknown recovery option {flag}")),
         }
     }
-    if cmd.output.as_os_str().is_empty() || (cmd.caches.is_empty() && cmd.repairs.is_empty()) {
+    if cmd.output.as_os_str().is_empty()
+        || (cmd.finish_staged.is_none() && cmd.caches.is_empty() && cmd.repairs.is_empty())
+    {
         return Err("Usage: recover-contours --cache FILE and/or --repairs DIRECTORY --output FILE [--remove-inputs | --cleanup-only]".into());
     }
     Ok(cmd)
@@ -307,9 +314,37 @@ fn receipts(db: &Connection) -> Result<Proofs> {
 }
 
 pub(crate) fn run(cmd: &Command, log: &mut dyn FnMut(String)) -> Result<String> {
+    if let Some(fast) = &cmd.verification_copy {
+        verification::distinct_destination(&cmd.output, fast)?;
+    }
+    if let Some(stage) = &cmd.finish_staged {
+        ensure!(
+            cmd.caches.is_empty()
+                && cmd.repairs.is_empty()
+                && !cmd.cleanup_only
+                && !cmd.remove_inputs,
+            "finish a staged output before running input cleanup separately"
+        );
+        return verification::publish_stage(
+            stage,
+            &cmd.output,
+            cmd.verification_copy.as_deref(),
+            log,
+        );
+    }
     let files = inputs(cmd)?;
+    if let Some(fast) = &cmd.verification_copy
+        && fast.try_exists()?
+    {
+        for source in &files {
+            ensure!(
+                !same_file::is_same_file(fast, &source.path)?,
+                "verification copy is also an input"
+            );
+        }
+    }
     if cmd.cleanup_only {
-        return retire::run(&cmd.output, &files, log);
+        return retire::run(&cmd.output, &files, cmd.verification_copy.as_deref(), log);
     }
     ensure!(
         !cmd.output.try_exists()?,
@@ -386,7 +421,13 @@ pub(crate) fn run(cmd: &Command, log: &mut dyn FnMut(String)) -> Result<String> 
             receipts(&reopened)? == proofs,
             "published receipts differ from copied tiles"
         );
-        verify(&reopened, &proofs, log)?;
+        verification::check(
+            stage.path(),
+            &reopened,
+            &proofs,
+            cmd.verification_copy.as_deref(),
+            log,
+        )?;
     }
     stage.persist_noclobber(&cmd.output)?;
     #[cfg(unix)]
@@ -399,7 +440,7 @@ pub(crate) fn run(cmd: &Command, log: &mut dyn FnMut(String)) -> Result<String> 
     );
     if cmd.remove_inputs {
         log(summary.clone());
-        return retire::run(&cmd.output, &files, log);
+        return retire::run(&cmd.output, &files, cmd.verification_copy.as_deref(), log);
     }
     Ok(summary)
 }

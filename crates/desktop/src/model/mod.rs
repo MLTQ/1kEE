@@ -12,6 +12,7 @@ pub mod gravity;
 mod geojson_layer;
 mod kml_layer;
 pub mod replay;
+pub(crate) mod seismic;
 mod vessels;
 
 pub use crate::deflock_source::DeflockAlprLocation;
@@ -78,6 +79,7 @@ pub struct AppModel {
     pub atlas_style: crate::atlas_style::AtlasStyle,
     pub show_loading_animation: bool,
     pub show_event_markers: bool,
+    pub(crate) seismic: seismic::SeismicLayer,
     pub show_camera_markers: bool,
     /// Optional proximity overlay, not evidence of a camera recording an event.
     pub show_camera_links: bool,
@@ -309,6 +311,7 @@ impl AppModel {
             atlas_style: app_settings.atlas_style,
             show_loading_animation: app_settings.show_loading_animation,
             show_event_markers: true,
+            seismic: seismic::SeismicLayer::default(),
             show_camera_markers: false,
             show_camera_links: false,
             marker_scale: app_settings.marker_scale,
@@ -737,6 +740,20 @@ impl AppModel {
         self.focused_city()
             .map(|city| city.location)
             .or_else(|| self.selected_event().map(|event| event.location))
+    }
+
+    pub(crate) fn focus_station_replay(&mut self, point: GeoPoint, zoom: f32) {
+        if self.active_body == ActiveBody::Earth
+            && !self.globe_view.local_mode
+            && !self.replay_mode
+            && self.follow_recaps.active.is_none()
+            && self.target.session.is_none()
+        {
+            self.stop_event_follow();
+            self.globe_view.stop_motion();
+            self.globe_view.focus_on(point);
+            self.globe_view.zoom = zoom;
+        }
     }
 
     pub fn terrain_focus_title(&self) -> String {

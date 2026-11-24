@@ -28,6 +28,7 @@ mod gpu_color;
 pub(crate) mod local_contour_pass;
 #[path = "world_map/globe_scene/mod.rs"]
 mod globe_scene;
+pub(crate) use globe_scene::seismic_controls;
 pub(crate) mod global_loading;
 mod graticule;
 mod layer_import;

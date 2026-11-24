@@ -453,7 +453,8 @@ fn usage() -> String {
       [--tiers overview,terrain,land] [--gdal-bin-dir <folder>]
       [--min-lon W --min-lat S --max-lon E --max-lat N]
   one-thousand-electric-eye-cache-builder recover-contours [--cache FILE]... [--repairs DIRECTORY]...
-      --output FILE [--remove-inputs | --cleanup-only]
+      --output FILE [--remove-inputs | --cleanup-only] [--verification-copy FILE]
+  one-thousand-electric-eye-cache-builder recover-contours --finish-staged FILE --output FILE [--verification-copy FILE]
   one-thousand-electric-eye-cache-builder contour-region pack CACHE REGION WEST SOUTH EAST NORTH
   one-thousand-electric-eye-cache-builder contour-region verify REGION
   one-thousand-electric-eye-cache-builder contour-region install REGION TERRAIN_DIRECTORY

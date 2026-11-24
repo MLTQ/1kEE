@@ -36,6 +36,7 @@ pub struct DashboardApp {
     camera_feed_viewer: CameraFeedViewer,
     event_camera_sidebar: panels::EventCameraSidebar,
     event_radio: panels::EventRadio,
+    seismic_stream: crate::seismic_stream::Stream,
     /// Gruve mesh bridge: serves the companion web view + announces to the local
     /// agent. `None` when no port was free; the app runs identically without it.
     gruve: Option<crate::gruve::GruveBridge>,
@@ -88,6 +89,7 @@ impl DashboardApp {
             camera_feed_viewer: CameraFeedViewer::default(),
             event_camera_sidebar: panels::EventCameraSidebar::default(),
             event_radio: panels::EventRadio::default(),
+            seismic_stream: crate::seismic_stream::Stream::default(),
             gruve,
         }
     }
@@ -101,6 +103,10 @@ impl DashboardApp {
         factal_stream::tick(&mut self.model);
         factal_stream::history_tick(&mut self.model);
         usgs_stream::tick(&mut self.model);
+        self.seismic_stream.tick(ctx, &mut self.model.seismic);
+        if let Some((point, zoom)) = self.model.seismic.station_replay.tick(ctx.input(|i| i.time)) {
+            self.model.focus_station_replay(point, zoom);
+        }
         camera_registry::tick(&mut self.model);
         deflock_source::tick(&mut self.model);
         self.model.flock.tick(self.model.selected_root.as_deref());

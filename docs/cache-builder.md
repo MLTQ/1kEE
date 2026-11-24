@@ -213,6 +213,10 @@ The builder recovers readable native contours, coastlines and recorded empty til
 
 Enable **Retire matching inputs after validation** or add `--remove-inputs` to delete each fully matched source. To retire sources later, run the same command with `--cleanup-only`. Each input must still match the published cache, including empty tiles. Damaged, changed, busy and partially recovered files are retained. Other terrain layers under the same repair root are preserved. A retained source and the published cache can both be supplied to a later build.
 
+On a mechanical drive, SQLite's scattered validation reads can dominate the build. Add `--verification-copy /fast-disk/archive.sqlite` to keep an exact copy on fast storage. The builder compares every byte under SQLite read locks and runs the same integrity and geometry checks there. The copy can be reused with `--cleanup-only`. It requires free space for the archive, and a difference aborts verification before any source is retired.
+
+If a build stopped after writing its recovery receipts, `recover-contours --finish-staged /new/terrain/.contour-recovery-… --output /new/terrain/srtm_native_v1.sqlite` can finish verification and publish the assembled file in the same directory. This also accepts `--verification-copy`. Incomplete stages fail verification.
+
 To switch the desktop after publication, close the map, run the command below with absolute paths, then reopen it. The first argument identifies the original native cache for the chosen terrain collection. The last argument is where the desktop should write future native tiles, typically on a local SSD.
 
 ```sh

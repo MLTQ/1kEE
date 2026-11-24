@@ -17,8 +17,11 @@ use std::sync::Arc;
 mod geography;
 mod markers;
 mod projection;
+mod seismic;
+mod station_replay;
 
 pub use projection::project_geo;
+pub(crate) use seismic::controls as seismic_controls;
 
 /// Unit-sphere imagery avoids synthetic terrain sampling at every mesh vertex.
 pub(super) fn project_surface(
@@ -328,6 +331,8 @@ pub(super) fn paint_with_layout(
         }
     }
 
+    seismic::draw(painter, rect, &layout, model, time, stereo);
+
     let selected_event_id = model.selected_event_id.as_deref();
     let selected_camera_id = model.selected_camera_id.as_deref();
     let nearby = model.nearby_camera_snapshot(250.0);
@@ -362,6 +367,7 @@ pub(super) fn paint_with_layout(
     let event_markers: Vec<_> = if !model.show_event_markers
         || model.replay_mode
         || model.follow_recaps.active.is_some()
+        || station_replay::is_active(model)
         || model.active_body != crate::model::ActiveBody::Earth
     {
         Vec::new()

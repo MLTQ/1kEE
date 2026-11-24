@@ -3,7 +3,12 @@ use rusqlite::TransactionBehavior;
 use same_file::Handle;
 use std::time::Duration;
 
-pub(super) fn run(output: &Path, inputs: &[Input], log: &mut dyn FnMut(String)) -> Result<String> {
+pub(super) fn run(
+    output: &Path,
+    inputs: &[Input],
+    verification_copy: Option<&Path>,
+    log: &mut dyn FnMut(String),
+) -> Result<String> {
     let published = Handle::from_path(output)?;
     let mut db = Connection::open_with_flags(output, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     db.busy_timeout(Duration::from_secs(2))?;
@@ -13,7 +18,7 @@ pub(super) fn run(output: &Path, inputs: &[Input], log: &mut dyn FnMut(String)) 
         "Checking the published cache before input cleanup: {}",
         output.display()
     ));
-    verify(&tx, &proofs, log)?;
+    verification::check(output, &tx, &proofs, verification_copy, log)?;
     let mut removed = 0;
     let mut retained = 0;
     let mut last = Instant::now();

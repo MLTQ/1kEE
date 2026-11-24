@@ -55,6 +55,20 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
   bundled TeleGeography snapshot (`submarine_cables.rs`, works offline) and live
   NASA FIRMS active-fire detections (`fire_source.rs`, rendered by
   `panels/world_map/fire_layer.rs`, cached locally). Both default to off.
+- **Seismic waves** — enable **Layers → Public Data → Seismic waves** on the live
+  Earth globe. 1kEE streams M2.5+ earthquake reports from EMSC and checks USGS
+  once per minute. The live gold wavefronts use a 3.5 km/s surface-wave model.
+  Select a USGS event and choose **Replay recorded arrivals**, or use **Replay by
+  USGS event ID** for an older quake such as Ridgecrest (`ci38457511`). Stations
+  flash at the published pick times, with cyan for P and violet for S arrivals.
+  The replay can be paused, scrubbed, or slowed to 1×. For shallow events with
+  adequate regional coverage, the `+` marker shows a separate epicenter fit from
+  arrival times and station coordinates. The fit uses a constant-velocity regional
+  model, holds catalog depth fixed, and reports its timing residual.
+  [EMSC SeismicPortal, CC BY 4.0](https://www.seismicportal.eu/realtime.html) ·
+  [USGS phase data](https://earthquake.usgs.gov/data/products/) ·
+  [EarthScope station metadata](https://service.earthscope.org/fdsnws/station/1/) ·
+  [ORFEUS station metadata](https://www.orfeus-eu.org/data/eida/webservices/station/)
 - **GhostMaps events** — enable **Layers → Public Data → GhostMaps events** on the
   Earth map. The default is the rolling 30-day Common Intelligence Picture.
   Use **Choose KMZ exports** to add the 90-day picture or a dated snapshot.

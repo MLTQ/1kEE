@@ -31,6 +31,8 @@ mod panels;
 mod planet_ephemeris;
 mod radio;
 mod satellite_image;
+mod seismic_stream;
+mod station_replay;
 mod settings_store;
 mod submarine_cables;
 mod stellar_catalog;

@@ -66,6 +66,23 @@ impl BuilderApp {
         if !form.output.as_os_str().is_empty() {
             ui.label(form.output.display().to_string());
         }
+        ui.collapsing("Validation drive", |ui| {
+            ui.label("Use an exact copy on a faster drive for the full database check.");
+            if ui.button("Choose verification copy…").clicked() {
+                if let Some(path) = rfd::FileDialog::new()
+                    .set_file_name("contour-verification.sqlite")
+                    .save_file()
+                {
+                    form.verification_copy = Some(path);
+                }
+            }
+            if let Some(path) = &form.verification_copy {
+                ui.label(path.display().to_string());
+                if ui.button("Verify on archive drive").clicked() {
+                    form.verification_copy = None;
+                }
+            }
+        });
         let ready = self.active_job.is_none()
             && !form.output.as_os_str().is_empty()
             && !(form.caches.is_empty() && form.repairs.is_empty());

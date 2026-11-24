@@ -149,6 +149,17 @@ pub(super) fn project_geo_unit_surface(
     project_geo_at_radius(layout, view, point, UNIT_SPHERE_RADIUS)
 }
 
+pub(super) fn project_visible_unit_vector(
+    layout: &GlobeLayout,
+    view: &GlobeViewState,
+    point: glam::Vec3,
+) -> Option<egui::Pos2> {
+    let projected = with_xform(layout, view, |xf| xf.apply(point.x, point.y, point.z))?;
+    // The tangent plane of the perspective silhouette is at z = 1 / distance.
+    let visible_depth = (1.0 + layout.camera_distance.recip()) * 0.5;
+    (projected.depth >= visible_depth).then_some(projected.pos)
+}
+
 /// Project a point strictly outward from the unit-sphere surface.
 ///
 /// Event and replay beam tips use this with their existing visual beam height,
