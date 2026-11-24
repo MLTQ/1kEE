@@ -1,3 +1,5 @@
+pub(crate) mod day;
+pub(crate) mod live;
 mod locate;
 mod source;
 
@@ -6,7 +8,7 @@ use crossbeam_channel::{Receiver, TryRecvError, bounded};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Deserialize, serde::Serialize)]
 pub(crate) struct StationId {
     pub network: String,
     pub code: String,
@@ -31,7 +33,7 @@ pub(crate) enum Phase {
     Other,
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 pub(crate) struct Pick {
     pub phase: String,
     pub time_ms: i64,
@@ -275,8 +277,7 @@ impl StationReplay {
 mod tests {
     use super::*;
 
-    #[test]
-    fn playback_triggers_at_observed_times_including_p_then_s() {
+    fn recording() -> Arc<Recording> {
         let id = StationId {
             network: "CI".into(),
             code: "ABC".into(),
@@ -304,7 +305,7 @@ mod tests {
                 },
             ],
         };
-        let recording = Arc::new(Recording {
+        Arc::new(Recording {
             title: "quake".into(),
             origin: Origin {
                 point,
@@ -314,7 +315,12 @@ mod tests {
             stations: vec![station],
             total_stations: 1,
             fit: Err("too few stations"),
-        });
+        })
+    }
+
+    #[test]
+    fn playback_triggers_at_observed_times_including_p_then_s() {
+        let recording = recording();
         let mut playback = Playback::new(Arc::clone(&recording), 0.0);
         let station = &recording.stations[0];
         playback.position = 4.249;
@@ -328,5 +334,66 @@ mod tests {
         assert!(!playback.playing);
         playback.toggle();
         assert_eq!(playback.position, playback.start);
+    }
+
+    #[test]
+    fn play_button_keeps_advancing_with_timeline_visible_at_each_speed() {
+        use crate::{model::AppModel, panels::world_map::seismic_controls};
+        use egui::{CentralPanel, Context, Event, PointerButton, RawInput, Shape};
+
+        let mut model = AppModel::new();
+        model.seismic.enabled = true;
+        for speed in [1., 2., 5., 10., 20., 60.] {
+            let ctx = Context::default();
+            let mut playback = Playback::new(recording(), 0.0);
+            let start = playback.start;
+            playback.speed = speed;
+            playback.playing = false;
+            model.seismic.station_replay.playback = Some(playback);
+
+            let frame = |model: &mut AppModel, time, events| {
+                ctx.run(
+                    RawInput {
+                        time: Some(time),
+                        events,
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        model.seismic.station_replay.tick(time);
+                        CentralPanel::default().show(ctx, |ui| seismic_controls(ui, model));
+                    },
+                )
+            };
+            let output = frame(&mut model, 0.0, vec![]);
+            let play = output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    Shape::Text(t) if t.galley.text() == "Play" => {
+                        Some(t.pos + t.galley.size() * 0.5)
+                    }
+                    _ => None,
+                })
+                .expect("Play button");
+            let click = |pressed| Event::PointerButton {
+                pos: play,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            };
+            frame(
+                &mut model,
+                0.25,
+                vec![Event::PointerMoved(play), click(true)],
+            );
+            frame(&mut model, 0.5, vec![click(false)]);
+            for index in 1..=6 {
+                let elapsed = f64::from(index) / 59.0;
+                frame(&mut model, 0.5 + elapsed, vec![]);
+                let playback = model.seismic.station_replay.playback.as_ref().unwrap();
+                assert!(playback.playing, "paused on frame {index} at {speed}×");
+                assert!((playback.position - (start + elapsed * speed)).abs() < 1e-9);
+            }
+        }
     }
 }

@@ -128,9 +128,15 @@ impl ReplayState {
     }
 
     /// UTC timestamp reached after this many seconds of playback.
-    pub(super) fn unix_at_elapsed(&self, elapsed: f64) -> f64 {
+    pub(crate) fn unix_at_elapsed(&self, elapsed: f64) -> f64 {
         let fraction = (elapsed / self.wall_duration).clamp(0.0, 1.0);
         self.sim_from as f64 + fraction * (self.sim_to - self.sim_from) as f64
+    }
+
+    pub(crate) fn set_duration(&mut self, duration: f64) {
+        let progress = self.progress();
+        self.wall_duration = duration;
+        self.seek(progress);
     }
 
     pub fn is_paused(&self) -> bool {

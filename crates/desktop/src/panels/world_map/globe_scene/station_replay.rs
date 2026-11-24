@@ -22,7 +22,7 @@ pub(super) fn controls(ui: &mut egui::Ui, model: &mut AppModel, time: f64) -> bo
             "Located stations: {} of {}",
             recording.stations.len(),
             recording.total_stations
-        ));
+        )).on_hover_text("Stations with a published phase arrival for this earthquake and coordinates valid at its origin time. The regional fit uses a subset of nearby arrivals.");
         match &recording.fit {
             Ok(fit) => {
                 ui.small(format!(
@@ -49,7 +49,8 @@ pub(super) fn controls(ui: &mut egui::Ui, model: &mut AppModel, time: f64) -> bo
             .add(
                 egui::Slider::new(&mut playback.position, playback.start..=playback.end)
                     .suffix(" s")
-                    .max_decimals(2),
+                    // Rounding the playhead itself would register as a seek on each tick.
+                    .custom_formatter(|seconds, _| format!("{seconds:.2}")),
             )
             .on_hover_text("Seconds since the catalog origin time")
             .changed()
@@ -150,11 +151,7 @@ pub(super) fn draw(
         };
         let recent = playback.current_pick(station);
         if let Some((pick, age)) = recent {
-            let color = match pick.family() {
-                Phase::P => P_COLOR,
-                Phase::S => S_COLOR,
-                Phase::Other => OTHER_COLOR,
-            };
+            let color = phase_color(pick.family());
             let flash = (1.0 - age / playback.speed.max(1.0)).clamp(0.0, 1.0) as f32;
             painter.circle_filled(
                 pos,
@@ -239,7 +236,15 @@ pub(super) fn draw(
     }
 }
 
-fn caption(painter: &Painter, anchor: Pos2, label: String) {
+pub(super) fn phase_color(phase: Phase) -> Color32 {
+    match phase {
+        Phase::P => P_COLOR,
+        Phase::S => S_COLOR,
+        Phase::Other => OTHER_COLOR,
+    }
+}
+
+pub(super) fn caption(painter: &Painter, anchor: Pos2, label: String) {
     let ink = theme::text_muted();
     let galley = painter.layout_no_wrap(label, egui::FontId::proportional(11.0), ink);
     painter.rect_filled(

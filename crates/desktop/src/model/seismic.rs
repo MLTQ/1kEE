@@ -100,6 +100,7 @@ struct Replay {
 #[derive(Default)]
 pub(crate) struct SeismicLayer {
     pub enabled: bool,
+    pub live_stations: crate::station_replay::live::LiveStations,
     pub stream_status: StreamStatus,
     pub station_replay: crate::station_replay::StationReplay,
     quakes: Vec<Quake>,

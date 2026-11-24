@@ -64,11 +64,28 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
   The replay can be paused, scrubbed, or slowed to 1×. For shallow events with
   adequate regional coverage, the `+` marker shows a separate epicenter fit from
   arrival times and station coordinates. The fit uses a constant-velocity regional
-  model, holds catalog depth fixed, and reports its timing residual.
+  model, holds catalog depth fixed, and reports its timing residual. The quake
+  view shows stations with published arrivals and coordinates at the origin time.
+  **Replay → Seismic stations** shows the EarthScope and ORFEUS station inventories
+  for a UTC day. Choose a date and press **Play**, or scrub the timeline to a
+  cluster of arrivals. A gray station has no recent mapped pick. Colored stations
+  flash at recorded USGS arrival times across earthquakes. Hover for the station
+  code, phase, timestamp, and event ID. The controls show archive coverage as it
+  loads. Replays reuse downloaded arrivals until USGS revises the quake.
+  This public replay works without a Factal key.
   [EMSC SeismicPortal, CC BY 4.0](https://www.seismicportal.eu/realtime.html) ·
   [USGS phase data](https://earthquake.usgs.gov/data/products/) ·
   [EarthScope station metadata](https://service.earthscope.org/fdsnws/station/1/) ·
   [ORFEUS station metadata](https://www.orfeus-eu.org/data/eida/webservices/station/)
+- **Live seismic stations** — enable **Layers → Public Data → Live seismic stations**
+  on the live Earth globe. One EarthScope SeedLink connection receives public
+  vertical seismometer and accelerometer channels. Gray dots mark listed stations.
+  Blue-gray dots have delivered samples in the past two minutes. After a channel
+  builds 45 seconds of background, a sudden rise in motion flashes amber. Local
+  disturbances can trigger it too. Published USGS arrivals flash cyan for P,
+  violet for S, and green for other phases when the app receives the pick.
+  Hover for the station code, sample time, motion ratio, and any associated quake.
+  [EarthScope real-time data](https://ds.iris.edu/ds/nodes/dmc/services/seedlink/)
 - **GhostMaps events** — enable **Layers → Public Data → GhostMaps events** on the
   Earth map. The default is the rolling 30-day Common Intelligence Picture.
   Use **Choose KMZ exports** to add the 90-day picture or a dated snapshot.

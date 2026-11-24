@@ -1,6 +1,7 @@
 use crate::event_store;
 use crate::model::{AppModel, EventSeverity};
 use crate::theme;
+use chrono::{DateTime, NaiveDate};
 
 const PANEL_WIDTH: f32 = 480.0;
 /// Maximum history the range slider can reach back (matches the DB pruning window).
@@ -14,13 +15,9 @@ pub fn render_replay_controls(ui: &mut egui::Ui, model: &mut AppModel) {
     }
 
     let map_rect = ui.min_rect();
-    let anchor = egui::pos2(
-        map_rect.center().x - PANEL_WIDTH * 0.5,
-        map_rect.bottom() - 200.0,
-    );
-
     egui::Area::new("replay_controls".into())
-        .fixed_pos(anchor)
+        .pivot(egui::Align2::CENTER_BOTTOM)
+        .fixed_pos(map_rect.center_bottom() - egui::vec2(0.0, 8.0))
         .order(egui::Order::Foreground)
         .interactable(true)
         .show(ui.ctx(), |ui| {
@@ -44,27 +41,26 @@ fn draw_controls(ui: &mut egui::Ui, model: &mut AppModel) {
             egui::RichText::new("REPLAY").small().strong(),
         );
 
-        let event_count = model
-            .replay_state
-            .as_ref()
-            .map(|s| s.events.len())
-            .unwrap_or(0);
-        ui.colored_label(
-            theme::text_muted(),
-            egui::RichText::new(format!(
-                "· {} events · {} → {}",
-                event_count,
-                event_store::unix_to_date_str(model.replay_from_unix),
-                event_store::unix_to_date_str(model.replay_to_unix),
-            ))
-            .small(),
-        );
-
-        if crate::factal_stream::is_history_fetching() {
-            ui.colored_label(
-                egui::Color32::from_rgb(255, 186, 73),
-                egui::RichText::new("⟳").small(),
-            );
+        let station_mode = model.station_day.is_some();
+        if ui.selectable_label(!station_mode, "Events").clicked() && station_mode {
+            model.station_day = None;
+            model.rebuild_replay_state();
+        }
+        if ui
+            .add_enabled(
+                model.active_body == crate::model::ActiveBody::Earth,
+                egui::SelectableLabel::new(station_mode, "Seismic stations"),
+            )
+            .on_hover_text(
+                "Replay the Earth station inventory and USGS phase arrivals for a UTC day",
+            )
+            .clicked()
+            && !station_mode
+        {
+            let date = DateTime::from_timestamp(model.replay_to_unix, 0)
+                .unwrap()
+                .date_naive();
+            model.open_station_day(date, ui.ctx());
         }
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -80,12 +76,135 @@ fn draw_controls(ui: &mut egui::Ui, model: &mut AppModel) {
     ui.add_space(6.0);
     draw_scrub_bar(ui, model);
 
+    if model.station_day.is_some() {
+        draw_station_day(ui, model);
+    } else {
+        draw_event_window(ui, model);
+    }
+
+    // ── Duration slider ───────────────────────────────────────────────────
+    ui.add_space(4.0);
+    let dur_changed = ui
+        .horizontal(|ui| {
+            ui.label(egui::RichText::new("Duration").small());
+            ui.spacing_mut().slider_width = 330.0;
+            ui.add(
+                egui::Slider::new(&mut model.replay_duration_secs, 60_u32..=300)
+                    .show_value(true)
+                    .suffix(" s"),
+            )
+            .changed()
+        })
+        .inner;
+    if dur_changed {
+        if model.station_day.is_some() {
+            if let Some(clock) = &mut model.replay_state {
+                clock.set_duration(f64::from(model.replay_duration_secs));
+            }
+        } else {
+            model.rebuild_replay_state();
+        }
+    }
+
+    // ── Transport controls ────────────────────────────────────────────────
+    ui.add_space(4.0);
+    draw_transport(ui, model);
+}
+
+fn draw_station_day(ui: &mut egui::Ui, model: &mut AppModel) {
+    let day = model.station_day.as_mut().unwrap();
+    let today = chrono::Utc::now().date_naive();
+    let selected = DateTime::from_timestamp(day.from, 0).unwrap().date_naive();
+    let mut load = None;
+    ui.horizontal(|ui| {
+        ui.small("UTC day");
+        if ui.small_button("◀").on_hover_text("Previous day").clicked() {
+            load = selected.pred_opt();
+        }
+        let input = ui.add(
+            egui::TextEdit::singleline(&mut day.date_entry)
+                .desired_width(82.0)
+                .hint_text("YYYY-MM-DD"),
+        );
+        let entered = NaiveDate::parse_from_str(day.date_entry.trim(), "%Y-%m-%d")
+            .ok()
+            .filter(|d| *d <= today);
+        let submit = input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if ui
+            .add_enabled(selected < today, egui::Button::new("▶").small())
+            .on_hover_text("Next day")
+            .clicked()
+        {
+            load = selected.succ_opt();
+        }
+        if ui
+            .add_enabled(entered.is_some(), egui::Button::new("Load day").small())
+            .on_disabled_hover_text("Enter a valid UTC date through today")
+            .clicked()
+            || submit
+        {
+            load = entered;
+        }
+        if let Some(clock) = &model.replay_state {
+            let now = (clock.unix_at_elapsed(clock.wall_elapsed()) as i64).min(day.to - 1);
+            ui.monospace(
+                DateTime::from_timestamp(now, 0)
+                    .unwrap()
+                    .format("%F %T UTC")
+                    .to_string(),
+            );
+        }
+    });
+    ui.horizontal(|ui| {
+        if day.loading() { ui.spinner(); }
+        ui.small(format!("{} stations · {} arrivals", day.stations.len(), day.mapped_picks))
+            .on_hover_text("EarthScope and ORFEUS station inventories. Gray marks a listed station with no recent published USGS phase pick.");
+        if let Some(total) = day.catalog_size {
+            ui.small(format!("{} / {total} quakes checked", day.processed));
+        } else if day.loading() {
+            ui.small("Loading archives…");
+        }
+    });
+    ui.small("Gray · no recent pick     Cyan · P     Violet · S     Green · other phase");
+    if day.loading()
+        && let Some(remaining) = day
+            .cooldown
+            .and_then(|t| t.checked_duration_since(std::time::Instant::now()))
+    {
+        ui.small(format!(
+            "USGS rate limit · retry in {} s",
+            remaining.as_secs() + 1
+        ));
+    }
+    for warning in &day.warnings {
+        ui.small(warning);
+    }
+    if day.failed > 0 || day.unmapped_picks > 0 {
+        ui.small(format!(
+            "Partial coverage · {} quake downloads unavailable · {} arrivals without coordinates",
+            day.failed, day.unmapped_picks
+        ))
+        .on_hover_text(
+            day.last_error
+                .as_deref()
+                .unwrap_or("Station coordinates must match the pick time."),
+        );
+    }
+    if let Some(date) = load {
+        model.open_station_day(date, ui.ctx());
+    }
+}
+
+fn draw_event_window(ui: &mut egui::Ui, model: &mut AppModel) {
     // ── Range slider (time window selection) ──────────────────────────────
     ui.add_space(8.0);
-    ui.colored_label(
-        theme::text_muted(),
-        egui::RichText::new("Time window").small(),
-    );
+    ui.horizontal(|ui| {
+        let count = model.replay_state.as_ref().map_or(0, |s| s.events.len());
+        ui.small(format!("Time window · {count} events"));
+        if crate::factal_stream::is_history_fetching() {
+            ui.spinner();
+        }
+    });
     ui.add_space(2.0);
     let now = event_store::now_unix();
     let mut from_unix = model.replay_from_unix;
@@ -104,28 +223,6 @@ fn draw_controls(ui: &mut egui::Ui, model: &mut AppModel) {
     if range_changed || date_changed {
         model.rebuild_replay_state();
     }
-
-    // ── Duration slider ───────────────────────────────────────────────────
-    ui.add_space(4.0);
-    let dur_changed = ui
-        .horizontal(|ui| {
-            ui.label(egui::RichText::new("Duration").small());
-            ui.spacing_mut().slider_width = 330.0;
-            ui.add(
-                egui::Slider::new(&mut model.replay_duration_secs, 60_u32..=300)
-                    .show_value(true)
-                    .suffix(" s"),
-            )
-            .changed()
-        })
-        .inner;
-    if dur_changed {
-        model.rebuild_replay_state();
-    }
-
-    // ── Transport controls ────────────────────────────────────────────────
-    ui.add_space(4.0);
-    draw_transport(ui, model);
 }
 
 // ── Scrub bar ─────────────────────────────────────────────────────────────────
@@ -156,7 +253,22 @@ fn draw_scrub_bar(ui: &mut egui::Ui, model: &mut AppModel) {
     let sim_span = (sim_to - sim_from).max(1) as f32;
 
     // Event tick marks — drawn before the progress fill so they show through.
-    if let Some(state) = model.replay_state.as_ref() {
+    if let Some(day) = &model.station_day {
+        let peak = day.bins.iter().copied().max().unwrap_or(0);
+        let w = rect.width() / day.bins.len() as f32;
+        for (i, &count) in day.bins.iter().enumerate().filter(|(_, n)| **n > 0) {
+            let height = rect.height() * ((count as f32).ln_1p() / (peak as f32).ln_1p());
+            let x = rect.left() + i as f32 * w;
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(x, rect.bottom() - height),
+                    egui::pos2(x + w, rect.bottom()),
+                ),
+                0.0,
+                egui::Color32::from_rgb(69, 169, 185),
+            );
+        }
+    } else if let Some(state) = model.replay_state.as_ref() {
         for (unix, event) in &state.events {
             let frac = ((*unix - sim_from) as f32 / sim_span).clamp(0.0, 1.0);
             let x = rect.left() + frac * rect.width();

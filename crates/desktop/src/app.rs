@@ -104,6 +104,7 @@ impl DashboardApp {
         factal_stream::history_tick(&mut self.model);
         usgs_stream::tick(&mut self.model);
         self.seismic_stream.tick(ctx, &mut self.model.seismic);
+        self.model.seismic.live_stations.tick(ctx);
         if let Some((point, zoom)) = self.model.seismic.station_replay.tick(ctx.input(|i| i.time)) {
             self.model.focus_station_replay(point, zoom);
         }
@@ -133,6 +134,10 @@ impl DashboardApp {
                 self.model.stellar_jd += self.model.stellar_anim_speed * dt;
                 ctx.request_repaint();
             }
+        }
+
+        if let Some(day) = &mut self.model.station_day {
+            day.poll();
         }
 
         // Advance the replay playhead and request a repaint while running.

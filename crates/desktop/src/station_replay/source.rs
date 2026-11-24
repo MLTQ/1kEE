@@ -11,58 +11,18 @@ use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-const USGS_QUERY: &str = "https://earthquake.usgs.gov/fdsnws/event/1/query";
+pub(super) const USGS_QUERY: &str = "https://earthquake.usgs.gov/fdsnws/event/1/query";
 const USGS_DETAILS: &str = "https://earthquake.usgs.gov/earthquakes/feed/v1.0/detail";
-const STATIONS: &str = "https://service.earthscope.org/fdsnws/station/1/query";
-const EIDA_STATIONS: &str = "https://www.orfeus-eu.org/fdsnws/station/1/query";
+pub(super) const STATIONS: &str = "https://service.earthscope.org/fdsnws/station/1/query";
+pub(super) const EIDA_STATIONS: &str = "https://www.orfeus-eu.org/fdsnws/station/1/query";
 const RESPONSE_LIMIT: u64 = 12 * 1024 * 1024;
 const STATION_BATCH: usize = 250;
+pub(super) const MIN_PICK_MS: i64 = -2_000;
+pub(super) const MAX_PICK_MS: i64 = 5_400_000;
 
 pub(super) fn load(id: &str, cancelled: &AtomicBool) -> Result<Recording, String> {
-    let check_active = || {
-        if cancelled.load(Ordering::Relaxed) {
-            Err("Station replay cancelled.")
-        } else {
-            Ok(())
-        }
-    };
-    check_active()?;
-    let client = Client::builder()
-        .timeout(Duration::from_secs(12))
-        .build()
-        .map_err(|error| format!("Could not start station replay: {error}"))?;
-    let body = read(
-        client.get(format!("{USGS_DETAILS}/{id}.geojson")),
-        "USGS event",
-    );
-    let body = match body {
-        Ok(body) => body,
-        Err(_) => {
-            check_active()?;
-            read(
-                client
-                    .get(USGS_QUERY)
-                    .query(&[("eventid", id), ("format", "geojson")]),
-                "USGS event",
-            )?
-        }
-    };
-    let json: Value = serde_json::from_str(&body).map_err(|_| "Invalid USGS event data.")?;
-    let (title, origin, products) = event(&json)?;
-    let mut picks = None;
-    let mut phase_error = "USGS has no usable phase arrivals for this event.".to_owned();
-    for url in products.into_iter().take(3) {
-        check_active()?;
-        match read(client.get(url), "USGS phase data").and_then(|xml| phase_picks(&xml)) {
-            Ok(parsed) if !parsed.is_empty() => {
-                picks = Some(parsed);
-                break;
-            }
-            Ok(_) => {}
-            Err(error) => phase_error = error,
-        }
-    }
-    let picks = picks.ok_or(phase_error)?;
+    let client = client()?;
+    let (title, origin, picks) = event_picks(&client, id, cancelled)?;
     let time = DateTime::<Utc>::from_timestamp_millis(origin.time_ms)
         .ok_or("Invalid USGS origin time.")?;
     let mut stations = HashMap::new();
@@ -74,7 +34,7 @@ pub(super) fn load(id: &str, cancelled: &AtomicBool) -> Result<Recording, String
             .cloned()
             .collect();
         for batch in missing.chunks(STATION_BATCH) {
-            check_active()?;
+            check_active(cancelled)?;
             match fetch_stations(&client, service, batch, time) {
                 Ok(result) => stations.extend(result),
                 Err(error) => metadata_error = Some(error),
@@ -82,6 +42,72 @@ pub(super) fn load(id: &str, cancelled: &AtomicBool) -> Result<Recording, String
         }
     }
     assemble(title, origin, picks, &stations).map_err(|error| metadata_error.unwrap_or(error))
+}
+
+pub(super) fn client() -> Result<Client, String> {
+    Client::builder()
+        .user_agent(concat!("1kEE/", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("Could not start station replay: {error}"))
+}
+
+pub(super) fn check_active(cancelled: &AtomicBool) -> Result<(), String> {
+    if cancelled.load(Ordering::Relaxed) {
+        return Err("Station replay cancelled.".into());
+    }
+    Ok(())
+}
+
+pub(super) fn event_picks(
+    client: &Client,
+    id: &str,
+    cancelled: &AtomicBool,
+) -> Result<(String, Origin, Picks), String> {
+    check_active(cancelled)?;
+    let body = read(
+        client.get(format!("{USGS_DETAILS}/{id}.geojson")),
+        "USGS event",
+    );
+    let body = match body {
+        Ok(body) => body,
+        Err(_) => {
+            check_active(cancelled)?;
+            read(
+                client
+                    .get(USGS_QUERY)
+                    .query(&[("eventid", id), ("format", "geojson")]),
+                "USGS event",
+            )?
+        }
+    };
+    product_picks(&body, cancelled, |url| {
+        read(client.get(url), "USGS phase data")
+    })
+}
+
+pub(super) fn product_picks(
+    body: &str,
+    cancelled: &AtomicBool,
+    fetch: impl Fn(reqwest::Url) -> Result<String, String>,
+) -> Result<(String, Origin, Picks), String> {
+    let json: Value = serde_json::from_str(body).map_err(|_| "Invalid USGS event data.")?;
+    let (title, origin, products) = event(&json)?;
+    let mut picks = None;
+    let mut phase_error = "USGS has no usable phase arrivals for this event.".to_owned();
+    for url in products.into_iter().take(3) {
+        check_active(cancelled)?;
+        match fetch(url).and_then(|xml| phase_picks(&xml)) {
+            Ok(parsed) if !parsed.is_empty() => {
+                picks = Some(parsed);
+                break;
+            }
+            Ok(_) => {}
+            Err(error) => phase_error = error,
+        }
+    }
+    let picks = picks.ok_or(phase_error)?;
+    Ok((title, origin, picks))
 }
 
 fn event(json: &Value) -> Result<(String, Origin, Vec<reqwest::Url>), String> {
@@ -139,10 +165,17 @@ fn event(json: &Value) -> Result<(String, Origin, Vec<reqwest::Url>), String> {
     ))
 }
 
-fn read(request: RequestBuilder, label: &str) -> Result<String, String> {
+pub(super) fn read(request: RequestBuilder, label: &str) -> Result<String, String> {
     let response = request
         .send()
         .map_err(|error| format!("{label} request failed: {error}"))?;
+    read_response(response, label)
+}
+
+pub(super) fn read_response(
+    response: reqwest::blocking::Response,
+    label: &str,
+) -> Result<String, String> {
     let response = response
         .error_for_status()
         .map_err(|error| format!("{label} request failed: {error}"))?;
@@ -157,7 +190,7 @@ fn read(request: RequestBuilder, label: &str) -> Result<String, String> {
     Ok(body)
 }
 
-type Picks = BTreeMap<StationId, Vec<Pick>>;
+pub(super) type Picks = BTreeMap<StationId, Vec<Pick>>;
 
 fn phase_picks(xml: &str) -> Result<Picks, String> {
     let doc = Document::parse(xml).map_err(|_| "Invalid USGS QuakeML phase data.")?;
@@ -235,14 +268,14 @@ fn field<'a, 'input: 'a>(node: Node<'a, 'input>, name: &str) -> Option<&'a str> 
     child(node, name)?.text().map(str::trim)
 }
 
-fn parse_utc(time: &str) -> Option<DateTime<Utc>> {
+pub(super) fn parse_utc(time: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(time)
         .or_else(|_| DateTime::parse_from_rfc3339(&format!("{time}Z")))
         .ok()
         .map(|time| time.with_timezone(&Utc))
 }
 
-fn point(lat: Option<f64>, lon: Option<f64>) -> Option<GeoPoint> {
+pub(super) fn point(lat: Option<f64>, lon: Option<f64>) -> Option<GeoPoint> {
     let (lat, lon) = (lat?, lon?);
     ((-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon)).then_some(GeoPoint {
         lat: lat as f32,
@@ -250,7 +283,7 @@ fn point(lat: Option<f64>, lon: Option<f64>) -> Option<GeoPoint> {
     })
 }
 
-fn station_id(network: Option<&str>, station: Option<&str>) -> Option<StationId> {
+pub(super) fn station_id(network: Option<&str>, station: Option<&str>) -> Option<StationId> {
     fn token(text: &str) -> bool {
         !text.is_empty()
             && text.len() <= 12
@@ -338,7 +371,9 @@ fn assemble(
             // Reject plainly corrupted timestamps while keeping late teleseismic phases.
             let picks: Vec<_> = picks
                 .into_iter()
-                .filter(|pick| (-2_000..=5_400_000).contains(&(pick.time_ms - origin.time_ms)))
+                .filter(|pick| {
+                    (MIN_PICK_MS..=MAX_PICK_MS).contains(&(pick.time_ms - origin.time_ms))
+                })
                 .collect();
             (!picks.is_empty()).then_some(Observation {
                 station: id,

@@ -246,6 +246,7 @@ pub struct AppModel {
     /// Wall-clock duration of the full replay in seconds (60–300).
     pub replay_duration_secs: u32,
     pub replay_state: Option<ReplayState>,
+    pub(crate) station_day: Option<crate::station_replay::day::StationDay>,
     /// Human-readable status for the history backfill fetch.
     pub replay_history_status: String,
     pub terrain_inventory: TerrainInventory,
@@ -463,6 +464,7 @@ impl AppModel {
             replay_to_str: crate::event_store::unix_to_date_str(crate::event_store::now_unix()),
             replay_duration_secs: 120,
             replay_state: None,
+            station_day: None,
             replay_history_status: String::new(),
             factal_stream_status: if factal_api_key.is_empty() {
                 "inactive".into()
@@ -1073,6 +1075,7 @@ impl AppModel {
         self.stop_event_follow();
         if self.replay_mode {
             // Exit replay
+            self.station_day = None;
             self.replay_mode = false;
             self.replay_state = None;
             return;
@@ -1096,8 +1099,28 @@ impl AppModel {
         self.rebuild_replay_state();
     }
 
+    pub(crate) fn open_station_day(&mut self, date: chrono::NaiveDate, ctx: &egui::Context) {
+        self.globe_view.local_mode = false;
+        if self.target.engaged() {
+            self.target.exit(ctx);
+        }
+        let day =
+            crate::station_replay::day::StationDay::open(date, crate::event_store::now_unix(), ctx);
+        self.replay_state = Some(ReplayState::new_paused(
+            Vec::new(),
+            day.from,
+            day.to,
+            f64::from(self.replay_duration_secs),
+        ));
+        self.station_day = Some(day);
+    }
+
     /// Reload the replay state from the event store with current settings.
     pub fn rebuild_replay_state(&mut self) {
+        // A background event backfill must never replace the station replay clock.
+        if self.station_day.is_some() {
+            return;
+        }
         let events =
             crate::event_store::load_events_in_range(self.replay_from_unix, self.replay_to_unix);
         let wall_duration = self.replay_duration_secs as f64;

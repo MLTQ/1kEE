@@ -11,7 +11,9 @@ fn db() -> &'static Mutex<Option<Connection>> {
     DB.get_or_init(|| Mutex::new(None))
 }
 
-fn with_conn<T, F: FnOnce(&mut Connection) -> rusqlite::Result<T>>(f: F) -> Result<T, String> {
+pub(crate) fn with_conn<T, F: FnOnce(&mut Connection) -> rusqlite::Result<T>>(
+    f: F,
+) -> Result<T, String> {
     let mut guard = db()
         .lock()
         .map_err(|_| "event store lock poisoned".to_string())?;
@@ -46,13 +48,20 @@ pub fn open() {
             occurred_unix  INTEGER NOT NULL,
             raw_json       TEXT    NOT NULL DEFAULT ''
         );
-        CREATE INDEX IF NOT EXISTS idx_occurred ON stored_events(occurred_unix);",
+        CREATE INDEX IF NOT EXISTS idx_occurred ON stored_events(occurred_unix);
+        CREATE TABLE IF NOT EXISTS station_replay_cache (
+            key TEXT PRIMARY KEY, revision INTEGER NOT NULL, stored_at INTEGER NOT NULL, data BLOB NOT NULL
+        );",
     );
     // Prune records older than 365 days.
     let cutoff = now_unix() - 365 * 86_400;
     let _ = conn.execute(
         "DELETE FROM stored_events WHERE occurred_unix < ?1",
         params![cutoff],
+    );
+    let _ = conn.execute(
+        "DELETE FROM station_replay_cache WHERE stored_at < ?1",
+        [now_unix() - 30 * 86_400],
     );
     *db().lock().unwrap() = Some(conn);
 }

@@ -144,6 +144,7 @@ impl AppModel {
         if self.event_follow.enabled() {
             self.stop_event_follow();
         } else if self.active_body == ActiveBody::Earth {
+            self.station_day = None;
             self.replay_mode = false;
             self.replay_state = None;
             self.follow_recaps = FollowRecaps::default();

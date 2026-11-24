@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+miniseed-rs = "0.2.2"
+tokio = { version = "1", features = ["rt", "time", "net"] }
+tokio-tungstenite = { version = "0.24", default-features = false }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 crc32fast = "1"
 libloading = "0.8"
 glam = "0.30"

@@ -16,12 +16,15 @@ use std::sync::Arc;
 
 mod geography;
 mod markers;
+mod live_stations;
 mod projection;
 mod seismic;
+mod station_day;
 mod station_replay;
 
 pub use projection::project_geo;
 pub(crate) use seismic::controls as seismic_controls;
+pub(crate) use live_stations::controls as live_station_controls;
 
 /// Unit-sphere imagery avoids synthetic terrain sampling at every mesh vertex.
 pub(super) fn project_surface(
@@ -331,7 +334,9 @@ pub(super) fn paint_with_layout(
         }
     }
 
+    live_stations::draw(painter, rect, &layout, model, stereo);
     seismic::draw(painter, rect, &layout, model, time, stereo);
+    station_day::draw(painter, rect, &layout, model, stereo);
 
     let selected_event_id = model.selected_event_id.as_deref();
     let selected_camera_id = model.selected_camera_id.as_deref();

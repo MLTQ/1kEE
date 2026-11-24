@@ -228,7 +228,7 @@ fn presentation_buttons(ui: &mut egui::Ui, model: &mut AppModel) {
             ));
         });
     }
-    if model.has_factal_api_key() && button(ui, "REPLAY", model.replay_mode).clicked() {
+    if (model.active_body == ActiveBody::Earth || model.has_factal_api_key()) && button(ui, "REPLAY", model.replay_mode).clicked() {
         model.toggle_replay();
     }
     if model.selected_event_has_factal_brief()
