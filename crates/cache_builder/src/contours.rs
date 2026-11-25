@@ -176,6 +176,276 @@ pub fn tile_contour_count(conn: &Connection, tile: TileKey) -> rusqlite::Result<
     .optional()
 }
 
+pub(crate) fn load_manifest_set(
+    conn: &Connection,
+) -> rusqlite::Result<std::collections::HashSet<(i32, i32, i32)>> {
+    let mut stmt = conn.prepare(
+        "SELECT zoom_bucket, lat_bucket, lon_bucket FROM contour_tile_manifest",
+    )?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+    let mut out = std::collections::HashSet::new();
+    for r in rows {
+        out.insert(r?);
+    }
+    Ok(out)
+}
+
+pub(crate) fn load_manifest_counts(
+    conn: &Connection,
+) -> rusqlite::Result<std::collections::HashMap<(i32, i32, i32), i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT zoom_bucket, lat_bucket, lon_bucket, contour_count FROM contour_tile_manifest",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(((row.get(0)?, row.get(1)?, row.get(2)?), row.get(3)?))
+    })?;
+    let mut out = std::collections::HashMap::new();
+    for r in rows {
+        let (k, v) = r?;
+        out.insert(k, v);
+    }
+    Ok(out)
+}
+
+fn parse_srtm_tile_key(name: &str) -> Option<(i32, i32)> {
+    let stem = name.strip_suffix(".tif")?;
+    let b = stem.as_bytes();
+    if b.len() != 7 {
+        return None;
+    }
+    let lat_sign = match b[0] {
+        b'N' => 1,
+        b'S' => -1,
+        _ => return None,
+    };
+    let lon_sign = match b[3] {
+        b'E' => 1,
+        b'W' => -1,
+        _ => return None,
+    };
+    let lat = std::str::from_utf8(&b[1..3]).ok()?.parse::<i32>().ok()?;
+    let lon = std::str::from_utf8(&b[4..7]).ok()?.parse::<i32>().ok()?;
+    Some((lat * lat_sign, lon * lon_sign))
+}
+
+fn scan_srtm_tiles(srtm_root: &Path) -> (usize, std::collections::HashSet<(i32, i32)>) {
+    let mut total_tifs = 0usize;
+    let mut keys = std::collections::HashSet::new();
+    if let Ok(entries) = fs::read_dir(srtm_root) {
+        for entry in entries.flatten() {
+            let fname_os = entry.file_name();
+            let fname = fname_os.to_string_lossy();
+            if fname.ends_with(".tif") {
+                total_tifs += 1;
+                if let Some(k) = parse_srtm_tile_key(&fname) {
+                    keys.insert(k);
+                }
+            }
+        }
+    }
+    (total_tifs, keys)
+}
+
+fn srtm_tile_paths_from_set(
+    srtm_root: &Path,
+    available: &std::collections::HashSet<(i32, i32)>,
+    bounds: GeoBounds,
+) -> Vec<PathBuf> {
+    let mut tiles = Vec::new();
+    for lat in (bounds.min_lat.floor() as i32)..=(bounds.max_lat.floor() as i32) {
+        for lon in (bounds.min_lon.floor() as i32)..=(bounds.max_lon.floor() as i32) {
+            if !available.contains(&(lat, lon)) {
+                continue;
+            }
+            let ns = if lat >= 0 { 'N' } else { 'S' };
+            let ew = if lon >= 0 { 'E' } else { 'W' };
+            tiles.push(srtm_root.join(format!(
+                "{}{:02}{}{:03}.tif",
+                ns,
+                lat.unsigned_abs(),
+                ew,
+                lon.unsigned_abs()
+            )));
+        }
+    }
+    tiles
+}
+
+fn has_srtm_in_bounds(
+    available: &std::collections::HashSet<(i32, i32)>,
+    bounds: GeoBounds,
+) -> bool {
+    for lat in (bounds.min_lat.floor() as i32)..=(bounds.max_lat.floor() as i32) {
+        for lon in (bounds.min_lon.floor() as i32)..=(bounds.max_lon.floor() as i32) {
+            if available.contains(&(lat, lon)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub(crate) fn read_gpkg_contours_clipped(
+    gpkg_path: &Path,
+    bounds: Option<CoreBounds>,
+) -> rusqlite::Result<Vec<(i64, f32, Vec<u8>)>> {
+    let source = Connection::open_with_flags(gpkg_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    source.busy_timeout(Duration::from_secs(30))?;
+    let table_exists: bool = source
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='contour'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false);
+    if !table_exists {
+        return Ok(Vec::new());
+    }
+    let mut stmt = source
+        .prepare("SELECT fid, geom, elevation_m FROM contour ORDER BY ABS(elevation_m), fid")?;
+    let mut rows = stmt.query([])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        let fid: i64 = row.get(0)?;
+        let geom = row.get_ref(1)?.as_blob()?;
+        let blob = match bounds {
+            Some(b) => {
+                let Some(clipped) = tile_archive::contour_clip::clip_gpkg(geom, b)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?
+                else {
+                    continue;
+                };
+                clipped
+            }
+            None => geom.to_vec(),
+        };
+        let elev: f32 = row.get(2)?;
+        out.push((fid, elev, blob));
+    }
+    Ok(out)
+}
+
+fn read_gpkg_coastlines_clipped(
+    gpkg_path: &Path,
+    bounds: Option<CoreBounds>,
+) -> rusqlite::Result<Vec<(i64, Vec<u8>)>> {
+    let source = Connection::open_with_flags(gpkg_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    source.busy_timeout(Duration::from_secs(30))?;
+    let table_exists: bool = source
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='contour'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false);
+    if !table_exists {
+        return Ok(Vec::new());
+    }
+    let mut stmt = source.prepare("SELECT fid, geom FROM contour ORDER BY fid")?;
+    let mut rows = stmt.query([])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        let fid: i64 = row.get(0)?;
+        let geom = row.get_ref(1)?.as_blob()?;
+        let blob = match bounds {
+            Some(b) => {
+                let Some(clipped) = tile_archive::contour_clip::clip_gpkg(geom, b)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?
+                else {
+                    continue;
+                };
+                clipped
+            }
+            None => geom.to_vec(),
+        };
+        out.push((fid, blob));
+    }
+    Ok(out)
+}
+
+pub(crate) fn write_encoded_tile(
+    conn: &mut Connection,
+    tile: TileKey,
+    encoded_contours: &[(i64, f32, Vec<u8>)],
+    encoded_coastlines: Option<&[(i64, Vec<u8>)]>,
+) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute(
+        "DELETE FROM contour_tiles WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
+        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
+    )?;
+    tx.execute(
+        "DELETE FROM contour_tile_manifest WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
+        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
+    )?;
+    {
+        let mut insert_contour = tx.prepare_cached(
+            "INSERT INTO contour_tiles (zoom_bucket,lat_bucket,lon_bucket,fid,elevation_m,geom)
+             VALUES (?1,?2,?3,?4,?5,?6)",
+        )?;
+        for (fid, elevation_m, blob) in encoded_contours {
+            insert_contour.execute(params![
+                tile.zoom_bucket,
+                tile.lat_bucket,
+                tile.lon_bucket,
+                fid,
+                elevation_m,
+                blob.as_slice()
+            ])?;
+        }
+    }
+    tx.execute(
+        "INSERT INTO contour_tile_manifest (zoom_bucket,lat_bucket,lon_bucket,contour_count,built_at)
+         VALUES (?1,?2,?3,?4,unixepoch())",
+        params![
+            tile.zoom_bucket,
+            tile.lat_bucket,
+            tile.lon_bucket,
+            encoded_contours.len() as i64
+        ],
+    )?;
+
+    if let Some(coastlines) = encoded_coastlines {
+        tx.execute(
+            "DELETE FROM coastline_tiles WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
+            params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
+        )?;
+        tx.execute(
+            "DELETE FROM coastline_tile_manifest WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
+            params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
+        )?;
+        {
+            let mut insert_coast = tx.prepare_cached(
+                "INSERT INTO coastline_tiles (zoom_bucket,lat_bucket,lon_bucket,fid,geom)
+                 VALUES (?1,?2,?3,?4,?5)",
+            )?;
+            for (fid, blob) in coastlines {
+                insert_coast.execute(params![
+                    tile.zoom_bucket,
+                    tile.lat_bucket,
+                    tile.lon_bucket,
+                    fid,
+                    blob.as_slice()
+                ])?;
+            }
+        }
+        tx.execute(
+            "INSERT INTO coastline_tile_manifest (zoom_bucket,lat_bucket,lon_bucket,line_count)
+             VALUES (?1,?2,?3,?4)",
+            params![
+                tile.zoom_bucket,
+                tile.lat_bucket,
+                tile.lon_bucket,
+                coastlines.len() as i64
+            ],
+        )?;
+    }
+
+    tx.commit()
+}
+
 pub fn import_tile(cache_db_path: &Path, tile: TileKey, gpkg_path: &Path) -> rusqlite::Result<()> {
     import_tile_clipped(cache_db_path, tile, gpkg_path, None)
 }
@@ -186,114 +456,9 @@ fn import_tile_clipped(
     gpkg_path: &Path,
     bounds: Option<CoreBounds>,
 ) -> rusqlite::Result<()> {
-    let source = Connection::open(gpkg_path)?;
-    source.busy_timeout(Duration::from_secs(30))?;
-    let mut stmt = source
-        .prepare("SELECT fid, geom, elevation_m FROM contour ORDER BY ABS(elevation_m), fid")?;
-    let mut rows = stmt.query([])?;
-
+    let encoded = read_gpkg_contours_clipped(gpkg_path, bounds)?;
     let mut cache = open_cache_db(cache_db_path)?;
-    let tx = cache.transaction()?;
-    tx.execute(
-        "DELETE FROM contour_tiles WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
-        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
-    )?;
-    tx.execute(
-        "DELETE FROM contour_tile_manifest WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
-        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
-    )?;
-
-    let mut count = 0usize;
-    while let Some(row) = rows.next()? {
-        let fid: i64 = row.get(0)?;
-        let geom: Vec<u8> = row.get(1)?;
-        let Some(geom) = clip_geometry(geom, bounds)? else {
-            continue;
-        };
-        let elev: f32 = row.get(2)?;
-        tx.execute(
-            "INSERT INTO contour_tiles (zoom_bucket,lat_bucket,lon_bucket,fid,elevation_m,geom)
-             VALUES (?1,?2,?3,?4,?5,?6)",
-            params![
-                tile.zoom_bucket,
-                tile.lat_bucket,
-                tile.lon_bucket,
-                fid,
-                elev,
-                geom
-            ],
-        )?;
-        count += 1;
-    }
-
-    tx.execute(
-        "INSERT INTO contour_tile_manifest (zoom_bucket,lat_bucket,lon_bucket,contour_count,built_at)
-         VALUES (?1,?2,?3,?4,unixepoch())",
-        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket, count as i64],
-    )?;
-    tx.commit()
-}
-
-fn import_coastline(cache_db_path: &Path, tile: TileKey, gpkg_path: &Path) -> rusqlite::Result<()> {
-    let source = Connection::open(gpkg_path)?;
-    source.busy_timeout(Duration::from_secs(30))?;
-
-    let table_exists: bool = source
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='contour'",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .map(|n| n > 0)
-        .unwrap_or(false);
-
-    let mut cache = open_cache_db(cache_db_path)?;
-    let tx = cache.transaction()?;
-    tx.execute(
-        "DELETE FROM coastline_tiles WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
-        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
-    )?;
-    tx.execute(
-        "DELETE FROM coastline_tile_manifest WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3",
-        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
-    )?;
-
-    let mut count = 0usize;
-    if table_exists {
-        let mut stmt = source.prepare("SELECT fid, geom FROM contour ORDER BY fid")?;
-        let mut rows = stmt.query([])?;
-        while let Some(row) = rows.next()? {
-            let fid: i64 = row.get(0)?;
-            let geom: Vec<u8> = row.get(1)?;
-            let Some(geom) = clip_geometry(geom, earth_core_bounds(tile))? else {
-                continue;
-            };
-            tx.execute(
-                "INSERT INTO coastline_tiles (zoom_bucket,lat_bucket,lon_bucket,fid,geom)
-                 VALUES (?1,?2,?3,?4,?5)",
-                params![
-                    tile.zoom_bucket,
-                    tile.lat_bucket,
-                    tile.lon_bucket,
-                    fid,
-                    geom
-                ],
-            )?;
-            count += 1;
-        }
-    }
-
-    tx.execute(
-        "INSERT INTO coastline_tile_manifest (zoom_bucket,lat_bucket,lon_bucket,line_count)
-         VALUES (?1,?2,?3,?4)",
-        params![
-            tile.zoom_bucket,
-            tile.lat_bucket,
-            tile.lon_bucket,
-            count as i64
-        ],
-    )?;
-    tx.commit()
+    write_encoded_tile(&mut cache, tile, &encoded, None)
 }
 
 // ── GDAL helpers (mirrors desktop gdal.rs) ────────────────────────────────────
@@ -302,6 +467,7 @@ pub(crate) fn run_gdal(mut cmd: Command, label: &str) -> std::io::Result<()> {
     let start = Instant::now();
     let timeout = Duration::from_secs(120);
     let mut child = cmd.spawn()?;
+    let mut delay_ms = 2u64;
     loop {
         if let Some(status) = child.try_wait()? {
             return if status.success() {
@@ -320,30 +486,9 @@ pub(crate) fn run_gdal(mut cmd: Command, label: &str) -> std::io::Result<()> {
                 format!("{label} timed out"),
             ));
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(delay_ms));
+        delay_ms = (delay_ms * 2).min(50);
     }
-}
-
-fn srtm_tile_paths(srtm_root: &Path, bounds: GeoBounds) -> Vec<PathBuf> {
-    let mut tiles = Vec::new();
-    for lat in (bounds.min_lat.floor() as i32)..=(bounds.max_lat.floor() as i32) {
-        for lon in (bounds.min_lon.floor() as i32)..=(bounds.max_lon.floor() as i32) {
-            let ns = if lat >= 0 { 'N' } else { 'S' };
-            let ew = if lon >= 0 { 'E' } else { 'W' };
-            let name = format!(
-                "{}{:02}{}{:03}.tif",
-                ns,
-                lat.unsigned_abs(),
-                ew,
-                lon.unsigned_abs()
-            );
-            let path = srtm_root.join(&name);
-            if path.exists() {
-                tiles.push(path);
-            }
-        }
-    }
-    tiles
 }
 
 fn run_gdalwarp(
@@ -361,6 +506,11 @@ fn run_gdalwarp(
         "bilinear",
         "-dstnodata",
         "-32768",
+        "-wo",
+        "NUM_THREADS=1",
+        "--config",
+        "GDAL_PAM_ENABLED",
+        "NO",
         "-te",
         &format!("{:.15}", bounds.min_lon),
         &format!("{:.15}", bounds.min_lat),
@@ -396,6 +546,15 @@ fn run_gdal_contour(
         "-32768",
         "-nln",
         "contour",
+        "--config",
+        "GDAL_PAM_ENABLED",
+        "NO",
+        "--config",
+        "OGR_SQLITE_SYNCHRONOUS",
+        "OFF",
+        "--config",
+        "OGR_SQLITE_CACHE",
+        "64",
     ]);
     cmd.arg(in_tif);
     cmd.arg(out_gpkg);
@@ -416,6 +575,15 @@ fn run_gdal_coastline(gdal_contour: &Path, in_tif: &Path, out_gpkg: &Path) -> st
         "-32768",
         "-nln",
         "contour",
+        "--config",
+        "GDAL_PAM_ENABLED",
+        "NO",
+        "--config",
+        "OGR_SQLITE_SYNCHRONOUS",
+        "OFF",
+        "--config",
+        "OGR_SQLITE_CACHE",
+        "64",
     ]);
     cmd.arg(in_tif);
     cmd.arg(out_gpkg);
@@ -514,14 +682,7 @@ pub fn build_contour_tiles(
     if !srtm_root.exists() {
         return Err(format!("SRTM root does not exist: {}", srtm_root.display()));
     }
-    let srtm_tile_count = fs::read_dir(srtm_root)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("tif"))
-                .count()
-        })
-        .unwrap_or(0);
+    let (srtm_tile_count, srtm_set) = scan_srtm_tiles(srtm_root);
     if srtm_tile_count == 0 {
         return Err(format!(
             "No .tif files found directly in SRTM root: {}. \
@@ -593,6 +754,8 @@ pub fn build_contour_tiles(
     }
 
     let conn = open_cache_db(cache_db_path).map_err(|e| e.to_string())?;
+    let existing = load_manifest_set(&conn).unwrap_or_default();
+    drop(conn);
     let mut work: Vec<TileWork> = Vec::new();
     let mut skipped = 0usize;
 
@@ -605,19 +768,18 @@ pub fn build_contour_tiles(
                     lat_bucket,
                     lon_bucket,
                 };
-                if tile_exists(&conn, tile) {
+                if existing.contains(&(tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket)) {
                     skipped += 1;
                     continue;
                 }
-                let source = CoreTile::srtm(spec.half_extent_deg, lat_bucket, lon_bucket)
-                .source;
+                let source = CoreTile::srtm(spec.half_extent_deg, lat_bucket, lon_bucket).source;
                 let tile_bounds = GeoBounds {
                     min_lat: source.min_lat as f32,
                     max_lat: source.max_lat as f32,
                     min_lon: source.min_lon as f32,
                     max_lon: source.max_lon as f32,
                 };
-                let srtm_tiles = srtm_tile_paths(srtm_root, tile_bounds);
+                let srtm_tiles = srtm_tile_paths_from_set(srtm_root, &srtm_set, tile_bounds);
                 if !srtm_tiles.is_empty() {
                     work.push(TileWork {
                         tile,
@@ -628,7 +790,6 @@ pub fn build_contour_tiles(
             }
         }
     }
-    drop(conn);
 
     let total = work.len() + skipped;
     let to_build = work.len();
@@ -661,10 +822,20 @@ pub fn build_contour_tiles(
         Built(f32, f32, f32, f32),
         Error(String),
     }
+    type GdalReady = Result<
+        (
+            TileKey,
+            CoreBounds,
+            Vec<(i64, f32, Vec<u8>)>,
+            Option<Vec<(i64, Vec<u8>)>>,
+        ),
+        String,
+    >;
+    let (write_tx, write_rx) = mpsc::sync_channel::<GdalReady>(32);
     let (tx, rx) = mpsc::channel::<Outcome>();
     let done_count = Arc::new(AtomicUsize::new(0));
 
-    // Capture by-value for the spawned thread
+    // Capture by-value for the spawned threads
     let gdalwarp = gdalwarp.clone();
     let gdal_contour = gdal_contour.clone();
     let cache_db_path = cache_db_path.to_path_buf();
@@ -677,7 +848,7 @@ pub fn build_contour_tiles(
             .build()
             .expect("rayon pool");
         pool.install(|| {
-            work.into_par_iter().for_each_with(tx, |tx, w| {
+            work.into_par_iter().for_each_with(write_tx, |tx, w| {
                 let TileWork {
                     tile,
                     spec,
@@ -693,7 +864,7 @@ pub fn build_contour_tiles(
                 cleanup(&[&tmp_tif, &tmp_gpkg, &tmp_coast_gpkg]);
 
                 let core = CoreTile::srtm(spec.half_extent_deg, tile.lat_bucket, tile.lon_bucket);
-                let outcome = (|| {
+                let ready = (|| {
                     run_gdalwarp(
                         &gdalwarp,
                         &srtm_tiles,
@@ -707,30 +878,60 @@ pub fn build_contour_tiles(
                     .map_err(|e| format!("gdalwarp: {e}"))?;
                     run_gdal_contour(&gdal_contour, &tmp_tif, &tmp_gpkg, spec.interval_m)
                         .map_err(|e| format!("gdal_contour: {e}"))?;
-                    import_tile_clipped(&cache_db_path, tile, &tmp_gpkg, Some(core.core))
-                        .map_err(|e| format!("db import: {e}"))?;
-                    if run_gdal_coastline(&gdal_contour, &tmp_tif, &tmp_coast_gpkg).is_ok() {
-                        let _ = import_coastline(&cache_db_path, tile, &tmp_coast_gpkg);
-                    }
-                    Ok::<_, String>(())
-                })();
-
-                cleanup(&[&tmp_tif, &tmp_gpkg, &tmp_coast_gpkg]);
-                done_arc.fetch_add(1, Ordering::Relaxed);
-                let _ = tx.send(match outcome {
-                    Ok(()) => Outcome::Built(
-                        core.core.min_lat as f32,
-                        core.core.max_lat as f32,
-                        core.core.min_lon as f32,
-                        core.core.max_lon as f32,
-                    ),
-                    Err(e) => Outcome::Error(format!(
+                    let contours = read_gpkg_contours_clipped(&tmp_gpkg, Some(core.core))
+                        .map_err(|e| format!("gpkg read: {e}"))?;
+                    let coastlines = if run_gdal_coastline(&gdal_contour, &tmp_tif, &tmp_coast_gpkg)
+                        .is_ok()
+                    {
+                        read_gpkg_coastlines_clipped(&tmp_coast_gpkg, Some(core.core)).ok()
+                    } else {
+                        None
+                    };
+                    Ok((tile, core.core, contours, coastlines))
+                })()
+                .map_err(|e: String| {
+                    format!(
                         "z{} ({},{}) — {e}",
                         tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket
-                    )),
+                    )
                 });
+
+                cleanup(&[&tmp_tif, &tmp_gpkg, &tmp_coast_gpkg]);
+                let _ = tx.send(ready);
             });
         });
+    });
+
+    // Dedicated SQLite writer thread: single persistent Connection, zero writer-lock contention.
+    std::thread::spawn(move || {
+        let mut conn = match open_cache_db(&cache_db_path) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tx.send(Outcome::Error(format!("open cache DB failed: {e}")));
+                return;
+            }
+        };
+        for item in write_rx {
+            done_arc.fetch_add(1, Ordering::Relaxed);
+            let outcome = match item {
+                Ok((tile, core_bounds, contours, coastlines)) => {
+                    match write_encoded_tile(&mut conn, tile, &contours, coastlines.as_deref()) {
+                        Ok(()) => Outcome::Built(
+                            core_bounds.min_lat as f32,
+                            core_bounds.max_lat as f32,
+                            core_bounds.min_lon as f32,
+                            core_bounds.max_lon as f32,
+                        ),
+                        Err(e) => Outcome::Error(format!(
+                            "z{} ({},{}) — db import: {e}",
+                            tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket
+                        )),
+                    }
+                }
+                Err(msg) => Outcome::Error(msg),
+            };
+            let _ = tx.send(outcome);
+        }
     });
 
     // ── Phase 3: drain results, report progress ───────────────────────────────
@@ -910,20 +1111,15 @@ pub fn build_contour_tiles_native(
     zoom_buckets: &[i32],
     progress: &mut dyn FnMut(ContourBuildProgress),
 ) -> Result<String, String> {
-    use crate::marching_squares::{NativeSrtmSampler, build_tile_contours_on_grid};
+    use crate::marching_squares::{
+        NativeSrtmSampler, SharedSrtmCache, build_tile_contours_on_grid,
+    };
 
     // ── Validate SRTM root ────────────────────────────────────────────────────
     if !srtm_root.exists() {
         return Err(format!("SRTM root does not exist: {}", srtm_root.display()));
     }
-    let srtm_tile_count = fs::read_dir(srtm_root)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("tif"))
-                .count()
-        })
-        .unwrap_or(0);
+    let (srtm_tile_count, srtm_set) = scan_srtm_tiles(srtm_root);
     if srtm_tile_count == 0 {
         return Err(format!(
             "No .tif files found in SRTM root: {}",
@@ -943,6 +1139,7 @@ pub fn build_contour_tiles_native(
 
     let native_db = open_cache_db(cache_db_path).map_err(|e| e.to_string())?;
     tile_archive::native_contours::initialize(&native_db).map_err(|e| e.to_string())?;
+    let existing = load_manifest_set(&native_db).unwrap_or_default();
     drop(native_db);
 
     let specs = all_specs();
@@ -959,7 +1156,6 @@ pub fn build_contour_tiles_native(
         "Scanning tiles…",
     ));
 
-    let conn = open_cache_db(cache_db_path).map_err(|e| e.to_string())?;
     let mut work: Vec<(TileKey, GeoBounds, FocusContourSpec)> = Vec::new();
     let mut skipped = 0usize;
 
@@ -972,12 +1168,11 @@ pub fn build_contour_tiles_native(
                     lat_bucket,
                     lon_bucket,
                 };
-                if tile_exists(&conn, tile) {
+                if existing.contains(&(tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket)) {
                     skipped += 1;
                     continue;
                 }
-                let source = CoreTile::srtm(spec.half_extent_deg, lat_bucket, lon_bucket)
-                .source;
+                let source = CoreTile::srtm(spec.half_extent_deg, lat_bucket, lon_bucket).source;
                 let tile_bounds = GeoBounds {
                     min_lat: source.min_lat as f32,
                     max_lat: source.max_lat as f32,
@@ -985,13 +1180,12 @@ pub fn build_contour_tiles_native(
                     max_lon: source.max_lon as f32,
                 };
                 // Only plan tiles that have at least one SRTM tile in range.
-                if !srtm_tile_paths(srtm_root, tile_bounds).is_empty() {
+                if has_srtm_in_bounds(&srtm_set, tile_bounds) {
                     work.push((tile, tile_bounds, *spec));
                 }
             }
         }
     }
-    drop(conn);
 
     // Interleave zoom levels so all levels progress simultaneously — avoids the
     // visual artifact where low-zoom (large) tiles complete first and flood the
@@ -1047,14 +1241,14 @@ pub fn build_contour_tiles_native(
         format!("Starting {num_threads} compute workers + 1 writer"),
     ));
 
-    // compute workers → writer thread
+    // compute workers → writer thread (pre-clipped & pre-encoded WKB so writer only inserts)
     type ComputeResult = (
         TileKey,
         GeoBounds,
-        Vec<crate::marching_squares::ContourLine>,
-        Vec<Vec<(f32, f32)>>,
+        Vec<(i64, f32, Vec<u8>)>,
+        Vec<(i64, Vec<u8>)>,
     );
-    let (compute_tx, compute_rx) = mpsc::channel::<ComputeResult>();
+    let (compute_tx, compute_rx) = mpsc::sync_channel::<ComputeResult>(32);
 
     // writer thread → main thread (outcome events)
     enum Outcome {
@@ -1064,9 +1258,9 @@ pub fn build_contour_tiles_native(
     let (outcome_tx, rx) = mpsc::channel::<Outcome>();
     let done_count = Arc::new(AtomicUsize::new(0));
 
-    let srtm_root_owned = srtm_root.to_path_buf();
+    let shared_srtm = SharedSrtmCache::new(srtm_root.to_path_buf(), 64);
 
-    // ── Compute thread: fans work out to rayon, sends raw results ────────────
+    // ── Compute thread: fans work out to rayon with shared SRTM LRU ──────────
     std::thread::spawn(move || {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(num_threads)
@@ -1074,24 +1268,50 @@ pub fn build_contour_tiles_native(
             .expect("rayon pool");
         pool.install(|| {
             work.into_par_iter()
-                .for_each_with(compute_tx, |tx, (tile, _tile_bounds, spec)| {
-                    let mut sampler = NativeSrtmSampler::new(srtm_root_owned.clone());
-                    let core = CoreTile::srtm(spec.half_extent_deg, tile.lat_bucket, tile.lon_bucket);
-                    let (contours, coastlines) = build_tile_contours_on_grid(
-                        FocusContourSpec {
-                            raster_size: core.raster_size,
-                            ..spec
-                        },
-                        core.source,
-                        |lat, lon| sampler.sample(lat, lon),
-                    );
-                    let display = GeoBounds {
-                        min_lat: core.core.min_lat as f32,
-                        max_lat: core.core.max_lat as f32,
-                        min_lon: core.core.min_lon as f32,
-                        max_lon: core.core.max_lon as f32,
-                    };
-                    let _ = tx.send((tile, display, contours, coastlines));
+                .map_init(
+                    || NativeSrtmSampler::with_shared(shared_srtm.clone()),
+                    |sampler, (tile, _tile_bounds, spec)| {
+                        let core =
+                            CoreTile::srtm(spec.half_extent_deg, tile.lat_bucket, tile.lon_bucket);
+                        let (contours, coastlines) = build_tile_contours_on_grid(
+                            FocusContourSpec {
+                                raster_size: core.raster_size,
+                                ..spec
+                            },
+                            core.source,
+                            |lat, lon| sampler.sample(lat, lon),
+                        );
+                        let encoded_contours: Vec<(i64, f32, Vec<u8>)> = contours
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(fid, line)| {
+                                let blob = tile_archive::contour_clip::clip_points_f32(
+                                    &line.points,
+                                    core.core,
+                                )?;
+                                Some((fid as i64, line.elevation_m, blob))
+                            })
+                            .collect();
+                        let encoded_coastlines: Vec<(i64, Vec<u8>)> = coastlines
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(fid, pts)| {
+                                let blob =
+                                    tile_archive::contour_clip::clip_points_f32(pts, core.core)?;
+                                Some((fid as i64, blob))
+                            })
+                            .collect();
+                        let display = GeoBounds {
+                            min_lat: core.core.min_lat as f32,
+                            max_lat: core.core.max_lat as f32,
+                            min_lon: core.core.min_lon as f32,
+                            max_lon: core.core.max_lon as f32,
+                        };
+                        (tile, display, encoded_contours, encoded_coastlines)
+                    },
+                )
+                .for_each_with(compute_tx, |tx, result| {
+                    let _ = tx.send(result);
                 });
         });
         // compute_tx drops here, closing the channel → writer thread exits
@@ -1110,8 +1330,13 @@ pub fn build_contour_tiles_native(
                 return;
             }
         };
-        for (tile, tile_bounds, contours, coastlines) in compute_rx {
-            let outcome = write_tile_native(&mut conn, tile, &contours, &coastlines);
+        for (tile, tile_bounds, encoded_contours, encoded_coastlines) in compute_rx {
+            let outcome = write_encoded_tile(
+                &mut conn,
+                tile,
+                &encoded_contours,
+                Some(&encoded_coastlines),
+            );
             done_arc.fetch_add(1, Ordering::Relaxed);
             let _ = outcome_tx.send(match outcome {
                 Ok(()) => Outcome::Built(

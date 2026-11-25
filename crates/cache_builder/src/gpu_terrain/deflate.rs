@@ -1,8 +1,10 @@
 //! Read native 512² Deflate tiles in file order and inflate while the drive reads ahead.
-use super::window::{TiffReader, Window};
+use super::window::{CountedFile, TiffReader, Window};
 use hashlink::lru_cache::LruCache;
 use libdeflater::Decompressor;
+use rayon::prelude::*;
 use std::{
+    fs::File,
     io::{self, Read, Seek, SeekFrom},
     path::Path,
     sync::{Arc, mpsc},
@@ -13,9 +15,20 @@ use tiff::{
     tags::{ByteOrder, Tag},
 };
 
-const SIDE: u32 = 512;
+pub(super) const SIDE: u32 = 512;
 const COLUMNS: u32 = 3601u32.div_ceil(SIDE);
 const TILE_BYTES: usize = (SIDE * SIDE * 2) as usize;
+
+/// Cached validated IFD metadata for a standard 512×512 Deflate Int16 SRTM GeoTIFF.
+pub(super) struct FastTiffMeta {
+    pub modified: Option<SystemTime>,
+    pub size: u64,
+    pub lat: i32,
+    pub lon: i32,
+    pub byte_order: ByteOrder,
+    pub offsets: Vec<u64>,
+    pub lengths: Vec<u64>,
+}
 
 #[derive(PartialEq, Eq, Hash)]
 struct BlockKey {
@@ -99,7 +112,7 @@ fn read_batches(
     while let Some(first) = rest.first() {
         let mut count = 1;
         // Keep reads bounded; skip unrelated tiles and overviews in sparse windows.
-        while count < rest.len().min(4)
+        while count < rest.len().min(8)
             && rest[count].offset >= rest[count - 1].end
             && rest[count].offset - rest[count - 1].end <= 4096
         {
@@ -148,42 +161,244 @@ fn read_ahead(
     })
 }
 
+fn block_bounds(index: u32) -> Window {
+    let x = index % COLUMNS * SIDE;
+    let y = index / COLUMNS * SIDE;
+    let width = SIDE.min(3601 - x);
+    let height = SIDE.min(3601 - y);
+    Window {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+fn validate_block(index: u32, pixels: &[i16]) -> io::Result<()> {
+    let bounds = block_bounds(index);
+    for dy in 0..bounds.height as usize {
+        let row = dy * SIDE as usize;
+        if pixels[row..row + bounds.width as usize]
+            .iter()
+            .any(|&v| v != i16::MIN && !(-12000..=10000).contains(&v))
+        {
+            return Err(io::Error::other("unexpected SRTM elevation range"));
+        }
+    }
+    Ok(())
+}
+
+/// Fast row copy for blocks already validated upon inflation or cache insertion.
+fn copy_block_trusted(index: u32, pixels: &[i16], window: Window, samples: &mut [i16]) -> Window {
+    let bounds = block_bounds(index);
+    let width = bounds.width as usize;
+    let height = bounds.height as usize;
+    let dx = (bounds.x - window.x) as usize;
+    let y_off = (bounds.y - window.y) as usize;
+    let stride = window.width as usize;
+    for dy in 0..height {
+        let row = dy * SIDE as usize;
+        let start = (y_off + dy) * stride + dx;
+        samples[start..start + width].copy_from_slice(&pixels[row..row + width]);
+    }
+    bounds
+}
+
 fn copy_block(
     index: u32,
     pixels: &[i16],
     window: Window,
     samples: &mut [i16],
 ) -> io::Result<Window> {
-    let x = index % COLUMNS * SIDE;
-    let y = index / COLUMNS * SIDE;
-    let width = SIDE.min(3601 - x);
-    let height = SIDE.min(3601 - y);
-    for dy in 0..height as usize {
-        let row = dy * SIDE as usize;
-        let start =
-            (y as usize - window.y as usize + dy) * window.width as usize + (x - window.x) as usize;
-        super::window::copy_heights(
-            &mut samples[start..start + width as usize],
-            &pixels[row..row + width as usize],
-        )
-        .map_err(io::Error::other)?;
+    validate_block(index, pixels)?;
+    Ok(copy_block_trusted(index, pixels, window, samples))
+}
+
+fn decode_batch(
+    batch: ReadBatch,
+    order: ByteOrder,
+    inflate: &mut Decompressor,
+    scratch: &mut Vec<i16>,
+    needed: Window,
+    window: Window,
+    samples: &mut [i16],
+    cache: &mut BlockCache,
+    key: &impl Fn(u32) -> Option<BlockKey>,
+) -> io::Result<()> {
+    let base = batch.blocks[0].offset;
+    if batch.blocks.len() == 1 {
+        let block = batch.blocks[0];
+        let bytes = &batch.bytes[(block.offset - base) as usize..(block.end - base) as usize];
+        let written = inflate
+            .zlib_decompress(bytes, bytemuck::cast_slice_mut(scratch))
+            .map_err(io::Error::other)?;
+        if written != TILE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "incomplete TIFF Deflate block",
+            ));
+        }
+        if order != ByteOrder::native() {
+            scratch.iter_mut().for_each(|p| *p = p.swap_bytes());
+        }
+        let bounds = copy_block(block.index, scratch, window, samples)?;
+        if !needed.contains(bounds)
+            && let Some(k) = key(block.index)
+        {
+            let next = if cache.0.len() == cache.0.capacity() {
+                cache.0.remove_lru().unwrap().1
+            } else {
+                vec![0i16; TILE_BYTES / 2]
+            };
+            cache.0.insert(k, std::mem::replace(scratch, next));
+        }
+        return Ok(());
     }
-    Ok(Window {
-        x,
-        y,
-        width,
-        height,
-    })
+
+    // Parallel zlib inflate + byte-swap + range validation across CPU cores.
+    let decoded_blocks: Vec<Vec<i16>> = batch
+        .blocks
+        .par_iter()
+        .map_init(Decompressor::new, |decomp, &block| -> io::Result<Vec<i16>> {
+            let bytes = &batch.bytes[(block.offset - base) as usize..(block.end - base) as usize];
+            let mut buf = vec![0i16; TILE_BYTES / 2];
+            let written = decomp
+                .zlib_decompress(bytes, bytemuck::cast_slice_mut(&mut buf))
+                .map_err(io::Error::other)?;
+            if written != TILE_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "incomplete TIFF Deflate block",
+                ));
+            }
+            if order != ByteOrder::native() {
+                buf.iter_mut().for_each(|p| *p = p.swap_bytes());
+            }
+            validate_block(block.index, &buf)?;
+            Ok(buf)
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+
+    // Copy into output window and update LRU cache in deterministic file order.
+    for (block, buf) in batch.blocks.into_iter().zip(decoded_blocks) {
+        let bounds = copy_block_trusted(block.index, &buf, window, samples);
+        if !needed.contains(bounds)
+            && let Some(k) = key(block.index)
+        {
+            if cache.0.len() == cache.0.capacity() {
+                let _ = cache.0.remove_lru();
+            }
+            cache.0.insert(k, buf);
+        }
+    }
+    Ok(())
 }
 
 pub(super) struct Stats {
     pub hits: u32,
     pub cpu: Duration,
+    pub fast_meta: Option<FastTiffMeta>,
+}
+
+/// Fast path for previously validated 512×512 Deflate Int16 SRTM tiles.
+/// Avoids TIFF IFD parsing completely and skips `File::open` when all blocks
+/// hit the host `BlockCache`.
+pub(super) fn read_window_fast(
+    path: &Path,
+    meta: &FastTiffMeta,
+    cache: &mut BlockCache,
+    needed: Window,
+    window: Window,
+    samples: &mut [i16],
+) -> Result<Option<(Stats, u64, f64)>, Box<dyn std::error::Error>> {
+    let path_arc: Arc<Path> = path.into();
+    let key = |index| {
+        meta.modified.map(|modified| BlockKey {
+            path: Arc::clone(&path_arc),
+            modified,
+            size: meta.size,
+            index,
+        })
+    };
+    let mut hits = 0;
+    let mut cpu = Duration::ZERO;
+    let mut missing = Vec::new();
+    for y in (window.y..window.y + window.height).step_by(SIDE as usize) {
+        for x in (window.x..window.x + window.width).step_by(SIDE as usize) {
+            let index = y / SIDE * COLUMNS + x / SIDE;
+            if let Some(pixels) = key(index).and_then(|k| cache.0.get(&k)) {
+                let start = Instant::now();
+                copy_block_trusted(index, pixels, window, samples);
+                cpu += start.elapsed();
+                hits += 1;
+                continue;
+            }
+            let offset = *meta
+                .offsets
+                .get(index as usize)
+                .ok_or("missing TIFF block offset")?;
+            let length = *meta
+                .lengths
+                .get(index as usize)
+                .ok_or("missing TIFF block length")?;
+            let end = offset
+                .checked_add(length)
+                .ok_or("invalid TIFF block range")?;
+            if length == 0 || length > 2 * TILE_BYTES as u64 {
+                return Ok(None);
+            }
+            if end > meta.size {
+                return Err("truncated TIFF block".into());
+            }
+            missing.push(Block { index, offset, end });
+        }
+    }
+    if missing.is_empty() {
+        return Ok(Some((
+            Stats {
+                hits,
+                cpu,
+                fast_meta: None,
+            },
+            0,
+            0.0,
+        )));
+    }
+    let mut reader = CountedFile::new(File::open(path)?);
+    let mut inflate = Decompressor::new();
+    let mut scratch = vec![0i16; TILE_BYTES / 2];
+    read_ahead(&mut reader, &mut missing, |batch| {
+        let start = Instant::now();
+        decode_batch(
+            batch,
+            meta.byte_order,
+            &mut inflate,
+            &mut scratch,
+            needed,
+            window,
+            samples,
+            cache,
+            &key,
+        )?;
+        cpu += start.elapsed();
+        Ok(())
+    })?;
+    Ok(Some((
+        Stats {
+            hits,
+            cpu,
+            fast_meta: None,
+        },
+        reader.bytes_read(),
+        reader.io_ms(),
+    )))
 }
 
 pub(super) fn read_window(
     decoder: &mut TiffReader,
     path: &Path,
+    lat: i32,
+    lon: i32,
     cache: &mut BlockCache,
     needed: Window,
     window: Window,
@@ -208,10 +423,10 @@ pub(super) fn read_window(
     let reader = decoder.inner();
     let meta = reader.get_ref().file.metadata()?;
     let modified = meta.modified().ok();
-    let path: Arc<Path> = path.into();
+    let path_arc: Arc<Path> = path.into();
     let key = |index| {
         modified.map(|modified| BlockKey {
-            path: Arc::clone(&path),
+            path: Arc::clone(&path_arc),
             modified,
             size: meta.len(),
             index,
@@ -223,9 +438,9 @@ pub(super) fn read_window(
     for y in (window.y..window.y + window.height).step_by(SIDE as usize) {
         for x in (window.x..window.x + window.width).step_by(SIDE as usize) {
             let index = y / SIDE * COLUMNS + x / SIDE;
-            if let Some(pixels) = key(index).and_then(|key| cache.0.get(&key)) {
+            if let Some(pixels) = key(index).and_then(|k| cache.0.get(&k)) {
                 let start = Instant::now();
-                copy_block(index, pixels, window, samples)?;
+                copy_block_trusted(index, pixels, window, samples);
                 cpu += start.elapsed();
                 hits += 1;
                 continue;
@@ -249,43 +464,38 @@ pub(super) fn read_window(
             missing.push(Block { index, offset, end });
         }
     }
-    if missing.is_empty() {
-        return Ok(Some(Stats { hits, cpu }));
+    if !missing.is_empty() {
+        let mut inflate = Decompressor::new();
+        let mut scratch = vec![0i16; TILE_BYTES / 2];
+        read_ahead(reader, &mut missing, |batch| {
+            let start = Instant::now();
+            decode_batch(
+                batch,
+                order,
+                &mut inflate,
+                &mut scratch,
+                needed,
+                window,
+                samples,
+                cache,
+                &key,
+            )?;
+            cpu += start.elapsed();
+            Ok(())
+        })?;
     }
-    let mut inflate = Decompressor::new();
-    let mut pixels = vec![0i16; TILE_BYTES / 2];
-    read_ahead(reader, &mut missing, |batch| {
-        let start = Instant::now();
-        let base = batch.blocks[0].offset;
-        for block in batch.blocks {
-            let bytes = &batch.bytes[(block.offset - base) as usize..(block.end - base) as usize];
-            let written = inflate
-                .zlib_decompress(bytes, bytemuck::cast_slice_mut(&mut pixels))
-                .map_err(io::Error::other)?;
-            if written != TILE_BYTES {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "incomplete TIFF Deflate block",
-                ));
-            }
-            if order != ByteOrder::native() {
-                pixels.iter_mut().for_each(|p| *p = p.swap_bytes());
-            }
-            let bounds = copy_block(block.index, &pixels, window, samples)?;
-            if !needed.contains(bounds)
-                && let Some(key) = key(block.index)
-            {
-                // Recycle the evicted block as the next decoder scratch area.
-                let next = if cache.0.len() == cache.0.capacity() {
-                    cache.0.remove_lru().unwrap().1
-                } else {
-                    vec![0i16; TILE_BYTES / 2]
-                };
-                cache.0.insert(key, std::mem::replace(&mut pixels, next));
-            }
-        }
-        cpu += start.elapsed();
-        Ok(())
-    })?;
-    Ok(Some(Stats { hits, cpu }))
+    let fast_meta = Some(FastTiffMeta {
+        modified,
+        size: meta.len(),
+        lat,
+        lon,
+        byte_order: order,
+        offsets,
+        lengths,
+    });
+    Ok(Some(Stats {
+        hits,
+        cpu,
+        fast_meta,
+    }))
 }

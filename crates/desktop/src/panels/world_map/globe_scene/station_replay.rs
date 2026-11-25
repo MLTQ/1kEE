@@ -14,7 +14,7 @@ pub(super) fn is_active(model: &AppModel) -> bool {
     model.seismic.enabled && model.seismic.station_replay.playback.is_some()
 }
 
-pub(super) fn controls(ui: &mut egui::Ui, model: &mut AppModel, time: f64) -> bool {
+pub(super) fn controls(ui: &mut egui::Ui, model: &mut AppModel, time: f64) {
     if let Some(playback) = &mut model.seismic.station_replay.playback {
         let recording = &playback.recording;
         ui.small(&recording.title);
@@ -23,6 +23,15 @@ pub(super) fn controls(ui: &mut egui::Ui, model: &mut AppModel, time: f64) -> bo
             recording.stations.len(),
             recording.total_stations
         )).on_hover_text("Stations with a published phase arrival for this earthquake and coordinates valid at its origin time. The regional fit uses a subset of nearby arrivals.");
+        egui::ComboBox::from_id_salt("recorded-station-waveform")
+            .selected_text("Station seismogram…").show_ui(ui, |ui| {
+                for obs in &recording.stations {
+                    if let Some(pick) = obs.picks.iter().min_by_key(|p| p.time_ms)
+                        && ui.selectable_label(false, obs.station.to_string()).clicked() {
+                        model.seismic.seismogram.arrival(obs.station.clone(), pick.clone(), recording.title.clone());
+                    }
+                }
+            });
         match &recording.fit {
             Ok(fit) => {
                 ui.small(format!(
@@ -75,7 +84,7 @@ pub(super) fn controls(ui: &mut egui::Ui, model: &mut AppModel, time: f64) -> bo
         if exit {
             model.seismic.station_replay.stop();
         }
-        return true;
+        return;
     }
 
     if model.seismic.station_replay.is_loading() {
@@ -86,7 +95,7 @@ pub(super) fn controls(ui: &mut egui::Ui, model: &mut AppModel, time: f64) -> bo
         if ui.small_button("Cancel").clicked() {
             model.seismic.station_replay.stop();
         }
-        return true;
+        return;
     }
 
     let selected_id = model.selected_event_id.as_deref();
@@ -118,14 +127,11 @@ pub(super) fn controls(ui: &mut egui::Ui, model: &mut AppModel, time: f64) -> bo
     if let Some(error) = &model.seismic.station_replay.status {
         ui.small(error);
     }
-    if let Some(id) = request {
-        model.seismic.stop_replay();
-        if let Some((point, zoom)) = model.seismic.station_replay.open(&id, ui.ctx(), time) {
-            model.focus_station_replay(point, zoom);
-        }
-        return true;
+    if let Some(id) = request
+        && let Some((point, zoom)) = model.seismic.station_replay.open(&id, ui.ctx(), time)
+    {
+        model.focus_station_replay(point, zoom);
     }
-    false
 }
 
 pub(super) fn draw(
@@ -219,6 +225,9 @@ pub(super) fn draw(
     if let Some((_, station, recent)) = hovered
         && let Some(pointer) = pointer
     {
+        if let Some(pick) = recent.map(|(p, _)| p).or_else(|| station.picks.first()) {
+            crate::panels::seismogram::station_click(painter, pointer, &station.station, Some((pick, &recording.title)));
+        }
         let label = match recent {
             Some((pick, _)) => format!(
                 "{} · {} · {:+.3} s",

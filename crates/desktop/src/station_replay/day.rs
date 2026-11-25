@@ -230,6 +230,85 @@ mod tests {
     }
 
     #[test]
+    fn follow_stops_once_at_earliest_mapped_arrival_then_resumes_touring() {
+        use crate::model::AppModel;
+        let mut model = AppModel::new();
+        model.factal_api_key.clear();
+        model.events = vec![crate::model::EventRecord {
+            id: "factal-live".into(),
+            title: "Live report".into(),
+            summary: String::new(),
+            severity: crate::model::EventSeverity::Advisory,
+            location_name: "City".into(),
+            location: GeoPoint { lat: 51., lon: 0. },
+            source: "Test".into(),
+            occurred_at: String::new(),
+            factal_brief: Some(crate::model::FactalBrief {
+                factal_id: "live".into(),
+                severity_value: None,
+                occurred_at_raw: None,
+                point_wkt: None,
+                vertical: None,
+                subvertical: None,
+                topics: vec![],
+                content: None,
+                raw_json_pretty: String::new(),
+            }),
+        }];
+        model.toggle_event_follow();
+        model.tick_event_follow(0.);
+        assert_eq!(model.selected_event_id.as_deref(), Some("factal-live"));
+        model.tick_event_follow(301.);
+        assert!(model.follow_recaps.active.is_some());
+        // Deterministic origin clock. Picks arrive unordered, before coordinates.
+        let start = chrono::Utc::now().timestamp_millis() + 1;
+        let quake: Arc<str> = "test-quake".into();
+        let picks = vec![
+            (station("LATE"), pick("P", start + 3500)),
+            (station("FIRST"), pick("S", start + 4000)),
+            (station("UNMAPPED"), pick("P", start + 300)),
+            (station("FIRST"), pick("P", start + 1000)),
+        ];
+        let live = &mut model.seismic.live_stations;
+        live.follow.observe(&"old".into(), start - 60000, &picks);
+        live.follow.observe(&quake, start, &picks);
+        assert!(live.follow.next(&live.stations).is_none());
+        for (code, lat) in [("LATE", 10.), ("FIRST", 39.)] {
+            live.stations
+                .entry(station(code))
+                .or_default()
+                .epochs
+                .push(Epoch {
+                    point: GeoPoint { lat, lon: -74. },
+                    start_ms: 0,
+                    end_ms: i64::MAX,
+                });
+        }
+        // A revised origin arriving before the station is visited is the same earthquake.
+        live.follow.observe(&quake, start + 1, &picks);
+        model.tick_event_follow(302.);
+        assert!(model.follow_recaps.active.is_none());
+        let target = model.selected_event().unwrap();
+        assert_eq!(target.id, "station-arrival-test-quake");
+        assert_eq!(target.location.lat, 39.);
+        let req = model.seismic.seismogram.request.as_ref().unwrap();
+        assert_eq!(req.station, station("FIRST"));
+        assert_eq!(req.arrival.as_ref().unwrap().0.time_ms, start + 1000);
+        assert!(model.seismic.seismogram.open);
+        model.seismic.seismogram.open = false;
+        let live = &mut model.seismic.live_stations;
+        live.follow.observe(&quake, start, &picks);
+        assert!(live.follow.next(&live.stations).is_none());
+        model.tick_event_follow(313.);
+        assert!(model.globe_view.zoom > 1.);
+        assert!(!model.seismic.seismogram.open);
+        model.tick_event_follow(313. + f64::from(model.event_follow.dwell_seconds()));
+        assert_eq!(model.selected_event_id.as_deref(), Some("factal-live"));
+        model.stop_event_follow();
+        assert!(!model.event_follow.enabled());
+    }
+
+    #[test]
     fn replay_uses_station_epochs_and_absolute_pick_times_across_earthquakes() {
         let mut day = StationDay::new(DAY, DAY * 2);
         let start = day.from * 1000;

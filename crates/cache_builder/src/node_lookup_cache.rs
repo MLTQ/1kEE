@@ -1,11 +1,15 @@
-//! Bounded per-worker reuse of immutable node-store blocks across OSM ways.
-use super::{INDEX_STRIDE, NodeLookup};
+//! Bounded per-worker LRU reuse of immutable node-store blocks across OSM ways.
+use super::NodeLookup;
+use hashlink::lru_cache::LruCache;
 
-const BLOCKS: usize = 64; // At most 4 MiB of node bytes per active Rayon task.
+#[cfg(not(test))]
+const BLOCKS: usize = 512; // At most 32 MiB of node bytes per active Rayon worker.
+#[cfg(test)]
+const BLOCKS: usize = 64;
 
 pub struct LookupSession<'a> {
     lookup: &'a NodeLookup,
-    blocks: Vec<Option<(u64, Vec<u8>)>>,
+    blocks: LruCache<u64, Vec<u8>>,
     queries: Vec<(u64, u64, usize)>,
     #[cfg(test)]
     reads: usize,
@@ -15,7 +19,7 @@ impl<'a> LookupSession<'a> {
     pub(super) fn new(lookup: &'a NodeLookup) -> Self {
         Self {
             lookup,
-            blocks: (0..BLOCKS).map(|_| None).collect(),
+            blocks: LruCache::new(BLOCKS),
             queries: Vec::new(),
             #[cfg(test)]
             reads: 0,
@@ -38,22 +42,23 @@ impl<'a> LookupSession<'a> {
             while last < self.queries.len() && self.queries[last].0 == start {
                 last += 1;
             }
-            // Direct mapping bounds memory and avoids shared cache locks or
-            // an LRU scan. Collisions replace a block; correctness is unchanged.
-            let slot = (start / INDEX_STRIDE) as usize % BLOCKS;
-            if self.blocks[slot]
-                .as_ref()
-                .is_none_or(|(key, _)| *key != start)
-            {
-                let mut bytes = self.blocks[slot].take().map(|(_, b)| b).unwrap_or_default();
+            if !self.blocks.contains_key(&start) {
+                let mut bytes = if self.blocks.len() == self.blocks.capacity() {
+                    self.blocks
+                        .remove_lru()
+                        .map(|(_, b)| b)
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 #[cfg(test)]
                 {
                     self.reads += 1;
                 }
                 self.lookup.read_block(start, end, &mut bytes)?;
-                self.blocks[slot] = Some((start, bytes));
+                self.blocks.insert(start, bytes);
             }
-            if let Some((_, bytes)) = &self.blocks[slot] {
+            if let Some(bytes) = self.blocks.get(&start) {
                 for &(_, _, index) in &self.queries[first..last] {
                     results[index] = NodeLookup::search_block(bytes, ids[index]);
                 }
@@ -67,7 +72,7 @@ impl<'a> LookupSession<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flat_node_store::NodeWriter;
+    use crate::flat_node_store::{INDEX_STRIDE, NodeWriter};
 
     #[test]
     #[ignore = "read-only real planet/node-store benchmark; requires ONEKEE_PLANET_BENCH_PBF, NODES, and OFFSET"]
@@ -185,7 +190,6 @@ mod tests {
             session
                 .blocks
                 .iter()
-                .flatten()
                 .map(|(_, b)| b.len())
                 .sum::<usize>()
                 <= BLOCKS * INDEX_STRIDE as usize * 16

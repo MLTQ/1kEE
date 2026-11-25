@@ -150,6 +150,10 @@ impl AppModel {
             self.follow_recaps = FollowRecaps::default();
             self.globe_view.stop_motion();
             self.event_follow.enable(&self.events);
+            self.seismic
+                .live_stations
+                .follow
+                .set_enabled(true, chrono::Utc::now().timestamp_millis());
             // Warm the one-day cache once per follow session, independently of live polling.
             let now = crate::event_store::now_unix();
             if self.has_factal_api_key()
@@ -168,6 +172,7 @@ impl AppModel {
         self.follow_recaps = FollowRecaps::default();
         if self.event_follow.enabled() {
             self.event_follow.stop();
+            self.seismic.live_stations.follow.set_enabled(false, 0);
             self.globe_view.stop_motion();
         }
     }
@@ -199,6 +204,18 @@ impl AppModel {
         if !self.event_follow.enabled() {
             return;
         }
+        let live = &mut self.seismic.live_stations;
+        let station = if self.event_follow.at_station(now) {
+            None
+        } else {
+            live.follow.next(&live.stations)
+        };
+        if station.is_some() {
+            if let Some(recap) = self.follow_recaps.active.take() {
+                recap.restore(&mut self.globe_view);
+            }
+            self.follow_recaps.live_since = Some(now);
+        }
         if let Some(recap) = &mut self.follow_recaps.active {
             if !recap.tick(&mut self.globe_view, now) {
                 return;
@@ -208,7 +225,7 @@ impl AppModel {
             self.follow_recaps.live_since = Some(now);
         } else {
             let since = *self.follow_recaps.live_since.get_or_insert(now);
-            if now - since >= LIVE_SECONDS {
+            if now - since >= LIVE_SECONDS && !self.event_follow.at_station(now) {
                 let region = RecapRegion::ALL[self.follow_recaps.next];
                 self.follow_recaps.next = (self.follow_recaps.next + 1) % RecapRegion::ALL.len();
                 self.event_follow.release_camera();
@@ -226,11 +243,39 @@ impl AppModel {
                 return;
             }
         }
-        if let Some(id) = self.event_follow.tick(&mut self.globe_view, now) {
+        let quake_stop = station.map(|stop| {
+            let time = chrono::DateTime::from_timestamp_millis(stop.pick.time_ms).unwrap();
+            let event = EventRecord {
+                id: format!("station-arrival-{}", stop.event),
+                title: format!("Earthquake · {}", stop.station),
+                summary: format!(
+                    "Earliest mapped {} arrival · USGS {}",
+                    stop.pick.phase, stop.event
+                ),
+                occurred_at: time.to_rfc3339(),
+                severity: super::EventSeverity::Unrated,
+                location_name: stop.station.to_string(),
+                location: stop.point,
+                source: "USGS phase data".into(),
+                factal_brief: None,
+            };
+            self.seismic
+                .seismogram
+                .arrival(stop.station, stop.pick, stop.event.to_string());
+            event
+        });
+        let is_quake = quake_stop.is_some();
+        let selected = if is_quake {
+            self.event_follow
+                .tick_with_stop(&mut self.globe_view, now, quake_stop)
+        } else {
+            self.event_follow.tick(&mut self.globe_view, now)
+        };
+        if let Some(id) = selected {
             self.focused_city_id = None;
             self.selected_event_id = Some(id);
             self.selected_camera_id = self.nearby_cameras(250.0).first().map(|c| c.id.clone());
-            self.factal_brief_open = true;
+            self.factal_brief_open = !is_quake;
         }
     }
 }

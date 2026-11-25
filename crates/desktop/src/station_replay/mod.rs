@@ -1,3 +1,4 @@
+pub(crate) mod waveform;
 pub(crate) mod day;
 pub(crate) mod live;
 mod locate;

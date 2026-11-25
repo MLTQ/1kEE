@@ -8,18 +8,22 @@ use crate::util::{
     canonical_industrial_class, canonical_military_class, canonical_pipeline_class,
     canonical_port_class, canonical_power_class, canonical_railway_class, canonical_road_class,
     canonical_surv_class, canonical_tree_class, canonical_waterway_class, expand_bounds,
-    focus_cells_for_bounds, parse_voltage_kv, point_in_bounds, polyline_bounds,
+    focus_cells_iter, parse_voltage_kv, point_in_bounds, polyline_bounds,
 };
 use osmpbf::{BlobDecode, BlobReader};
+use rayon::prelude::*;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const ROAD_FLUSH_THRESHOLD: usize = 100_000;
 const NODE_INSERT_BATCH: usize = 50_000;
+const PBF_READ_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+const BBOX_BATCH_BLOBS: usize = 64;
 /// Bound the work replayed by a resumed node scan even over sparse areas where
 /// the retained-node batch does not fill for a long time.
 const NODE_CHECKPOINT_SCAN_INTERVAL: usize = 1_000_000;
@@ -27,13 +31,14 @@ const NODE_PROGRESS_SCAN_INTERVAL: usize = 2_000_000;
 
 // ── Position-tracking reader ──────────────────────────────────────────────────
 //
-// Wraps a plain `File` and counts every byte delivered to the BlobReader.
+// Wraps a buffered `File` and counts every byte delivered to the BlobReader.
 // Because PBF blobs are length-prefixed and BlobReader reads exactly one blob
-// per iterator step, `bytes_read` equals the file offset of the *start of the
-// next* blob after each `next()` call — a safe resume point.
+// per iterator step, `pos` equals the exact logical file offset of the *start
+// of the next* blob after each `next()` call — a safe resume point, while the
+// 4 MiB `BufReader` eliminates per-header/per-blob `read()` syscalls.
 
 pub(crate) struct PosReader {
-    inner: File,
+    inner: BufReader<File>,
     pos: Arc<AtomicU64>,
 }
 
@@ -45,7 +50,7 @@ impl Read for PosReader {
     }
 }
 
-// `File` is Send; `Arc<AtomicU64>` is Send.
+// `BufReader<File>` is Send; `Arc<AtomicU64>` is Send.
 unsafe impl Send for PosReader {}
 
 /// Open `planet_path` seeked to `start_offset` and wrap in a `BlobReader`.
@@ -63,7 +68,7 @@ pub(crate) fn open_planet_at(
     }
     let pos = Arc::new(AtomicU64::new(start_offset));
     let reader = BlobReader::new(PosReader {
-        inner: file,
+        inner: BufReader::with_capacity(PBF_READ_BUFFER_BYTES, file),
         pos: pos.clone(),
     });
     Ok((reader, pos))
@@ -252,7 +257,7 @@ fn collect_candidate_nodes(
     progress: &mut dyn FnMut(RoadBuildProgress),
 ) -> Result<(), String> {
     let start = resume_offset.unwrap_or(0);
-    let (reader, pos) = open_planet_at(planet_path, start)?;
+    let (mut reader, pos) = open_planet_at(planet_path, start)?;
 
     let mut scanned = 0usize;
     let mut kept = 0usize;
@@ -260,25 +265,44 @@ fn collect_candidate_nodes(
     let mut next_checkpoint_at = NODE_CHECKPOINT_SCAN_INTERVAL;
     let mut next_progress_at = NODE_PROGRESS_SCAN_INTERVAL;
 
-    for blob_result in reader {
-        let blob = blob_result.map_err(|e| e.to_string())?;
-        let decoded = blob.decode().map_err(|e| e.to_string())?;
-        let BlobDecode::OsmData(block) = decoded else {
-            continue;
-        };
+    loop {
+        let blobs: Vec<_> = reader
+            .by_ref()
+            .take(BBOX_BATCH_BLOBS)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        if blobs.is_empty() {
+            break;
+        }
+        let partials: Vec<(usize, Vec<(i64, GeoPoint)>)> = blobs
+            .par_iter()
+            .map(|blob| -> Result<(usize, Vec<(i64, GeoPoint)>), String> {
+                let decoded = blob.decode().map_err(|e| e.to_string())?;
+                let BlobDecode::OsmData(block) = decoded else {
+                    return Ok((0, Vec::new()));
+                };
+                let mut local_scanned = 0usize;
+                let mut local_kept = Vec::new();
+                for element in block.elements() {
+                    let (node_id, lat, lon) = match element {
+                        osmpbf::Element::Node(n) => (n.id(), n.lat() as f32, n.lon() as f32),
+                        osmpbf::Element::DenseNode(n) => (n.id(), n.lat() as f32, n.lon() as f32),
+                        _ => continue,
+                    };
+                    let point = GeoPoint { lat, lon };
+                    if point_in_bounds(point, bounds) {
+                        local_kept.push((node_id, point));
+                    }
+                    local_scanned += 1;
+                }
+                Ok((local_scanned, local_kept))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
 
-        for element in block.elements() {
-            let (node_id, lat, lon) = match element {
-                osmpbf::Element::Node(n) => (n.id(), n.lat() as f32, n.lon() as f32),
-                osmpbf::Element::DenseNode(n) => (n.id(), n.lat() as f32, n.lon() as f32),
-                _ => continue,
-            };
-            let point = GeoPoint { lat, lon };
-            if point_in_bounds(point, bounds) {
-                batch.push((node_id, point));
-                kept += 1;
-            }
-            scanned += 1;
+        for (local_scanned, local_kept) in partials {
+            scanned += local_scanned;
+            kept += local_kept.len();
+            batch.extend(local_kept);
         }
 
         // Keep both the candidate-node rows and the offset in one transaction.
@@ -359,7 +383,7 @@ fn collect_all_features_by_cell(
     }
 
     let start = resume_offset.unwrap_or(0);
-    let (reader, pos) = open_planet_at(&command.planet_path, start)?;
+    let (mut reader, pos) = open_planet_at(&command.planet_path, start)?;
 
     // Per-feature-type accumulators
     let mut seen_road_ids: HashSet<i64> = HashSet::new();
@@ -392,581 +416,368 @@ fn collect_all_features_by_cell(
     let mut govt_by_cell: HashMap<(i32, i32), Vec<WayFeature>> = HashMap::new();
     let mut surv_by_cell: HashMap<(i32, i32), Vec<WayFeature>> = HashMap::new();
 
+    struct MatchedBboxWay {
+        way_id: i64,
+        way_bounds: GeoBounds,
+        points: Vec<GeoPoint>,
+        name: Option<String>,
+        road_class: Option<&'static str>,
+        waterway_class: Option<&'static str>,
+        building_class: Option<&'static str>,
+        tree_class: Option<&'static str>,
+        military_class: Option<&'static str>,
+        industrial_class: Option<&'static str>,
+        port_class: Option<&'static str>,
+        govt_class: Option<&'static str>,
+        surv_class: Option<&'static str>,
+        power_class: Option<&'static str>,
+        raw_railway: Option<&'static str>,
+        pipeline_class: Option<&'static str>,
+        aeroway_class: Option<&'static str>,
+        comm_class: Option<&'static str>,
+    }
+
     let mut scanned_ways = 0usize;
+    let mut next_progress_ways = 250_000usize;
     let mut feature_count = 0usize;
     let mut touched_cells: HashSet<(i32, i32)> = HashSet::new();
     let mut written_cells = 0usize;
     let mut buffered = 0usize;
 
-    for blob_result in reader {
-        let blob = blob_result.map_err(|e| e.to_string())?;
-        let decoded = blob.decode().map_err(|e| e.to_string())?;
-        let BlobDecode::OsmData(block) = decoded else {
-            continue;
-        };
+    loop {
+        let blobs: Vec<_> = reader
+            .by_ref()
+            .take(BBOX_BATCH_BLOBS)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        if blobs.is_empty() {
+            break;
+        }
 
-        for element in block.elements() {
-            let osmpbf::Element::Way(way) = element else {
-                continue;
+        let partials: Vec<Vec<MatchedBboxWay>> = blobs
+            .par_iter()
+            .map(|blob| -> Result<Vec<MatchedBboxWay>, String> {
+                let decoded = blob.decode().map_err(|e| e.to_string())?;
+                let BlobDecode::OsmData(block) = decoded else {
+                    return Ok(Vec::new());
+                };
+                let mut matched = Vec::new();
+                let mut points_buf: Vec<GeoPoint> = Vec::new();
+
+                for way in block.groups().flat_map(|g| g.ways()) {
+                    let mut road_class: Option<&'static str> = None;
+                    let mut waterway_class: Option<&'static str> = None;
+                    let mut building_class: Option<&'static str> = None;
+                    let mut tree_class: Option<&'static str> = None;
+                    let mut military_class: Option<&'static str> = None;
+                    let mut industrial_class: Option<&'static str> = None;
+                    let mut port_class: Option<&'static str> = None;
+                    let mut govt_class: Option<&'static str> = None;
+                    let mut surv_class: Option<&'static str> = None;
+                    let mut raw_name: Option<&str> = None;
+
+                    let mut raw_power: Option<&str> = None;
+                    let mut raw_voltage: Option<&str> = None;
+                    let mut raw_railway: Option<&'static str> = None;
+                    let mut raw_pipeline = false;
+                    let mut raw_substance: Option<&str> = None;
+                    let mut raw_aeroway: Option<&str> = None;
+                    let mut raw_aerodrome_intl = false;
+                    let mut raw_man_made: Option<&str> = None;
+                    let mut raw_tower_type: Option<&str> = None;
+
+                    for (key, value) in way.tags() {
+                        match key {
+                            "highway" => road_class = canonical_road_class(value),
+                            "waterway" => waterway_class = canonical_waterway_class(value),
+                            "building" => building_class = canonical_building_class(value),
+                            "natural" | "landuse" => {
+                                if tree_class.is_none() {
+                                    tree_class = canonical_tree_class(key, value);
+                                }
+                                if industrial_class.is_none() {
+                                    industrial_class = canonical_industrial_class(key, value);
+                                }
+                            }
+                            "military" => military_class = canonical_military_class(key, value),
+                            "power" => raw_power = Some(value),
+                            "voltage" => raw_voltage = Some(value),
+                            "railway" => raw_railway = canonical_railway_class(value),
+                            "man_made" => {
+                                if value == "pipeline" {
+                                    raw_pipeline = true;
+                                } else {
+                                    if industrial_class.is_none() {
+                                        industrial_class = canonical_industrial_class(key, value);
+                                    }
+                                    raw_man_made = Some(value);
+                                    if port_class.is_none() {
+                                        port_class = canonical_port_class(key, value);
+                                    }
+                                    if surv_class.is_none() {
+                                        surv_class = canonical_surv_class(key, value);
+                                    }
+                                }
+                            }
+                            "substance" => raw_substance = Some(value),
+                            "aeroway" => raw_aeroway = Some(value),
+                            "aerodrome:type" => {
+                                if value == "international" {
+                                    raw_aerodrome_intl = true;
+                                }
+                            }
+                            "tower:type" => raw_tower_type = Some(value),
+                            "amenity" => {
+                                if govt_class.is_none() {
+                                    govt_class = canonical_govt_class(key, value);
+                                }
+                                if port_class.is_none() {
+                                    port_class = canonical_port_class(key, value);
+                                }
+                            }
+                            "office" | "government" => {
+                                if govt_class.is_none() {
+                                    govt_class = canonical_govt_class(key, value);
+                                }
+                            }
+                            "harbour" | "leisure" => {
+                                if port_class.is_none() {
+                                    port_class = canonical_port_class(key, value);
+                                }
+                            }
+                            "surveillance" => {
+                                if surv_class.is_none() {
+                                    surv_class = canonical_surv_class(key, value);
+                                }
+                            }
+                            "name" if raw_name.is_none() => raw_name = Some(value),
+                            _ => {}
+                        }
+                    }
+
+                    let voltage_kv = raw_voltage.and_then(parse_voltage_kv);
+                    let power_class = raw_power.and_then(|pt| canonical_power_class(pt, voltage_kv));
+                    let pipeline_class = if raw_pipeline {
+                        Some(canonical_pipeline_class(raw_substance.unwrap_or("")))
+                    } else {
+                        None
+                    };
+                    let aeroway_class =
+                        raw_aeroway.and_then(|a| canonical_aeroway_class(a, raw_aerodrome_intl));
+                    let comm_class =
+                        raw_man_made.and_then(|m| canonical_comm_class(m, raw_tower_type));
+
+                    let any_match = (command.build_roads && road_class.is_some())
+                        || (command.build_waterways && waterway_class.is_some())
+                        || (command.build_buildings && building_class.is_some())
+                        || (command.build_trees && tree_class.is_some())
+                        || (command.build_power && power_class.is_some())
+                        || (command.build_rail && raw_railway.is_some())
+                        || (command.build_pipeline && pipeline_class.is_some())
+                        || (command.build_aeroway && aeroway_class.is_some())
+                        || (command.build_military && military_class.is_some())
+                        || (command.build_comm && comm_class.is_some())
+                        || (command.build_industrial && industrial_class.is_some())
+                        || (command.build_port && port_class.is_some())
+                        || (command.build_government && govt_class.is_some())
+                        || (command.build_surveillance && surv_class.is_some());
+                    if !any_match {
+                        continue;
+                    }
+
+                    points_buf.clear();
+                    for id in way.refs() {
+                        if let Some(&pt) = node_map.get(&id) {
+                            points_buf.push(pt);
+                        }
+                    }
+                    if points_buf.len() < 2 {
+                        continue;
+                    }
+
+                    let way_bounds = polyline_bounds(&points_buf);
+                    if !bounds_intersect(way_bounds, bounds) {
+                        continue;
+                    }
+
+                    matched.push(MatchedBboxWay {
+                        way_id: way.id(),
+                        way_bounds,
+                        points: points_buf.clone(),
+                        name: raw_name.map(str::to_owned),
+                        road_class,
+                        waterway_class,
+                        building_class,
+                        tree_class,
+                        military_class,
+                        industrial_class,
+                        port_class,
+                        govt_class,
+                        surv_class,
+                        power_class,
+                        raw_railway,
+                        pipeline_class,
+                        aeroway_class,
+                        comm_class,
+                    });
+                }
+                Ok(matched)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        macro_rules! push_bbox_feature {
+            ($enabled:expr, $cls:expr, $seen:expr, $map:expr, $is_poly:expr, $w:expr) => {
+                if $enabled {
+                    if let Some(cls) = $cls {
+                        if $seen.insert($w.way_id) {
+                            let mut cells = focus_cells_iter($w.way_bounds).peekable();
+                            let feature = WayFeature {
+                                way_id: $w.way_id,
+                                feature_class: Cow::Borrowed(cls),
+                                name: $w.name.clone(),
+                                points: $w.points.clone(),
+                                is_polygon: $is_poly,
+                            };
+                            while let Some(cell) = cells.next() {
+                                touched_cells.insert(cell);
+                                if cells.peek().is_none() {
+                                    $map.entry(cell).or_default().push(feature);
+                                    break;
+                                } else {
+                                    $map.entry(cell).or_default().push(feature.clone());
+                                }
+                            }
+                            feature_count += 1;
+                            buffered += 1;
+                        }
+                    }
+                }
             };
+        }
 
-            let mut road_class: Option<&'static str> = None;
-            let mut waterway_class: Option<&'static str> = None;
-            let mut building_class: Option<&'static str> = None;
-            let mut tree_class: Option<&'static str> = None;
-            let mut military_class: Option<&'static str> = None;
-            let mut industrial_class: Option<&'static str> = None;
-            let mut port_class: Option<&'static str> = None;
-            let mut govt_class: Option<&'static str> = None;
-            let mut surv_class: Option<&'static str> = None;
-            let mut name: Option<String> = None;
+        for batch_ways in partials {
+            for w in batch_ways {
+                scanned_ways += 1;
 
-            // Multi-tag raw values for features that need correlation
-            let mut raw_power: Option<String> = None;
-            let mut raw_voltage: Option<String> = None;
-            let mut raw_railway: Option<&'static str> = None;
-            let mut raw_pipeline = false; // man_made=pipeline found
-            let mut raw_substance: Option<String> = None;
-            let mut raw_aeroway: Option<String> = None;
-            let mut raw_aerodrome_intl = false;
-            let mut raw_man_made: Option<String> = None;
-            let mut raw_tower_type: Option<String> = None;
-
-            for (key, value) in way.tags() {
-                match key {
-                    "highway" => road_class = canonical_road_class(value),
-                    "waterway" => waterway_class = canonical_waterway_class(value),
-                    "building" => building_class = canonical_building_class(value),
-                    "natural" | "landuse" => {
-                        if tree_class.is_none() {
-                            tree_class = canonical_tree_class(key, value);
-                        }
-                        if industrial_class.is_none() {
-                            industrial_class = canonical_industrial_class(key, value);
-                        }
-                    }
-                    "military" => military_class = canonical_military_class(key, value),
-                    "power" => raw_power = Some(value.to_owned()),
-                    "voltage" => raw_voltage = Some(value.to_owned()),
-                    "railway" => raw_railway = canonical_railway_class(value),
-                    "man_made" => {
-                        if value == "pipeline" {
-                            raw_pipeline = true;
-                        } else {
-                            if industrial_class.is_none() {
-                                industrial_class = canonical_industrial_class(key, value);
-                            }
-                            // collect for later correlation with tower:type
-                            raw_man_made = Some(value.to_owned());
-                            if port_class.is_none() {
-                                port_class = canonical_port_class(key, value);
-                            }
-                            if surv_class.is_none() {
-                                surv_class = canonical_surv_class(key, value);
-                            }
-                        }
-                    }
-                    "substance" => raw_substance = Some(value.to_owned()),
-                    "aeroway" => raw_aeroway = Some(value.to_owned()),
-                    "aerodrome:type" => {
-                        if value == "international" {
-                            raw_aerodrome_intl = true;
-                        }
-                    }
-                    "tower:type" => raw_tower_type = Some(value.to_owned()),
-                    "amenity" => {
-                        if govt_class.is_none() {
-                            govt_class = canonical_govt_class(key, value);
-                        }
-                        if port_class.is_none() {
-                            port_class = canonical_port_class(key, value);
-                        }
-                    }
-                    "office" | "government" => {
-                        if govt_class.is_none() {
-                            govt_class = canonical_govt_class(key, value);
-                        }
-                    }
-                    "harbour" | "leisure" => {
-                        if port_class.is_none() {
-                            port_class = canonical_port_class(key, value);
-                        }
-                    }
-                    "surveillance" => {
-                        if surv_class.is_none() {
-                            surv_class = canonical_surv_class(key, value);
-                        }
-                    }
-                    "name" if name.is_none() => name = Some(value.to_owned()),
-                    _ => {}
-                }
-            }
-
-            // Resolve multi-tag classes after the loop
-            let voltage_kv = raw_voltage.as_deref().and_then(parse_voltage_kv);
-            let power_class = raw_power
-                .as_deref()
-                .and_then(|pt| canonical_power_class(pt, voltage_kv));
-
-            let pipeline_class: Option<&'static str> = if raw_pipeline {
-                Some(canonical_pipeline_class(
-                    raw_substance.as_deref().unwrap_or(""),
-                ))
-            } else {
-                None
-            };
-
-            let aeroway_class = raw_aeroway
-                .as_deref()
-                .and_then(|a| canonical_aeroway_class(a, raw_aerodrome_intl));
-
-            let comm_class = raw_man_made
-                .as_deref()
-                .and_then(|m| canonical_comm_class(m, raw_tower_type.as_deref()));
-
-            // Skip entirely if nothing matched any enabled layer
-            let any_match = (command.build_roads && road_class.is_some())
-                || (command.build_waterways && waterway_class.is_some())
-                || (command.build_buildings && building_class.is_some())
-                || (command.build_trees && tree_class.is_some())
-                || (command.build_power && power_class.is_some())
-                || (command.build_rail && raw_railway.is_some())
-                || (command.build_pipeline && pipeline_class.is_some())
-                || (command.build_aeroway && aeroway_class.is_some())
-                || (command.build_military && military_class.is_some())
-                || (command.build_comm && comm_class.is_some())
-                || (command.build_industrial && industrial_class.is_some())
-                || (command.build_port && port_class.is_some())
-                || (command.build_government && govt_class.is_some())
-                || (command.build_surveillance && surv_class.is_some());
-            if !any_match {
-                continue;
-            }
-
-            let refs: Vec<_> = way.refs().collect();
-            let points: Vec<crate::util::GeoPoint> = refs
-                .iter()
-                .filter_map(|id| node_map.get(id).copied())
-                .collect();
-            if points.len() < 2 {
-                continue;
-            }
-
-            let way_bounds = polyline_bounds(&points);
-            if !bounds_intersect(way_bounds, bounds) {
-                continue;
-            }
-
-            scanned_ways += 1;
-
-            // Roads
-            if command.build_roads {
-                if let Some(cls) = road_class {
-                    if seen_road_ids.insert(way.id()) {
-                        let road = RoadPolyline {
-                            way_id: way.id(),
-                            road_class: cls.to_owned(),
-                            name: name.clone(),
-                            points: points.clone(),
-                        };
-                        let mut assigned = HashSet::new();
-                        for cell in focus_cells_for_bounds(way_bounds) {
-                            if assigned.insert(cell) {
+                if command.build_roads {
+                    if let Some(cls) = w.road_class {
+                        if seen_road_ids.insert(w.way_id) {
+                            let mut cells = focus_cells_iter(w.way_bounds).peekable();
+                            let road = RoadPolyline {
+                                way_id: w.way_id,
+                                road_class: Cow::Borrowed(cls),
+                                name: w.name.clone(),
+                                points: w.points.clone(),
+                            };
+                            while let Some(cell) = cells.next() {
                                 touched_cells.insert(cell);
-                                roads_by_cell.entry(cell).or_default().push(road.clone());
+                                if cells.peek().is_none() {
+                                    roads_by_cell.entry(cell).or_default().push(road);
+                                    break;
+                                } else {
+                                    roads_by_cell.entry(cell).or_default().push(road.clone());
+                                }
                             }
+                            feature_count += 1;
+                            buffered += 1;
                         }
-                        feature_count += 1;
-                        buffered += 1;
                     }
                 }
+
+                push_bbox_feature!(command.build_waterways, w.waterway_class, seen_waterway_ids, waterways_by_cell, false, w);
+                push_bbox_feature!(command.build_buildings, w.building_class, seen_building_ids, buildings_by_cell, true, w);
+                push_bbox_feature!(command.build_trees, w.tree_class, seen_tree_ids, trees_by_cell, true, w);
+                push_bbox_feature!(
+                    command.build_power,
+                    w.power_class,
+                    seen_power_ids,
+                    power_by_cell,
+                    matches!(w.power_class, Some("substation" | "power_plant")),
+                    w
+                );
+                push_bbox_feature!(command.build_rail, w.raw_railway, seen_rail_ids, rail_by_cell, false, w);
+                push_bbox_feature!(command.build_pipeline, w.pipeline_class, seen_pipeline_ids, pipeline_by_cell, false, w);
+                push_bbox_feature!(
+                    command.build_aeroway,
+                    w.aeroway_class,
+                    seen_aeroway_ids,
+                    aeroway_by_cell,
+                    matches!(w.aeroway_class, Some("intl_airport" | "dom_airport" | "airfield" | "airstrip" | "terminal")),
+                    w
+                );
+                push_bbox_feature!(command.build_military, w.military_class, seen_military_ids, military_by_cell, true, w);
+                push_bbox_feature!(command.build_comm, w.comm_class, seen_comm_ids, comm_by_cell, false, w);
+                push_bbox_feature!(
+                    command.build_industrial,
+                    w.industrial_class,
+                    seen_industrial_ids,
+                    industrial_by_cell,
+                    matches!(w.industrial_class, Some("industrial" | "mine")),
+                    w
+                );
+                push_bbox_feature!(
+                    command.build_port,
+                    w.port_class,
+                    seen_port_ids,
+                    port_by_cell,
+                    matches!(w.port_class, Some("harbour" | "marina" | "shipyard")),
+                    w
+                );
+                push_bbox_feature!(command.build_government, w.govt_class, seen_govt_ids, govt_by_cell, true, w);
+                push_bbox_feature!(command.build_surveillance, w.surv_class, seen_surv_ids, surv_by_cell, false, w);
             }
+        }
 
-            // Waterways
-            if command.build_waterways {
-                if let Some(cls) = waterway_class {
-                    if seen_waterway_ids.insert(way.id()) {
-                        let feature = WayFeature {
-                            way_id: way.id(),
-                            feature_class: cls.to_owned(),
-                            name: name.clone(),
-                            points: points.clone(),
-                            is_polygon: false,
-                        };
-                        let mut assigned = HashSet::new();
-                        for cell in focus_cells_for_bounds(way_bounds) {
-                            if assigned.insert(cell) {
-                                touched_cells.insert(cell);
-                                waterways_by_cell
-                                    .entry(cell)
-                                    .or_default()
-                                    .push(feature.clone());
-                            }
-                        }
-                        feature_count += 1;
-                        buffered += 1;
-                    }
-                }
-            }
+        if buffered >= ROAD_FLUSH_THRESHOLD {
+            written_cells += flush_all_chunks(
+                &command.cache_dir,
+                &mut roads_by_cell,
+                &mut waterways_by_cell,
+                &mut buildings_by_cell,
+                &mut trees_by_cell,
+                &mut power_by_cell,
+                &mut rail_by_cell,
+                &mut pipeline_by_cell,
+                &mut aeroway_by_cell,
+                &mut military_by_cell,
+                &mut comm_by_cell,
+                &mut industrial_by_cell,
+                &mut port_by_cell,
+                &mut govt_by_cell,
+                &mut surv_by_cell,
+                srtm.as_mut().map(|s| &mut **s),
+            )?;
+            buffered = 0;
 
-            // Buildings
-            if command.build_buildings {
-                if let Some(cls) = building_class {
-                    if seen_building_ids.insert(way.id()) {
-                        let feature = WayFeature {
-                            way_id: way.id(),
-                            feature_class: cls.to_owned(),
-                            name: name.clone(),
-                            points: points.clone(),
-                            is_polygon: true,
-                        };
-                        let mut assigned = HashSet::new();
-                        for cell in focus_cells_for_bounds(way_bounds) {
-                            if assigned.insert(cell) {
-                                touched_cells.insert(cell);
-                                buildings_by_cell
-                                    .entry(cell)
-                                    .or_default()
-                                    .push(feature.clone());
-                            }
-                        }
-                        feature_count += 1;
-                        buffered += 1;
-                    }
-                }
-            }
+            // Checkpoint: file position of the next blob to read.
+            let checkpoint = pos.load(Ordering::Relaxed);
+            candidate_nodes.save_scan_offset("way_scan", checkpoint)?;
 
-            // Trees / forests
-            if command.build_trees {
-                if let Some(cls) = tree_class {
-                    if seen_tree_ids.insert(way.id()) {
-                        let feature = WayFeature {
-                            way_id: way.id(),
-                            feature_class: cls.to_owned(),
-                            name: name.clone(),
-                            points: points.clone(),
-                            is_polygon: true,
-                        };
-                        let mut assigned = HashSet::new();
-                        for cell in focus_cells_for_bounds(way_bounds) {
-                            if assigned.insert(cell) {
-                                touched_cells.insert(cell);
-                                trees_by_cell.entry(cell).or_default().push(feature.clone());
-                            }
-                        }
-                        feature_count += 1;
-                        buffered += 1;
-                    }
-                }
-            }
+            progress(RoadBuildProgress {
+                metrics: None,
+                stage: "Writing Cache".to_owned(),
+                fraction: 0.76,
+                message: format!(
+                    "Flushed features to {} cache files so far ({} features)",
+                    written_cells, feature_count
+                ),
+            });
+        }
 
-            // Power lines and infrastructure
-            if command.build_power {
-                if let Some(cls) = power_class {
-                    if seen_power_ids.insert(way.id()) {
-                        let is_poly = cls == "substation" || cls == "power_plant";
-                        let feature = WayFeature {
-                            way_id: way.id(),
-                            feature_class: cls.to_owned(),
-                            name: name.clone(),
-                            points: points.clone(),
-                            is_polygon: is_poly,
-                        };
-                        let mut assigned = HashSet::new();
-                        for cell in focus_cells_for_bounds(way_bounds) {
-                            if assigned.insert(cell) {
-                                touched_cells.insert(cell);
-                                power_by_cell.entry(cell).or_default().push(feature.clone());
-                            }
-                        }
-                        feature_count += 1;
-                        buffered += 1;
-                    }
-                }
-            }
-
-            // Railways
-            if command.build_rail {
-                if let Some(cls) = raw_railway {
-                    if seen_rail_ids.insert(way.id()) {
-                        let feature = WayFeature {
-                            way_id: way.id(),
-                            feature_class: cls.to_owned(),
-                            name: name.clone(),
-                            points: points.clone(),
-                            is_polygon: false,
-                        };
-                        let mut assigned = HashSet::new();
-                        for cell in focus_cells_for_bounds(way_bounds) {
-                            if assigned.insert(cell) {
-                                touched_cells.insert(cell);
-                                rail_by_cell.entry(cell).or_default().push(feature.clone());
-                            }
-                        }
-                        feature_count += 1;
-                        buffered += 1;
-                    }
-                }
-            }
-
-            // Pipelines
-            if command.build_pipeline {
-                if let Some(cls) = pipeline_class {
-                    if seen_pipeline_ids.insert(way.id()) {
-                        let feature = WayFeature {
-                            way_id: way.id(),
-                            feature_class: cls.to_owned(),
-                            name: name.clone(),
-                            points: points.clone(),
-                            is_polygon: false,
-                        };
-                        let mut assigned = HashSet::new();
-                        for cell in focus_cells_for_bounds(way_bounds) {
-                            if assigned.insert(cell) {
-                                touched_cells.insert(cell);
-                                pipeline_by_cell
-                                    .entry(cell)
-                                    .or_default()
-                                    .push(feature.clone());
-                            }
-                        }
-                        feature_count += 1;
-                        buffered += 1;
-                    }
-                }
-            }
-
-            // Aeroways (airports, runways, helipads)
-            if command.build_aeroway {
-                if let Some(cls) = aeroway_class {
-                    if seen_aeroway_ids.insert(way.id()) {
-                        let is_poly = matches!(
-                            cls,
-                            "intl_airport" | "dom_airport" | "airfield" | "airstrip" | "terminal"
-                        );
-                        let feature = WayFeature {
-                            way_id: way.id(),
-                            feature_class: cls.to_owned(),
-                            name: name.clone(),
-                            points: points.clone(),
-                            is_polygon: is_poly,
-                        };
-                        let mut assigned = HashSet::new();
-                        for cell in focus_cells_for_bounds(way_bounds) {
-                            if assigned.insert(cell) {
-                                touched_cells.insert(cell);
-                                aeroway_by_cell
-                                    .entry(cell)
-                                    .or_default()
-                                    .push(feature.clone());
-                            }
-                        }
-                        feature_count += 1;
-                        buffered += 1;
-                    }
-                }
-            }
-
-            // Military areas
-            if command.build_military {
-                if let Some(cls) = military_class {
-                    if seen_military_ids.insert(way.id()) {
-                        let feature = WayFeature {
-                            way_id: way.id(),
-                            feature_class: cls.to_owned(),
-                            name: name.clone(),
-                            points: points.clone(),
-                            is_polygon: true,
-                        };
-                        let mut assigned = HashSet::new();
-                        for cell in focus_cells_for_bounds(way_bounds) {
-                            if assigned.insert(cell) {
-                                touched_cells.insert(cell);
-                                military_by_cell
-                                    .entry(cell)
-                                    .or_default()
-                                    .push(feature.clone());
-                            }
-                        }
-                        feature_count += 1;
-                        buffered += 1;
-                    }
-                }
-            }
-
-            // Communications infrastructure
-            if command.build_comm {
-                if let Some(cls) = comm_class {
-                    if seen_comm_ids.insert(way.id()) {
-                        let feature = WayFeature {
-                            way_id: way.id(),
-                            feature_class: cls.to_owned(),
-                            name: name.clone(),
-                            points: points.clone(),
-                            is_polygon: false,
-                        };
-                        let mut assigned = HashSet::new();
-                        for cell in focus_cells_for_bounds(way_bounds) {
-                            if assigned.insert(cell) {
-                                touched_cells.insert(cell);
-                                comm_by_cell.entry(cell).or_default().push(feature.clone());
-                            }
-                        }
-                        feature_count += 1;
-                        buffered += 1;
-                    }
-                }
-            }
-
-            // Industrial areas
-            if command.build_industrial {
-                if let Some(cls) = industrial_class {
-                    if seen_industrial_ids.insert(way.id()) {
-                        let is_poly = cls == "industrial" || cls == "mine";
-                        let feature = WayFeature {
-                            way_id: way.id(),
-                            feature_class: cls.to_owned(),
-                            name: name.clone(),
-                            points: points.clone(),
-                            is_polygon: is_poly,
-                        };
-                        let mut assigned = HashSet::new();
-                        for cell in focus_cells_for_bounds(way_bounds) {
-                            if assigned.insert(cell) {
-                                touched_cells.insert(cell);
-                                industrial_by_cell
-                                    .entry(cell)
-                                    .or_default()
-                                    .push(feature.clone());
-                            }
-                        }
-                        feature_count += 1;
-                        buffered += 1;
-                    }
-                }
-            }
-
-            // Maritime / port features
-            if command.build_port {
-                if let Some(cls) = port_class {
-                    if seen_port_ids.insert(way.id()) {
-                        let is_poly = cls == "harbour" || cls == "marina" || cls == "shipyard";
-                        let feature = WayFeature {
-                            way_id: way.id(),
-                            feature_class: cls.to_owned(),
-                            name: name.clone(),
-                            points: points.clone(),
-                            is_polygon: is_poly,
-                        };
-                        let mut assigned = HashSet::new();
-                        for cell in focus_cells_for_bounds(way_bounds) {
-                            if assigned.insert(cell) {
-                                touched_cells.insert(cell);
-                                port_by_cell.entry(cell).or_default().push(feature.clone());
-                            }
-                        }
-                        feature_count += 1;
-                        buffered += 1;
-                    }
-                }
-            }
-
-            // Government facilities
-            if command.build_government {
-                if let Some(cls) = govt_class {
-                    if seen_govt_ids.insert(way.id()) {
-                        let feature = WayFeature {
-                            way_id: way.id(),
-                            feature_class: cls.to_owned(),
-                            name: name.clone(),
-                            points: points.clone(),
-                            is_polygon: true,
-                        };
-                        let mut assigned = HashSet::new();
-                        for cell in focus_cells_for_bounds(way_bounds) {
-                            if assigned.insert(cell) {
-                                touched_cells.insert(cell);
-                                govt_by_cell.entry(cell).or_default().push(feature.clone());
-                            }
-                        }
-                        feature_count += 1;
-                        buffered += 1;
-                    }
-                }
-            }
-
-            // Surveillance infrastructure
-            if command.build_surveillance {
-                if let Some(cls) = surv_class {
-                    if seen_surv_ids.insert(way.id()) {
-                        let feature = WayFeature {
-                            way_id: way.id(),
-                            feature_class: cls.to_owned(),
-                            name: name.clone(),
-                            points: points.clone(),
-                            is_polygon: false,
-                        };
-                        let mut assigned = HashSet::new();
-                        for cell in focus_cells_for_bounds(way_bounds) {
-                            if assigned.insert(cell) {
-                                touched_cells.insert(cell);
-                                surv_by_cell.entry(cell).or_default().push(feature.clone());
-                            }
-                        }
-                        feature_count += 1;
-                        buffered += 1;
-                    }
-                }
-            }
-
-            if buffered >= ROAD_FLUSH_THRESHOLD {
-                written_cells += flush_all_chunks(
-                    &command.cache_dir,
-                    &mut roads_by_cell,
-                    &mut waterways_by_cell,
-                    &mut buildings_by_cell,
-                    &mut trees_by_cell,
-                    &mut power_by_cell,
-                    &mut rail_by_cell,
-                    &mut pipeline_by_cell,
-                    &mut aeroway_by_cell,
-                    &mut military_by_cell,
-                    &mut comm_by_cell,
-                    &mut industrial_by_cell,
-                    &mut port_by_cell,
-                    &mut govt_by_cell,
-                    &mut surv_by_cell,
-                    srtm.as_mut().map(|s| &mut **s),
-                )?;
-                buffered = 0;
-
-                // Checkpoint: file position of the next blob to read.
-                let checkpoint = pos.load(Ordering::Relaxed);
-                candidate_nodes.save_scan_offset("way_scan", checkpoint)?;
-
-                progress(RoadBuildProgress {
-                    metrics: None,
-                    stage: "Writing Cache".to_owned(),
-                    fraction: 0.76,
-                    message: format!(
-                        "Flushed features to {} cache files so far ({} features)",
-                        written_cells, feature_count
-                    ),
-                });
-            }
-
-            if scanned_ways % 250_000 == 0 {
-                progress(RoadBuildProgress {
-                    metrics: None,
-                    stage: "Scanning Ways".to_owned(),
-                    fraction: 0.75,
-                    message: format!(
-                        "Scanned {} ways; kept {} features across {} cells",
-                        scanned_ways,
-                        feature_count,
-                        touched_cells.len()
-                    ),
-                });
+        if scanned_ways >= next_progress_ways {
+            progress(RoadBuildProgress {
+                metrics: None,
+                stage: "Scanning Ways".to_owned(),
+                fraction: 0.75,
+                message: format!(
+                    "Scanned {} ways; kept {} features across {} cells",
+                    scanned_ways,
+                    feature_count,
+                    touched_cells.len()
+                ),
+            });
+            while scanned_ways >= next_progress_ways {
+                next_progress_ways += 250_000;
             }
         }
     }

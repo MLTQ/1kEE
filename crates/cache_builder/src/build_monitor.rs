@@ -100,11 +100,20 @@ impl Live {
         }) {
             self.samples.clear();
         }
-        self.samples.push_back((now, metrics.scanned_bytes));
-        while self.samples.len() > 2
-            && now.duration_since(self.samples[1].0) > Duration::from_secs(15)
-        {
-            self.samples.pop_front();
+        let should_push = match self.samples.back() {
+            None => true,
+            Some(&(last_time, last_bytes)) => {
+                metrics.scanned_bytes != last_bytes
+                    && now.duration_since(last_time) >= Duration::from_millis(250)
+            }
+        };
+        if should_push {
+            self.samples.push_back((now, metrics.scanned_bytes));
+            while self.samples.len() > 2
+                && now.duration_since(self.samples[1].0) > Duration::from_secs(15)
+            {
+                self.samples.pop_front();
+            }
         }
         self.metrics = Some(metrics.clone());
     }

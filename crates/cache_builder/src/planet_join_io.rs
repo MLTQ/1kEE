@@ -1,13 +1,17 @@
 //! Bounded, checksummed append spools and external sorting for the node join.
+use hashlink::lru_cache::LruCache;
+use rayon::prelude::*;
 use ring::digest::{Context, SHA256};
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Reverse,
-    collections::BinaryHeap,
+    collections::{BinaryHeap, binary_heap::PeekMut},
     fs::{self, File, OpenOptions},
-    io::{self, BufReader, Read, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
 };
+
+const OPEN_HANDLE_POOL: usize = 128;
 
 pub(super) type Result<T> = std::result::Result<T, String>;
 const SORT_ERROR: &str = "Temporary coordinate sort failed: ";
@@ -79,6 +83,7 @@ struct Sink {
 pub(super) struct Sinks {
     root: PathBuf,
     entries: Vec<Option<Sink>>,
+    handles: LruCache<usize, File>,
 }
 impl Sinks {
     pub fn new(root: &Path, count: usize) -> Result<Self> {
@@ -86,6 +91,7 @@ impl Sinks {
         Ok(Self {
             root: root.into(),
             entries: (0..count).map(|_| None).collect(),
+            handles: LruCache::new(OPEN_HANDLE_POOL),
         })
     }
     pub fn path(root: &Path, n: usize) -> PathBuf {
@@ -103,39 +109,76 @@ impl Sinks {
             });
         sink.buffer.extend_from_slice(&record.bytes());
         if sink.buffer.len() >= 65536 {
-            Self::flush(&self.root, n, sink)?;
+            Self::flush_with_pool(&self.root, &mut self.handles, n, sink)?;
         }
         Ok(())
     }
-    fn flush(root: &Path, n: usize, sink: &mut Sink) -> Result<()> {
+    fn flush_with_pool(
+        root: &Path,
+        handles: &mut LruCache<usize, File>,
+        n: usize,
+        sink: &mut Sink,
+    ) -> Result<()> {
         if sink.buffer.is_empty() {
             return Ok(());
         }
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(Self::path(root, n))
-            .map_err(|e| e.to_string())?;
+        let file = if let Some(f) = handles.get_mut(&n) {
+            f
+        } else {
+            let f = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(Self::path(root, n))
+                .map_err(|e| e.to_string())?;
+            handles.insert(n, f);
+            handles.get_mut(&n).unwrap()
+        };
         file.write_all(&sink.buffer).map_err(|e| e.to_string())?;
         sink.hash.update(&sink.buffer);
         sink.len += sink.buffer.len() as u64;
         sink.buffer.clear();
         Ok(())
     }
-    pub fn finish(mut self, spools: &mut [Spool]) -> Result<()> {
+    fn finish_inner(mut self, spools: &mut [Spool], durable: bool) -> Result<()> {
+        let mut touched: Vec<usize> = Vec::new();
         for (n, entry) in self.entries.iter_mut().enumerate() {
             if let Some(mut sink) = entry.take() {
-                Self::flush(&self.root, n, &mut sink)?;
-                File::open(Self::path(&self.root, n))
-                    .and_then(|f| f.sync_all())
-                    .map_err(|e| e.to_string())?;
+                Self::flush_with_pool(&self.root, &mut self.handles, n, &mut sink)?;
                 spools[n].segments.push(Segment {
                     len: sink.len,
                     digest: hex(sink.hash.finish().as_ref()),
                 });
+                touched.push(n);
             }
         }
+        // Drop pooled write handles before syncing so all file descriptors are cleanly closed.
+        self.handles.clear();
+        if durable && !touched.is_empty() {
+            #[cfg(target_os = "linux")]
+            {
+                use std::os::fd::AsRawFd;
+                let dir = File::open(&self.root).map_err(|e| e.to_string())?;
+                // Single filesystem-wide barrier replaces hundreds/thousands of per-file fsync()s.
+                let rc = unsafe { libc::syncfs(dir.as_raw_fd()) };
+                if rc == 0 {
+                    return Ok(());
+                }
+            }
+            let root = &self.root;
+            touched.par_iter().try_for_each(|&n| {
+                File::open(Self::path(root, n))
+                    .and_then(|f| f.sync_data())
+                    .map_err(|e| e.to_string())
+            })?;
+        }
         Ok(())
+    }
+    pub fn finish(self, spools: &mut [Spool]) -> Result<()> {
+        self.finish_inner(spools, true)
+    }
+    /// Flush and checksum ephemeral reconstructible sort runs without calling `fsync`.
+    pub fn finish_ephemeral(self, spools: &mut [Spool]) -> Result<()> {
+        self.finish_inner(spools, false)
     }
 }
 struct Verified {
@@ -200,17 +243,23 @@ impl Records {
             },
         ))))
     }
+    #[inline]
     pub fn next(&mut self) -> Result<Option<Record>> {
         let Some(reader) = &mut self.0 else {
             return Ok(None);
         };
-        let mut bytes = [0u8; 16];
-        if reader.read(&mut bytes[..1]).map_err(|e| e.to_string())? == 0 {
+        let avail = reader.fill_buf().map_err(|e| e.to_string())?;
+        if avail.is_empty() {
             return Ok(None);
         }
-        reader
-            .read_exact(&mut bytes[1..])
-            .map_err(|e| e.to_string())?;
+        if avail.len() >= 16 {
+            let id = i64::from_le_bytes(avail[..8].try_into().unwrap());
+            let value = u64::from_le_bytes(avail[8..16].try_into().unwrap());
+            reader.consume(16);
+            return Ok(Some(Record { id, value }));
+        }
+        let mut bytes = [0u8; 16];
+        reader.read_exact(&mut bytes).map_err(|e| e.to_string())?;
         Ok(Some(Record {
             id: i64::from_le_bytes(bytes[..8].try_into().unwrap()),
             value: u64::from_le_bytes(bytes[8..].try_into().unwrap()),
@@ -246,20 +295,26 @@ impl Merge {
         Ok(result)
     }
     pub fn next(&mut self) -> Result<Option<Record>> {
-        let Some(Reverse((record, i))) = self.heap.pop() else {
+        let Some(mut top) = self.heap.peek_mut() else {
             return Ok(None);
         };
-        if let Some(next) = self.readers[i]
+        let Reverse((record, i)) = *top;
+        match self.readers[i]
             .next()
             .map_err(|e| sort_error(format!("{}: {e}", self.paths[i].display())))?
         {
-            if next < record {
-                return Err(sort_error(format!(
-                    "{}: records are out of order",
-                    self.paths[i].display()
-                )));
+            Some(next) => {
+                if next < record {
+                    return Err(sort_error(format!(
+                        "{}: records are out of order",
+                        self.paths[i].display()
+                    )));
+                }
+                *top = Reverse((next, i));
             }
-            self.heap.push(Reverse((next, i)));
+            None => {
+                PeekMut::pop(top);
+            }
         }
         Ok(Some(record))
     }
@@ -292,7 +347,7 @@ pub(super) fn sorted(
         if records.is_empty() {
             break;
         }
-        records.sort_unstable();
+        records.par_sort_unstable();
         let dir = work.join(number.to_string());
         number += 1;
         let mut sink = Sinks::new(&dir, 1)?;
@@ -301,7 +356,7 @@ pub(super) fn sorted(
             sink.push(0, record)?;
             bytes += 16;
         }
-        sink.finish(&mut spools)?;
+        sink.finish_ephemeral(&mut spools)?;
         runs.push(Run {
             dir,
             spool: spools.remove(0),
@@ -324,7 +379,7 @@ pub(super) fn sorted(
                     progress(bytes + merged_bytes);
                 }
             }
-            sink.finish(&mut spools)?;
+            sink.finish_ephemeral(&mut spools)?;
             merged.push(Run {
                 dir,
                 spool: spools.remove(0),

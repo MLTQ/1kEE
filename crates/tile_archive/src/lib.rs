@@ -99,6 +99,7 @@ impl Reader {
 
 pub struct Writer {
     connection: Connection,
+    path: std::path::PathBuf,
 }
 
 impl Writer {
@@ -112,9 +113,13 @@ impl Writer {
         drop(file);
         let initialized = (|| -> Result<Connection, String> {
             let connection = Connection::open(path).map_err(|e| e.to_string())?;
+            // Staging file is exclusively owned and deleted on failure; defer
+            // durability until `finish()` restores DELETE+FULL and fsyncs before
+            // atomic publication.
             connection.execute_batch(&format!(
             "PRAGMA application_id={APPLICATION_ID}; PRAGMA user_version=1;
-             PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;
+             PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF;
+             PRAGMA cache_size=-131072; PRAGMA temp_store=MEMORY;
              CREATE TABLE tiles(body INTEGER NOT NULL, layer BLOB NOT NULL, grid INTEGER NOT NULL,
                 level INTEGER NOT NULL, y INTEGER NOT NULL, x INTEGER NOT NULL,
                 payload BLOB NOT NULL, checksum INTEGER NOT NULL,
@@ -126,7 +131,10 @@ impl Writer {
             Ok(connection)
         })();
         match initialized {
-            Ok(connection) => Ok(Self { connection }),
+            Ok(connection) => Ok(Self {
+                connection,
+                path: path.to_path_buf(),
+            }),
             Err(error) => {
                 let _ = std::fs::remove_file(path);
                 Err(error)
@@ -138,6 +146,15 @@ impl Writer {
         &mut self,
         tiles: &[(Key, Vec<u8>)],
         cell: Option<([u8; 4], i32, i32)>,
+    ) -> Result<(), String> {
+        self.put_batch_with_meta(tiles, cell, None)
+    }
+
+    pub fn put_batch_with_meta(
+        &mut self,
+        tiles: &[(Key, Vec<u8>)],
+        cell: Option<([u8; 4], i32, i32)>,
+        meta: Option<(&str, &str)>,
     ) -> Result<(), String> {
         let tx = self.connection.transaction().map_err(|e| e.to_string())?;
         {
@@ -163,29 +180,41 @@ impl Writer {
             }
         }
         if let Some((layer, lat, lon)) = cell {
-            tx.execute(
-                "INSERT OR REPLACE INTO vector_cells VALUES (?1,?2,?3)",
-                params![&layer[..], lat, lon],
-            )
-            .map_err(|e| e.to_string())?;
+            let mut stmt = tx
+                .prepare_cached("INSERT OR REPLACE INTO vector_cells VALUES (?1,?2,?3)")
+                .map_err(|e| e.to_string())?;
+            stmt.execute(params![&layer[..], lat, lon])
+                .map_err(|e| e.to_string())?;
+        }
+        if let Some((k, v)) = meta {
+            let mut stmt = tx
+                .prepare_cached("INSERT OR REPLACE INTO metadata VALUES (?1,?2)")
+                .map_err(|e| e.to_string())?;
+            stmt.execute(params![k, v]).map_err(|e| e.to_string())?;
         }
         tx.commit().map_err(|e| e.to_string())
     }
 
     pub fn metadata(&self, key: &str, value: &str) -> Result<(), String> {
-        self.connection
-            .execute(
-                "INSERT OR REPLACE INTO metadata VALUES (?1,?2)",
-                params![key, value],
-            )
+        let mut stmt = self
+            .connection
+            .prepare_cached("INSERT OR REPLACE INTO metadata VALUES (?1,?2)")
+            .map_err(|e| e.to_string())?;
+        stmt.execute(params![key, value])
             .map_err(|e| e.to_string())?;
         Ok(())
     }
 
     pub fn finish(self) -> Result<(), String> {
         self.connection
-            .execute_batch("PRAGMA optimize;")
+            .execute_batch(
+                "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA optimize;",
+            )
             .map_err(|e| e.to_string())?;
-        self.connection.close().map_err(|(_, e)| e.to_string())
+        let path = self.path;
+        self.connection.close().map_err(|(_, e)| e.to_string())?;
+        std::fs::File::open(&path)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| e.to_string())
     }
 }

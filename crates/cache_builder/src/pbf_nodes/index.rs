@@ -1,5 +1,7 @@
 //! Small resumable block index; each transaction publishes descriptors + scan offset.
-use super::{Block, IndexProgress, MAX_BLOCK_BYTES, MAX_BLOCK_NODES, PbfNodes, Stamp, decode};
+use super::{
+    Block, IndexProgress, MAX_BLOCK_BYTES, MAX_BLOCK_NODES, PbfNodes, Stamp, scan_block_descriptor,
+};
 use crate::roads::open_planet_at;
 use rayon::prelude::*;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -10,6 +12,9 @@ use std::sync::atomic::Ordering;
 
 const APP_ID: i32 = 0x314b504e;
 const MAX_BLOCKS: usize = 8_000_000;
+#[cfg(not(test))]
+const BATCH: usize = 512;
+#[cfg(test)]
 const BATCH: usize = 32;
 
 #[derive(Serialize, Deserialize)]
@@ -20,6 +25,8 @@ struct State {
     offset: u64,
     nodes: u64,
     first_way: Option<u64>,
+    #[serde(default)]
+    first_relation: Option<u64>,
     indexed: bool,
     build_options: Option<String>,
     build_done: bool,
@@ -140,6 +147,7 @@ pub(super) fn open(
                 offset: 0,
                 nodes: 0,
                 first_way: None,
+                first_relation: None,
                 indexed: false,
                 build_options: None,
                 build_done: false,
@@ -185,6 +193,9 @@ pub(super) fn open(
         save(&connection, &state)?;
     }
     if !state.indexed {
+        connection
+            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-65536;")
+            .map_err(|e| e.to_string())?;
         let (mut reader, position) = open_planet_at(source, state.offset)?;
         loop {
             let mut batch = Vec::with_capacity(BATCH);
@@ -206,26 +217,32 @@ pub(super) fn open(
             if batch.is_empty() {
                 break;
             }
-            // Only descriptors survive a batch; decoded node arrays are released.
+            // Zero-allocation descriptor scan: never allocates Vec<Node> or scales
+            // 9 billion lat/lon floats during indexing.
             let decoded = batch
                 .par_iter()
                 .map(|(offset, length, blob)| {
-                    let (nodes, has_ways) = decode(blob)?;
-                    let descriptor = nodes.first().map(|first| Block {
+                    let (desc, has_ways, has_relations) = scan_block_descriptor(blob)?;
+                    let descriptor = desc.map(|(min, max, count)| Block {
                         offset: *offset,
                         length: *length,
-                        min: first.id,
-                        max: nodes.last().unwrap().id,
-                        count: nodes.len(),
+                        min,
+                        max,
+                        count,
                     });
-                    Ok((descriptor, has_ways))
+                    Ok((descriptor, has_ways, has_relations))
                 })
                 .collect::<Result<Vec<_>, String>>()?;
             let mut added = Vec::new();
             let mut last = blocks.last().map(|b| b.max);
-            for ((offset, _, _), (descriptor, has_ways)) in batch.iter().zip(decoded) {
+            for ((offset, _, _), (descriptor, has_ways, has_relations)) in
+                batch.iter().zip(decoded)
+            {
                 if has_ways && state.first_way.is_none() {
                     state.first_way = Some(*offset);
+                }
+                if has_relations && state.first_relation.is_none() {
+                    state.first_relation = Some(*offset);
                 }
                 if let Some(b) = descriptor {
                     if last.is_some_and(|id| id >= b.min) {
@@ -246,12 +263,14 @@ pub(super) fn open(
             }
             state.offset = position.load(Ordering::Relaxed);
             let tx = connection.transaction().map_err(|e| e.to_string())?;
-            for b in &added {
-                tx.execute(
-                    "INSERT INTO blocks VALUES (?1,?2,?3,?4,?5)",
-                    params![b.offset, b.length, b.min, b.max, b.count],
-                )
-                .map_err(|e| e.to_string())?;
+            {
+                let mut stmt = tx
+                    .prepare_cached("INSERT INTO blocks VALUES (?1,?2,?3,?4,?5)")
+                    .map_err(|e| e.to_string())?;
+                for b in &added {
+                    stmt.execute(params![b.offset, b.length, b.min, b.max, b.count])
+                        .map_err(|e| e.to_string())?;
+                }
             }
             save(&tx, &state)?;
             tx.commit().map_err(|e| e.to_string())?;
@@ -268,12 +287,17 @@ pub(super) fn open(
         }
         state.indexed = true;
         save(&connection, &state)?;
+        connection
+            .execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;")
+            .map_err(|e| e.to_string())?;
     }
     validate(&blocks, &state)?;
     let file = File::open(source).map_err(|e| e.to_string())?;
     if Stamp::read(source)? != stamp {
         return Err("PBF changed before opening lookups".into());
     }
+    let first_way = state.first_way.unwrap_or(state.source.len);
+    let first_relation = state.first_relation.unwrap_or(first_way);
     let nodes = PbfNodes {
         decoded_blocks: Default::default(),
         decoded_bytes: Default::default(),
@@ -281,7 +305,8 @@ pub(super) fn open(
         path: source.to_owned(),
         stamp,
         blocks,
-        first_way: state.first_way.unwrap_or(state.source.len),
+        first_way,
+        first_relation,
         node_count: state.nodes,
     };
     Ok((
@@ -305,6 +330,7 @@ fn verify_legacy_source(source: &Path, stamp: &Stamp, blocks: &[Block]) -> Resul
         stamp: stamp.clone(),
         blocks: blocks.to_vec(),
         first_way: 0,
+        first_relation: 0,
         node_count: 0,
     };
     let count = blocks.len().min(64);

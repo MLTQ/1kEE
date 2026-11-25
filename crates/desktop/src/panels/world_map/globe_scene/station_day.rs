@@ -68,9 +68,10 @@ pub(super) fn draw(
     if let (Some(pos), Some((_, id, arrival))) = (pointer, hovered) {
         let text = match arrival {
             Some(hit) => {
+                crate::panels::seismogram::station_click(&painter, pos, id, Some((&hit.pick, &hit.event)));
                 let time = chrono::DateTime::from_timestamp_millis(hit.pick.time_ms).unwrap();
                 format!(
-                    "{id} · {} at {} UTC\nUSGS {}",
+                    "{id} · {} at {} UTC\nUSGS {} · Right-click for seismogram",
                     hit.pick.phase,
                     time.format("%H:%M:%S%.3f"),
                     hit.event

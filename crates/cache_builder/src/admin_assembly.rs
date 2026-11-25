@@ -61,26 +61,72 @@ pub(super) fn run(
     let mut completed: usize = levels.iter().map(|l| l.assembled).sum();
     for (i, relations) in pending.into_iter().enumerate() {
         let mut last_publish = Instant::now();
-        for (id, name) in relations {
-            progress(RoadBuildProgress {
-                metrics: None,
-                stage: "Assembling Admin Boundaries".into(),
-                fraction: 0.90 + 0.09 * completed as f32 / total.max(1) as f32,
-                message: format!(
-                    "{completed} / {total} regions saved; resolving {} (relation {id}, level {})",
-                    name.as_deref().unwrap_or("unnamed"),
-                    levels[i].level
-                ),
-            });
-            let members = nodes.admin_member_ids(id)?;
-            let ways = nodes.admin_way_refs(&members)?;
-            let mut region =
-                geometry::assemble(id, name, &ways, &mut |ids| saved.resolve(ids, resolve))?;
-            region.complete &= ways.len() == members.len();
+        let mut pos = 0usize;
+        while pos < relations.len() {
+            // Publish the very first region of a level immediately so countries
+            // appear live in the app right away; batch subsequent regions to
+            // coalesce coordinate lookups and SQLite commits.
+            let batch_len = if levels[i].published == 0 {
+                1
+            } else if levels[i].level <= 3 {
+                8
+            } else {
+                64
+            };
+            let end = (pos + batch_len).min(relations.len());
+            let chunk = &relations[pos..end];
+            if let Some((first_id, first_name)) = chunk.first() {
+                progress(RoadBuildProgress {
+                    metrics: None,
+                    stage: "Assembling Admin Boundaries".into(),
+                    fraction: 0.90 + 0.09 * completed as f32 / total.max(1) as f32,
+                    message: format!(
+                        "{completed} / {total} regions saved; resolving {} (relation {first_id}, level {})",
+                        first_name.as_deref().unwrap_or("unnamed"),
+                        levels[i].level
+                    ),
+                });
+            }
+
+            let mut prepared: Vec<(i64, Option<String>, bool, Vec<Vec<i64>>, usize)> =
+                Vec::with_capacity(chunk.len());
+            let mut batch_refs: Vec<i64> = Vec::new();
+            for (id, name) in chunk {
+                let members = nodes.admin_member_ids(*id)?;
+                let ways = nodes.admin_way_refs(&members)?;
+                let complete_ways = ways.len() == members.len();
+                let chains = geometry::stitch_chains(&ways);
+                let ref_count: usize = chains.iter().map(Vec::len).sum();
+                batch_refs.reserve(ref_count);
+                for c in &chains {
+                    batch_refs.extend_from_slice(c);
+                }
+                prepared.push((*id, name.clone(), complete_ways, chains, ref_count));
+            }
+
+            // One batched coordinate lookup for the entire chunk so neighboring
+            // regions share border nodes and PBF block decodes.
+            let resolved = saved.resolve(&batch_refs, resolve)?;
+            let mut assembled = Vec::with_capacity(prepared.len());
+            let mut offset = 0usize;
+            for (id, name, complete_ways, chains, ref_count) in prepared {
+                let mut region = geometry::build_region_from_chains(
+                    id,
+                    name,
+                    chains,
+                    &resolved[offset..offset + ref_count],
+                )?;
+                region.complete &= complete_ways;
+                assembled.push(region);
+                offset += ref_count;
+            }
+
             validate()?;
-            saved.save(levels[i].level, &region)?;
-            completed += 1;
-            levels[i].assembled += 1;
+            saved.save_batch(levels[i].level, &assembled)?;
+            completed += assembled.len();
+            levels[i].assembled += assembled.len();
+            pos = end;
+
             if levels[i].published == 0 || last_publish.elapsed() >= Duration::from_secs(30) {
                 ring_counts[i] = saved.publish(output, levels[i].level)?;
                 levels[i].published = levels[i].assembled;

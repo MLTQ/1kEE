@@ -110,6 +110,211 @@ fn parse_linestring<T>(
     Some(points)
 }
 
+/// Zero-allocation validator equivalent to `try_parse_gpkg_lines(blob, |_, _| ()).is_some()`.
+pub fn validate_gpkg_lines(blob: &[u8]) -> bool {
+    if blob.len() < 8 || &blob[0..2] != b"GP" || blob[2] != 0 {
+        return false;
+    }
+    let envelope_len = match (blob[3] >> 1) & 7 {
+        0 => 0,
+        1 => 32,
+        2 | 3 => 48,
+        4 => 64,
+        _ => return false,
+    };
+    let Some(wkb) = blob.get(8 + envelope_len..) else {
+        return false;
+    };
+    let mut cursor = 0usize;
+    let Some(&endian) = wkb.get(cursor) else {
+        return false;
+    };
+    if endian > 1 {
+        return false;
+    }
+    cursor += 1;
+    let little = endian == 1;
+    let Some(geom_type) = read_u32(wkb, &mut cursor, little) else {
+        return false;
+    };
+    match geom_type % 1000 {
+        2 => validate_linestring(wkb, &mut cursor, little),
+        5 => {
+            let Some(count) = read_u32(wkb, &mut cursor, little).map(|n| n as usize) else {
+                return false;
+            };
+            if wkb.len().checked_sub(cursor).is_none_or(|rem| count > rem / 9) {
+                return false;
+            }
+            for _ in 0..count {
+                let Some(&e) = wkb.get(cursor) else {
+                    return false;
+                };
+                if e > 1 {
+                    return false;
+                }
+                cursor += 1;
+                let lit = e == 1;
+                let Some(gt) = read_u32(wkb, &mut cursor, lit) else {
+                    return false;
+                };
+                if gt % 1000 != 2 || !validate_linestring(wkb, &mut cursor, lit) {
+                    return false;
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn validate_linestring(wkb: &[u8], cursor: &mut usize, little: bool) -> bool {
+    let Some(count) = read_u32(wkb, cursor, little).map(|n| n as usize) else {
+        return false;
+    };
+    let Some(end) = count.checked_mul(16).and_then(|n| cursor.checked_add(n)) else {
+        return false;
+    };
+    let Some(slice) = wkb.get(*cursor..end) else {
+        return false;
+    };
+    *cursor = end;
+    let pairs = slice.as_chunks::<16>().0;
+    if little {
+        pairs.iter().all(|pair| {
+            let x = f64::from_le_bytes(pair[0..8].try_into().unwrap()) as f32;
+            let y = f64::from_le_bytes(pair[8..16].try_into().unwrap()) as f32;
+            x.is_finite() && y.is_finite()
+        })
+    } else {
+        pairs.iter().all(|pair| {
+            let x = f64::from_be_bytes(pair[0..8].try_into().unwrap()) as f32;
+            let y = f64::from_be_bytes(pair[8..16].try_into().unwrap()) as f32;
+            x.is_finite() && y.is_finite()
+        })
+    }
+}
+
+/// Stream a GeoPackage WKB LineString/MultiLineString directly into CTF1 geometry
+/// payload bytes (part_count + per-part (point_count, f32 lon, f32 lat)) with
+/// zero intermediate `Vec<Vec<...>>` allocations.
+pub fn stream_gpkg_to_ctf1(blob: &[u8], out: &mut Vec<u8>) -> bool {
+    if blob.len() < 8 || &blob[0..2] != b"GP" || blob[2] != 0 {
+        return false;
+    }
+    let envelope_len = match (blob[3] >> 1) & 7 {
+        0 => 0,
+        1 => 32,
+        2 | 3 => 48,
+        4 => 64,
+        _ => return false,
+    };
+    let Some(wkb) = blob.get(8 + envelope_len..) else {
+        return false;
+    };
+    let mut cursor = 0usize;
+    let Some(&endian) = wkb.get(cursor) else {
+        return false;
+    };
+    if endian > 1 {
+        return false;
+    }
+    cursor += 1;
+    let little = endian == 1;
+    let Some(geom_type) = read_u32(wkb, &mut cursor, little) else {
+        return false;
+    };
+    let start_len = out.len();
+    match geom_type % 1000 {
+        2 => {
+            out.extend_from_slice(&1u32.to_le_bytes());
+            if !stream_linestring_to_ctf1(wkb, &mut cursor, little, out) {
+                out.truncate(start_len);
+                return false;
+            }
+            true
+        }
+        5 => {
+            let Some(count) = read_u32(wkb, &mut cursor, little).map(|n| n as usize) else {
+                return false;
+            };
+            if wkb.len().checked_sub(cursor).is_none_or(|rem| count > rem / 9) {
+                return false;
+            }
+            out.extend_from_slice(&(count as u32).to_le_bytes());
+            for _ in 0..count {
+                let Some(&e) = wkb.get(cursor) else {
+                    out.truncate(start_len);
+                    return false;
+                };
+                if e > 1 {
+                    out.truncate(start_len);
+                    return false;
+                }
+                cursor += 1;
+                let lit = e == 1;
+                let Some(gt) = read_u32(wkb, &mut cursor, lit) else {
+                    out.truncate(start_len);
+                    return false;
+                };
+                if gt % 1000 != 2 || !stream_linestring_to_ctf1(wkb, &mut cursor, lit, out) {
+                    out.truncate(start_len);
+                    return false;
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn stream_linestring_to_ctf1(
+    wkb: &[u8],
+    cursor: &mut usize,
+    little: bool,
+    out: &mut Vec<u8>,
+) -> bool {
+    let Some(count) = read_u32(wkb, cursor, little).map(|n| n as usize) else {
+        return false;
+    };
+    let Some(end) = count.checked_mul(16).and_then(|n| cursor.checked_add(n)) else {
+        return false;
+    };
+    let Some(slice) = wkb.get(*cursor..end) else {
+        return false;
+    };
+    *cursor = end;
+    out.reserve(4 + count * 8);
+    out.extend_from_slice(&(count as u32).to_le_bytes());
+    let pairs = slice.as_chunks::<16>().0;
+    if little {
+        for pair in pairs {
+            let lon = f64::from_le_bytes(pair[0..8].try_into().unwrap()) as f32;
+            let lat = f64::from_le_bytes(pair[8..16].try_into().unwrap()) as f32;
+            if !lon.is_finite() || !lat.is_finite() {
+                return false;
+            }
+            let mut rec = [0u8; 8];
+            rec[0..4].copy_from_slice(&lon.to_le_bytes());
+            rec[4..8].copy_from_slice(&lat.to_le_bytes());
+            out.extend_from_slice(&rec);
+        }
+    } else {
+        for pair in pairs {
+            let lon = f64::from_be_bytes(pair[0..8].try_into().unwrap()) as f32;
+            let lat = f64::from_be_bytes(pair[8..16].try_into().unwrap()) as f32;
+            if !lon.is_finite() || !lat.is_finite() {
+                return false;
+            }
+            let mut rec = [0u8; 8];
+            rec[0..4].copy_from_slice(&lon.to_le_bytes());
+            rec[4..8].copy_from_slice(&lat.to_le_bytes());
+            out.extend_from_slice(&rec);
+        }
+    }
+    true
+}
+
 fn read_u32(bytes: &[u8], cursor: &mut usize, little: bool) -> Option<u32> {
     let end = (*cursor).checked_add(4)?;
     let slice = bytes.get(*cursor..end)?;

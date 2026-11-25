@@ -12,6 +12,18 @@ impl Lookup {
     pub fn is_compact(&self) -> bool {
         matches!(self, Self::Compact(_))
     }
+    pub fn first_way(&self) -> u64 {
+        match self {
+            Self::Flat(_) => 0,
+            Self::Compact(n) => n.first_way,
+        }
+    }
+    pub fn first_relation(&self) -> u64 {
+        match self {
+            Self::Flat(_) => 0,
+            Self::Compact(n) => n.first_relation,
+        }
+    }
     pub fn prepare_batch(
         &self,
         ids: Vec<i64>,

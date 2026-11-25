@@ -55,9 +55,9 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
   bundled TeleGeography snapshot (`submarine_cables.rs`, works offline) and live
   NASA FIRMS active-fire detections (`fire_source.rs`, rendered by
   `panels/world_map/fire_layer.rs`, cached locally). Both default to off.
-- **Seismic waves** — enable **Layers → Public Data → Seismic waves** on the live
+- **Earthquake epicenters** — enable **Layers → Public Data → Earthquake epicenters** on the live
   Earth globe. 1kEE streams M2.5+ earthquake reports from EMSC and checks USGS
-  once per minute. The live gold wavefronts use a 3.5 km/s surface-wave model.
+  once per minute. Gold dots mark recently reported epicenters.
   Select a USGS event and choose **Replay recorded arrivals**, or use **Replay by
   USGS event ID** for an older quake such as Ridgecrest (`ci38457511`). Stations
   flash at the published pick times, with cyan for P and violet for S arrivals.
@@ -85,6 +85,17 @@ event → geolocated camera pips → live snapshot/MJPEG feed window.
   disturbances can trigger it too. Published USGS arrivals flash cyan for P,
   violet for S, and green for other phases when the app receives the pick.
   Hover for the station code, sample time, motion ratio, and any associated quake.
+  **Follow Events** monitors published arrivals while it is on, even with the
+  station layer hidden. A new quake interrupts the tour or regional recap and
+  flies to the earliest station in the published phase data with valid map
+  coordinates. The normal tour resumes after its configured dwell time.
+  The movable **Seismogram** opens centered on that arrival, with 30 seconds
+  before and 90 seconds after it. The axis shows instrument counts. Right-click
+  a live station, or enter its network and station code (e.g. `IU.ANMO`) under
+  **Layers → Public Data → Seismogram** to watch a live trace. In a recorded
+  quake replay, choose **Station seismogram**. In a day replay, right-click a
+  station with a published arrival to open its recorded trace.
+  [EarthScope waveform archive](https://service.earthscope.org/fdsnws/dataselect/1/) ·
   [EarthScope real-time data](https://ds.iris.edu/ds/nodes/dmc/services/seedlink/)
 - **GhostMaps events** — enable **Layers → Public Data → GhostMaps events** on the
   Earth map. The default is the rolling 30-day Common Intelligence Picture.

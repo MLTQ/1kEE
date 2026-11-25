@@ -256,31 +256,32 @@ fn verify(db: &Connection, proofs: &Proofs, log: &mut dyn FnMut(String)) -> Resu
     for layer in LAYERS {
         let (tiles, complete) = layer::inventory(db, layer)?;
         ensure!(complete, "damaged output manifest");
-        let mut expected_total = 0i64;
-        for t in tiles {
+        for t in &tiles {
             let p = proofs
                 .get(&(layer, t.key))
                 .ok_or_else(|| anyhow!("unexpected output tile {:?}", t.key))?;
             ensure!(
-                t.count == p.count
-                    && t.built == p.built
-                    && layer::transfer(db, None, layer, &t, false)? == p.hash,
+                t.count == p.count && t.built == p.built,
                 "output verification failed for {:?}",
                 t.key
             );
-            expected_total += t.count;
+        }
+        layer::verify_layer_sequential(db, layer, &tiles, "orphan output geometry", |t, hash| {
+            let p = proofs
+                .get(&(layer, t.key))
+                .ok_or_else(|| anyhow!("unexpected output tile {:?}", t.key))?;
+            ensure!(
+                hash == p.hash,
+                "output verification failed for {:?}",
+                t.key
+            );
             verified += 1;
             if last.elapsed().as_secs() >= 10 {
                 log(format!("Verified {verified}/{} tile layers", proofs.len()));
                 last = Instant::now();
             }
-        }
-        let total: i64 = db.query_row(
-            &format!("SELECT COUNT(*) FROM {} NOT INDEXED", layer.table()),
-            [],
-            |r| r.get(0),
-        )?;
-        ensure!(total == expected_total, "orphan output geometry");
+            Ok(())
+        })?;
     }
     ensure!(verified == proofs.len(), "missing output manifest rows");
     Ok(())
@@ -362,7 +363,13 @@ pub(crate) fn run(cmd: &Command, log: &mut dyn FnMut(String)) -> Result<String> 
         .tempfile_in(parent)?;
     Connection::open(stage.path())?.pragma_update(None, "page_size", 16384)?;
     let mut dst = crate::contours::open_cache_db(stage.path())?;
-    dst.execute_batch("PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF; PRAGMA cache_size=-196608; PRAGMA temp_store=MEMORY;")?;
+    dst.execute_batch(
+        "PRAGMA journal_mode=MEMORY;
+         PRAGMA synchronous=OFF;
+         PRAGMA cache_size=-196608;
+         PRAGMA temp_store=MEMORY;
+         DROP INDEX IF EXISTS idx_contour_tiles_lookup;",
+    )?;
     tile_archive::native_contours::initialize(&dst)?;
     let mut proofs = Proofs::new();
     let mut partial = 0;
@@ -393,6 +400,11 @@ pub(crate) fn run(cmd: &Command, log: &mut dyn FnMut(String)) -> Result<String> 
         }
     }
     ensure!(!proofs.is_empty(), "no valid native tiles recovered");
+    log("Building contour lookup index".into());
+    dst.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_contour_tiles_lookup
+             ON contour_tiles (zoom_bucket, lat_bucket, lon_bucket, elevation_m, fid);",
+    )?;
     let tx = dst.transaction()?;
     tx.execute_batch("CREATE TABLE cache_recovery_digests(layer INTEGER,z INTEGER,lat INTEGER,lon INTEGER,n INTEGER,digest BLOB,repair INTEGER,built INTEGER,PRIMARY KEY(layer,z,lat,lon)) WITHOUT ROWID")?;
     {

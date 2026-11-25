@@ -201,38 +201,47 @@ fn pack_vectors(
         gb(source_bytes)
     ));
     let mut count = 0;
-    for (prefix, tag, path) in sources {
+    use rayon::prelude::*;
+    for batch in sources.chunks(16) {
         space.check(progress)?;
-        let before = contours::fingerprint(&path)?;
-        if fs::metadata(&path).map_err(|e| e.to_string())?.len() > tile_archive::MAX_PAYLOAD as u64
-        {
-            return Err(format!("Source cell exceeds 256 MiB: {}", path.display()));
-        }
-        let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let features = cell_format::read::read_single_chunk(&bytes, tag)
-            .ok_or_else(|| format!("Invalid {} cell {}", prefix, path.display()))?;
-        let lat = i16::from_le_bytes(bytes[5..7].try_into().unwrap()) as i32;
-        let lon = i16::from_le_bytes(bytes[7..9].try_into().unwrap()) as i32;
-        if path.file_name().unwrap() != cell_format::cell_filename(prefix, lat, lon).as_str() {
-            return Err(format!("Cell filename/header mismatch: {}", path.display()));
-        }
-        let packed = vector::pack_cell(writer, tag, lat, lon, &features)
-            .map_err(|e| format!("Cannot pack {}: {e}", path.display()))?;
-        if before != contours::fingerprint(&path)? {
-            return Err(format!(
-                "Source cell changed during packing: {}",
-                path.display()
+        let encoded: Result<Vec<_>, String> = batch
+            .par_iter()
+            .map(|&(prefix, tag, ref path)| {
+                let before = contours::fingerprint(path)?;
+                if fs::metadata(path).map_err(|e| e.to_string())?.len()
+                    > tile_archive::MAX_PAYLOAD as u64
+                {
+                    return Err(format!("Source cell exceeds 256 MiB: {}", path.display()));
+                }
+                let bytes = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+                let features = cell_format::read::read_single_chunk(&bytes, tag)
+                    .ok_or_else(|| format!("Invalid {} cell {}", prefix, path.display()))?;
+                let lat = i16::from_le_bytes(bytes[5..7].try_into().unwrap()) as i32;
+                let lon = i16::from_le_bytes(bytes[7..9].try_into().unwrap()) as i32;
+                if path.file_name().unwrap()
+                    != cell_format::cell_filename(prefix, lat, lon).as_str()
+                {
+                    return Err(format!("Cell filename/header mismatch: {}", path.display()));
+                }
+                let (tiles, packed) = vector::encode_cell(tag, lat, lon, &features)
+                    .map_err(|e| format!("Cannot pack {}: {e}", path.display()))?;
+                if before != contours::fingerprint(path)? {
+                    return Err(format!(
+                        "Source cell changed during packing: {}",
+                        path.display()
+                    ));
+                }
+                let meta_key = format!("vector:{}:{lat}:{lon}", String::from_utf8_lossy(&tag));
+                Ok((prefix, tag, lat, lon, features.len(), packed, tiles, meta_key, before))
+            })
+            .collect();
+        for (prefix, tag, lat, lon, feature_count, packed, tiles, meta_key, before) in encoded? {
+            writer.put_batch_with_meta(&tiles, Some((tag, lat, lon)), Some((&meta_key, &before)))?;
+            count += 1;
+            progress(format!(
+                "Packed {prefix} ({lat},{lon}): {feature_count} features, {packed} bytes"
             ));
         }
-        writer.metadata(
-            &format!("vector:{}:{lat}:{lon}", String::from_utf8_lossy(&tag)),
-            &before,
-        )?;
-        count += 1;
-        progress(format!(
-            "Packed {prefix} ({lat},{lon}): {} features, {packed} bytes",
-            features.len()
-        ));
     }
     Ok(count)
 }
@@ -244,63 +253,138 @@ fn pack_contours(
     progress: &mut dyn FnMut(String),
     space: &mut SpaceMonitor,
 ) -> Result<usize, String> {
-    use rusqlite::{Connection, OpenFlags, params};
+    use rusqlite::{Connection, OpenFlags};
     let before = contours::fingerprint(path)?;
     let source = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| e.to_string())?;
+    let _ = source.pragma_update(None, "cache_size", -131072);
+    let _ = source.pragma_update(None, "mmap_size", 268_435_456i64);
     source.execute_batch("BEGIN;").map_err(|e| e.to_string())?;
-    let mut manifest = source.prepare("SELECT zoom_bucket,lat_bucket,lon_bucket,contour_count FROM contour_tile_manifest ORDER BY zoom_bucket,lat_bucket,lon_bucket").map_err(|e|e.to_string())?;
-    let mut rows = manifest.query([]).map_err(|e| e.to_string())?;
-    let mut geometry = source.prepare("SELECT elevation_m,geom FROM contour_tiles WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3 ORDER BY fid").map_err(|e|e.to_string())?;
-    let mut count = 0;
-    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+    let mut manifest_stmt = source
+        .prepare(
+            "SELECT zoom_bucket,lat_bucket,lon_bucket,contour_count \
+             FROM contour_tile_manifest ORDER BY zoom_bucket,lat_bucket,lon_bucket",
+        )
+        .map_err(|e| e.to_string())?;
+    let manifest: Vec<(i32, i32, i32, usize)> = manifest_stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    drop(manifest_stmt);
+
+    // Single ordered scan of `contour_tiles` merge-joined against the manifest
+    // instead of N+1 indexed queries, streaming WKB directly into CTF1 bytes.
+    let mut geom_stmt = source
+        .prepare(
+            "SELECT zoom_bucket,lat_bucket,lon_bucket,elevation_m,geom \
+             FROM contour_tiles ORDER BY zoom_bucket,lat_bucket,lon_bucket,fid",
+        )
+        .map_err(|e| e.to_string())?;
+    let mut geom_rows = geom_stmt.query([]).map_err(|e| e.to_string())?;
+
+    let mut pending_batch: Vec<(Key, Vec<u8>)> = Vec::with_capacity(256);
+    let mut pending_bytes = 0usize;
+    let mut count = 0usize;
+
+    // Lookahead buffer holds at most 1 row across tile boundaries so all rows
+    // inside a tile stream directly from SQLite `as_blob()` with zero copy.
+    let mut carry: Option<((i32, i32, i32), f32, Vec<u8>)> = None;
+
+    for (level, y, x, expected) in manifest {
         space.check(progress)?;
-        let level: i32 = row.get(0).map_err(|e| e.to_string())?;
-        let y: i32 = row.get(1).map_err(|e| e.to_string())?;
-        let x: i32 = row.get(2).map_err(|e| e.to_string())?;
-        let expected: usize = row.get(3).map_err(|e| e.to_string())?;
-        let mut result = geometry
-            .query(params![level, y, x])
-            .map_err(|e| e.to_string())?;
-        let mut features = Vec::new();
-        let mut size = 8usize;
-        while let Some(r) = result.next().map_err(|e| e.to_string())? {
-            let elevation: f32 = r.get(0).map_err(|e| e.to_string())?;
-            let blob = r
-                .get_ref(1)
-                .map_err(|e| e.to_string())?
-                .as_blob()
-                .map_err(|e| e.to_string())?;
-            size = size.saturating_add(8).saturating_add(blob.len());
-            if size > tile_archive::MAX_PAYLOAD {
-                return Err("Contour tile exceeds 256 MiB".into());
+        let target_key = (level, y, x);
+        let mut tile_bytes = Vec::with_capacity(8 + expected * 32);
+        tile_bytes.extend_from_slice(b"CTF1");
+        tile_bytes.extend_from_slice(&(expected as u32).to_le_bytes());
+        let mut seen = 0usize;
+        let mut raw_size = 8usize;
+
+        if let Some((rk, elev, blob)) = carry.take() {
+            match rk.cmp(&target_key) {
+                std::cmp::Ordering::Less => {}
+                std::cmp::Ordering::Equal => {
+                    raw_size = raw_size.saturating_add(8).saturating_add(blob.len());
+                    if raw_size > tile_archive::MAX_PAYLOAD {
+                        return Err("Contour tile exceeds 256 MiB".into());
+                    }
+                    contours::append_gpkg_row(elev, &blob, &mut tile_bytes)?;
+                    seen += 1;
+                }
+                std::cmp::Ordering::Greater => {
+                    carry = Some((rk, elev, blob));
+                }
             }
-            features.push((elevation, blob.to_vec()));
         }
-        if features.len() != expected {
+
+        if carry.is_none() {
+            while let Some(row) = geom_rows.next().map_err(|e| e.to_string())? {
+                let rk = (
+                    row.get::<_, i32>(0).map_err(|e| e.to_string())?,
+                    row.get::<_, i32>(1).map_err(|e| e.to_string())?,
+                    row.get::<_, i32>(2).map_err(|e| e.to_string())?,
+                );
+                match rk.cmp(&target_key) {
+                    std::cmp::Ordering::Less => continue,
+                    std::cmp::Ordering::Equal => {
+                        let elevation: f32 = row.get(3).map_err(|e| e.to_string())?;
+                        let blob = row
+                            .get_ref(4)
+                            .map_err(|e| e.to_string())?
+                            .as_blob()
+                            .map_err(|e| e.to_string())?;
+                        raw_size = raw_size.saturating_add(8).saturating_add(blob.len());
+                        if raw_size > tile_archive::MAX_PAYLOAD {
+                            return Err("Contour tile exceeds 256 MiB".into());
+                        }
+                        contours::append_gpkg_row(elevation, blob, &mut tile_bytes)?;
+                        seen += 1;
+                    }
+                    std::cmp::Ordering::Greater => {
+                        let elevation: f32 = row.get(3).map_err(|e| e.to_string())?;
+                        let blob = row
+                            .get_ref(4)
+                            .map_err(|e| e.to_string())?
+                            .as_blob()
+                            .map_err(|e| e.to_string())?
+                            .to_vec();
+                        carry = Some((rk, elevation, blob));
+                        break;
+                    }
+                }
+            }
+        }
+
+        if seen != expected {
             return Err(format!(
                 "Contour manifest mismatch at {body}/{level}/{y}/{x}"
             ));
         }
-        let bytes = contours::encode(&features)?;
-        writer.put_batch(
-            &[(
-                Key {
-                    body,
-                    layer: *b"CNTR",
-                    grid: 2,
-                    level,
-                    y,
-                    x,
-                },
-                bytes,
-            )],
-            None,
-        )?;
+
+        pending_bytes += tile_bytes.len();
+        pending_batch.push((
+            Key {
+                body,
+                layer: *b"CNTR",
+                grid: 2,
+                level,
+                y,
+                x,
+            },
+            tile_bytes,
+        ));
+        if pending_batch.len() >= 256 || pending_bytes >= 32 * 1024 * 1024 {
+            writer.put_batch(&pending_batch, None)?;
+            pending_batch.clear();
+            pending_bytes = 0;
+        }
         count += 1;
         if count % 100 == 0 {
             progress(format!("Packed {count} contour tiles for body {body}"));
         }
+    }
+    if !pending_batch.is_empty() {
+        writer.put_batch(&pending_batch, None)?;
     }
     if before != contours::fingerprint(path)? {
         return Err(format!(

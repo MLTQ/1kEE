@@ -9,7 +9,7 @@ anyhow = "1"
 same-file = "1"
 eframe = { version = "0.31", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
 egui = "0.31"
-image = { version = "0.25", default-features = false, features = ["tiff"] }
+flate2 = { version = "1", features = ["zlib-rs"] }
 tiff = "0.11"
 libdeflater = "1"
 hashlink = "0.9"
@@ -27,5 +27,8 @@ tempfile = "3"
 
 bytemuck = { version = "1", features = ["derive"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
-flate2 = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }

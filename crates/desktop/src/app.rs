@@ -104,7 +104,7 @@ impl DashboardApp {
         factal_stream::history_tick(&mut self.model);
         usgs_stream::tick(&mut self.model);
         self.seismic_stream.tick(ctx, &mut self.model.seismic);
-        self.model.seismic.live_stations.tick(ctx);
+        self.model.seismic.live_stations.tick(ctx, self.model.event_follow.enabled());
         if let Some((point, zoom)) = self.model.seismic.station_replay.tick(ctx.input(|i| i.time)) {
             self.model.focus_station_replay(point, zoom);
         }
@@ -198,6 +198,7 @@ impl eframe::App for DashboardApp {
             }
         }
 
+        panels::seismogram::render(ctx, &mut self.model.seismic.seismogram);
         panels::render_factal_brief(ctx, &mut self.model, &mut self.event_radio);
 
         let map_rect = egui::CentralPanel::default()

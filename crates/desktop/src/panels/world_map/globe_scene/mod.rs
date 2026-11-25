@@ -335,7 +335,7 @@ pub(super) fn paint_with_layout(
     }
 
     live_stations::draw(painter, rect, &layout, model, stereo);
-    seismic::draw(painter, rect, &layout, model, time, stereo);
+    seismic::draw(painter, rect, &layout, model, stereo);
     station_day::draw(painter, rect, &layout, model, stereo);
 
     let selected_event_id = model.selected_event_id.as_deref();

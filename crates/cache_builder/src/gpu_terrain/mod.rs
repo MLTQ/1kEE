@@ -1,11 +1,11 @@
 //! SRTM GL1 compute backend. Sources are read-only; callers own cache writes.
 //! One serialized device and a twelve-window VRAM LRU are shared by background jobs.
 use crate::contours::{self, TileKey};
-use crate::marching_squares::{ContourLine, chain_segments};
+use crate::marching_squares::{ContourLine, FxHashMap, chain_segments};
 use eframe::wgpu::{self, util::DeviceExt};
 use rayon::prelude::*;
 use std::{
-    collections::BTreeMap,
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
     time::Instant,
@@ -81,17 +81,14 @@ pub fn build(root: &Path, zoom: i32, lat: i32, lon: i32) -> Result<TerrainTile, 
     worker
         .device
         .push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-    let computed = (|| {
-        let grid = worker.resample(root, core.source, core.raster_size)?;
-        let source_ms = start.elapsed().as_secs_f64() * 1000.0;
-        let start_contour = Instant::now();
-        let raw = worker.extract(&grid, core.raster_size, spec.interval_m as f32, CAPACITY)?;
-        Ok::<_, String>((
-            raw,
-            source_ms,
-            start_contour.elapsed().as_secs_f64() * 1000.0,
-        ))
-    })();
+    let computed = worker.resample_and_extract(
+        root,
+        core.source,
+        core.raster_size,
+        spec.interval_m as f32,
+        CAPACITY,
+        start,
+    );
     if let Some(error) = block_on(worker.device.pop_error_scope()) {
         let error = format!("GPU terrain disabled after allocation failure: {error}");
         *state = Err(error.clone());
@@ -146,7 +143,9 @@ struct Worker {
     sample_pipeline: wgpu::ComputePipeline,
     contour_pipeline: wgpu::ComputePipeline,
     sources: Vec<Source>,
+    tiff_meta: HashMap<PathBuf, deflate::FastTiffMeta>,
     block_cache: deflate::BlockCache,
+    grid_buffer: Option<wgpu::Buffer>,
     segment_buffer: Option<wgpu::Buffer>,
     count_buffer: wgpu::Buffer,
     count_staging: wgpu::Buffer,
@@ -262,7 +261,9 @@ impl Worker {
             sample_pipeline,
             contour_pipeline,
             sources: Vec::new(),
+            tiff_meta: HashMap::new(),
             block_cache: Default::default(),
+            grid_buffer: None,
             segment_buffer: None,
             count_buffer,
             count_staging,
@@ -292,6 +293,16 @@ impl Worker {
         buffers: &[&wgpu::Buffer],
         n: u32,
     ) {
+        self.encode_dispatch_2d(encoder, pipeline, buffers, n, n);
+    }
+    fn encode_dispatch_2d(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        pipeline: &wgpu::ComputePipeline,
+        buffers: &[&wgpu::Buffer],
+        width: u32,
+        height: u32,
+    ) {
         let entries: Vec<_> = buffers
             .iter()
             .enumerate()
@@ -308,7 +319,7 @@ impl Worker {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind, &[]);
-        pass.dispatch_workgroups(n.div_ceil(16), n.div_ceil(16), 1);
+        pass.dispatch_workgroups(width.div_ceil(16), height.div_ceil(16), 1);
     }
     #[cfg(test)]
     fn dispatch(&self, pipeline: &wgpu::ComputePipeline, buffers: &[&wgpu::Buffer], n: u32) {
@@ -383,19 +394,52 @@ impl Worker {
             .metadata()
             .map_err(|e| format!("{}: {e}", path.display()))?;
         let modified = meta.modified().ok();
+        let size = meta.len();
         if let Some(i) = self.sources.iter().position(|s| {
             s.path == path
                 && s.modified == modified
-                && s.size == meta.len()
+                && s.size == size
                 && s.window.contains(needed)
         }) {
             let entry = self.sources.remove(i);
             self.sources.push(entry);
             return Ok(self.sources.len() - 1);
         }
-        let mut decoder = window::open(path)?;
-        validate_source(&mut decoder, path, lat, lon)?;
-        let decoded = window::load_cached(decoder, path, needed, &mut self.block_cache)?;
+        // Fast path: reuse cached validated TIFF IFD metadata (offsets/lengths) so
+        // repeated windows from the same 1° SRTM tile skip IFD parsing and even
+        // File::open when all needed blocks hit BlockCache.
+        let fast_decoded = if let Some(cached_meta) = self.tiff_meta.get(path)
+            && cached_meta.modified == modified
+            && cached_meta.size == size
+            && cached_meta.lat == lat
+            && cached_meta.lon == lon
+        {
+            window::load_fast(path, cached_meta, needed, &mut self.block_cache)?
+        } else {
+            None
+        };
+        let decoded = match fast_decoded {
+            Some(d) => d,
+            None => {
+                let mut decoder = window::open(path)?;
+                validate_source(&mut decoder, path, lat, lon)?;
+                let d = window::load_cached_with_coords(
+                    decoder,
+                    path,
+                    lat,
+                    lon,
+                    needed,
+                    &mut self.block_cache,
+                )?;
+                if let Some(fast_meta) = d.fast_meta {
+                    self.tiff_meta.insert(path.to_path_buf(), fast_meta);
+                }
+                window::Decoded {
+                    fast_meta: None,
+                    ..d
+                }
+            }
+        };
         let upload_start = Instant::now();
         let buffer = self.buffer(
             "resident SRTM",
@@ -417,7 +461,7 @@ impl Worker {
         self.sources.retain(|s| {
             s.path != path
                 || (s.modified == modified
-                    && s.size == meta.len()
+                    && s.size == size
                     && !decoded.window.contains(s.window))
         });
         if self.sources.len() >= 12 {
@@ -426,27 +470,26 @@ impl Worker {
         self.sources.push(Source {
             path: path.into(),
             modified,
-            size: meta.len(),
+            size,
             window: decoded.window,
             buffer,
         });
         Ok(self.sources.len() - 1)
     }
-    fn resample(&mut self, root: &Path, bounds: Bounds, n: u32) -> Result<wgpu::Buffer, String> {
-        validate_grid(bounds, n)?;
-        let grid = self.empty(
-            "sampled terrain",
-            u64::from(n) * u64::from(n) * 4,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        );
+    fn encode_resample_into(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        grid: &wgpu::Buffer,
+        root: &Path,
+        bounds: Bounds,
+        n: u32,
+    ) -> Result<(), String> {
         let init_params = self.buffer(
             "sampling parameters",
             bytemuck::cast_slice(&[n, 3601, 3601, 0]),
             wgpu::BufferUsages::UNIFORM,
         );
-        // Record initialize + all overlapping source resamples into a single CommandEncoder submit.
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        self.encode_dispatch(&mut encoder, &self.initialize_pipeline, &[&init_params, &grid], n);
+        self.encode_dispatch(encoder, &self.initialize_pipeline, &[&init_params, grid], n);
         let mut found = false;
         for lat in bounds.min_lat.floor() as i32..=bounds.max_lat.floor() as i32 {
             for lon in bounds.min_lon.floor() as i32..=bounds.max_lon.floor() as i32 {
@@ -464,6 +507,12 @@ impl Worker {
                 let Some(needed) = Window::from_axes(&axes, n as usize) else {
                     continue;
                 };
+                let Some((out_x0, out_w)) = active_axis_span(&axes[..n as usize]) else {
+                    continue;
+                };
+                let Some((out_y0, out_h)) = active_axis_span(&axes[n as usize..]) else {
+                    continue;
+                };
                 let i = self.source(&path, lat, lon, needed)?;
                 found = true;
                 let window = self.sources[i].window;
@@ -477,9 +526,10 @@ impl Worker {
                         *v -= window.y as f32;
                     }
                 }
+                let origin = (out_x0 & 0xffff) | ((out_y0 & 0xffff) << 16);
                 let params = self.buffer(
                     "window sampling parameters",
-                    bytemuck::cast_slice(&[n, window.width, window.height, 0]),
+                    bytemuck::cast_slice(&[n, window.width, window.height, origin]),
                     wgpu::BufferUsages::UNIFORM,
                 );
                 let axes = self.buffer(
@@ -487,20 +537,169 @@ impl Worker {
                     bytemuck::cast_slice(&axes),
                     wgpu::BufferUsages::STORAGE,
                 );
-                self.encode_dispatch(
-                    &mut encoder,
+                self.encode_dispatch_2d(
+                    encoder,
                     &self.sample_pipeline,
-                    &[&params, &self.sources[i].buffer, &axes, &grid],
-                    n,
+                    &[&params, &self.sources[i].buffer, &axes, grid],
+                    out_w,
+                    out_h,
                 );
             }
         }
         if !found {
             return Err("No SRTM sources for GPU tile".into());
         }
+        Ok(())
+    }
+    #[cfg(test)]
+    fn resample(&mut self, root: &Path, bounds: Bounds, n: u32) -> Result<wgpu::Buffer, String> {
+        validate_grid(bounds, n)?;
+        let grid = self.empty(
+            "sampled terrain",
+            u64::from(n) * u64::from(n) * 4,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        );
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        self.encode_resample_into(&mut encoder, &grid, root, bounds, n)?;
         self.queue.submit(Some(encoder.finish()));
         Ok(grid)
     }
+    fn resample_and_extract(
+        &mut self,
+        root: &Path,
+        bounds: Bounds,
+        n: u32,
+        interval: f32,
+        limit: u32,
+        start: Instant,
+    ) -> Result<(Vec<[f32; 5]>, f64, f64), String> {
+        validate_grid(bounds, n)?;
+        if !(2..=MAX_N).contains(&n)
+            || !interval.is_finite()
+            || interval < 1.0
+            || limit == 0
+            || limit > CAPACITY
+        {
+            return Err("Invalid GPU contour dimensions or interval".into());
+        }
+        let grid_bytes = u64::from(n) * u64::from(n) * 4;
+        if self
+            .grid_buffer
+            .as_ref()
+            .is_none_or(|b| b.size() < grid_bytes)
+        {
+            self.grid_buffer = Some(self.empty(
+                "sampled terrain",
+                grid_bytes,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            ));
+        }
+        let previous = self
+            .segment_buffer
+            .as_ref()
+            .map_or(0, |b| (b.size() / 20) as u32);
+        let mut capacity = (n * n / 4).max(64).max(previous).min(limit);
+        let seg_bytes = u64::from(capacity) * 20;
+        if self
+            .segment_buffer
+            .as_ref()
+            .is_none_or(|b| b.size() < seg_bytes)
+        {
+            self.segment_buffer = Some(self.empty(
+                "contour segments",
+                seg_bytes,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            ));
+        }
+
+        // Record initialize + source resamples + initial contour extraction + count
+        // copy into a single CommandEncoder submit.
+        let grid = self.grid_buffer.take().unwrap();
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let resample_res = self.encode_resample_into(&mut encoder, &grid, root, bounds, n);
+        if let Err(e) = resample_res {
+            self.grid_buffer = Some(grid);
+            return Err(e);
+        }
+        let source_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let start_contour = Instant::now();
+
+        let count_res = (|| -> Result<u32, String> {
+            let mut first_encoder = Some(encoder);
+            loop {
+                let bytes = u64::from(capacity) * 20;
+                if self
+                    .segment_buffer
+                    .as_ref()
+                    .is_none_or(|b| b.size() < bytes)
+                {
+                    self.segment_buffer = Some(self.empty(
+                        "contour segments",
+                        bytes,
+                        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                    ));
+                }
+                let segments = self.segment_buffer.as_ref().unwrap();
+                let params = self.buffer(
+                    "contour parameters",
+                    bytemuck::cast_slice(&[n, capacity, interval.to_bits(), 0]),
+                    wgpu::BufferUsages::UNIFORM,
+                );
+                self.queue
+                    .write_buffer(&self.count_buffer, 0, bytemuck::bytes_of(&0u32));
+                let mut enc = first_encoder
+                    .take()
+                    .unwrap_or_else(|| self.device.create_command_encoder(&Default::default()));
+                self.encode_dispatch(
+                    &mut enc,
+                    &self.contour_pipeline,
+                    &[&params, &grid, segments, &self.count_buffer],
+                    n,
+                );
+                enc.copy_buffer_to_buffer(&self.count_buffer, 0, &self.count_staging, 0, 4);
+                self.queue.submit(Some(enc.finish()));
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.count_staging
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |r| {
+                        let _ = tx.send(r);
+                    });
+                self.device.poll(wgpu::Maintain::Wait);
+                rx.recv()
+                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())?;
+                let count = {
+                    let mapped = self.count_staging.slice(..).get_mapped_range();
+                    u32::from_ne_bytes(mapped[..4].try_into().unwrap())
+                };
+                self.count_staging.unmap();
+                if count <= capacity {
+                    return Ok(count);
+                }
+                if capacity == limit {
+                    return Err(format!(
+                        "GPU contour capacity exceeded ({count}>{capacity}); no partial output accepted"
+                    ));
+                }
+                capacity = (capacity * 4).min(limit);
+            }
+        })();
+        self.grid_buffer = Some(grid);
+        let count = count_res?;
+        let raw = if count == 0 {
+            Vec::new()
+        } else {
+            let segments = self.segment_buffer.take().unwrap();
+            let res = self.read_mapped(&segments, u64::from(count) * 20, |mapped| {
+                bytemuck::cast_slice::<u8, [f32; 5]>(mapped).to_vec()
+            });
+            self.segment_buffer = Some(segments);
+            res?
+        };
+        let compute_ms = start_contour.elapsed().as_secs_f64() * 1000.0;
+        Ok((raw, source_ms, compute_ms))
+    }
+    #[cfg(test)]
     fn extract(
         &mut self,
         grid: &wgpu::Buffer,
@@ -607,6 +806,11 @@ fn validate_grid(b: Bounds, n: u32) -> Result<(), String> {
     }
     Ok(())
 }
+fn active_axis_span(values: &[f32]) -> Option<(u32, u32)> {
+    let first = values.iter().position(|&v| v >= 0.0)?;
+    let last = values.iter().rposition(|&v| v >= 0.0)?;
+    Some((first as u32, (last - first + 1) as u32))
+}
 fn axes(b: Bounds, n: u32, lat: i32, lon: i32) -> Vec<f32> {
     let local = |value: f64, base: i32, flip: bool| {
         // Snap tiny transform error back to a post before sampling.
@@ -683,19 +887,20 @@ fn validate_source(
     }
 }
 fn stitch(raw: Vec<[f32; 5]>, b: Bounds, n: u32) -> Lines {
-    // Elevations are integral. Partition before sorting so each independent
-    // chain can use a CPU core while the GPU starts the next tile.
-    let mut levels: BTreeMap<i32, Vec<[f32; 4]>> = BTreeMap::new();
+    // Elevations are integral. Partition in O(N) via FxHashMap, then sort the
+    // small set of distinct elevation levels so output order stays canonical.
+    let mut levels: FxHashMap<i32, Vec<[f32; 4]>> = FxHashMap::default();
     for [x, y, z, w, h] in raw {
         levels.entry(h as i32).or_default().push([x, y, z, w]);
     }
+    let mut levels: Vec<(i32, Vec<[f32; 4]>)> = levels.into_iter().collect();
+    levels.sort_unstable_by_key(|(h, _)| *h);
     let coord = |x: f32, y: f32| {
         (
             (b.min_lon + (f64::from(x) + 0.5) * (b.max_lon - b.min_lon) / f64::from(n)) as f32,
             (b.max_lat - (f64::from(y) + 0.5) * (b.max_lat - b.min_lat) / f64::from(n)) as f32,
         )
     };
-    let levels: Vec<_> = levels.into_iter().collect();
     let lines_by_level: Vec<_> = levels
         .into_par_iter()
         .map(|(h, mut segments)| {
@@ -739,54 +944,188 @@ pub(crate) fn build_bbox(
 ) -> Result<String, String> {
     let mut db = contours::open_cache_db(&command.cache_db_path).map_err(|e| e.to_string())?;
     tile_archive::native_contours::initialize(&db).map_err(|e| e.to_string())?;
-    let mut built = 0;
-    let mut skipped = 0;
+    let existing = contours::load_manifest_set(&db).map_err(|e| e.to_string())?;
     let specs: Vec<_> = contours::all_specs()
         .into_iter()
         .filter(|s| command.zoom_buckets.contains(&s.zoom_bucket))
         .collect();
-    let count = |low, high, step| {
-        let range = contours::bucket_range(low, high, step);
-        (i64::from(*range.end()) - i64::from(*range.start()) + 1).max(0) as u64
-    };
-    let total: u64 = specs
-        .iter()
-        .map(|s| {
-            let step = s.half_extent_deg * 0.45;
-            count(command.min_lat, command.max_lat, step).saturating_mul(count(
-                command.min_lon,
-                command.max_lon,
-                step,
-            ))
-        })
-        .fold(0, u64::saturating_add);
+
+    let mut pending = Vec::new();
+    let mut skipped = 0u64;
     for spec in specs {
         let step = spec.half_extent_deg * 0.45;
         for lat in contours::bucket_range(command.min_lat, command.max_lat, step) {
             for lon in contours::bucket_range(command.min_lon, command.max_lon, step) {
-                let present: bool = db
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM contour_tile_manifest
-                     WHERE zoom_bucket=?1 AND lat_bucket=?2 AND lon_bucket=?3)",
-                        rusqlite::params![spec.zoom_bucket, lat, lon],
-                        |r| r.get(0),
-                    )
-                    .map_err(|e| e.to_string())?;
-                if present {
+                if existing.contains(&(spec.zoom_bucket, lat, lon)) {
                     skipped += 1;
-                    continue;
+                } else {
+                    pending.push((spec, lat, lon));
                 }
-                let tile = build(&command.srtm_root, spec.zoom_bucket, lat, lon)?;
-                tile.write(&mut db).map_err(|e| e.to_string())?;
-                built += 1;
-                progress(contours::ContourBuildProgress::info(
-                    "GPU terrain",
-                    ((built + skipped) as f64 / total.max(1) as f64) as f32,
-                    format!("{built} built, {skipped} cached"),
-                ));
             }
         }
     }
+    let total = skipped + pending.len() as u64;
+    let mut built = 0u64;
+
+    if !pending.is_empty() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
+        type RawMsg = Result<(TileKey, CoreTile, Vec<[f32; 5]>), String>;
+        type EncodedMsg = Result<(TileKey, Vec<(i64, f32, Vec<u8>)>, Vec<(i64, Vec<u8>)>), String>;
+
+        let stop = AtomicBool::new(false);
+        let srtm_root = &command.srtm_root;
+        let (raw_tx, raw_rx) = mpsc::sync_channel::<RawMsg>(4);
+        let (enc_tx, enc_rx) = mpsc::sync_channel::<EncodedMsg>(6);
+
+        let pipeline_result: Result<(), String> = std::thread::scope(|scope| {
+            let stop_ref = &stop;
+            // Stage 1: GPU resample + contour segment extraction.
+            let gpu_thread = scope.spawn(move || {
+                for (spec, lat, lon) in pending {
+                    if stop_ref.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let core = CoreTile::srtm(spec.half_extent_deg, lat, lon);
+                    let res = (|| -> Result<(TileKey, CoreTile, Vec<[f32; 5]>), String> {
+                        validate_grid(core.source, core.raster_size)?;
+                        let mut state = WORKER
+                            .get_or_init(|| Mutex::new(Worker::new()))
+                            .lock()
+                            .map_err(|_| "GPU terrain worker unavailable".to_string())?;
+                        let worker = state.as_mut().map_err(|e| e.clone())?;
+                        let start = Instant::now();
+                        worker
+                            .device
+                            .push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+                        let computed = worker.resample_and_extract(
+                            srtm_root,
+                            core.source,
+                            core.raster_size,
+                            spec.interval_m as f32,
+                            CAPACITY,
+                            start,
+                        );
+                        if let Some(error) = block_on(worker.device.pop_error_scope()) {
+                            let error =
+                                format!("GPU terrain disabled after allocation failure: {error}");
+                            *state = Err(error.clone());
+                            return Err(error);
+                        }
+                        let (raw, _, _) = computed?;
+                        Ok((
+                            TileKey {
+                                zoom_bucket: spec.zoom_bucket,
+                                lat_bucket: lat,
+                                lon_bucket: lon,
+                            },
+                            core,
+                            raw,
+                        ))
+                    })();
+                    if res.is_err() {
+                        stop_ref.store(true, Ordering::Relaxed);
+                        let _ = raw_tx.send(res);
+                        break;
+                    }
+                    if raw_tx.send(res).is_err() {
+                        break;
+                    }
+                }
+            });
+
+            // Stage 2: CPU Rayon segment stitching + core clipping + GPKG WKB encoding.
+            let cpu_thread = scope.spawn(move || {
+                for msg in raw_rx {
+                    match msg {
+                        Ok((tile, core, raw)) => {
+                            if stop_ref.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            let (contours_lines, coastline_lines) =
+                                stitch(raw, core.source, core.raster_size);
+                            let core_bounds = core.core;
+                            let encoded_contours: Vec<(i64, f32, Vec<u8>)> = contours_lines
+                                .par_iter()
+                                .enumerate()
+                                .filter_map(|(fid, line)| {
+                                    let blob = tile_archive::contour_clip::clip_points_f32(
+                                        &line.points,
+                                        core_bounds,
+                                    )?;
+                                    Some((fid as i64, line.elevation_m, blob))
+                                })
+                                .collect();
+                            let encoded_coastlines: Vec<(i64, Vec<u8>)> = coastline_lines
+                                .par_iter()
+                                .enumerate()
+                                .filter_map(|(fid, pts)| {
+                                    let blob = tile_archive::contour_clip::clip_points_f32(
+                                        pts,
+                                        core_bounds,
+                                    )?;
+                                    Some((fid as i64, blob))
+                                })
+                                .collect();
+                            if enc_tx
+                                .send(Ok((tile, encoded_contours, encoded_coastlines)))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            stop_ref.store(true, Ordering::Relaxed);
+                            let _ = enc_tx.send(Err(e));
+                            break;
+                        }
+                    }
+                }
+            });
+
+            // Stage 3 (main thread): SQLite atomic tile writes + progress reporting.
+            let mut err: Option<String> = None;
+            for msg in enc_rx {
+                match msg {
+                    Ok((tile, encoded_contours, encoded_coastlines)) => {
+                        if err.is_some() {
+                            continue;
+                        }
+                        if let Err(e) = contours::write_encoded_tile(
+                            &mut db,
+                            tile,
+                            &encoded_contours,
+                            Some(&encoded_coastlines),
+                        ) {
+                            stop.store(true, Ordering::Relaxed);
+                            err = Some(e.to_string());
+                            continue;
+                        }
+                        built += 1;
+                        progress(contours::ContourBuildProgress::info(
+                            "GPU terrain",
+                            ((built + skipped) as f64 / total.max(1) as f64) as f32,
+                            format!("{built} built, {skipped} cached"),
+                        ));
+                    }
+                    Err(e) => {
+                        stop.store(true, Ordering::Relaxed);
+                        err.get_or_insert(e);
+                    }
+                }
+            }
+            let _ = gpu_thread.join();
+            let _ = cpu_thread.join();
+            match err {
+                Some(e) => Err(e),
+                None => Ok(()),
+            }
+        });
+        pipeline_result?;
+    }
+
     db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
         .map_err(|e| e.to_string())?;
     Ok(format!(

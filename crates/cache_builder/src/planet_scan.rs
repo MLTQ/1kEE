@@ -10,9 +10,15 @@ pub(super) fn node_records(blob: &Blob) -> Result<Vec<u8>, String> {
                 Element::DenseNode(n) => (n.id(), n.lat() as f32, n.lon() as f32),
                 _ => continue,
             };
-            bytes.extend_from_slice(&id.to_le_bytes());
-            bytes.extend_from_slice(&lat.to_le_bytes());
-            bytes.extend_from_slice(&lon.to_le_bytes());
+            if bytes.is_empty() {
+                // Standard OSM node blocks hold ~8,000 nodes (16 bytes/record).
+                bytes.reserve(8192 * 16);
+            }
+            let mut rec = [0u8; 16];
+            rec[0..8].copy_from_slice(&id.to_le_bytes());
+            rec[8..12].copy_from_slice(&lat.to_le_bytes());
+            rec[12..16].copy_from_slice(&lon.to_le_bytes());
+            bytes.extend_from_slice(&rec);
         }
     }
     Ok(bytes)

@@ -26,6 +26,7 @@ pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
     .on_hover_text(
         "Monitor real vertical seismometer and accelerometer waveforms on the live Earth globe.",
     );
+    if ui.small_button("Seismogram…").clicked() { model.seismic.seismogram.open = true; }
     if live.enabled {
         ui.indent("live_station_status", |ui| {
             let count = format!("{} reporting · {} listed", live.reporting, live.stations.len());
@@ -67,10 +68,6 @@ pub(super) fn draw(
         || model.replay_mode
         || model.follow_recaps.active.is_some()
         || super::station_replay::is_active(model)
-        || model
-            .seismic
-            .replay_wave(painter.ctx().input(|i| i.time))
-            .is_some()
     {
         return;
     }
@@ -156,6 +153,8 @@ pub(super) fn draw(
         } else {
             lines.push("No recent station data".into());
         }
+        lines.push("Right-click for live seismogram".into());
+        crate::panels::seismogram::station_click(&painter, pos, id, None);
         let anchor = egui::pos2(
             (pos.x + 12.).min(rect.right() - 270.),
             (pos.y + 12.).min(rect.bottom() - 17. * lines.len() as f32),

@@ -2,7 +2,7 @@
 use super::{ActiveTab, BuilderApp};
 use crate::{
     atlas,
-    job::{BuildJob, spawn_job},
+    job::{BuildJob, spawn_job_with_wake},
 };
 use eframe::egui;
 use std::path::PathBuf;
@@ -159,7 +159,10 @@ impl BuilderApp {
                     self.progress_detail = "Checking sources and saved tiles…".into();
                     self.atlas_form.progress = None;
                     self.active_job_tab = Some(ActiveTab::Atlas);
-                    self.active_job = Some(spawn_job(BuildJob::Atlas(command)));
+                    self.active_job = Some(spawn_job_with_wake(
+                        BuildJob::Atlas(command),
+                        Some(ui.ctx().clone()),
+                    ));
                 }
                 Err(error) => {
                     self.status = "Failed".into();
@@ -215,9 +218,20 @@ impl BuilderApp {
         ui.separator();
         ui.label("Atlas reads these height tiles directly. Missing coverage falls back to original terrain sources; illumination and forest overlays are applied at runtime.");
         egui::CollapsingHeader::new("Build log").show(ui, |ui| {
-            for line in self.log_lines.iter().rev().take(80) {
-                ui.small(line);
-            }
+            let count = self.log_lines.len().min(80);
+            let row_height = ui.text_style_height(&egui::TextStyle::Small);
+            egui::ScrollArea::vertical()
+                .id_salt("atlas_log_scroll")
+                .max_height(180.0)
+                .show_rows(ui, row_height, count, |ui, range| {
+                    let total = self.log_lines.len();
+                    for row in range {
+                        let idx = total - 1 - row;
+                        if let Some(line) = self.log_lines.get(idx) {
+                            ui.small(line);
+                        }
+                    }
+                });
         });
     }
 }

@@ -1,3 +1,4 @@
+pub(crate) mod seismogram;
 mod camera_list;
 mod event_camera_sidebar;
 mod event_chyron;

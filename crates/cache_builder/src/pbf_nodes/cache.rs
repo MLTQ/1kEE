@@ -6,59 +6,73 @@ const CACHE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PREFETCH_REFS: usize = 512 * 1024;
 type Coordinate = Option<(f32, f32)>;
 /// Selected coordinates shared by all workers in one bounded way group.
-pub struct Prepared(Vec<(i64, Coordinate)>);
+/// Stored compactly as `Vec<Node>` (16 bytes/entry vs 24 bytes for `(i64, Option<(f32, f32)>)`).
+/// Because `Prepared` is exhaustive for its group, any ID absent from this sorted
+/// table is definitively missing and never triggers an original-PBF read.
+pub struct Prepared(Vec<Node>);
 
 impl Prepared {
-    pub(crate) fn sorted(values: Vec<(i64, Option<(f32, f32)>)>) -> Result<Arc<Self>, String> {
-        if values.windows(2).any(|w| w[0].0 >= w[1].0) {
+    pub(crate) fn sorted_nodes(nodes: Vec<Node>) -> Result<Arc<Self>, String> {
+        if nodes.windows(2).any(|w| w[0].id >= w[1].id) {
             return Err("Joined coordinates are not strictly sorted".into());
         }
-        Ok(Arc::new(Self(values)))
+        Ok(Arc::new(Self(nodes)))
     }
 }
 
 impl PbfNodes {
     pub fn prepare_batch(&self, mut ids: Vec<i64>) -> Result<Arc<Prepared>, String> {
-        ids.sort_unstable();
+        ids.par_sort_unstable();
         ids.dedup();
         let mut groups = Vec::new();
         let mut start = 0;
+        let mut block_cursor = 0;
         while start < ids.len() {
-            let b = self.blocks.partition_point(|b| b.max < ids[start]);
+            block_cursor += self.blocks[block_cursor..].partition_point(|b| b.max < ids[start]);
+            let b = block_cursor;
             let end = if let Some(block) = self.blocks.get(b) {
                 start + ids[start..].partition_point(|&id| id <= block.max)
             } else {
                 ids.len()
             };
-            groups.push((b, start, end));
+            if b < self.blocks.len() && ids[end - 1] >= self.blocks[b].min {
+                groups.push((b, start, end));
+            }
             start = end;
         }
         // One decode per required block for the whole group, not per way or
-        // per blob. Missing IDs stay in the table so they never trigger rereads.
-        let coordinates = groups
+        // per blob. Both `ids[start..end]` and `nodes` are sorted, so a single
+        // advancing cursor finds all matching nodes without repeated full searches.
+        let found_per_group = groups
             .par_iter()
             .map(|&(b, start, end)| {
-                let nodes = if b < self.blocks.len() && ids[end - 1] >= self.blocks[b].min {
-                    self.read_block(b)?
-                } else {
-                    Vec::new()
-                };
-                Ok(ids[start..end]
-                    .iter()
-                    .map(|id| {
-                        nodes
-                            .binary_search_by_key(id, |n| n.id)
-                            .ok()
-                            .map(|i| (nodes[i].lat, nodes[i].lon))
-                    })
-                    .collect::<Vec<_>>())
+                let nodes = self.read_block(b)?;
+                let slice = &ids[start..end];
+                let mut out = Vec::with_capacity(slice.len().min(nodes.len()));
+                let mut cursor = 0usize;
+                for &id in slice {
+                    if cursor >= nodes.len() {
+                        break;
+                    }
+                    if nodes[cursor].id < id {
+                        cursor += nodes[cursor..].partition_point(|n| n.id < id);
+                    }
+                    if let Some(&n) = nodes.get(cursor)
+                        && n.id == id
+                    {
+                        out.push(n);
+                        cursor += 1;
+                    }
+                }
+                Ok(out)
             })
             .collect::<Result<Vec<_>, String>>()?;
-        Ok(Arc::new(Prepared(
-            ids.into_iter()
-                .zip(coordinates.into_iter().flatten())
-                .collect(),
-        )))
+        let total: usize = found_per_group.iter().map(Vec::len).sum();
+        let mut merged = Vec::with_capacity(total);
+        for chunk in found_per_group {
+            merged.extend(chunk);
+        }
+        Ok(Arc::new(Prepared(merged)))
     }
     pub fn prepared_session(&self, prepared: Arc<Prepared>) -> Session<'_> {
         let mut session = Session::new(self);
@@ -122,19 +136,24 @@ impl<'a> Session<'a> {
     }
 
     pub fn lookup_many(&mut self, ids: &[i64]) -> Result<Vec<Option<(f32, f32)>>, String> {
+        if let Some(shared) = &self.shared {
+            // Prepared tables are exhaustive for this way group. Missing IDs
+            // must never trigger another original-PBF read; fast-path avoids
+            // allocating `groups`.
+            let table = &shared.0;
+            return Ok(ids
+                .iter()
+                .map(|&id| {
+                    table
+                        .binary_search_by_key(&id, |n| n.id)
+                        .ok()
+                        .map(|n| (table[n].lat, table[n].lon))
+                })
+                .collect());
+        }
         let mut result = vec![None; ids.len()];
         let mut groups = Vec::with_capacity(ids.len());
         for (i, &id) in ids.iter().enumerate() {
-            if let Some(shared) = &self.shared {
-                // Prepared tables are exhaustive for this way group. Missing
-                // IDs must never trigger another original-PBF read.
-                result[i] = shared
-                    .0
-                    .binary_search_by_key(&id, |n| n.0)
-                    .ok()
-                    .and_then(|n| shared.0[n].1);
-                continue;
-            }
             if let Ok(n) = self.prefetched.binary_search_by_key(&id, |n| n.0) {
                 result[i] = self.prefetched[n].1;
                 continue;

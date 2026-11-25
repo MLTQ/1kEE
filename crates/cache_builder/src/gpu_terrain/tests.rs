@@ -220,7 +220,8 @@ fn gpu_native_raster_matches_gdal() {
         assert!(cmd.arg(&tmp).status().unwrap().success());
         let expected = SrtmTile::load(&tmp).unwrap();
         let mut valid = 0;
-        for (&a, &e) in actual.iter().zip(&expected.samples) {
+        for (idx, &a) in actual.iter().enumerate() {
+            let e = expected.sample_at_index(idx);
             if e.is_nan() {
                 assert_eq!(a, NODATA);
             } else {

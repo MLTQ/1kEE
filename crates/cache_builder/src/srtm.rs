@@ -1,69 +1,90 @@
 /// Minimal SRTM elevation sampler for the cache builder.
 ///
 /// Loads GeoTIFF tiles on demand and caches up to `MAX_CACHED_TILES` in
-/// memory.  Bilinearly interpolates between the four nearest grid samples.
+/// memory, shared safely across Rayon cell-flushing workers.  Each handle keeps
+/// a lock-free 1-slot fast cache for the current 1°×1° tile so consecutive
+/// vertices in the same cell incur zero mutex acquisitions and zero allocations.
 /// Returns `0.0` for no-data cells (SRTM sentinel −32768) and for tiles
 /// that cannot be opened (e.g. ocean areas with no tile file).
-use std::collections::HashSet;
+use hashlink::lru_cache::LruCache;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-const MAX_CACHED_TILES: usize = 8;
+const MAX_CACHED_TILES: usize = 32;
+
+enum SrtmSamples {
+    I16(Vec<i16>),
+    F32(Vec<f32>),
+}
 
 struct SrtmTile {
     width: u32,
     height: u32,
     /// Elevation values in metres, row-major, top row first (north to south).
-    /// No-data cells are pre-converted to `0.0`.
-    samples: Vec<f32>,
+    samples: SrtmSamples,
 }
 
-struct CachedEntry {
-    path: PathBuf,
-    tile: SrtmTile,
-}
+type SharedCache = Arc<Mutex<LruCache<(i32, i32), Option<Arc<SrtmTile>>>>>;
 
 pub struct SrtmSampler {
-    root: PathBuf,
-    tiles: Vec<CachedEntry>, // front = most-recently used
-    missing: HashSet<PathBuf>,
+    root: Arc<PathBuf>,
+    shared: SharedCache,
+    /// Lock-free 1-slot fast cache for the most recent 1°×1° tile.
+    last: Option<((i32, i32), Option<Arc<SrtmTile>>)>,
 }
 
 impl SrtmSampler {
     pub fn new(root: PathBuf) -> Self {
         Self {
-            root,
-            tiles: Vec::new(),
-            missing: HashSet::new(),
+            root: Arc::new(root),
+            shared: Arc::new(Mutex::new(LruCache::new(MAX_CACHED_TILES))),
+            last: None,
+        }
+    }
+
+    /// Cheap handle sharing the underlying tile LRU across Rayon workers.
+    pub fn clone_handle(&self) -> Self {
+        Self {
+            root: Arc::clone(&self.root),
+            shared: Arc::clone(&self.shared),
+            last: None,
         }
     }
 
     /// Sample the elevation at `(lat, lon)` in metres.  Returns `0.0` if the
     /// tile file is absent or the point falls on a no-data cell.
+    #[inline]
     pub fn sample(&mut self, lat: f32, lon: f32) -> f32 {
-        let path = tile_path(&self.root, lat, lon);
+        let key = (lat.floor() as i32, lon.floor() as i32);
 
-        if self.missing.contains(&path) {
-            return 0.0;
+        if let Some((last_key, ref tile)) = self.last
+            && last_key == key
+        {
+            return match tile {
+                Some(t) => t.sample(lat, lon),
+                None => 0.0,
+            };
         }
 
-        // LRU hit.
-        if let Some(idx) = self.tiles.iter().position(|e| e.path == path) {
-            let entry = self.tiles.remove(idx);
-            let value = entry.tile.sample(lat, lon);
-            self.tiles.insert(0, entry);
-            return value;
-        }
-
-        // Load tile from disk.
-        let Some(tile) = load_tile(&path) else {
-            self.missing.insert(path);
-            return 0.0;
+        let tile = {
+            let mut guard = self.shared.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(entry) = guard.get(&key) {
+                entry.clone()
+            } else {
+                drop(guard);
+                let loaded = load_tile(&tile_path(&self.root, key.0, key.1)).map(Arc::new);
+                let mut guard = self.shared.lock().unwrap_or_else(|p| p.into_inner());
+                guard.insert(key, loaded.clone());
+                loaded
+            }
         };
-        let value = tile.sample(lat, lon);
-        self.tiles.insert(0, CachedEntry { path, tile });
-        if self.tiles.len() > MAX_CACHED_TILES {
-            self.tiles.pop();
-        }
+
+        let value = match &tile {
+            Some(t) => t.sample(lat, lon),
+            None => 0.0,
+        };
+        self.last = Some((key, tile));
         value
     }
 }
@@ -75,44 +96,53 @@ fn load_tile(path: &Path) -> Option<SrtmTile> {
     use tiff::decoder::{Decoder, DecodingResult};
 
     let file = File::open(path).ok()?;
-    let mut decoder = Decoder::new(file).ok()?;
+    let mut decoder = Decoder::new(BufReader::with_capacity(256 * 1024, file)).ok()?;
     let (width, height) = decoder.dimensions().ok()?;
     let result = decoder.read_image().ok()?;
 
-    // Convert all supported SRTM pixel formats to f32 elevation values.
-    // Nodata sentinel (-32768 for Int/UInt, NaN/-32768.0 for float) → 0.0.
-    let samples: Vec<f32> = match result {
-        DecodingResult::I16(data) => data
-            .into_iter()
-            .map(|s| if s == i16::MIN { 0.0 } else { s as f32 })
-            .collect(),
-        DecodingResult::U16(data) => data
-            .into_iter()
-            .map(|u| {
-                let s = u as i16;
-                if s == i16::MIN { 0.0 } else { s as f32 }
-            })
-            .collect(),
-        DecodingResult::F32(data) => data
-            .into_iter()
-            .map(|f| if f.is_nan() || f <= -32767.0 { 0.0 } else { f })
-            .collect(),
-        DecodingResult::F64(data) => data
-            .into_iter()
-            .map(|f| {
-                if f.is_nan() || f <= -32767.0 {
-                    0.0
-                } else {
-                    f as f32
+    let expected = (width as usize).checked_mul(height as usize)?;
+    let samples = match result {
+        DecodingResult::I16(data) => {
+            if data.len() != expected {
+                return None;
+            }
+            SrtmSamples::I16(data)
+        }
+        DecodingResult::U16(data) => {
+            if data.len() != expected {
+                return None;
+            }
+            SrtmSamples::I16(data.into_iter().map(|u| u as i16).collect())
+        }
+        DecodingResult::F32(mut data) => {
+            if data.len() != expected {
+                return None;
+            }
+            for f in &mut data {
+                if f.is_nan() || *f <= -32767.0 {
+                    *f = 0.0;
                 }
-            })
-            .collect(),
+            }
+            SrtmSamples::F32(data)
+        }
+        DecodingResult::F64(data) => {
+            if data.len() != expected {
+                return None;
+            }
+            SrtmSamples::F32(
+                data.into_iter()
+                    .map(|f| {
+                        if f.is_nan() || f <= -32767.0 {
+                            0.0
+                        } else {
+                            f as f32
+                        }
+                    })
+                    .collect(),
+            )
+        }
         _ => return None,
     };
-
-    if samples.len() != (width * height) as usize {
-        return None;
-    }
 
     Some(SrtmTile {
         width,
@@ -121,9 +151,7 @@ fn load_tile(path: &Path) -> Option<SrtmTile> {
     })
 }
 
-fn tile_path(root: &Path, lat: f32, lon: f32) -> PathBuf {
-    let lat_base = lat.floor() as i32;
-    let lon_base = lon.floor() as i32;
+fn tile_path(root: &Path, lat_base: i32, lon_base: i32) -> PathBuf {
     let lat_prefix = if lat_base >= 0 { 'N' } else { 'S' };
     let lon_prefix = if lon_base >= 0 { 'E' } else { 'W' };
     root.join(format!(
@@ -138,6 +166,7 @@ fn tile_path(root: &Path, lat: f32, lon: f32) -> PathBuf {
 // ── Sampling ──────────────────────────────────────────────────────────────────
 
 impl SrtmTile {
+    #[inline]
     fn sample(&self, lat: f32, lon: f32) -> f32 {
         let lat_base = lat.floor();
         let lon_base = lon.floor();
@@ -164,10 +193,15 @@ impl SrtmTile {
         top + (bot - top) * ty
     }
 
+    #[inline]
     fn get(&self, x: u32, y: u32) -> f32 {
-        self.samples
-            .get((y * self.width + x) as usize)
-            .copied()
-            .unwrap_or(0.0)
+        let idx = (y * self.width + x) as usize;
+        match &self.samples {
+            SrtmSamples::I16(v) => v
+                .get(idx)
+                .copied()
+                .map_or(0.0, |s| if s == i16::MIN { 0.0 } else { s as f32 }),
+            SrtmSamples::F32(v) => v.get(idx).copied().unwrap_or(0.0),
+        }
     }
 }

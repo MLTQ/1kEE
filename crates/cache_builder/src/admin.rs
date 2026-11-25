@@ -11,11 +11,13 @@ mod checkpoint;
 mod geometry;
 pub use geometry::AdminRegion;
 use osmpbf::{BlobDecode, RelMemberType};
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 
 const RELATION_BATCH: usize = 500;
 const WAY_BATCH: usize = 1000;
+const ADMIN_SCAN_BLOBS: usize = 64;
 
 /// Top-level entry point. Runs Pass R and Pass A if not yet complete, then stitches
 /// rings and writes per-level binary files.
@@ -30,7 +32,7 @@ pub fn load_or_build_admin_boundaries(
     node_store.prepare_admin_source(&command.planet_path)?;
     // Pass R: collect admin relations + member way IDs.
     if !node_store.is_relation_scan_complete()? {
-        collect_admin_relations(&command.planet_path, node_store, progress)?;
+        collect_admin_relations(&command.planet_path, 0, node_store, progress)?;
     } else {
         let count = node_store.count_admin_relations()?;
         progress(RoadBuildProgress {
@@ -43,7 +45,7 @@ pub fn load_or_build_admin_boundaries(
 
     // Pass A: collect node refs for admin member ways.
     if !node_store.is_admin_way_scan_complete()? {
-        collect_admin_way_nodes(&command.planet_path, node_store, progress)?;
+        collect_admin_way_nodes(&command.planet_path, 0, node_store, progress)?;
     } else {
         progress(RoadBuildProgress {
             metrics: None,
@@ -70,6 +72,7 @@ pub fn load_or_build_admin_boundaries(
 
 fn collect_admin_relations(
     planet_path: &std::path::Path,
+    min_start: u64,
     node_store: &mut NodeStore,
     progress: &mut dyn FnMut(RoadBuildProgress),
 ) -> Result<(), String> {
@@ -83,11 +86,11 @@ fn collect_admin_relations(
         });
     }
 
-    let start = resume_offset.unwrap_or(0);
+    let start = resume_offset.unwrap_or(0).max(min_start);
     let total_bytes = std::fs::metadata(planet_path)
         .map_err(|e| e.to_string())?
         .len();
-    let (reader, pos) = open_planet_at(planet_path, start)?;
+    let (mut reader, pos) = open_planet_at(planet_path, start)?;
 
     // Batch: (relation_id, name, admin_level, way_ids)
     let mut batch: Vec<(i64, Option<String>, u8, Vec<i64>)> = Vec::new();
@@ -104,65 +107,80 @@ fn collect_admin_relations(
         ),
     });
 
-    for blob_result in reader {
-        let blob = blob_result.map_err(|e| e.to_string())?;
-        let decoded = blob.decode().map_err(|e| e.to_string())?;
-        let BlobDecode::OsmData(block) = decoded else {
-            continue;
-        };
-
-        for rel in block.groups().flat_map(|group| group.relations()) {
-            // OSM levels vary by country; retain intermediate and local divisions too.
-            let mut is_boundary = false;
-            let mut admin_level: Option<u8> = None;
-            let mut name: Option<String> = None;
-
-            for (key, value) in rel.tags() {
-                match key {
-                    "boundary" if value == "administrative" => is_boundary = true,
-                    "admin_level" => {
-                        admin_level = value.parse::<u8>().ok().filter(|n| (2..=11).contains(n));
-                    }
-                    "name" if name.is_none() => name = Some(value.to_owned()),
-                    _ => {}
-                }
-            }
-
-            if !is_boundary {
-                continue;
-            }
-            let Some(level) = admin_level else { continue };
-
-            // Nested geometry relations need recursive resolution. Do not pretend
-            // a partial relation is a complete polygon (subarea/label members are metadata).
-            if rel.members().any(|m| {
-                m.member_type == RelMemberType::Relation
-                    && matches!(m.role().unwrap_or(""), "" | "outer" | "inner")
-            }) {
-                continue;
-            }
-            // Keep inner members: even-odd filling must preserve enclaves/holes.
-            let way_ids: Vec<i64> = rel
-                .members()
-                .filter_map(|m| {
-                    if m.member_type != RelMemberType::Way {
-                        return None;
-                    }
-                    let role = m.role().unwrap_or("");
-                    if !matches!(role, "" | "outer" | "inner") {
-                        return None;
-                    }
-                    Some(m.member_id)
-                })
-                .collect();
-
-            if way_ids.is_empty() {
-                continue;
-            }
-
-            batch.push((rel.id(), name, level, way_ids));
-            total_relations += 1;
+    loop {
+        let blobs: Vec<_> = reader
+            .by_ref()
+            .take(ADMIN_SCAN_BLOBS)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        if blobs.is_empty() {
+            break;
         }
+        let partials: Vec<Vec<(i64, Option<String>, u8, Vec<i64>)>> = blobs
+            .par_iter()
+            .map(|blob| -> Result<Vec<(i64, Option<String>, u8, Vec<i64>)>, String> {
+                let decoded = blob.decode().map_err(|e| e.to_string())?;
+                let BlobDecode::OsmData(block) = decoded else {
+                    return Ok(Vec::new());
+                };
+                let mut local = Vec::new();
+                for rel in block.groups().flat_map(|group| group.relations()) {
+                    let mut is_boundary = false;
+                    let mut admin_level: Option<u8> = None;
+                    let mut raw_name: Option<&str> = None;
+
+                    for (key, value) in rel.tags() {
+                        match key {
+                            "boundary" if value == "administrative" => is_boundary = true,
+                            "admin_level" => {
+                                admin_level =
+                                    value.parse::<u8>().ok().filter(|n| (2..=11).contains(n));
+                            }
+                            "name" if raw_name.is_none() => raw_name = Some(value),
+                            _ => {}
+                        }
+                    }
+
+                    if !is_boundary {
+                        continue;
+                    }
+                    let Some(level) = admin_level else { continue };
+
+                    if rel.members().any(|m| {
+                        m.member_type == RelMemberType::Relation
+                            && matches!(m.role().unwrap_or(""), "" | "outer" | "inner")
+                    }) {
+                        continue;
+                    }
+                    let way_ids: Vec<i64> = rel
+                        .members()
+                        .filter_map(|m| {
+                            if m.member_type != RelMemberType::Way {
+                                return None;
+                            }
+                            let role = m.role().unwrap_or("");
+                            if !matches!(role, "" | "outer" | "inner") {
+                                return None;
+                            }
+                            Some(m.member_id)
+                        })
+                        .collect();
+
+                    if way_ids.is_empty() {
+                        continue;
+                    }
+
+                    local.push((rel.id(), raw_name.map(str::to_owned), level, way_ids));
+                }
+                Ok(local)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for local in partials {
+            total_relations += local.len();
+            batch.extend(local);
+        }
+
         let offset = pos.load(Ordering::Relaxed);
         if batch.len() >= RELATION_BATCH || offset.saturating_sub(checkpoint) >= 256 * 1024 * 1024 {
             node_store.save_admin_relations_batch(&batch)?;
@@ -203,6 +221,7 @@ fn collect_admin_relations(
 
 fn collect_admin_way_nodes(
     planet_path: &std::path::Path,
+    min_start: u64,
     node_store: &mut NodeStore,
     progress: &mut dyn FnMut(RoadBuildProgress),
 ) -> Result<(), String> {
@@ -223,11 +242,11 @@ fn collect_admin_way_nodes(
         });
     }
 
-    let start = resume_offset.unwrap_or(0);
+    let start = resume_offset.unwrap_or(0).max(min_start);
     let total_bytes = std::fs::metadata(planet_path)
         .map_err(|e| e.to_string())?
         .len();
-    let (reader, pos) = open_planet_at(planet_path, start)?;
+    let (mut reader, pos) = open_planet_at(planet_path, start)?;
 
     let mut batch: Vec<(i64, Vec<i64>)> = Vec::new();
     let mut ways_found = 0usize;
@@ -243,22 +262,39 @@ fn collect_admin_way_nodes(
         ),
     });
 
-    for blob_result in reader {
-        let blob = blob_result.map_err(|e| e.to_string())?;
-        let decoded = blob.decode().map_err(|e| e.to_string())?;
-        let BlobDecode::OsmData(block) = decoded else {
-            continue;
-        };
-
-        for way in block.groups().flat_map(|group| group.ways()) {
-            if !admin_way_ids.contains(&way.id()) {
-                continue;
-            }
-
-            let node_ids: Vec<i64> = way.refs().collect();
-            batch.push((way.id(), node_ids));
-            ways_found += 1;
+    loop {
+        let blobs: Vec<_> = reader
+            .by_ref()
+            .take(ADMIN_SCAN_BLOBS)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        if blobs.is_empty() {
+            break;
         }
+        let partials: Vec<Vec<(i64, Vec<i64>)>> = blobs
+            .par_iter()
+            .map(|blob| -> Result<Vec<(i64, Vec<i64>)>, String> {
+                let decoded = blob.decode().map_err(|e| e.to_string())?;
+                let BlobDecode::OsmData(block) = decoded else {
+                    return Ok(Vec::new());
+                };
+                let mut local = Vec::new();
+                for way in block.groups().flat_map(|group| group.ways()) {
+                    if !admin_way_ids.contains(&way.id()) {
+                        continue;
+                    }
+                    let node_ids: Vec<i64> = way.refs().collect();
+                    local.push((way.id(), node_ids));
+                }
+                Ok(local)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for local in partials {
+            ways_found += local.len();
+            batch.extend(local);
+        }
+
         let offset = pos.load(Ordering::Relaxed);
         if batch.len() >= WAY_BATCH || offset.saturating_sub(checkpoint) >= 256 * 1024 * 1024 {
             node_store.save_admin_way_nodes(&batch)?;
@@ -309,10 +345,15 @@ pub fn build_planet(
     let mut store = NodeStore::open(&scratch.join("admin-v2.sqlite"))?;
     store.prepare_admin_source(&command.planet_path)?;
     if !store.is_relation_scan_complete()? {
-        collect_admin_relations(&command.planet_path, &mut store, progress)?;
+        collect_admin_relations(
+            &command.planet_path,
+            lookup.first_relation(),
+            &mut store,
+            progress,
+        )?;
     }
     if !store.is_admin_way_scan_complete()? {
-        collect_admin_way_nodes(&command.planet_path, &mut store, progress)?;
+        collect_admin_way_nodes(&command.planet_path, lookup.first_way(), &mut store, progress)?;
     }
     let mut session = lookup.session();
     lookup.validate_source()?;

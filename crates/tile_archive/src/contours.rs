@@ -1,34 +1,46 @@
 use std::path::Path;
 
 pub fn encode(rows: &[(f32, Vec<u8>)]) -> Result<Vec<u8>, String> {
-    let mut bytes = b"CTF1".to_vec();
+    let mut bytes = Vec::with_capacity(
+        8 + rows
+            .iter()
+            .map(|(_, g)| 12 + g.len() / 2)
+            .sum::<usize>(),
+    );
+    bytes.extend_from_slice(b"CTF1");
     bytes.extend_from_slice(
         &u32::try_from(rows.len())
             .map_err(|e| e.to_string())?
             .to_le_bytes(),
     );
     for (elevation, geometry) in rows {
-        let lines =
-            crate::gpkg::parse_gpkg_lines(geometry, |lon, lat| cell_format::CellPoint { lon, lat });
-        let mut packed = Vec::new();
-        packed.extend_from_slice(&(lines.len() as u32).to_le_bytes());
-        for line in lines {
-            packed.extend_from_slice(&(line.len() as u32).to_le_bytes());
-            for p in line {
-                packed.extend_from_slice(&p.lon.to_le_bytes());
-                packed.extend_from_slice(&p.lat.to_le_bytes());
-            }
-        }
-        if !elevation.is_finite()
-            || bytes.len().saturating_add(8).saturating_add(packed.len()) > crate::MAX_PAYLOAD
-        {
-            return Err("Invalid/oversized contour tile".into());
-        }
-        bytes.extend_from_slice(&elevation.to_le_bytes());
-        bytes.extend_from_slice(&(packed.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(&packed);
+        append_gpkg_row(*elevation, geometry, &mut bytes)?;
     }
     Ok(bytes)
+}
+
+/// Append one `(elevation, gpkg_blob)` row directly into a `CTF1` buffer
+/// (started with `b"CTF1"` + 4-byte placeholder row count), with zero
+/// intermediate allocations.
+pub fn append_gpkg_row(elevation: f32, geometry: &[u8], bytes: &mut Vec<u8>) -> Result<(), String> {
+    if !elevation.is_finite() {
+        return Err("Invalid/oversized contour tile".into());
+    }
+    bytes.extend_from_slice(&elevation.to_le_bytes());
+    let len_pos = bytes.len();
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    let payload_start = bytes.len();
+    if !crate::gpkg::stream_gpkg_to_ctf1(geometry, bytes) {
+        // Match previous `parse_gpkg_lines` fallback for unparseable/empty blobs: 0 parts.
+        bytes.truncate(payload_start);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+    }
+    let payload_len = bytes.len() - payload_start;
+    if bytes.len() > crate::MAX_PAYLOAD {
+        return Err("Invalid/oversized contour tile".into());
+    }
+    bytes[len_pos..len_pos + 4].copy_from_slice(&(payload_len as u32).to_le_bytes());
+    Ok(())
 }
 
 pub fn decode(bytes: &[u8]) -> Result<Vec<(f32, &[u8])>, String> {

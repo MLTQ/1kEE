@@ -25,16 +25,18 @@ use crate::geojson::{ensure_cache_dir, merge_write_cells, merge_write_feature_ce
 use crate::planet_lookup::{Lookup, Session as LookupSession};
 use crate::roads::{RoadBuildProgress, open_planet_at};
 use crate::srtm::SrtmSampler;
-use crate::util::{GeoPoint, RoadPolyline, WayFeature, focus_cells_for_bounds, polyline_bounds};
+use crate::util::{GeoPoint, RoadPolyline, WayFeature, focus_cells_iter, polyline_bounds};
 use osmpbf::BlobDecode;
 use rayon::prelude::*;
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-const FLUSH_THRESHOLD: usize = 100_000;
+const FLUSH_THRESHOLD: usize = 400_000;
 /// Make Pass 1 resumable at a bounded replay cost without syncing every PBF
 /// blob. Node records are made durable before the corresponding offset is
 /// published in the checkpoint.
@@ -206,6 +208,7 @@ fn build_planet_cache_inner(
     }
 
     let node_file = cmd.tmp_dir.join("planet_nodes.bin");
+    let index_file = cmd.tmp_dir.join("planet_nodes.sparse-index-v1");
     let checkpoint_path = cmd.tmp_dir.join("checkpoint.txt");
     let sort_tmp = cmd.tmp_dir.join("sort_chunks");
 
@@ -213,29 +216,43 @@ fn build_planet_cache_inner(
 
     // ── Pass 1: collect all nodes ─────────────────────────────────────────────
     if !cp.pass1_complete {
-        cp.pass1_record_count = run_pass1(
+        let (record_count, already_sorted) = run_pass1(
             &cmd.planet_path,
             &node_file,
+            Some(&index_file),
             &mut cp,
             &checkpoint_path,
             progress,
         )?;
+        cp.pass1_record_count = record_count;
 
-        progress(RoadBuildProgress {
-            metrics: None,
-            stage: "Sorting Nodes".to_owned(),
-            fraction: 0.30,
-            message: format!("Sorting {} node records…", cp.pass1_record_count),
-        });
-
-        sort_in_place(&node_file, &sort_tmp, cp.pass1_record_count, &mut |msg| {
+        if already_sorted {
+            progress(RoadBuildProgress {
+                metrics: None,
+                stage: "Sorted Nodes".to_owned(),
+                fraction: 0.35,
+                message: format!(
+                    "Node file already sorted ({} records) — skipped sort & indexed on the fly",
+                    cp.pass1_record_count
+                ),
+            });
+        } else {
             progress(RoadBuildProgress {
                 metrics: None,
                 stage: "Sorting Nodes".to_owned(),
-                fraction: 0.35,
-                message: msg,
+                fraction: 0.30,
+                message: format!("Sorting {} node records…", cp.pass1_record_count),
             });
-        })?;
+
+            sort_in_place(&node_file, &sort_tmp, cp.pass1_record_count, &mut |msg| {
+                progress(RoadBuildProgress {
+                    metrics: None,
+                    stage: "Sorting Nodes".to_owned(),
+                    fraction: 0.35,
+                    message: msg,
+                });
+            })?;
+        }
 
         cp.pass1_complete = true;
         cp.pass1_offset = 0; // no longer needed
@@ -276,7 +293,7 @@ fn build_planet_cache_inner(
     let node_lookup = Arc::new(Lookup::Flat(NodeLookup::open_cached(
         &node_file,
         cp.pass1_record_count,
-        &cmd.tmp_dir.join("planet_nodes.sparse-index-v1"),
+        &index_file,
     )?));
 
     let stats = run_pass2(&cmd, &node_lookup, &mut cp, &checkpoint_path, progress)?;
@@ -308,10 +325,11 @@ fn build_planet_cache_inner(
 fn run_pass1(
     planet_path: &Path,
     node_file: &Path,
+    index_path: Option<&Path>,
     cp: &mut Checkpoint,
     checkpoint_path: &Path,
     progress: &mut dyn FnMut(RoadBuildProgress),
-) -> Result<u64, String> {
+) -> Result<(u64, bool), String> {
     let total_bytes = fs::metadata(planet_path).map_err(|e| e.to_string())?.len();
     let resume = cp.pass1_offset;
 
@@ -385,14 +403,14 @@ fn run_pass1(
     }
 
     let total = writer.count;
-    writer.finish()?;
+    let already_sorted = writer.finish_with_index(index_path)?;
     // Save the exact EOF resume point after the final durable flush. If the
     // process stops between here and sort completion, Pass 1 resumes without
     // duplicating its uncheckpointed tail.
     cp.pass1_offset = pos.load(Ordering::Relaxed);
     cp.pass1_record_count = total;
     cp.save(checkpoint_path)?;
-    Ok(total)
+    Ok((total, already_sorted))
 }
 
 // ── Pass 2 ────────────────────────────────────────────────────────────────────
@@ -449,8 +467,73 @@ impl BatchOutput {
 
 fn merge_map<T>(dst: &mut HashMap<(i32, i32), Vec<T>>, src: HashMap<(i32, i32), Vec<T>>) {
     for (cell, items) in src {
-        dst.entry(cell).or_default().extend(items);
+        match dst.entry(cell) {
+            Entry::Vacant(v) => {
+                v.insert(items);
+            }
+            Entry::Occupied(mut o) => {
+                o.get_mut().extend(items);
+            }
+        }
     }
+}
+
+struct SelectedWay {
+    id: i64,
+    selection: selection::WaySelection,
+    refs: Vec<i64>,
+}
+
+struct DecodedWayBlob {
+    scanned_ways: usize,
+    ref_count: usize,
+    ways: Vec<SelectedWay>,
+}
+
+fn decode_and_classify_blob(
+    blob: &osmpbf::Blob,
+    cmd: &PlanetAllCommand,
+) -> Result<DecodedWayBlob, String> {
+    let BlobDecode::OsmData(block) = blob.decode().map_err(|e| e.to_string())? else {
+        return Ok(DecodedWayBlob {
+            scanned_ways: 0,
+            ref_count: 0,
+            ways: Vec::new(),
+        });
+    };
+    let mut scanned_ways = 0usize;
+    let mut ref_count = 0usize;
+    let mut ways = Vec::new();
+    for way in block.groups().flat_map(|g| g.ways()) {
+        scanned_ways += 1;
+        if let Some(selection) = selection::classify(&way, cmd) {
+            let refs: Vec<i64> = way.refs().collect();
+            ref_count += refs.len();
+            ways.push(SelectedWay {
+                id: way.id(),
+                selection,
+                refs,
+            });
+        }
+    }
+    Ok(DecodedWayBlob {
+        scanned_ways,
+        ref_count,
+        ways,
+    })
+}
+
+fn process_decoded_blob(
+    decoded: DecodedWayBlob,
+    node_lookup: &mut LookupSession<'_>,
+    cmd: &PlanetAllCommand,
+) -> Result<BatchOutput, String> {
+    let mut out = BatchOutput::new();
+    out.scanned_ways = decoded.scanned_ways;
+    for way in decoded.ways {
+        process_way_refs(way.id, &way.refs, way.selection, node_lookup, cmd, &mut out)?;
+    }
+    Ok(out)
 }
 
 // Decode one PBF blob and classify all Way elements inside it.
@@ -472,8 +555,11 @@ fn process_blob(
         }
     }
     node_lookup.prepare_refs(selected.iter().flat_map(|(way, _)| way.refs()))?;
+    let mut refs_buf = Vec::new();
     for (way, selection) in selected {
-        process_way(&way, selection, node_lookup, cmd, &mut out)?;
+        refs_buf.clear();
+        refs_buf.extend(way.refs());
+        process_way_refs(way.id(), &refs_buf, selection, node_lookup, cmd, &mut out)?;
     }
     Ok(out)
 }
@@ -503,16 +589,10 @@ fn compact_batch_budget() -> usize {
         .unwrap_or(MAX_BATCH_REFS)
 }
 
+#[cfg(test)]
 fn selected_refs(blob: &osmpbf::Blob, cmd: &PlanetAllCommand) -> Result<Vec<i64>, String> {
-    let BlobDecode::OsmData(block) = blob.decode().map_err(|e| e.to_string())? else {
-        return Ok(Vec::new());
-    };
-    Ok(block
-        .groups()
-        .flat_map(|g| g.ways())
-        .filter(|w| selection::classify(w, cmd).is_some())
-        .flat_map(|w| w.refs())
-        .collect())
+    let decoded = decode_and_classify_blob(blob, cmd)?;
+    Ok(decoded.ways.into_iter().flat_map(|w| w.refs).collect())
 }
 
 fn process_batch(
@@ -531,9 +611,9 @@ fn process_batch_bounded(
     completed: &(impl Fn(&BatchOutput) + Sync),
     limit: usize,
 ) -> Result<Vec<BatchOutput>, String> {
-    let run = |group: &[osmpbf::Blob], ids: Vec<i64>| {
-        let prepared = lookup.prepare_batch(ids)?;
-        group
+    if !lookup.is_compact() {
+        let prepared = lookup.prepare_batch(Vec::new())?;
+        return blobs
             .par_iter()
             .map_init(
                 || lookup.prepared_session(&prepared),
@@ -543,35 +623,62 @@ fn process_batch_bounded(
                     Ok(output)
                 },
             )
+            .collect::<Result<Vec<_>, String>>();
+    }
+
+    // Decode & classify all blobs in parallel ONCE, eliminating the previous
+    // sequential pre-scan + double zlib/protobuf decode per blob.
+    let decoded_blobs: Vec<DecodedWayBlob> = blobs
+        .par_iter()
+        .map(|blob| decode_and_classify_blob(blob, cmd))
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let mut output = Vec::with_capacity(decoded_blobs.len());
+    let mut chunk: Vec<DecodedWayBlob> = Vec::new();
+    let mut ids: Vec<i64> = Vec::new();
+
+    let run_chunk = |group: Vec<DecodedWayBlob>, ids: Vec<i64>| -> Result<Vec<BatchOutput>, String> {
+        let prepared = lookup.prepare_batch(ids)?;
+        group
+            .into_par_iter()
+            .map_init(
+                || lookup.prepared_session(&prepared),
+                |session, decoded| {
+                    let output = process_decoded_blob(decoded, session, cmd)?;
+                    completed(&output);
+                    Ok(output)
+                },
+            )
             .collect::<Result<Vec<_>, String>>()
     };
-    if !lookup.is_compact() {
-        return run(blobs, Vec::new());
-    }
-    let mut output = Vec::with_capacity(blobs.len());
-    let mut first = 0;
-    let mut ids = Vec::new();
-    for (i, blob) in blobs.iter().enumerate() {
-        let refs = selected_refs(blob, cmd)?;
-        if refs.len() > limit {
+
+    for decoded in decoded_blobs {
+        if decoded.ref_count > limit {
             return Err(format!(
                 "One way blob exceeds the shared lookup reference budget ({limit}); source/checkpoint preserved"
             ));
         }
-        if i > first && ids.len() + refs.len() > limit {
-            output.extend(run(&blobs[first..i], std::mem::take(&mut ids))?);
-            first = i;
+        if !chunk.is_empty() && ids.len() + decoded.ref_count > limit {
+            output.extend(run_chunk(
+                std::mem::take(&mut chunk),
+                std::mem::take(&mut ids),
+            )?);
         }
-        ids.extend(refs);
+        ids.reserve(decoded.ref_count);
+        for way in &decoded.ways {
+            ids.extend_from_slice(&way.refs);
+        }
+        chunk.push(decoded);
     }
-    if first < blobs.len() {
-        output.extend(run(&blobs[first..], ids)?);
+    if !chunk.is_empty() {
+        output.extend(run_chunk(chunk, ids)?);
     }
     Ok(output)
 }
 
-fn process_way(
-    way: &osmpbf::Way<'_>,
+fn process_way_refs(
+    way_id: i64,
+    refs: &[i64],
     selected: selection::WaySelection,
     node_lookup: &mut LookupSession<'_>,
     cmd: &PlanetAllCommand,
@@ -595,10 +702,9 @@ fn process_way(
         name,
     } = selected;
 
-    let refs: Vec<i64> = way.refs().collect();
     let points: Vec<GeoPoint> = node_lookup
-        .lookup_many(&refs)
-        .map_err(|e| format!("Way {}: {e}", way.id()))?
+        .lookup_many(refs)
+        .map_err(|e| format!("Way {way_id}: {e}"))?
         .into_iter()
         .flatten()
         .map(|(lat, lon)| GeoPoint { lat, lon })
@@ -613,15 +719,18 @@ fn process_way(
             if $enabled {
                 if let Some(cls) = $cls {
                     let feature = WayFeature {
-                        way_id: way.id(),
-                        feature_class: cls.to_owned(),
+                        way_id,
+                        feature_class: Cow::Borrowed(cls),
                         name: name.clone(),
                         points: points.clone(),
                         is_polygon: $is_poly,
                     };
-                    let mut assigned = std::collections::HashSet::new();
-                    for cell in focus_cells_for_bounds(way_bounds) {
-                        if assigned.insert(cell) {
+                    let mut cells = focus_cells_iter(way_bounds).peekable();
+                    while let Some(cell) = cells.next() {
+                        if cells.peek().is_none() {
+                            $map.entry(cell).or_default().push(feature);
+                            break;
+                        } else {
                             $map.entry(cell).or_default().push(feature.clone());
                         }
                     }
@@ -634,14 +743,17 @@ fn process_way(
     if cmd.build_roads {
         if let Some(cls) = road_class {
             let road = RoadPolyline {
-                way_id: way.id(),
-                road_class: cls.to_owned(),
+                way_id,
+                road_class: Cow::Borrowed(cls),
                 name: name.clone(),
                 points: points.clone(),
             };
-            let mut assigned = std::collections::HashSet::new();
-            for cell in focus_cells_for_bounds(way_bounds) {
-                if assigned.insert(cell) {
+            let mut cells = focus_cells_iter(way_bounds).peekable();
+            while let Some(cell) = cells.next() {
+                if cells.peek().is_none() {
+                    out.roads.entry(cell).or_default().push(road);
+                    break;
+                } else {
                     out.roads.entry(cell).or_default().push(road.clone());
                 }
             }
@@ -1183,7 +1295,9 @@ mod tests {
         let checkpoint = root.join("checkpoint.txt");
         let mut cp = Checkpoint::default();
         assert_eq!(
-            super::run_pass1(&source, &nodes, &mut cp, &checkpoint, &mut |_| {}).unwrap(),
+            super::run_pass1(&source, &nodes, None, &mut cp, &checkpoint, &mut |_| {})
+                .unwrap()
+                .0,
             4
         );
         let original = fs::read(&nodes).unwrap();
@@ -1197,7 +1311,9 @@ mod tests {
             .unwrap();
         let mut cp = Checkpoint::load(&checkpoint);
         assert_eq!(
-            super::run_pass1(&source, &nodes, &mut cp, &checkpoint, &mut |_| {}).unwrap(),
+            super::run_pass1(&source, &nodes, None, &mut cp, &checkpoint, &mut |_| {})
+                .unwrap()
+                .0,
             4
         );
         assert_eq!(fs::read(&nodes).unwrap(), original);

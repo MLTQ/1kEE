@@ -12,8 +12,8 @@
 ///
 /// Mars uses the same five zoom specs as Lunar.
 use crate::contours::{
-    ContourBuildProgress, FocusContourSpec, GeoBounds, TileKey, bucket_range, import_tile,
-    open_cache_db, resolve_gdal_tool, tile_contour_count,
+    ContourBuildProgress, FocusContourSpec, GeoBounds, TileKey, bucket_range, open_cache_db,
+    resolve_gdal_tool,
 };
 use crate::lunar::all_lunar_specs;
 use rayon::prelude::*;
@@ -110,18 +110,46 @@ fn build_ctx_index(data_root: &Path) -> Vec<MarsIndexEntry> {
     index
 }
 
-fn find_ctx_tiles_for_bounds(index: &[MarsIndexEntry], bounds: GeoBounds) -> Vec<PathBuf> {
-    let min_lat = bounds.min_lat - SPATIAL_BUFFER_DEG;
-    let max_lat = bounds.max_lat + SPATIAL_BUFFER_DEG;
-    let min_lon = bounds.min_lon - SPATIAL_BUFFER_DEG;
-    let max_lon = bounds.max_lon + SPATIAL_BUFFER_DEG;
-    index
-        .iter()
-        .filter(|e| {
-            e.lat >= min_lat && e.lat <= max_lat && e.lon >= min_lon && e.lon <= max_lon
-        })
-        .map(|e| e.dem_path.clone())
-        .collect()
+struct CtxSpatialIndex {
+    entries: Vec<MarsIndexEntry>,
+    grid: std::collections::HashMap<(i32, i32), Vec<usize>>,
+}
+
+impl CtxSpatialIndex {
+    fn build(entries: Vec<MarsIndexEntry>) -> Self {
+        let mut grid: std::collections::HashMap<(i32, i32), Vec<usize>> =
+            std::collections::HashMap::new();
+        for (idx, e) in entries.iter().enumerate() {
+            let cell = (e.lat.floor() as i32, e.lon.floor() as i32);
+            grid.entry(cell).or_default().push(idx);
+        }
+        Self { entries, grid }
+    }
+
+    fn find_for_bounds(&self, bounds: GeoBounds) -> Vec<PathBuf> {
+        let min_lat = bounds.min_lat - SPATIAL_BUFFER_DEG;
+        let max_lat = bounds.max_lat + SPATIAL_BUFFER_DEG;
+        let min_lon = bounds.min_lon - SPATIAL_BUFFER_DEG;
+        let max_lon = bounds.max_lon + SPATIAL_BUFFER_DEG;
+        let mut out = Vec::new();
+        for lat_cell in (min_lat.floor() as i32)..=(max_lat.floor() as i32) {
+            for lon_cell in (min_lon.floor() as i32)..=(max_lon.floor() as i32) {
+                if let Some(indices) = self.grid.get(&(lat_cell, lon_cell)) {
+                    for &idx in indices {
+                        let e = &self.entries[idx];
+                        if e.lat >= min_lat
+                            && e.lat <= max_lat
+                            && e.lon >= min_lon
+                            && e.lon <= max_lon
+                        {
+                            out.push(e.dem_path.clone());
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
 }
 
 // ── MOLA VRT ─────────────────────────────────────────────────────────────────
@@ -171,6 +199,7 @@ fn ensure_mola_vrt(gdalbuildvrt: &Path, mola_tiles: &[PathBuf]) -> Option<PathBu
 fn run_gdal_timed(mut cmd: Command, label: &str, timeout: Duration) -> std::io::Result<()> {
     let start = Instant::now();
     let mut child = cmd.spawn()?;
+    let mut delay_ms = 2u64;
     loop {
         if let Some(status) = child.try_wait()? {
             return if status.success() {
@@ -189,7 +218,8 @@ fn run_gdal_timed(mut cmd: Command, label: &str, timeout: Duration) -> std::io::
                 format!("{label} timed out after {:?}", timeout),
             ));
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(delay_ms));
+        delay_ms = (delay_ms * 2).min(50);
     }
 }
 
@@ -210,6 +240,11 @@ fn run_gdalwarp_mars(
         "bilinear",
         "-dstnodata",
         MARS_NODATA,
+        "-wo",
+        "NUM_THREADS=1",
+        "--config",
+        "GDAL_PAM_ENABLED",
+        "NO",
         "-te",
         &format!("{:.6}", bounds.min_lon),
         &format!("{:.6}", bounds.min_lat),
@@ -246,6 +281,15 @@ fn run_gdal_contour_mars(
         MARS_NODATA,
         "-nln",
         "contour",
+        "--config",
+        "GDAL_PAM_ENABLED",
+        "NO",
+        "--config",
+        "OGR_SQLITE_SYNCHRONOUS",
+        "OFF",
+        "--config",
+        "OGR_SQLITE_CACHE",
+        "64",
     ]);
     cmd.arg(in_tif).arg(out_gpkg);
     run_gdal_timed(cmd, "gdal_contour (mars)", Duration::from_secs(120))
@@ -262,18 +306,6 @@ fn temp_tile_path(tmp_dir: &Path, tile: TileKey, suffix: &str) -> PathBuf {
         "mars_z{}_lat{}_lon{}.{}",
         tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket, suffix
     ))
-}
-
-fn mark_tile_empty(cache_db_path: &Path, tile: TileKey) {
-    let Ok(conn) = rusqlite::Connection::open(cache_db_path) else {
-        return;
-    };
-    let _ = conn.execute(
-        "INSERT OR REPLACE INTO contour_tile_manifest
-             (zoom_bucket, lat_bucket, lon_bucket, contour_count, built_at)
-         VALUES (?1, ?2, ?3, 0, unixepoch())",
-        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
-    );
 }
 
 // ── Main entry point ─────────────────────────────────────────────────────────
@@ -409,10 +441,12 @@ pub fn build_mars_contour_tiles(
         mola_vrt: Option<PathBuf>,
     }
 
-    let conn = open_cache_db(&command.cache_db_path).map_err(|e| e.to_string())?;
+    let mut conn = open_cache_db(&command.cache_db_path).map_err(|e| e.to_string())?;
+    let existing = crate::contours::load_manifest_counts(&conn).unwrap_or_default();
+    let spatial_ctx = CtxSpatialIndex::build(ctx_index);
     let mut work: Vec<TileWork> = Vec::new();
+    let mut empty_tiles: Vec<TileKey> = Vec::new();
     let mut skipped = 0usize;
-    let mut marked_empty = 0usize;
 
     for spec in &selected {
         let step = spec.half_extent_deg * 0.45;
@@ -425,7 +459,9 @@ pub fn build_mars_contour_tiles(
                     lon_bucket,
                 };
 
-                let count = tile_contour_count(&conn, tile).unwrap_or(None);
+                let count = existing
+                    .get(&(tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket))
+                    .copied();
                 match count {
                     Some(c) if c > 0 => {
                         // Tile already has real contour data.
@@ -448,12 +484,11 @@ pub fn build_mars_contour_tiles(
                     max_lon: center_lon + spec.half_extent_deg,
                 };
 
-                let ctx_sources = find_ctx_tiles_for_bounds(&ctx_index, bounds);
+                let ctx_sources = spatial_ctx.find_for_bounds(bounds);
                 if ctx_sources.is_empty() && mola_vrt.is_none() {
-                    // No source at all — mark empty so we don't retry every run.
+                    // No source at all — batch-mark empty in one transaction below.
                     if count.is_none() {
-                        mark_tile_empty(&command.cache_db_path, tile);
-                        marked_empty += 1;
+                        empty_tiles.push(tile);
                     }
                     continue;
                 }
@@ -466,6 +501,21 @@ pub fn build_mars_contour_tiles(
                     mola_vrt: mola_vrt.clone(),
                 });
             }
+        }
+    }
+    let marked_empty = empty_tiles.len();
+    if !empty_tiles.is_empty() {
+        if let Ok(tx) = conn.transaction() {
+            if let Ok(mut stmt) = tx.prepare_cached(
+                "INSERT OR REPLACE INTO contour_tile_manifest
+                     (zoom_bucket, lat_bucket, lon_bucket, contour_count, built_at)
+                 VALUES (?1, ?2, ?3, 0, unixepoch())",
+            ) {
+                for tile in &empty_tiles {
+                    let _ = stmt.execute(params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket]);
+                }
+            }
+            let _ = tx.commit();
         }
     }
     drop(conn);
@@ -505,6 +555,8 @@ pub fn build_mars_contour_tiles(
         Error(String),
     }
 
+    type MarsReady = Result<(TileKey, GeoBounds, Vec<(i64, f32, Vec<u8>)>), String>;
+    let (write_tx, write_rx) = mpsc::sync_channel::<MarsReady>(32);
     let (tx, rx) = mpsc::channel::<Outcome>();
     let done_count = Arc::new(AtomicUsize::new(0));
 
@@ -542,7 +594,7 @@ pub fn build_mars_contour_tiles(
                         } else if let Some(vrt) = item.mola_vrt {
                             vec![vrt]
                         } else {
-                            return Outcome::Error(format!(
+                            return Err(format!(
                                 "z{}({},{}) no source data",
                                 item.tile.zoom_bucket,
                                 item.tile.lat_bucket,
@@ -554,7 +606,7 @@ pub fn build_mars_contour_tiles(
                             run_gdalwarp_mars(gw, &sources, &tmp_tif, item.bounds, &focus_spec)
                         {
                             cleanup(&[&tmp_tif, &tmp_gpkg]);
-                            return Outcome::Error(format!(
+                            return Err(format!(
                                 "z{}({},{}) warp: {e}",
                                 item.tile.zoom_bucket,
                                 item.tile.lat_bucket,
@@ -569,7 +621,7 @@ pub fn build_mars_contour_tiles(
                             focus_spec.interval_m,
                         ) {
                             cleanup(&[&tmp_tif, &tmp_gpkg]);
-                            return Outcome::Error(format!(
+                            return Err(format!(
                                 "z{}({},{}) contour: {e}",
                                 item.tile.zoom_bucket,
                                 item.tile.lat_bucket,
@@ -577,19 +629,12 @@ pub fn build_mars_contour_tiles(
                             ));
                         }
 
-                        let result = import_tile(&cache_db_path, item.tile, &tmp_gpkg);
+                        let encoded = crate::contours::read_gpkg_contours_clipped(&tmp_gpkg, None);
                         cleanup(&[&tmp_tif, &tmp_gpkg]);
-                        done_arc.fetch_add(1, Ordering::Relaxed);
-
-                        match result {
-                            Ok(()) => Outcome::Built(
-                                item.bounds.min_lat,
-                                item.bounds.max_lat,
-                                item.bounds.min_lon,
-                                item.bounds.max_lon,
-                            ),
-                            Err(e) => Outcome::Error(format!(
-                                "z{}({},{}) import: {e}",
+                        match encoded {
+                            Ok(rows) => Ok((item.tile, item.bounds, rows)),
+                            Err(e) => Err(format!(
+                                "z{}({},{}) gpkg read: {e}",
                                 item.tile.zoom_bucket,
                                 item.tile.lat_bucket,
                                 item.tile.lon_bucket
@@ -597,10 +642,42 @@ pub fn build_mars_contour_tiles(
                         }
                     },
                 )
-                .for_each_with(tx, |tx, outcome| {
-                    let _ = tx.send(outcome);
+                .for_each_with(write_tx, |tx, ready| {
+                    let _ = tx.send(ready);
                 });
         });
+    });
+
+    // Dedicated SQLite writer thread: single persistent Connection, zero lock contention.
+    std::thread::spawn(move || {
+        let mut conn = match open_cache_db(&cache_db_path) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tx.send(Outcome::Error(format!("open cache DB failed: {e}")));
+                return;
+            }
+        };
+        for item in write_rx {
+            done_arc.fetch_add(1, Ordering::Relaxed);
+            let outcome = match item {
+                Ok((tile, bounds, rows)) => {
+                    match crate::contours::write_encoded_tile(&mut conn, tile, &rows, None) {
+                        Ok(()) => Outcome::Built(
+                            bounds.min_lat,
+                            bounds.max_lat,
+                            bounds.min_lon,
+                            bounds.max_lon,
+                        ),
+                        Err(e) => Outcome::Error(format!(
+                            "z{}({},{}) import: {e}",
+                            tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket
+                        )),
+                    }
+                }
+                Err(msg) => Outcome::Error(msg),
+            };
+            let _ = tx.send(outcome);
+        }
     });
 
     let mut built = 0usize;

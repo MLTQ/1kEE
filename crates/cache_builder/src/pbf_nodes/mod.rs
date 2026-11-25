@@ -29,8 +29,12 @@ pub(crate) struct Node {
     pub lon: f32,
 }
 
-fn decode(blob: &osmpbf::Blob) -> Result<(Vec<Node>, bool), String> {
-    let mut nodes = Vec::new();
+fn decode_with_capacity(blob: &osmpbf::Blob, capacity: usize) -> Result<(Vec<Node>, bool), String> {
+    let mut nodes = if capacity > 0 {
+        Vec::with_capacity(capacity.max(4))
+    } else {
+        Vec::new()
+    };
     let mut ways = false;
     if let BlobDecode::OsmData(block) = blob.decode().map_err(|e| e.to_string())? {
         for e in block.elements() {
@@ -63,6 +67,64 @@ fn decode(blob: &osmpbf::Blob) -> Result<(Vec<Node>, bool), String> {
     Ok((nodes, ways))
 }
 
+#[cfg(test)]
+fn decode(blob: &osmpbf::Blob) -> Result<(Vec<Node>, bool), String> {
+    decode_with_capacity(blob, 0)
+}
+
+/// Zero-allocation descriptor scan for indexing: extracts `(min_id, max_id, count)`,
+/// `has_ways`, and `has_relations` without allocating a `Vec<Node>` or scaling
+/// 9 billion lat/lon floats.
+pub(super) fn scan_block_descriptor(
+    blob: &osmpbf::Blob,
+) -> Result<(Option<(i64, i64, usize)>, bool, bool), String> {
+    let mut min_id: Option<i64> = None;
+    let mut last_id: Option<i64> = None;
+    let mut count = 0usize;
+    let mut has_ways = false;
+    let mut has_relations = false;
+    if let BlobDecode::OsmData(block) = blob.decode().map_err(|e| e.to_string())? {
+        for group in block.groups() {
+            for n in group.dense_nodes() {
+                let id = n.id();
+                if last_id.is_some_and(|prev| prev >= id) {
+                    return Err("Compact lookup requires strictly increasing node IDs; use flat node storage for unordered/history PBFs".into());
+                }
+                if count == MAX_BLOCK_NODES {
+                    return Err("PBF node block exceeds the compact decoder limit".into());
+                }
+                if min_id.is_none() {
+                    min_id = Some(id);
+                }
+                last_id = Some(id);
+                count += 1;
+            }
+            for n in group.nodes() {
+                let id = n.id();
+                if last_id.is_some_and(|prev| prev >= id) {
+                    return Err("Compact lookup requires strictly increasing node IDs; use flat node storage for unordered/history PBFs".into());
+                }
+                if count == MAX_BLOCK_NODES {
+                    return Err("PBF node block exceeds the compact decoder limit".into());
+                }
+                if min_id.is_none() {
+                    min_id = Some(id);
+                }
+                last_id = Some(id);
+                count += 1;
+            }
+            if !has_ways && group.ways().next().is_some() {
+                has_ways = true;
+            }
+            if !has_relations && group.relations().next().is_some() {
+                has_relations = true;
+            }
+        }
+    }
+    let desc = min_id.map(|min| (min, last_id.unwrap(), count));
+    Ok((desc, has_ways, has_relations))
+}
+
 pub struct IndexProgress {
     pub bytes: u64,
     pub total: u64,
@@ -78,6 +140,7 @@ pub struct PbfNodes {
     stamp: Stamp,
     blocks: Vec<Block>,
     pub first_way: u64,
+    pub first_relation: u64,
     pub node_count: u64,
 }
 
@@ -125,6 +188,22 @@ impl PbfNodes {
         let n = self.blocks.partition_point(|b| b.max < id);
         self.blocks.get(n).filter(|b| b.min <= id).map(|_| n)
     }
+    /// Monotonic-cursor version of `block_for` for sorted ID streams.
+    #[inline]
+    pub(crate) fn block_for_sorted(&self, id: i64, cursor: &mut usize) -> Option<usize> {
+        if *cursor < self.blocks.len() && self.blocks[*cursor].max < id {
+            // Fast check next block before binary searching the tail.
+            if *cursor + 1 < self.blocks.len() && self.blocks[*cursor + 1].max >= id {
+                *cursor += 1;
+            } else {
+                *cursor += self.blocks[*cursor..].partition_point(|b| b.max < id);
+            }
+        }
+        self.blocks
+            .get(*cursor)
+            .filter(|b| b.min <= id)
+            .map(|_| *cursor)
+    }
     pub(crate) fn join_identity(&self) -> String {
         // Device numbers change on remount. open() already verifies the source.
         format!(
@@ -153,7 +232,7 @@ impl PbfNodes {
             .next()
             .ok_or("Missing PBF node block")?
             .map_err(|e| e.to_string())?;
-        let (nodes, _) = decode(&blob)?;
+        let (nodes, _) = decode_with_capacity(&blob, b.count)?;
         if reader.next().is_some()
             || nodes.len() != b.count
             || nodes.first().map(|n| n.id) != Some(b.min)

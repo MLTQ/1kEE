@@ -24,7 +24,12 @@ pub fn run(args: &[String]) -> Result<()> {
 }
 fn read(path: &Path) -> Result<Connection> {
     let c = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    c.execute_batch("PRAGMA trusted_schema=OFF; BEGIN;")?;
+    c.execute_batch(
+        "PRAGMA trusted_schema=OFF;
+         PRAGMA cache_size=-131072;
+         PRAGMA mmap_size=268435456;
+         BEGIN;",
+    )?;
     Ok(c)
 }
 fn pack(source: &Path, out: &Path, bounds: [f64; 4]) -> Result<()> {
@@ -44,6 +49,13 @@ fn pack(source: &Path, out: &Path, bounds: [f64; 4]) -> Result<()> {
         .unwrap_or(Path::new("."));
     let temp = tempfile::NamedTempFile::new_in(parent)?.into_temp_path();
     let mut stage = contours::open_cache_db(&temp)?;
+    stage.execute_batch(
+        "PRAGMA journal_mode=MEMORY;
+         PRAGMA synchronous=OFF;
+         PRAGMA cache_size=-196608;
+         PRAGMA temp_store=MEMORY;
+         DROP INDEX IF EXISTS idx_contour_tiles_lookup;",
+    )?;
     let tx = stage.transaction()?;
     let (count, hash) = transfer(&db, Some(&tx), bounds, native)?;
     if count == 0 {
@@ -63,6 +75,10 @@ fn pack(source: &Path, out: &Path, bounds: [f64; 4]) -> Result<()> {
         ],
     )?;
     tx.commit()?;
+    stage.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_contour_tiles_lookup
+             ON contour_tiles (zoom_bucket, lat_bucket, lon_bucket, elevation_m, fid);",
+    )?;
     stage.query_row("PRAGMA journal_mode=DELETE", [], |r| r.get::<_, String>(0))?;
     drop(stage);
     check(&temp, None)?;
@@ -142,8 +158,32 @@ fn transfer(
         for (kind, count_col) in [("contour", "contour_count"), ("coastline", "line_count")] {
             let manifests = format!("{kind}_tile_manifest");
             let rows_table = format!("{kind}_tiles");
-            let mut st=src.prepare(&format!("SELECT lat_bucket,lon_bucket,{count_col},built_at FROM {manifests}
+            let is_contour = kind == "contour";
+            let elevation = if is_contour { "elevation_m" } else { "0.0" };
+            let mut st=src.prepare_cached(&format!("SELECT lat_bucket,lon_bucket,{count_col},built_at FROM {manifests}
                 WHERE zoom_bucket=?1 AND lat_bucket BETWEEN ?2 AND ?3 AND (lon_bucket BETWEEN ?4 AND ?5 OR (?6 AND lon_bucket BETWEEN ?7 AND ?8)) ORDER BY lat_bucket,lon_bucket"))?;
+            let mut feat_stmt = src.prepare_cached(&format!(
+                "SELECT fid,{elevation},geom FROM {rows_table} WHERE {WHERE_KEY} ORDER BY fid"
+            ))?;
+            let mut del_stmt = dst
+                .map(|d| d.prepare_cached(&format!("DELETE FROM {rows_table} WHERE {WHERE_KEY}")))
+                .transpose()?;
+            let mut man_stmt = dst
+                .map(|d| {
+                    d.prepare_cached(&format!(
+                        "INSERT OR REPLACE INTO {manifests}(zoom_bucket,lat_bucket,lon_bucket,{count_col},built_at) VALUES(?1,?2,?3,?4,?5)"
+                    ))
+                })
+                .transpose()?;
+            let mut ins_stmt = dst
+                .map(|d| {
+                    d.prepare_cached(if is_contour {
+                        "INSERT INTO contour_tiles(zoom_bucket,lat_bucket,lon_bucket,fid,elevation_m,geom) VALUES(?1,?2,?3,?4,?5,?6)"
+                    } else {
+                        "INSERT INTO coastline_tiles(zoom_bucket,lat_bucket,lon_bucket,fid,geom) VALUES(?1,?2,?3,?4,?5)"
+                    })
+                })
+                .transpose()?;
             let mut rows = st.query(params![
                 z,
                 bucket(s),
@@ -163,41 +203,28 @@ fn transfer(
                 for v in [z as i64, y.into(), x.into(), count, built] {
                     hash.update(&v.to_le_bytes());
                 }
-                if let Some(dst) = dst {
-                    dst.execute(
-                        &format!("DELETE FROM {rows_table} WHERE {WHERE_KEY}"),
-                        params![z, y, x],
-                    )?;
-                    dst.execute(&format!("INSERT OR REPLACE INTO {manifests}(zoom_bucket,lat_bucket,lon_bucket,{count_col},built_at) VALUES(?1,?2,?3,?4,?5)"),params![z,y,x,count,built])?;
+                if let (Some(del), Some(man)) = (del_stmt.as_mut(), man_stmt.as_mut()) {
+                    del.execute(params![z, y, x])?;
+                    man.execute(params![z, y, x, count, built])?;
                 }
-                let elevation = if kind == "contour" {
-                    "elevation_m"
-                } else {
-                    "0.0"
-                };
-                let mut st = src.prepare_cached(&format!(
-                    "SELECT fid,{elevation},geom FROM {rows_table} WHERE {WHERE_KEY} ORDER BY fid"
-                ))?;
-                let mut features = st.query(params![z, y, x])?;
+                let mut features = feat_stmt.query(params![z, y, x])?;
                 let mut seen = 0;
                 while let Some(record) = features.next()? {
                     let fid: i64 = record.get(0)?;
                     let z_m: f64 = record.get(1)?;
                     let geom = record.get_ref(2)?.as_blob()?;
-                    if !z_m.is_finite()
-                        || tile_archive::gpkg::try_parse_gpkg_lines(geom, |_, _| ()).is_none()
-                    {
+                    if !z_m.is_finite() || !tile_archive::gpkg::validate_gpkg_lines(geom) {
                         return Err(format!("Invalid {kind} geometry {z}/{y}/{x} fid {fid}").into());
                     }
                     hash.update(&fid.to_le_bytes());
                     hash.update(&z_m.to_bits().to_le_bytes());
                     hash.update(&(geom.len() as u64).to_le_bytes());
                     hash.update(geom);
-                    if let Some(dst) = dst {
-                        if kind == "contour" {
-                            dst.prepare_cached("INSERT INTO contour_tiles(zoom_bucket,lat_bucket,lon_bucket,fid,elevation_m,geom) VALUES(?1,?2,?3,?4,?5,?6)")?.execute(params![z,y,x,fid,z_m,geom])?;
+                    if let Some(ins) = ins_stmt.as_mut() {
+                        if is_contour {
+                            ins.execute(params![z, y, x, fid, z_m, geom])?;
                         } else {
-                            dst.prepare_cached("INSERT INTO coastline_tiles(zoom_bucket,lat_bucket,lon_bucket,fid,geom) VALUES(?1,?2,?3,?4,?5)")?.execute(params![z,y,x,fid,geom])?;
+                            ins.execute(params![z, y, x, fid, geom])?;
                         }
                     }
                     seen += 1;

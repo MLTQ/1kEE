@@ -15,7 +15,7 @@ pub(super) struct Checkpoint {
 impl Checkpoint {
     pub fn open(path: &Path, source: &str) -> Result<Self, String> {
         let mut db = Connection::open(path).map_err(|e| e.to_string())?;
-        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-65536;
             CREATE TABLE IF NOT EXISTS identity (id INTEGER PRIMARY KEY CHECK(id=1), source TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS regions (id INTEGER PRIMARY KEY, level INTEGER NOT NULL, rings INTEGER NOT NULL, encoded BLOB NOT NULL);
             CREATE INDEX IF NOT EXISTS regions_by_level ON regions(level,id);
@@ -41,6 +41,7 @@ impl Checkpoint {
             .and_then(|mut s| s.query_map([level], |r| r.get(0))?.collect())
             .map_err(|e| e.to_string())
     }
+    #[cfg(test)]
     pub fn save(&self, level: u8, region: &AdminRegion) -> Result<(), String> {
         let features = crate::geojson::admin_cell_features(level, std::slice::from_ref(region));
         let bytes = cell_format::write::write_cell(0, 0, &[(cell_format::TAG_ADMN, &features)]);
@@ -50,6 +51,33 @@ impl Checkpoint {
                 params![region.relation_id, level, features.len() as u64, bytes],
             )
             .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    pub fn save_batch(&mut self, level: u8, regions: &[AdminRegion]) -> Result<(), String> {
+        if regions.is_empty() {
+            return Ok(());
+        }
+        let encoded: Vec<(i64, u64, Vec<u8>)> = regions
+            .iter()
+            .map(|region| {
+                let features =
+                    crate::geojson::admin_cell_features(level, std::slice::from_ref(region));
+                let bytes =
+                    cell_format::write::write_cell(0, 0, &[(cell_format::TAG_ADMN, &features)]);
+                (region.relation_id, features.len() as u64, bytes)
+            })
+            .collect();
+        let tx = self.db.transaction().map_err(|e| e.to_string())?;
+        {
+            let mut stmt = tx
+                .prepare_cached("INSERT OR REPLACE INTO regions VALUES(?1,?2,?3,?4)")
+                .map_err(|e| e.to_string())?;
+            for (relation_id, ring_count, bytes) in &encoded {
+                stmt.execute(params![relation_id, level, ring_count, bytes.as_slice()])
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
     /// Resolve absent coordinates together and persist them for neighboring
@@ -127,16 +155,23 @@ impl Checkpoint {
         let mut header = cell_format::write::write_cell(0, 0, &[(cell_format::TAG_ADMN, &[])]);
         header[14..18].copy_from_slice(&length.to_le_bytes());
         header[18..22].copy_from_slice(&count.to_le_bytes());
-        let mut out = BufWriter::new(File::create(&temporary).map_err(|e| e.to_string())?);
+        let mut out = BufWriter::with_capacity(
+            4 * 1024 * 1024,
+            File::create(&temporary).map_err(|e| e.to_string())?,
+        );
         out.write_all(&header).map_err(|e| e.to_string())?;
         let mut stmt = self
             .db
-            .prepare("SELECT rings,encoded FROM regions WHERE level=?1 ORDER BY id")
+            .prepare_cached("SELECT rings,encoded FROM regions WHERE level=?1 ORDER BY id")
             .map_err(|e| e.to_string())?;
         let mut rows = stmt.query([level]).map_err(|e| e.to_string())?;
         while let Some(row) = rows.next().map_err(|e| e.to_string())? {
             let n: u32 = row.get(0).map_err(|e| e.to_string())?;
-            let bytes: Vec<u8> = row.get(1).map_err(|e| e.to_string())?;
+            let bytes = row
+                .get_ref(1)
+                .map_err(|e| e.to_string())?
+                .as_blob()
+                .map_err(|e| e.to_string())?;
             if bytes.len() < 22
                 || bytes[..14] != header[..14]
                 || u32::from_le_bytes(bytes[14..18].try_into().unwrap()) as usize

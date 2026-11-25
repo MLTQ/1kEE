@@ -56,17 +56,17 @@ pub(super) fn classify(way: &osmpbf::Way<'_>, cmd: &PlanetAllCommand) -> Option<
     let mut port_class: Option<&'static str> = None;
     let mut govt_class: Option<&'static str> = None;
     let mut surv_class: Option<&'static str> = None;
-    let mut name: Option<String> = None;
+    let mut raw_name: Option<&str> = None;
 
-    let mut raw_power: Option<String> = None;
-    let mut raw_voltage: Option<String> = None;
+    let mut raw_power: Option<&str> = None;
+    let mut raw_voltage: Option<&str> = None;
     let mut raw_railway: Option<&'static str> = None;
     let mut raw_pipeline = false;
-    let mut raw_substance: Option<String> = None;
-    let mut raw_aeroway: Option<String> = None;
+    let mut raw_substance: Option<&str> = None;
+    let mut raw_aeroway: Option<&str> = None;
     let mut raw_aerodrome_intl = false;
-    let mut raw_man_made: Option<String> = None;
-    let mut raw_tower_type: Option<String> = None;
+    let mut raw_man_made: Option<&str> = None;
+    let mut raw_tower_type: Option<&str> = None;
 
     for (key, value) in way.tags() {
         match key {
@@ -82,8 +82,8 @@ pub(super) fn classify(way: &osmpbf::Way<'_>, cmd: &PlanetAllCommand) -> Option<
                 }
             }
             "military" => military_class = canonical_military_class(key, value),
-            "power" => raw_power = Some(value.to_owned()),
-            "voltage" => raw_voltage = Some(value.to_owned()),
+            "power" => raw_power = Some(value),
+            "voltage" => raw_voltage = Some(value),
             "railway" => raw_railway = canonical_railway_class(value),
             "man_made" => {
                 if value == "pipeline" {
@@ -92,7 +92,7 @@ pub(super) fn classify(way: &osmpbf::Way<'_>, cmd: &PlanetAllCommand) -> Option<
                     if industrial_class.is_none() {
                         industrial_class = canonical_industrial_class(key, value);
                     }
-                    raw_man_made = Some(value.to_owned());
+                    raw_man_made = Some(value);
                     if port_class.is_none() {
                         port_class = canonical_port_class(key, value);
                     }
@@ -101,14 +101,14 @@ pub(super) fn classify(way: &osmpbf::Way<'_>, cmd: &PlanetAllCommand) -> Option<
                     }
                 }
             }
-            "substance" => raw_substance = Some(value.to_owned()),
-            "aeroway" => raw_aeroway = Some(value.to_owned()),
+            "substance" => raw_substance = Some(value),
+            "aeroway" => raw_aeroway = Some(value),
             "aerodrome:type" => {
                 if value == "international" {
                     raw_aerodrome_intl = true;
                 }
             }
-            "tower:type" => raw_tower_type = Some(value.to_owned()),
+            "tower:type" => raw_tower_type = Some(value),
             "amenity" => {
                 if govt_class.is_none() {
                     govt_class = canonical_govt_class(key, value);
@@ -132,28 +132,20 @@ pub(super) fn classify(way: &osmpbf::Way<'_>, cmd: &PlanetAllCommand) -> Option<
                     surv_class = canonical_surv_class(key, value);
                 }
             }
-            "name" if name.is_none() => name = Some(value.to_owned()),
+            "name" if raw_name.is_none() => raw_name = Some(value),
             _ => {}
         }
     }
 
-    let voltage_kv = raw_voltage.as_deref().and_then(parse_voltage_kv);
-    let power_class = raw_power
-        .as_deref()
-        .and_then(|pt| canonical_power_class(pt, voltage_kv));
+    let voltage_kv = raw_voltage.and_then(parse_voltage_kv);
+    let power_class = raw_power.and_then(|pt| canonical_power_class(pt, voltage_kv));
     let pipeline_class: Option<&'static str> = if raw_pipeline {
-        Some(canonical_pipeline_class(
-            raw_substance.as_deref().unwrap_or(""),
-        ))
+        Some(canonical_pipeline_class(raw_substance.unwrap_or("")))
     } else {
         None
     };
-    let aeroway_class = raw_aeroway
-        .as_deref()
-        .and_then(|a| canonical_aeroway_class(a, raw_aerodrome_intl));
-    let comm_class = raw_man_made
-        .as_deref()
-        .and_then(|m| canonical_comm_class(m, raw_tower_type.as_deref()));
+    let aeroway_class = raw_aeroway.and_then(|a| canonical_aeroway_class(a, raw_aerodrome_intl));
+    let comm_class = raw_man_made.and_then(|m| canonical_comm_class(m, raw_tower_type));
 
     let any_match = (cmd.build_roads && road_class.is_some())
         || (cmd.build_waterways && waterway_class.is_some())
@@ -188,6 +180,6 @@ pub(super) fn classify(way: &osmpbf::Way<'_>, cmd: &PlanetAllCommand) -> Option<
         pipeline_class,
         aeroway_class,
         comm_class,
-        name,
+        name: raw_name.map(str::to_owned),
     })
 }

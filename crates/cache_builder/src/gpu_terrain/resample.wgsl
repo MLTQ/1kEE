@@ -1,4 +1,4 @@
-struct Params { n: u32, width: u32, height: u32, unused: u32 }
+struct Params { n: u32, width: u32, height: u32, origin: u32 }
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read> source: array<u32>;
 // Local source-pixel coordinates, calculated in f64 on the host. Negative =
@@ -11,8 +11,10 @@ fn height_at(i: u32) -> f32 {
 }
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    if id.x >= p.n || id.y >= p.n { return; }
-    let x = axes[id.x]; let y = axes[p.n + id.y];
+    let ox = (p.origin & 0xffffu) + id.x;
+    let oy = (p.origin >> 16u) + id.y;
+    if ox >= p.n || oy >= p.n { return; }
+    let x = axes[ox]; let y = axes[p.n + oy];
     if x < 0.0 || y < 0.0 { return; }
     let x0 = u32(x); let y0 = u32(y);
     let x1 = min(x0 + 1u, p.width - 1u);
@@ -30,5 +32,5 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         let bottom = c + (d - c) * tx;
         value = top + (bottom - top) * ty;
     }
-    if value > -32767.0 { raster[id.y * p.n + id.x] = value; }
+    if value > -32767.0 { raster[oy * p.n + ox] = value; }
 }

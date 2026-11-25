@@ -1,4 +1,4 @@
-use crate::model::seismic::{Provider, Quake, quake_severity};
+use crate::model::seismic::{Quake, quake_severity};
 use crate::model::{AppModel, EventRecord, EventSeverity, FactalBrief, GeoPoint, USGS_EVENT_PREFIX};
 use reqwest::blocking::Client;
 use reqwest::header::RETRY_AFTER;
@@ -290,7 +290,6 @@ fn parse_feature(raw: &Value) -> Option<(EventRecord, Option<Quake>)> {
         epicenter: location,
         origin_ms: time_ms,
         severity,
-        provider: Provider::Usgs,
         has_station_picks: props["types"]
             .as_str()
             .is_some_and(|types| types.split(',').any(|kind| kind == "phase-data")),

@@ -4,16 +4,17 @@ mod atlas_panel;
 mod recovery_panel;
 
 use crate::args::{BboxCommand, ContoursBboxCommand, PlanetAllCommand};
-use crate::job::{BuildEvent, BuildJob, JobHandle, spawn_job};
+use crate::job::{BuildEvent, BuildJob, JobHandle, spawn_job_with_wake};
 use crate::lunar::{LunarBuildCommand, all_lunar_specs};
 use crate::mars::MarsBuildCommand;
 use eframe::egui;
 use eframe::egui::Color32;
 use rusqlite::OpenFlags;
-use std::fs;
+use serde::Deserialize;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use std::sync::mpsc::TryRecvError;
+use std::sync::mpsc::{self, TryRecvError};
 use std::time::Duration;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -61,37 +62,70 @@ struct MarsForm {
 const NE_COUNTRIES_JSON: &str = include_str!("../assets/ne_110m_countries.json");
 static COASTLINES: OnceLock<Vec<Vec<[f32; 2]>>> = OnceLock::new();
 
-/// Returns all outer/inner rings from the Natural Earth 110m FeatureCollection.
-/// Parsed once and cached for the lifetime of the process.
+#[derive(Deserialize)]
+struct NeCollection {
+    features: Vec<NeFeature>,
+}
+#[derive(Deserialize)]
+struct NeFeature {
+    geometry: Option<NeGeometry>,
+}
+#[derive(Deserialize)]
+#[serde(tag = "type", content = "coordinates")]
+enum NeGeometry {
+    Polygon(Vec<Vec<[f32; 2]>>),
+    MultiPolygon(Vec<Vec<Vec<[f32; 2]>>>),
+    #[serde(other)]
+    Other,
+}
+
+/// Returns all decimated outer/inner rings from the Natural Earth 110m FeatureCollection.
+/// Parsed once via typed serde structs (skipping all unused `properties`) and cached.
 fn coastline_rings() -> &'static Vec<Vec<[f32; 2]>> {
     COASTLINES.get_or_init(|| parse_ne_rings(NE_COUNTRIES_JSON))
 }
 
+fn decimate_ring(pts: Vec<[f32; 2]>) -> Vec<[f32; 2]> {
+    if pts.len() <= 2 {
+        return pts;
+    }
+    const MIN_DEG_SQ: f32 = 0.4 * 0.4;
+    let mut out = Vec::with_capacity(pts.len() / 2 + 2);
+    out.push(pts[0]);
+    let mut last = pts[0];
+    for &p in &pts[1..pts.len() - 1] {
+        let dx = p[0] - last[0];
+        let dy = p[1] - last[1];
+        if dx * dx + dy * dy >= MIN_DEG_SQ {
+            out.push(p);
+            last = p;
+        }
+    }
+    out.push(*pts.last().unwrap());
+    out
+}
+
 fn parse_ne_rings(json: &str) -> Vec<Vec<[f32; 2]>> {
-    let mut rings: Vec<Vec<[f32; 2]>> = Vec::new();
-    let Ok(val) = serde_json::from_str::<serde_json::Value>(json) else {
-        return rings;
+    let Ok(col) = serde_json::from_str::<NeCollection>(json) else {
+        return Vec::new();
     };
-    let Some(features) = val["features"].as_array() else {
-        return rings;
-    };
-    for feat in features {
-        let geom = &feat["geometry"];
-        match geom["type"].as_str().unwrap_or("") {
-            "Polygon" => {
-                if let Some(coords) = geom["coordinates"].as_array() {
-                    for ring in coords {
-                        rings.push(extract_ring(ring));
+    let mut rings = Vec::with_capacity(300);
+    for feat in col.features {
+        match feat.geometry {
+            Some(NeGeometry::Polygon(coords)) => {
+                for ring in coords {
+                    let dec = decimate_ring(ring);
+                    if dec.len() >= 2 {
+                        rings.push(dec);
                     }
                 }
             }
-            "MultiPolygon" => {
-                if let Some(polys) = geom["coordinates"].as_array() {
-                    for poly in polys {
-                        if let Some(poly_rings) = poly.as_array() {
-                            for ring in poly_rings {
-                                rings.push(extract_ring(ring));
-                            }
+            Some(NeGeometry::MultiPolygon(polys)) => {
+                for poly in polys {
+                    for ring in poly {
+                        let dec = decimate_ring(ring);
+                        if dec.len() >= 2 {
+                            rings.push(dec);
                         }
                     }
                 }
@@ -102,53 +136,209 @@ fn parse_ne_rings(json: &str) -> Vec<Vec<[f32; 2]>> {
     rings
 }
 
-fn extract_ring(ring: &serde_json::Value) -> Vec<[f32; 2]> {
-    ring.as_array()
-        .map(|pts| {
-            pts.iter()
-                .filter_map(|pt| {
-                    let arr = pt.as_array()?;
-                    let lon = arr.first()?.as_f64()? as f32;
-                    let lat = arr.get(1)?.as_f64()? as f32;
-                    Some([lon, lat])
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+const OVERLAY_W: usize = 560;
+const OVERLAY_H: usize = 280;
+
+fn blend_over(dst: Color32, src: Color32) -> Color32 {
+    let sa = src.a() as u32;
+    if sa == 0 {
+        return dst;
+    }
+    if sa == 255 || dst.a() == 0 {
+        return src;
+    }
+    let inv = 255 - sa;
+    let da = dst.a() as u32;
+    let out_a = sa + (da * inv + 127) / 255;
+    if out_a == 0 {
+        return Color32::TRANSPARENT;
+    }
+    let blend_ch = |s: u8, d: u8| -> u8 {
+        ((s as u32 * sa + d as u32 * da * inv / 255 + out_a / 2) / out_a).min(255) as u8
+    };
+    Color32::from_rgba_unmultiplied(
+        blend_ch(src.r(), dst.r()),
+        blend_ch(src.g(), dst.g()),
+        blend_ch(src.b(), dst.b()),
+        out_a as u8,
+    )
+}
+
+fn stamp_rect_into(
+    img: &mut egui::ColorImage,
+    min_lat: f32,
+    max_lat: f32,
+    min_lon: f32,
+    max_lon: f32,
+    color: Color32,
+) {
+    let x0 = (((min_lon + 180.0) / 360.0 * OVERLAY_W as f32).floor() as i32 - 1)
+        .clamp(0, OVERLAY_W as i32 - 1) as usize;
+    let x1 = (((max_lon + 180.0) / 360.0 * OVERLAY_W as f32).ceil() as i32 + 1)
+        .clamp(1, OVERLAY_W as i32) as usize;
+    let y0 = (((90.0 - max_lat) / 180.0 * OVERLAY_H as f32).floor() as i32 - 1)
+        .clamp(0, OVERLAY_H as i32 - 1) as usize;
+    let y1 = (((90.0 - min_lat) / 180.0 * OVERLAY_H as f32).ceil() as i32 + 1)
+        .clamp(1, OVERLAY_H as i32) as usize;
+    for y in y0..y1 {
+        let row = y * OVERLAY_W;
+        for x in x0..x1 {
+            img.pixels[row + x] = blend_over(img.pixels[row + x], color);
+        }
+    }
+}
+
+fn rasterize_coastlines(color: Color32) -> egui::ColorImage {
+    let mut img = egui::ColorImage::new([OVERLAY_W, OVERLAY_H], Color32::TRANSPARENT);
+    let plot = |pixels: &mut [Color32], x: i32, y: i32| {
+        if x >= 0 && x < OVERLAY_W as i32 && y >= 0 && y < OVERLAY_H as i32 {
+            pixels[y as usize * OVERLAY_W + x as usize] = color;
+        }
+    };
+    for ring in coastline_rings() {
+        for pair in ring.windows(2) {
+            let mut x0 = ((pair[0][0] + 180.0) / 360.0 * (OVERLAY_W - 1) as f32).round() as i32;
+            let mut y0 = ((90.0 - pair[0][1]) / 180.0 * (OVERLAY_H - 1) as f32).round() as i32;
+            let x1 = ((pair[1][0] + 180.0) / 360.0 * (OVERLAY_W - 1) as f32).round() as i32;
+            let y1 = ((90.0 - pair[1][1]) / 180.0 * (OVERLAY_H - 1) as f32).round() as i32;
+            let dx = (x1 - x0).abs();
+            let sx = if x0 < x1 { 1 } else { -1 };
+            let dy = -(y1 - y0).abs();
+            let sy = if y0 < y1 { 1 } else { -1 };
+            let mut err = dx + dy;
+            loop {
+                plot(&mut img.pixels, x0, y0);
+                if x0 == x1 && y0 == y1 {
+                    break;
+                }
+                let e2 = 2 * err;
+                if e2 >= dy {
+                    err += dy;
+                    x0 += sx;
+                }
+                if e2 <= dx {
+                    err += dx;
+                    y0 += sy;
+                }
+            }
+        }
+    }
+    img
+}
+
+struct CoverageLayer {
+    cached_count: usize,
+    live_count: usize,
+    cached_img: Option<egui::ColorImage>,
+    live_img: Option<egui::ColorImage>,
+    cached_tex: Option<egui::TextureHandle>,
+    live_tex: Option<egui::TextureHandle>,
+    cached_dirty: bool,
+    live_dirty: bool,
+}
+
+impl Default for CoverageLayer {
+    fn default() -> Self {
+        Self {
+            cached_count: 0,
+            live_count: 0,
+            cached_img: None,
+            live_img: None,
+            cached_tex: None,
+            live_tex: None,
+            cached_dirty: false,
+            live_dirty: false,
+        }
+    }
+}
+
+impl CoverageLayer {
+    fn set_cached(&mut self, count: usize, img: egui::ColorImage) {
+        self.cached_count = count;
+        self.cached_img = Some(img);
+        self.cached_dirty = true;
+    }
+
+    fn clear_live(&mut self) {
+        self.live_count = 0;
+        self.live_img = None;
+        self.live_tex = None;
+        self.live_dirty = false;
+    }
+
+    fn stamp_live(&mut self, min_lat: f32, max_lat: f32, min_lon: f32, max_lon: f32, color: Color32) {
+        self.live_count += 1;
+        let img = self
+            .live_img
+            .get_or_insert_with(|| egui::ColorImage::new([OVERLAY_W, OVERLAY_H], Color32::TRANSPARENT));
+        stamp_rect_into(img, min_lat, max_lat, min_lon, max_lon, color);
+        self.live_dirty = true;
+    }
+
+    fn paint(&mut self, ctx: &egui::Context, painter: &egui::Painter, rect: egui::Rect, id: &str) {
+        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        if self.cached_dirty {
+            if let Some(img) = &self.cached_img {
+                self.cached_tex = Some(ctx.load_texture(
+                    format!("{id}_cached"),
+                    img.clone(),
+                    egui::TextureOptions::NEAREST,
+                ));
+            }
+            self.cached_dirty = false;
+        }
+        if let Some(tex) = &self.cached_tex {
+            painter.image(tex.id(), rect, uv, Color32::WHITE);
+        }
+        if self.live_dirty {
+            if let Some(img) = &self.live_img {
+                self.live_tex = Some(ctx.load_texture(
+                    format!("{id}_live"),
+                    img.clone(),
+                    egui::TextureOptions::NEAREST,
+                ));
+            }
+            self.live_dirty = false;
+        }
+        if let Some(tex) = &self.live_tex {
+            painter.image(tex.id(), rect, uv, Color32::WHITE);
+        }
+    }
+}
+
+struct ScanResult {
+    tab: ActiveTab,
+    outcome: Result<(usize, egui::ColorImage), String>,
 }
 
 pub struct BuilderApp {
     form: BuilderForm,
     assets: AssetSelection,
-    log_lines: Vec<String>,
+    pub(super) log_lines: VecDeque<String>,
     status: String,
     progress: f32,
     progress_detail: String,
+    needs_fresh_working_folder: bool,
     dashboard: crate::builder_dashboard::Dashboard,
     active_job: Option<JobHandle>,
+    scan_rx: Option<mpsc::Receiver<ScanResult>>,
+    coast_tex_earth: Option<egui::TextureHandle>,
+    coast_tex_lunar: Option<egui::TextureHandle>,
+    coast_tex_mars: Option<egui::TextureHandle>,
     drag_start: Option<egui::Pos2>,
     osm_mode: OsmMode,
-    /// Tiles already in the cache (from Scan Cache): (zoom_bucket, min_lat, max_lat, min_lon, max_lon)
-    cached_tiles: Vec<(i32, f32, f32, f32, f32)>,
-    /// Tiles completed in the current build run: (min_lat, max_lat, min_lon, max_lon)
-    live_tiles: Vec<(f32, f32, f32, f32)>,
+    earth_coverage: CoverageLayer,
     // ── Lunar tab ─────────────────────────────────────────────────────────────
     active_tab: ActiveTab,
     atlas_form: atlas_panel::Form,
     recovery_form: crate::contour_recovery::Command,
     lunar_form: LunarForm,
     lunar_drag_start: Option<egui::Pos2>,
-    /// Lunar tiles already in lunar_focus_cache.sqlite
-    lunar_cached_tiles: Vec<(i32, f32, f32, f32, f32)>,
-    /// Lunar tiles built in the current session
-    lunar_live_tiles: Vec<(f32, f32, f32, f32)>,
+    lunar_coverage: CoverageLayer,
     // ── Mars tab ──────────────────────────────────────────────────────────────
     mars_form: MarsForm,
     mars_drag_start: Option<egui::Pos2>,
-    /// Mars tiles already in mars_ctx_cache.sqlite
-    mars_cached_tiles: Vec<(i32, f32, f32, f32, f32)>,
-    /// Mars tiles built in the current session
-    mars_live_tiles: Vec<(f32, f32, f32, f32)>,
+    mars_coverage: CoverageLayer,
     /// Which tab started the active build job (for routing TileCompleted events).
     active_job_tab: Option<ActiveTab>,
 }
@@ -250,16 +440,20 @@ impl BuilderApp {
                 government: false,
                 surveillance: false,
             },
-            log_lines: vec!["Ready.".to_owned()],
+            log_lines: VecDeque::from(["Ready.".to_owned()]),
             status: "Idle".to_owned(),
             progress: 0.0,
             progress_detail: "No active build".to_owned(),
+            needs_fresh_working_folder: false,
             dashboard: Default::default(),
             active_job: None,
+            scan_rx: None,
+            coast_tex_earth: None,
+            coast_tex_lunar: None,
+            coast_tex_mars: None,
             drag_start: None,
             osm_mode: OsmMode::Bbox,
-            cached_tiles: Vec::new(),
-            live_tiles: Vec::new(),
+            earth_coverage: Default::default(),
             active_tab: ActiveTab::OsmContours,
             atlas_form: Default::default(),
             recovery_form: Default::default(),
@@ -280,8 +474,7 @@ impl BuilderApp {
                 zoom_buckets: [true, true, false, false, false],
             },
             lunar_drag_start: None,
-            lunar_cached_tiles: Vec::new(),
-            lunar_live_tiles: Vec::new(),
+            lunar_coverage: Default::default(),
             mars_form: MarsForm {
                 data_root: String::new(),
                 cache_db: std::env::current_dir()
@@ -299,15 +492,14 @@ impl BuilderApp {
                 zoom_buckets: [true, true, false, false, false],
             },
             mars_drag_start: None,
-            mars_cached_tiles: Vec::new(),
-            mars_live_tiles: Vec::new(),
+            mars_coverage: Default::default(),
             active_job_tab: None,
         };
         app.refresh_inspector();
         app
     }
 
-    fn start_build(&mut self) {
+    fn start_build(&mut self, ctx: &egui::Context) {
         if self.active_job.is_some() {
             return;
         }
@@ -323,63 +515,162 @@ impl BuilderApp {
         self.dashboard.live.start();
         self.progress = 0.0;
         self.progress_detail = "Starting export…".to_owned();
+        self.needs_fresh_working_folder = false;
         self.active_job_tab = Some(ActiveTab::OsmContours);
         self.push_log(format!(
             "Starting export for bbox [{}, {}] x [{}, {}]",
             self.form.min_lat, self.form.max_lat, self.form.min_lon, self.form.max_lon
         ));
-        self.active_job = Some(spawn_job(BuildJob::Bbox(command)));
+        self.active_job = Some(spawn_job_with_wake(
+            BuildJob::Bbox(command),
+            Some(ctx.clone()),
+        ));
     }
 
-    fn scan_cache_tiles(&mut self) {
-        let db_path = PathBuf::from(self.form.contour_db.trim());
-        if !db_path.exists() {
-            self.push_log(format!("Contour DB not found: {}", db_path.display()));
+    fn spawn_cache_scan(&mut self, tab: ActiveTab, db_path: PathBuf, ctx: &egui::Context) {
+        if self.scan_rx.is_some() {
             return;
         }
-        let Ok(conn) =
-            rusqlite::Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        else {
-            self.push_log("Failed to open contour DB for scanning.".to_owned());
+        let (tx, rx) = mpsc::channel();
+        self.scan_rx = Some(rx);
+        let wake = ctx.clone();
+        std::thread::spawn(move || {
+            let outcome = (|| -> Result<(usize, egui::ColorImage), String> {
+                if !db_path.exists() {
+                    return Err(format!("Cache DB not found: {}", db_path.display()));
+                }
+                let conn = rusqlite::Connection::open_with_flags(
+                    &db_path,
+                    OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .map_err(|e| format!("Failed to open cache DB: {e}"))?;
+                let _ = conn.busy_timeout(Duration::from_secs(2));
+                let mut stmt = conn
+                    .prepare("SELECT zoom_bucket, lat_bucket, lon_bucket FROM contour_tile_manifest")
+                    .map_err(|e| format!("Failed to query contour_tile_manifest: {e}"))?;
+                let mut img =
+                    egui::ColorImage::new([OVERLAY_W, OVERLAY_H], Color32::TRANSPARENT);
+                let mut count = 0usize;
+                match tab {
+                    ActiveTab::OsmContours => {
+                        let specs = crate::contours::all_specs();
+                        let rows = stmt
+                            .query_map([], |row| {
+                                Ok((
+                                    row.get::<_, i32>(0)?,
+                                    row.get::<_, i32>(1)?,
+                                    row.get::<_, i32>(2)?,
+                                ))
+                            })
+                            .map_err(|e| format!("Failed to scan manifest: {e}"))?;
+                        for (zoom_bucket, lat_bucket, lon_bucket) in rows.flatten() {
+                            if let Some(spec) = usize::try_from(zoom_bucket)
+                                .ok()
+                                .and_then(|i| specs.get(i))
+                                .filter(|s| s.zoom_bucket == zoom_bucket)
+                                .or_else(|| specs.iter().find(|s| s.zoom_bucket == zoom_bucket))
+                            {
+                                let step = spec.half_extent_deg * 0.45;
+                                let center_lat = lat_bucket as f32 * step;
+                                let center_lon = lon_bucket as f32 * step;
+                                let alpha = (25 + zoom_bucket.max(0) as u8 * 12).min(120);
+                                stamp_rect_into(
+                                    &mut img,
+                                    center_lat - step * 0.5,
+                                    center_lat + step * 0.5,
+                                    center_lon - step * 0.5,
+                                    center_lon + step * 0.5,
+                                    Color32::from_rgba_unmultiplied(0, 180, 160, alpha),
+                                );
+                                count += 1;
+                            }
+                        }
+                    }
+                    ActiveTab::Lunar | ActiveTab::Mars => {
+                        let specs = all_lunar_specs();
+                        let is_mars = tab == ActiveTab::Mars;
+                        let rows = stmt
+                            .query_map([], |row| {
+                                Ok((
+                                    row.get::<_, i32>(0)?,
+                                    row.get::<_, i32>(1)?,
+                                    row.get::<_, i32>(2)?,
+                                ))
+                            })
+                            .map_err(|e| format!("Failed to scan manifest: {e}"))?;
+                        for (zoom_bucket, lat_bucket, lon_bucket) in rows.flatten() {
+                            if let Some(spec) = usize::try_from(zoom_bucket)
+                                .ok()
+                                .and_then(|i| specs.get(i))
+                                .filter(|s| s.zoom_bucket == zoom_bucket)
+                                .or_else(|| specs.iter().find(|s| s.zoom_bucket == zoom_bucket))
+                            {
+                                let step = spec.half_extent_deg * 0.45;
+                                let center_lat = lat_bucket as f32 * step;
+                                let center_lon = lon_bucket as f32 * step;
+                                let alpha = (20 + zoom_bucket.max(0) as u8 * 14).min(110);
+                                let color = if is_mars {
+                                    Color32::from_rgba_unmultiplied(200, 100, 40, alpha)
+                                } else {
+                                    Color32::from_rgba_unmultiplied(0, 180, 160, alpha)
+                                };
+                                stamp_rect_into(
+                                    &mut img,
+                                    center_lat - spec.half_extent_deg,
+                                    center_lat + spec.half_extent_deg,
+                                    center_lon - spec.half_extent_deg,
+                                    center_lon + spec.half_extent_deg,
+                                    color,
+                                );
+                                count += 1;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                Ok((count, img))
+            })();
+            let _ = tx.send(ScanResult { tab, outcome });
+            wake.request_repaint();
+        });
+    }
+
+    fn poll_cache_scan(&mut self) {
+        let Some(rx) = &self.scan_rx else {
             return;
         };
-        let Ok(mut stmt) =
-            conn.prepare("SELECT zoom_bucket, lat_bucket, lon_bucket FROM contour_tile_manifest")
-        else {
-            self.push_log("Failed to query contour_tile_manifest.".to_owned());
-            return;
-        };
-        let specs = crate::contours::all_specs();
-        let mut tiles = Vec::new();
-        if let Ok(rows) = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, i32>(0)?,
-                row.get::<_, i32>(1)?,
-                row.get::<_, i32>(2)?,
-            ))
-        }) {
-            for row in rows.flatten() {
-                let (zoom_bucket, lat_bucket, lon_bucket) = row;
-                if let Some(spec) = specs.iter().find(|s| s.zoom_bucket == zoom_bucket) {
-                    let step = spec.half_extent_deg * 0.45;
-                    let center_lat = lat_bucket as f32 * step;
-                    let center_lon = lon_bucket as f32 * step;
-                    tiles.push((
-                        zoom_bucket,
-                        center_lat - step * 0.5,
-                        center_lat + step * 0.5,
-                        center_lon - step * 0.5,
-                        center_lon + step * 0.5,
-                    ));
+        match rx.try_recv() {
+            Ok(result) => {
+                self.scan_rx = None;
+                match result.outcome {
+                    Ok((count, img)) => match result.tab {
+                        ActiveTab::Lunar => {
+                            self.lunar_coverage.set_cached(count, img);
+                            self.push_log(format!("Lunar cache scan: {count} tiles found."));
+                        }
+                        ActiveTab::Mars => {
+                            self.mars_coverage.set_cached(count, img);
+                            self.push_log(format!("Mars cache scan: {count} tiles found."));
+                        }
+                        _ => {
+                            self.earth_coverage.set_cached(count, img);
+                            self.push_log(format!("Cache scan: {count} tiles found."));
+                        }
+                    },
+                    Err(msg) => self.push_log(msg),
                 }
             }
+            Err(TryRecvError::Disconnected) => self.scan_rx = None,
+            Err(TryRecvError::Empty) => {}
         }
-        let count = tiles.len();
-        self.cached_tiles = tiles;
-        self.push_log(format!("Cache scan: {count} tiles found."));
     }
 
-    fn start_contour_build(&mut self) {
+    fn scan_cache_tiles(&mut self, ctx: &egui::Context) {
+        let db_path = PathBuf::from(self.form.contour_db.trim());
+        self.spawn_cache_scan(ActiveTab::OsmContours, db_path, ctx);
+    }
+
+    fn start_contour_build(&mut self, ctx: &egui::Context) {
         if self.active_job.is_some() {
             return;
         }
@@ -394,13 +685,17 @@ impl BuilderApp {
         self.dashboard.live.start();
         self.progress = 0.0;
         self.progress_detail = "Starting contour export…".to_owned();
+        self.needs_fresh_working_folder = false;
         self.active_job_tab = Some(ActiveTab::OsmContours);
-        self.live_tiles.clear();
+        self.earth_coverage.clear_live();
         self.push_log(format!(
             "Starting contour build for bbox [{}, {}] x [{}, {}]",
             self.form.min_lat, self.form.max_lat, self.form.min_lon, self.form.max_lon,
         ));
-        self.active_job = Some(spawn_job(BuildJob::ContoursBbox(command)));
+        self.active_job = Some(spawn_job_with_wake(
+            BuildJob::ContoursBbox(command),
+            Some(ctx.clone()),
+        ));
     }
 
     fn contours_command(&self) -> Result<ContoursBboxCommand, String> {
@@ -536,7 +831,7 @@ impl BuilderApp {
         })
     }
 
-    fn start_archive_pack(&mut self) {
+    fn start_archive_pack(&mut self, ctx: &egui::Context) {
         if self.active_job.is_some() {
             return;
         }
@@ -558,17 +853,21 @@ impl BuilderApp {
         self.progress = 0.0;
         self.progress_detail =
             "Packing existing cached geometry; completed cells appear in the log.".to_owned();
+        self.needs_fresh_working_folder = false;
         self.active_job_tab = Some(ActiveTab::OsmContours);
-        self.active_job = Some(spawn_job(BuildJob::PackArchive(crate::archive_pack::Command {
-            out,
-            osm: Some(osm),
-            pipelines: None,
-            platforms: None,
-            terrain: Vec::new(),
-        })));
+        self.active_job = Some(spawn_job_with_wake(
+            BuildJob::PackArchive(crate::archive_pack::Command {
+                out,
+                osm: Some(osm),
+                pipelines: None,
+                platforms: None,
+                terrain: Vec::new(),
+            }),
+            Some(ctx.clone()),
+        ));
     }
 
-    fn start_planet_build(&mut self) {
+    fn start_planet_build(&mut self, ctx: &egui::Context) {
         if self.active_job.is_some() {
             return;
         }
@@ -583,42 +882,42 @@ impl BuilderApp {
         self.dashboard.live.start();
         self.progress = 0.0;
         self.progress_detail = "Starting planet-all export…".to_owned();
+        self.needs_fresh_working_folder = false;
         self.active_job_tab = Some(ActiveTab::OsmContours);
         self.push_log(format!(
             "Starting planet-all build from {}",
             command.planet_path.display()
         ));
-        self.active_job = Some(spawn_job(BuildJob::PlanetAll(command)));
+        self.active_job = Some(spawn_job_with_wake(
+            BuildJob::PlanetAll(command),
+            Some(ctx.clone()),
+        ));
     }
 
     fn poll_job(&mut self) {
-        let Some(job) = self.active_job.as_ref() else {
+        let Some(job) = self.active_job.take() else {
             return;
         };
 
-        let mut events = Vec::new();
+        let mut finished = false;
         loop {
-            match job.receiver.try_recv() {
-                Ok(event) => events.push(event),
+            let event = match job.receiver.try_recv() {
+                Ok(event) => event,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
-                    events.push(BuildEvent::Finished(Err(
-                        "Background build worker disconnected".to_owned(),
-                    )));
-                    break;
+                    BuildEvent::Finished(Err("Background build worker disconnected".to_owned()))
                 }
-            }
-        }
-
-        for event in events {
+            };
             match event {
                 BuildEvent::AtlasProgress(p) => self.atlas_form.progress = Some(p),
                 BuildEvent::Progress(update) => {
                     self.dashboard.live.observe(update.metrics.as_ref());
-                    if self.status != update.stage { self.push_log(format!("{} · {}", update.stage, update.message)); }
-                    self.status = update.stage.clone();
+                    if self.status != update.stage {
+                        self.push_log(format!("{} · {}", update.stage, update.message));
+                    }
+                    self.status = update.stage;
                     self.progress = update.fraction.clamp(0.0, 1.0);
-                    self.progress_detail = update.message.clone();
+                    self.progress_detail = update.message;
                 }
                 BuildEvent::Log(line) => {
                     self.push_log(line);
@@ -627,13 +926,31 @@ impl BuilderApp {
                     self.dashboard.live.tiles += 1;
                     match self.active_job_tab {
                         Some(ActiveTab::Lunar) => {
-                            self.lunar_live_tiles.push((min_lat, max_lat, min_lon, max_lon));
+                            self.lunar_coverage.stamp_live(
+                                min_lat,
+                                max_lat,
+                                min_lon,
+                                max_lon,
+                                Color32::from_rgba_unmultiplied(80, 255, 120, 210),
+                            );
                         }
                         Some(ActiveTab::Mars) => {
-                            self.mars_live_tiles.push((min_lat, max_lat, min_lon, max_lon));
+                            self.mars_coverage.stamp_live(
+                                min_lat,
+                                max_lat,
+                                min_lon,
+                                max_lon,
+                                Color32::from_rgba_unmultiplied(255, 180, 60, 210),
+                            );
                         }
                         _ => {
-                            self.live_tiles.push((min_lat, max_lat, min_lon, max_lon));
+                            self.earth_coverage.stamp_live(
+                                min_lat,
+                                max_lat,
+                                min_lon,
+                                max_lon,
+                                Color32::from_rgba_unmultiplied(80, 255, 120, 210),
+                            );
                         }
                     }
                 }
@@ -643,23 +960,29 @@ impl BuilderApp {
                         Ok(summary) => {
                             self.status = "Completed".to_owned();
                             self.progress = 1.0;
+                            self.needs_fresh_working_folder = false;
                             self.progress_detail = summary.clone();
                             self.push_log(summary);
                         }
                         Err(error) => {
                             self.status = "Failed".to_owned();
+                            self.needs_fresh_working_folder =
+                                error.to_ascii_lowercase().contains("new working directory");
                             self.progress_detail = error.clone();
                             self.push_log(format!("Build failed: {error}"));
                         }
                     }
-                    self.active_job = None;
                     if !matches!(self.active_job_tab, Some(ActiveTab::Atlas | ActiveTab::Recovery)) {
                         self.refresh_inspector();
                     }
                     self.active_job_tab = None;
+                    finished = true;
                     break;
                 }
             }
+        }
+        if !finished {
+            self.active_job = Some(job);
         }
     }
 
@@ -667,55 +990,12 @@ impl BuilderApp {
         self.dashboard.refresh();
     }
 
-    fn scan_lunar_cache(&mut self) {
+    fn scan_lunar_cache(&mut self, ctx: &egui::Context) {
         let db_path = PathBuf::from(self.lunar_form.lunar_db.trim());
-        if !db_path.exists() {
-            self.push_log(format!("Lunar cache DB not found: {}", db_path.display()));
-            return;
-        }
-        let Ok(conn) =
-            rusqlite::Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        else {
-            self.push_log("Failed to open lunar cache DB.".to_owned());
-            return;
-        };
-        let Ok(mut stmt) =
-            conn.prepare("SELECT zoom_bucket, lat_bucket, lon_bucket FROM contour_tile_manifest")
-        else {
-            self.push_log("Failed to query lunar contour_tile_manifest.".to_owned());
-            return;
-        };
-        let specs = all_lunar_specs();
-        let mut tiles = Vec::new();
-        if let Ok(rows) = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, i32>(0)?,
-                row.get::<_, i32>(1)?,
-                row.get::<_, i32>(2)?,
-            ))
-        }) {
-            for row in rows.flatten() {
-                let (zoom_bucket, lat_bucket, lon_bucket) = row;
-                if let Some(spec) = specs.iter().find(|s| s.zoom_bucket == zoom_bucket) {
-                    let step = spec.half_extent_deg * 0.45;
-                    let center_lat = lat_bucket as f32 * step;
-                    let center_lon = lon_bucket as f32 * step;
-                    tiles.push((
-                        zoom_bucket,
-                        center_lat - spec.half_extent_deg,
-                        center_lat + spec.half_extent_deg,
-                        center_lon - spec.half_extent_deg,
-                        center_lon + spec.half_extent_deg,
-                    ));
-                }
-            }
-        }
-        let count = tiles.len();
-        self.lunar_cached_tiles = tiles;
-        self.push_log(format!("Lunar cache scan: {count} tiles found."));
+        self.spawn_cache_scan(ActiveTab::Lunar, db_path, ctx);
     }
 
-    fn start_lunar_build(&mut self) {
+    fn start_lunar_build(&mut self, ctx: &egui::Context) {
         if self.active_job.is_some() {
             return;
         }
@@ -730,8 +1010,9 @@ impl BuilderApp {
         self.dashboard.live.start();
         self.progress = 0.0;
         self.progress_detail = "Starting lunar build…".to_owned();
+        self.needs_fresh_working_folder = false;
         self.active_job_tab = Some(ActiveTab::Lunar);
-        self.lunar_live_tiles.clear();
+        self.lunar_coverage.clear_live();
         self.push_log(format!(
             "Starting lunar build for bbox [{}, {}] x [{}, {}]",
             self.lunar_form.min_lat,
@@ -739,7 +1020,10 @@ impl BuilderApp {
             self.lunar_form.min_lon,
             self.lunar_form.max_lon,
         ));
-        self.active_job = Some(spawn_job(BuildJob::LunarContours(command)));
+        self.active_job = Some(spawn_job_with_wake(
+            BuildJob::LunarContours(command),
+            Some(ctx.clone()),
+        ));
     }
 
     fn lunar_command(&self) -> Result<LunarBuildCommand, String> {
@@ -785,55 +1069,12 @@ impl BuilderApp {
         })
     }
 
-    fn scan_mars_cache(&mut self) {
+    fn scan_mars_cache(&mut self, ctx: &egui::Context) {
         let db_path = PathBuf::from(self.mars_form.cache_db.trim());
-        if !db_path.exists() {
-            self.push_log(format!("Mars cache DB not found: {}", db_path.display()));
-            return;
-        }
-        let Ok(conn) =
-            rusqlite::Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        else {
-            self.push_log("Failed to open Mars cache DB.".to_owned());
-            return;
-        };
-        let Ok(mut stmt) =
-            conn.prepare("SELECT zoom_bucket, lat_bucket, lon_bucket FROM contour_tile_manifest")
-        else {
-            self.push_log("Failed to query Mars contour_tile_manifest.".to_owned());
-            return;
-        };
-        let specs = all_lunar_specs(); // Mars uses identical zoom specs
-        let mut tiles = Vec::new();
-        if let Ok(rows) = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, i32>(0)?,
-                row.get::<_, i32>(1)?,
-                row.get::<_, i32>(2)?,
-            ))
-        }) {
-            for row in rows.flatten() {
-                let (zoom_bucket, lat_bucket, lon_bucket) = row;
-                if let Some(spec) = specs.iter().find(|s| s.zoom_bucket == zoom_bucket) {
-                    let step = spec.half_extent_deg * 0.45;
-                    let center_lat = lat_bucket as f32 * step;
-                    let center_lon = lon_bucket as f32 * step;
-                    tiles.push((
-                        zoom_bucket,
-                        center_lat - spec.half_extent_deg,
-                        center_lat + spec.half_extent_deg,
-                        center_lon - spec.half_extent_deg,
-                        center_lon + spec.half_extent_deg,
-                    ));
-                }
-            }
-        }
-        let count = tiles.len();
-        self.mars_cached_tiles = tiles;
-        self.push_log(format!("Mars cache scan: {count} tiles found."));
+        self.spawn_cache_scan(ActiveTab::Mars, db_path, ctx);
     }
 
-    fn start_mars_build(&mut self) {
+    fn start_mars_build(&mut self, ctx: &egui::Context) {
         if self.active_job.is_some() {
             return;
         }
@@ -848,8 +1089,9 @@ impl BuilderApp {
         self.dashboard.live.start();
         self.progress = 0.0;
         self.progress_detail = "Starting Mars build…".to_owned();
+        self.needs_fresh_working_folder = false;
         self.active_job_tab = Some(ActiveTab::Mars);
-        self.mars_live_tiles.clear();
+        self.mars_coverage.clear_live();
         self.push_log(format!(
             "Starting Mars build for bbox [{}, {}] x [{}, {}]",
             self.mars_form.min_lat,
@@ -857,7 +1099,10 @@ impl BuilderApp {
             self.mars_form.min_lon,
             self.mars_form.max_lon,
         ));
-        self.active_job = Some(spawn_job(BuildJob::MarsContours(command)));
+        self.active_job = Some(spawn_job_with_wake(
+            BuildJob::MarsContours(command),
+            Some(ctx.clone()),
+        ));
     }
 
     fn mars_command(&self) -> Result<MarsBuildCommand, String> {
@@ -984,19 +1229,22 @@ impl BuilderApp {
         ui.separator();
         ui.horizontal(|ui| {
             ui.label("Coverage Map");
-            if ui.small_button("Scan Cache").clicked() {
-                self.scan_lunar_cache();
+            if ui
+                .add_enabled(self.scan_rx.is_none(), egui::Button::new("Scan Cache").small())
+                .clicked()
+            {
+                self.scan_lunar_cache(ui.ctx());
             }
-            if !self.lunar_cached_tiles.is_empty() {
+            if self.lunar_coverage.cached_count > 0 {
                 ui.label(
-                    egui::RichText::new(format!("({} cached)", self.lunar_cached_tiles.len()))
+                    egui::RichText::new(format!("({} cached)", self.lunar_coverage.cached_count))
                         .color(Color32::from_rgb(0, 180, 160))
                         .small(),
                 );
             }
-            if !self.lunar_live_tiles.is_empty() {
+            if self.lunar_coverage.live_count > 0 {
                 ui.label(
-                    egui::RichText::new(format!("({} built)", self.lunar_live_tiles.len()))
+                    egui::RichText::new(format!("({} built)", self.lunar_coverage.live_count))
                         .color(Color32::from_rgb(80, 255, 120))
                         .small(),
                 );
@@ -1021,30 +1269,9 @@ impl BuilderApp {
             painter.rect_filled(band, 0.0, Color32::from_rgba_unmultiplied(30, 60, 120, 50));
         }
 
-        // Cached tiles (dim teal)
-        for &(zoom_bucket, min_lat, max_lat, min_lon, max_lon) in &self.lunar_cached_tiles {
-            let alpha = (20 + zoom_bucket as u8 * 14).min(110);
-            let color = Color32::from_rgba_unmultiplied(0, 180, 160, alpha);
-            let tile_rect = egui::Rect::from_min_max(
-                egui::pos2(lon_to_x(rect, min_lon), lat_to_y(rect, max_lat)),
-                egui::pos2(lon_to_x(rect, max_lon), lat_to_y(rect, min_lat)),
-            )
-            .expand(0.5);
-            painter.rect_filled(tile_rect, 0.0, color);
-        }
-        // Live tiles (bright green)
-        for &(min_lat, max_lat, min_lon, max_lon) in &self.lunar_live_tiles {
-            let tile_rect = egui::Rect::from_min_max(
-                egui::pos2(lon_to_x(rect, min_lon), lat_to_y(rect, max_lat)),
-                egui::pos2(lon_to_x(rect, max_lon), lat_to_y(rect, min_lat)),
-            )
-            .expand(0.5);
-            painter.rect_filled(
-                tile_rect,
-                0.0,
-                Color32::from_rgba_unmultiplied(80, 255, 120, 210),
-            );
-        }
+        // Cached + live tiles via baked 2× HiDPI bitmap overlays
+        self.lunar_coverage
+            .paint(ui.ctx(), &painter, rect, "lunar_cov");
 
         // Graticule
         let grid = Color32::from_rgb(20, 40, 80);
@@ -1053,7 +1280,7 @@ impl BuilderApp {
             let x = lon_to_x(rect, lon as f32);
             painter.line_segment(
                 [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                egui::Stroke::new(1.0, grid),
+                egui::Stroke::new(1.0_f32, grid),
             );
         }
         for lat in [-90i32, -60, -30, 0, 30, 60, 90] {
@@ -1061,7 +1288,7 @@ impl BuilderApp {
             let c = if lat == 0 { equat } else { grid };
             painter.line_segment(
                 [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-                egui::Stroke::new(if lat == 60 || lat == -60 { 1.5 } else { 1.0 }, c),
+                egui::Stroke::new(if lat == 60 || lat == -60 { 1.5_f32 } else { 1.0_f32 }, c),
             );
         }
         // ±60° labels
@@ -1076,17 +1303,20 @@ impl BuilderApp {
             );
         }
 
-        // Country outlines
-        let coast = Color32::from_rgb(60, 90, 110);
-        for ring in coastline_rings() {
-            let pts: Vec<egui::Pos2> = ring
-                .iter()
-                .map(|[lon, lat]| egui::pos2(lon_to_x(rect, *lon), lat_to_y(rect, *lat)))
-                .collect();
-            if pts.len() >= 2 {
-                painter.add(egui::Shape::line(pts, egui::Stroke::new(0.5, coast)));
-            }
-        }
+        // Country outlines (cached static texture)
+        let coast_tex = self.coast_tex_lunar.get_or_insert_with(|| {
+            ui.ctx().load_texture(
+                "coast_lunar",
+                rasterize_coastlines(Color32::from_rgb(60, 90, 110)),
+                egui::TextureOptions::LINEAR,
+            )
+        });
+        painter.image(
+            coast_tex.id(),
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
 
         // Current bbox rect
         if let (Ok(min_lat), Ok(max_lat), Ok(min_lon), Ok(max_lon)) = (
@@ -1107,7 +1337,7 @@ impl BuilderApp {
             painter.rect_stroke(
                 bbox_rect,
                 0.0,
-                egui::Stroke::new(1.5, Color32::from_rgb(220, 160, 30)),
+                egui::Stroke::new(1.5_f32, Color32::from_rgb(220, 160, 30)),
                 egui::StrokeKind::Middle,
             );
         }
@@ -1134,9 +1364,8 @@ impl BuilderApp {
         ui.separator();
         ui.add(
             egui::ProgressBar::new(self.progress)
-                .animate(self.active_job.is_some())
                 .show_percentage()
-                .text(self.status.clone()),
+                .text(&self.status),
         );
         ui.horizontal(|ui| {
             let building = self.active_job.is_some();
@@ -1144,10 +1373,13 @@ impl BuilderApp {
                 .add_enabled(!building, egui::Button::new("Build Lunar Contours"))
                 .clicked()
             {
-                self.start_lunar_build();
+                self.start_lunar_build(ui.ctx());
             }
-            if ui.small_button("Scan Cache").clicked() {
-                self.scan_lunar_cache();
+            if ui
+                .add_enabled(self.scan_rx.is_none(), egui::Button::new("Scan Cache").small())
+                .clicked()
+            {
+                self.scan_lunar_cache(ui.ctx());
             }
         });
     }
@@ -1230,19 +1462,22 @@ impl BuilderApp {
         ui.separator();
         ui.horizontal(|ui| {
             ui.label("Coverage Map");
-            if ui.small_button("Scan Cache").clicked() {
-                self.scan_mars_cache();
+            if ui
+                .add_enabled(self.scan_rx.is_none(), egui::Button::new("Scan Cache").small())
+                .clicked()
+            {
+                self.scan_mars_cache(ui.ctx());
             }
-            if !self.mars_cached_tiles.is_empty() {
+            if self.mars_coverage.cached_count > 0 {
                 ui.label(
-                    egui::RichText::new(format!("({} cached)", self.mars_cached_tiles.len()))
+                    egui::RichText::new(format!("({} cached)", self.mars_coverage.cached_count))
                         .color(Color32::from_rgb(200, 120, 60))
                         .small(),
                 );
             }
-            if !self.mars_live_tiles.is_empty() {
+            if self.mars_coverage.live_count > 0 {
                 ui.label(
-                    egui::RichText::new(format!("({} built)", self.mars_live_tiles.len()))
+                    egui::RichText::new(format!("({} built)", self.mars_coverage.live_count))
                         .color(Color32::from_rgb(255, 180, 80))
                         .small(),
                 );
@@ -1256,30 +1491,9 @@ impl BuilderApp {
         // Background — dark reddish to evoke Mars
         painter.rect_filled(rect, 0.0, Color32::from_rgb(18, 8, 6));
 
-        // Cached tiles (dim orange-red)
-        for &(zoom_bucket, min_lat, max_lat, min_lon, max_lon) in &self.mars_cached_tiles {
-            let alpha = (20 + zoom_bucket as u8 * 14).min(110);
-            let color = Color32::from_rgba_unmultiplied(200, 100, 40, alpha);
-            let tile_rect = egui::Rect::from_min_max(
-                egui::pos2(lon_to_x(rect, min_lon), lat_to_y(rect, max_lat)),
-                egui::pos2(lon_to_x(rect, max_lon), lat_to_y(rect, min_lat)),
-            )
-            .expand(0.5);
-            painter.rect_filled(tile_rect, 0.0, color);
-        }
-        // Live tiles (bright amber)
-        for &(min_lat, max_lat, min_lon, max_lon) in &self.mars_live_tiles {
-            let tile_rect = egui::Rect::from_min_max(
-                egui::pos2(lon_to_x(rect, min_lon), lat_to_y(rect, max_lat)),
-                egui::pos2(lon_to_x(rect, max_lon), lat_to_y(rect, min_lat)),
-            )
-            .expand(0.5);
-            painter.rect_filled(
-                tile_rect,
-                0.0,
-                Color32::from_rgba_unmultiplied(255, 180, 60, 210),
-            );
-        }
+        // Cached + live tiles via baked 2× HiDPI bitmap overlays
+        self.mars_coverage
+            .paint(ui.ctx(), &painter, rect, "mars_cov");
 
         // Graticule
         let grid = Color32::from_rgb(50, 20, 16);
@@ -1288,7 +1502,7 @@ impl BuilderApp {
             let x = lon_to_x(rect, lon as f32);
             painter.line_segment(
                 [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                egui::Stroke::new(1.0, grid),
+                egui::Stroke::new(1.0_f32, grid),
             );
         }
         for lat in [-90i32, -60, -30, 0, 30, 60, 90] {
@@ -1296,7 +1510,7 @@ impl BuilderApp {
             let c = if lat == 0 { equat } else { grid };
             painter.line_segment(
                 [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-                egui::Stroke::new(1.0, c),
+                egui::Stroke::new(1.0_f32, c),
             );
         }
         // Equator label
@@ -1309,17 +1523,20 @@ impl BuilderApp {
             equat,
         );
 
-        // Country outlines (Earth reference — helps orient the bbox picker)
-        let coast = Color32::from_rgb(50, 30, 24);
-        for ring in coastline_rings() {
-            let pts: Vec<egui::Pos2> = ring
-                .iter()
-                .map(|[lon, lat]| egui::pos2(lon_to_x(rect, *lon), lat_to_y(rect, *lat)))
-                .collect();
-            if pts.len() >= 2 {
-                painter.add(egui::Shape::line(pts, egui::Stroke::new(0.5, coast)));
-            }
-        }
+        // Country outlines (Earth reference — cached static texture)
+        let coast_tex = self.coast_tex_mars.get_or_insert_with(|| {
+            ui.ctx().load_texture(
+                "coast_mars",
+                rasterize_coastlines(Color32::from_rgb(50, 30, 24)),
+                egui::TextureOptions::LINEAR,
+            )
+        });
+        painter.image(
+            coast_tex.id(),
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
 
         // Current bbox rect
         if let (Ok(min_lat), Ok(max_lat), Ok(min_lon), Ok(max_lon)) = (
@@ -1340,7 +1557,7 @@ impl BuilderApp {
             painter.rect_stroke(
                 bbox_rect,
                 0.0,
-                egui::Stroke::new(1.5, Color32::from_rgb(240, 140, 40)),
+                egui::Stroke::new(1.5_f32, Color32::from_rgb(240, 140, 40)),
                 egui::StrokeKind::Middle,
             );
         }
@@ -1367,9 +1584,8 @@ impl BuilderApp {
         ui.separator();
         ui.add(
             egui::ProgressBar::new(self.progress)
-                .animate(self.active_job.is_some())
                 .show_percentage()
-                .text(self.status.clone()),
+                .text(&self.status),
         );
         ui.horizontal(|ui| {
             let building = self.active_job.is_some();
@@ -1377,19 +1593,21 @@ impl BuilderApp {
                 .add_enabled(!building, egui::Button::new("Build Mars Contours"))
                 .clicked()
             {
-                self.start_mars_build();
+                self.start_mars_build(ui.ctx());
             }
-            if ui.small_button("Scan Cache").clicked() {
-                self.scan_mars_cache();
+            if ui
+                .add_enabled(self.scan_rx.is_none(), egui::Button::new("Scan Cache").small())
+                .clicked()
+            {
+                self.scan_mars_cache(ui.ctx());
             }
         });
     }
 
     fn push_log(&mut self, line: String) {
-        self.log_lines.push(line);
-        if self.log_lines.len() > 200 {
-            let drop_count = self.log_lines.len() - 200;
-            self.log_lines.drain(0..drop_count);
+        self.log_lines.push_back(line);
+        while self.log_lines.len() > 200 {
+            self.log_lines.pop_front();
         }
     }
 }
@@ -1397,9 +1615,21 @@ impl BuilderApp {
 impl eframe::App for BuilderApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_job();
-        if !matches!(self.active_tab, ActiveTab::Atlas | ActiveTab::Recovery) { self.dashboard.poll(&self.form.cache_dir, &self.form.planet_tmp_dir, self.form.compact_nodes, ctx); }
-        if self.active_job.is_some() {
-            ctx.request_repaint_after(Duration::from_millis(100));
+        self.poll_cache_scan();
+        let building = self.active_job.is_some();
+        if !matches!(self.active_tab, ActiveTab::Atlas | ActiveTab::Recovery) {
+            self.dashboard.poll(
+                &self.form.cache_dir,
+                &self.form.planet_tmp_dir,
+                self.form.compact_nodes,
+                building,
+                ctx,
+            );
+        }
+        // Job workers proactively call ctx.request_repaint() (throttled to ~100ms);
+        // keep only a 1s fallback tick while building so elapsed counters stay live.
+        if building {
+            ctx.request_repaint_after(Duration::from_secs(1));
         }
 
         egui::TopBottomPanel::top("builder_header").show(ctx, |ui| {
@@ -1448,7 +1678,7 @@ impl eframe::App for BuilderApp {
                     .on_hover_text("Convert the selected vector cache directory to a packed runtime archive. Save as Derived/world.1ka; existing files are never overwritten.")
                     .clicked()
                 {
-                    self.start_archive_pack();
+                    self.start_archive_pack(ui.ctx());
                 }
 
                 ui.horizontal(|ui| {
@@ -1525,9 +1755,11 @@ impl eframe::App for BuilderApp {
                     }
                 }
 
-                if self.osm_mode == OsmMode::Planet && self.form.compact_nodes
-                    && self.active_job.is_none() && self.status == "Failed"
-                    && self.progress_detail.to_ascii_lowercase().contains("new working directory")
+                if self.osm_mode == OsmMode::Planet
+                    && self.form.compact_nodes
+                    && self.active_job.is_none()
+                    && self.status == "Failed"
+                    && self.needs_fresh_working_folder
                 {
                     ui.add_space(6.0);
                     ui.colored_label(Color32::from_rgb(240, 185, 105), "Saved index cannot be resumed with this source/settings.");
@@ -1576,19 +1808,22 @@ impl eframe::App for BuilderApp {
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("Bounding Box Map");
-                    if ui.small_button("Scan Cache").clicked() {
-                        self.scan_cache_tiles();
+                    if ui
+                        .add_enabled(self.scan_rx.is_none(), egui::Button::new("Scan Cache").small())
+                        .clicked()
+                    {
+                        self.scan_cache_tiles(ui.ctx());
                     }
-                    if !self.cached_tiles.is_empty() {
+                    if self.earth_coverage.cached_count > 0 {
                         ui.label(
-                            egui::RichText::new(format!("({} cached)", self.cached_tiles.len()))
+                            egui::RichText::new(format!("({} cached)", self.earth_coverage.cached_count))
                                 .color(Color32::from_rgb(0, 180, 160))
                                 .small(),
                         );
                     }
-                    if !self.live_tiles.is_empty() {
+                    if self.earth_coverage.live_count > 0 {
                         ui.label(
-                            egui::RichText::new(format!("({} built)", self.live_tiles.len()))
+                            egui::RichText::new(format!("({} built)", self.earth_coverage.live_count))
                                 .color(Color32::from_rgb(80, 255, 120))
                                 .small(),
                         );
@@ -1602,33 +1837,9 @@ impl eframe::App for BuilderApp {
                 // Background
                 painter.rect_filled(rect, 0.0, Color32::from_rgb(8, 12, 28));
 
-                // Cached tiles (dim teal — existing cache coverage)
-                for &(zoom_bucket, min_lat, max_lat, min_lon, max_lon) in &self.cached_tiles {
-                    // Brighter for higher zoom buckets (more detail)
-                    let alpha = (25 + zoom_bucket as u8 * 12).min(120);
-                    let color = Color32::from_rgba_unmultiplied(0, 180, 160, alpha);
-                    let x0 = lon_to_x(rect, min_lon);
-                    let x1 = lon_to_x(rect, max_lon);
-                    let y0 = lat_to_y(rect, max_lat);
-                    let y1 = lat_to_y(rect, min_lat);
-                    let tile_rect =
-                        egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1))
-                            .expand(0.5);
-                    painter.rect_filled(tile_rect, 0.0, color);
-                }
-
-                // Live tiles (bright green — built in this session)
-                for &(min_lat, max_lat, min_lon, max_lon) in &self.live_tiles {
-                    let color = Color32::from_rgba_unmultiplied(80, 255, 120, 210);
-                    let x0 = lon_to_x(rect, min_lon);
-                    let x1 = lon_to_x(rect, max_lon);
-                    let y0 = lat_to_y(rect, max_lat);
-                    let y1 = lat_to_y(rect, min_lat);
-                    let tile_rect =
-                        egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1))
-                            .expand(0.5);
-                    painter.rect_filled(tile_rect, 0.0, color);
-                }
+                // Cached + live tiles via baked 2× HiDPI bitmap overlays
+                self.earth_coverage
+                    .paint(ui.ctx(), &painter, rect, "earth_cov");
 
                 // Graticule lines
                 let graticule_color = Color32::from_rgb(20, 40, 80);
@@ -1641,7 +1852,7 @@ impl eframe::App for BuilderApp {
                     let x = lon_to_x(rect, lon as f32);
                     painter.line_segment(
                         [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                        egui::Stroke::new(1.0, graticule_color),
+                        egui::Stroke::new(1.0_f32, graticule_color),
                     );
                 }
                 for lat in lats {
@@ -1653,21 +1864,24 @@ impl eframe::App for BuilderApp {
                     };
                     painter.line_segment(
                         [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-                        egui::Stroke::new(1.0, color),
+                        egui::Stroke::new(1.0_f32, color),
                     );
                 }
 
-                // Country outlines (Natural Earth 110m)
-                let coast_color = Color32::from_rgb(70, 100, 120);
-                for ring in coastline_rings() {
-                    let pts: Vec<egui::Pos2> = ring
-                        .iter()
-                        .map(|[lon, lat]| egui::pos2(lon_to_x(rect, *lon), lat_to_y(rect, *lat)))
-                        .collect();
-                    if pts.len() >= 2 {
-                        painter.add(egui::Shape::line(pts, egui::Stroke::new(0.5, coast_color)));
-                    }
-                }
+                // Country outlines (Natural Earth 110m — cached static texture)
+                let coast_tex = self.coast_tex_earth.get_or_insert_with(|| {
+                    ui.ctx().load_texture(
+                        "coast_earth",
+                        rasterize_coastlines(Color32::from_rgb(70, 100, 120)),
+                        egui::TextureOptions::LINEAR,
+                    )
+                });
+                painter.image(
+                    coast_tex.id(),
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
 
                 // Equator label
                 let eq_y = lat_to_y(rect, 0.0);
@@ -1698,7 +1912,7 @@ impl eframe::App for BuilderApp {
                     painter.rect_stroke(
                         bbox_rect,
                         0.0,
-                        egui::Stroke::new(1.5, bbox_color),
+                        egui::Stroke::new(1.5_f32, bbox_color),
                         egui::StrokeKind::Middle,
                     );
                 }
@@ -1805,9 +2019,8 @@ impl eframe::App for BuilderApp {
                 ui.separator();
                 ui.add(
                     egui::ProgressBar::new(self.progress)
-                        .animate(self.active_job.is_some())
                         .show_percentage()
-                        .text(self.status.clone()),
+                        .text(&self.status),
                 );
 
                 ui.horizontal(|ui| {
@@ -1817,20 +2030,20 @@ impl eframe::App for BuilderApp {
                             .add_enabled(!building, egui::Button::new("Build OSM Cache"))
                             .clicked()
                         {
-                            self.start_build();
+                            self.start_build(ui.ctx());
                         }
                         if ui
                             .add_enabled(!building, egui::Button::new("Build Contours"))
                             .clicked()
                         {
-                            self.start_contour_build();
+                            self.start_contour_build(ui.ctx());
                         }
                     } else {
                         if ui
                             .add_enabled(!building, egui::Button::new("Build / resume planet cache"))
                             .clicked()
                         {
-                            self.start_planet_build();
+                            self.start_planet_build(ui.ctx());
                         }
                     }
                     if ui.button("Refresh Inspector").clicked() {
@@ -1844,7 +2057,8 @@ impl eframe::App for BuilderApp {
             egui::ScrollArea::vertical().id_salt("builder_dashboard").show(ui, |ui| {
                 if self.active_tab == ActiveTab::Recovery { self.show_recovery_log(ui); return; }
                 if self.active_tab == ActiveTab::Atlas { self.show_atlas_dashboard(ui); return; }
-                self.dashboard.show(ui, &self.status, &self.progress_detail, self.active_job.is_some(), &self.log_lines, &[
+                let logs = self.log_lines.make_contiguous();
+                self.dashboard.show(ui, &self.status, &self.progress_detail, self.active_job.is_some(), logs, &[
                     ("road", self.assets.roads), ("waterway", self.assets.water),
                     ("building", self.assets.buildings), ("tree", self.assets.trees),
                     ("admin", self.assets.admin), ("power", self.assets.power),

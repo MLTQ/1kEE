@@ -156,6 +156,25 @@ impl EventFollow {
     /// Returns a newly followed event ID so the model can select it without
     /// using the ordinary click-to-focus snap. Uses absolute animation time.
     pub fn tick(&mut self, view: &mut GlobeViewState, now: f64) -> Option<String> {
+        self.tick_with_stop(view, now, None)
+    }
+
+    pub(super) fn at_station(&self, now: f64) -> bool {
+        self.target
+            .as_ref()
+            .is_some_and(|e| e.id.starts_with("station-arrival-"))
+            && self
+                .flight
+                .as_ref()
+                .is_some_and(|f| now < f.started + f.duration + f64::from(self.dwell_seconds))
+    }
+
+    pub(super) fn tick_with_stop(
+        &mut self,
+        view: &mut GlobeViewState,
+        now: f64,
+        station: Option<EventRecord>,
+    ) -> Option<String> {
         if !self.enabled {
             return None;
         }
@@ -166,13 +185,18 @@ impl EventFollow {
             apply(view, pose);
             self.velocity = velocity;
         }
-        let next = self.tour.take_pending().or_else(|| {
-            let dwell_finished = self.flight.as_ref().is_none_or(|flight| {
-                now >= flight.started + flight.duration + f64::from(self.dwell_seconds)
-            });
-            dwell_finished
-                .then(|| self.tour.next(self.target.as_ref().map(|e| e.id.as_str())))
-                .flatten()
+        let next = station.or_else(|| {
+            if self.at_station(now) {
+                return None;
+            }
+            self.tour.take_pending().or_else(|| {
+                let dwell_finished = self.flight.as_ref().is_none_or(|flight| {
+                    now >= flight.started + flight.duration + f64::from(self.dwell_seconds)
+                });
+                dwell_finished
+                    .then(|| self.tour.next(self.target.as_ref().map(|e| e.id.as_str())))
+                    .flatten()
+            })
         });
         let selected = next.map(|event| {
             if self.flight.is_none() {

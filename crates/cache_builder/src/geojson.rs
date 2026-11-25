@@ -10,6 +10,7 @@ use cell_format::{
     encode_rail_class, encode_road_class, encode_surv_class, encode_watr_class,
     read::read_single_chunk, write::write_cell,
 };
+use rayon::prelude::*;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
@@ -36,44 +37,54 @@ pub fn feature_cell_path(cache_dir: &Path, prefix: &str, cell_lat: i32, cell_lon
 pub fn merge_write_cells(
     cache_dir: &Path,
     roads_by_cell: &HashMap<(i32, i32), Vec<RoadPolyline>>,
-    mut srtm: Option<&mut SrtmSampler>,
+    srtm: Option<&mut SrtmSampler>,
 ) -> Result<usize, String> {
     let road_cells_dir = cache_dir.join("road_cells");
     ensure_cache_dir(&road_cells_dir)?;
-    let mut written_cells = 0usize;
+    let mut entries: Vec<(&(i32, i32), &Vec<RoadPolyline>)> = roads_by_cell.iter().collect();
+    // Sort spatially so neighboring cells share the same SRTM tiles in cache.
+    entries.sort_unstable_by_key(|&(&(lat, lon), _)| (lat, lon));
+    let srtm_shared = srtm.as_deref();
 
-    for (&(cell_lat, cell_lon), roads) in roads_by_cell {
-        let path = vector_cell_path(cache_dir, cell_lat, cell_lon);
-        let mut merged: HashMap<i64, CellFeature> = load_road_features_for_merge(&path)
-            .into_iter()
-            .map(|feature| (feature.way_id, feature))
-            .collect();
-        let before = merged.len();
-        for road in roads {
-            merged.insert(road.way_id, road_to_cell_feature(road, None));
-        }
-        if merged.len() == before && path.exists() {
-            continue;
-        }
+    let written_counts: Vec<usize> = entries
+        .into_par_iter()
+        .map_init(
+            || srtm_shared.map(SrtmSampler::clone_handle),
+            |local_srtm, (&(cell_lat, cell_lon), roads)| -> Result<usize, String> {
+                let path = vector_cell_path(cache_dir, cell_lat, cell_lon);
+                let (existing, had_file) = load_road_features_for_merge_status(&path);
+                let mut merged: HashMap<i64, CellFeature> = existing
+                    .into_iter()
+                    .map(|feature| (feature.way_id, feature))
+                    .collect();
+                let before = merged.len();
+                for road in roads {
+                    merged.insert(road.way_id, road_to_cell_feature(road, None));
+                }
+                if merged.len() == before && had_file {
+                    return Ok(0);
+                }
 
-        let cell_bounds = focus_cell_bounds(cell_lat, cell_lon);
-        let mut features = Vec::with_capacity(merged.len());
-        for mut feature in merged.into_values() {
-            if feature.points.len() < 2
-                || !bounds_intersect(cell_feature_bounds(&feature.points), cell_bounds)
-            {
-                continue;
-            }
-            ensure_elevations(&mut feature, srtm.as_deref_mut());
-            features.push(feature);
-        }
+                let cell_bounds = focus_cell_bounds(cell_lat, cell_lon);
+                let mut features = Vec::with_capacity(merged.len());
+                for mut feature in merged.into_values() {
+                    if feature.points.len() < 2
+                        || !bounds_intersect(cell_feature_bounds(&feature.points), cell_bounds)
+                    {
+                        continue;
+                    }
+                    ensure_elevations(&mut feature, local_srtm.as_mut());
+                    features.push(feature);
+                }
 
-        let bytes = write_cell(cell_lat as i16, cell_lon as i16, &[(TAG_ROAD, &features)]);
-        fs::write(&path, bytes).map_err(|e| e.to_string())?;
-        written_cells += 1;
-    }
+                let bytes = write_cell(cell_lat as i16, cell_lon as i16, &[(TAG_ROAD, &features)]);
+                fs::write(&path, bytes).map_err(|e| e.to_string())?;
+                Ok(1)
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(written_cells)
+    Ok(written_counts.into_iter().sum())
 }
 
 // ── Feature cells (buildings, waterways, trees) ──────────────────────────────
@@ -82,49 +93,58 @@ pub fn merge_write_feature_cells(
     cache_dir: &Path,
     prefix: &str,
     features_by_cell: &HashMap<(i32, i32), Vec<WayFeature>>,
-    mut srtm: Option<&mut SrtmSampler>,
+    srtm: Option<&mut SrtmSampler>,
 ) -> Result<usize, String> {
     let cells_dir = cache_dir.join(format!("{prefix}_cells"));
     fs::create_dir_all(&cells_dir).map_err(|e| e.to_string())?;
-    let mut written_cells = 0usize;
 
     let tag = prefix_to_tag(prefix);
+    let mut entries: Vec<(&(i32, i32), &Vec<WayFeature>)> = features_by_cell.iter().collect();
+    entries.sort_unstable_by_key(|&(&(lat, lon), _)| (lat, lon));
+    let srtm_shared = srtm.as_deref();
 
-    for (&(cell_lat, cell_lon), features) in features_by_cell {
-        let path = feature_cell_path(cache_dir, prefix, cell_lat, cell_lon);
-        let mut merged: HashMap<i64, CellFeature> = load_features_for_merge(&path, tag, prefix)
-            .into_iter()
-            .map(|feature| (feature.way_id, feature))
-            .collect();
-        let before = merged.len();
-        for feature in features {
-            merged.insert(
-                feature.way_id,
-                way_feature_to_cell_feature_with_elev(feature, prefix, None),
-            );
-        }
-        if merged.len() == before && path.exists() {
-            continue;
-        }
+    let written_counts: Vec<usize> = entries
+        .into_par_iter()
+        .map_init(
+            || srtm_shared.map(SrtmSampler::clone_handle),
+            |local_srtm, (&(cell_lat, cell_lon), features)| -> Result<usize, String> {
+                let path = feature_cell_path(cache_dir, prefix, cell_lat, cell_lon);
+                let (existing, had_file) = load_features_for_merge_status(&path, tag, prefix);
+                let mut merged: HashMap<i64, CellFeature> = existing
+                    .into_iter()
+                    .map(|feature| (feature.way_id, feature))
+                    .collect();
+                let before = merged.len();
+                for feature in features {
+                    merged.insert(
+                        feature.way_id,
+                        way_feature_to_cell_feature_with_elev(feature, prefix, None),
+                    );
+                }
+                if merged.len() == before && had_file {
+                    return Ok(0);
+                }
 
-        let cell_bounds = focus_cell_bounds(cell_lat, cell_lon);
-        let mut cell_features = Vec::with_capacity(merged.len());
-        for mut feature in merged.into_values() {
-            if feature.points.len() < 2
-                || !bounds_intersect(cell_feature_bounds(&feature.points), cell_bounds)
-            {
-                continue;
-            }
-            ensure_elevations(&mut feature, srtm.as_deref_mut());
-            cell_features.push(feature);
-        }
+                let cell_bounds = focus_cell_bounds(cell_lat, cell_lon);
+                let mut cell_features = Vec::with_capacity(merged.len());
+                for mut feature in merged.into_values() {
+                    if feature.points.len() < 2
+                        || !bounds_intersect(cell_feature_bounds(&feature.points), cell_bounds)
+                    {
+                        continue;
+                    }
+                    ensure_elevations(&mut feature, local_srtm.as_mut());
+                    cell_features.push(feature);
+                }
 
-        let bytes = write_cell(cell_lat as i16, cell_lon as i16, &[(tag, &cell_features)]);
-        fs::write(&path, bytes).map_err(|e| e.to_string())?;
-        written_cells += 1;
-    }
+                let bytes = write_cell(cell_lat as i16, cell_lon as i16, &[(tag, &cell_features)]);
+                fs::write(&path, bytes).map_err(|e| e.to_string())?;
+                Ok(1)
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(written_cells)
+    Ok(written_counts.into_iter().sum())
 }
 
 // ── Admin boundary files ──────────────────────────────────────────────────────
@@ -233,39 +253,59 @@ pub fn write_admin_level_file(
 }
 
 /// Loads binary cache features directly for a merge so pre-baked elevations
-/// survive later incremental flushes.
-fn load_road_features_for_merge(path: &Path) -> Vec<CellFeature> {
-    if path.exists() {
-        if let Some(features) = read_single_chunk(&fs::read(path).unwrap_or_default(), TAG_ROAD) {
-            return features
-                .into_iter()
-                .filter(|feature| feature.points.len() >= 2)
-                .collect();
+/// survive later incremental flushes. Returns `(features, had_binary_file)` in
+/// one `fs::read` without redundant `stat()` calls.
+fn load_road_features_for_merge_status(path: &Path) -> (Vec<CellFeature>, bool) {
+    if let Ok(bytes) = fs::read(path) {
+        if let Some(features) = read_single_chunk(&bytes, TAG_ROAD) {
+            return (
+                features
+                    .into_iter()
+                    .filter(|feature| feature.points.len() >= 2)
+                    .collect(),
+                true,
+            );
         }
+        return (Vec::new(), true);
     }
 
-    load_roads_from_geojson(&path.with_extension("geojson"))
+    let legacy = load_roads_from_geojson(&path.with_extension("geojson"))
         .unwrap_or_default()
         .iter()
         .map(|road| road_to_cell_feature(road, None))
-        .collect()
+        .collect();
+    (legacy, false)
 }
 
-fn load_features_for_merge(path: &Path, tag: [u8; 4], prefix: &str) -> Vec<CellFeature> {
-    if path.exists() {
-        if let Some(features) = read_single_chunk(&fs::read(path).unwrap_or_default(), tag) {
-            return features
-                .into_iter()
-                .filter(|feature| feature.points.len() >= 2)
-                .collect();
+#[cfg(test)]
+fn load_road_features_for_merge(path: &Path) -> Vec<CellFeature> {
+    load_road_features_for_merge_status(path).0
+}
+
+fn load_features_for_merge_status(
+    path: &Path,
+    tag: [u8; 4],
+    prefix: &str,
+) -> (Vec<CellFeature>, bool) {
+    if let Ok(bytes) = fs::read(path) {
+        if let Some(features) = read_single_chunk(&bytes, tag) {
+            return (
+                features
+                    .into_iter()
+                    .filter(|feature| feature.points.len() >= 2)
+                    .collect(),
+                true,
+            );
         }
+        return (Vec::new(), true);
     }
 
-    load_features_from_geojson(&path.with_extension("geojson"))
+    let legacy = load_features_from_geojson(&path.with_extension("geojson"))
         .unwrap_or_default()
         .iter()
         .map(|feature| way_feature_to_cell_feature_with_elev(feature, prefix, None))
-        .collect()
+        .collect();
+    (legacy, false)
 }
 
 // ── Conversion helpers ────────────────────────────────────────────────────────
@@ -413,7 +453,7 @@ fn load_roads_from_geojson(path: &Path) -> Option<Vec<RoadPolyline>> {
         }
         roads.push(RoadPolyline {
             way_id,
-            road_class,
+            road_class: std::borrow::Cow::Owned(road_class),
             name: props
                 .get("name")
                 .and_then(Value::as_str)
@@ -466,7 +506,7 @@ fn load_features_from_geojson(path: &Path) -> Option<Vec<WayFeature>> {
         }
         result.push(WayFeature {
             way_id,
-            feature_class,
+            feature_class: std::borrow::Cow::Owned(feature_class),
             name: props
                 .get("name")
                 .and_then(Value::as_str)
@@ -532,7 +572,7 @@ mod tests {
             (40, -74),
             vec![RoadPolyline {
                 way_id: 88,
-                road_class: "primary".to_owned(),
+                road_class: std::borrow::Cow::Borrowed("primary"),
                 name: None,
                 points: vec![
                     GeoPoint {

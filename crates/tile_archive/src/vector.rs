@@ -1,5 +1,5 @@
 use crate::{Key, Reader, Writer};
-use cell_format::{CellFeature, read::read_single_chunk, write::write_cell};
+use cell_format::{CellFeature, read::read_single_chunk, write::write_cell_refs};
 
 pub const DIVISIONS: i32 = 8;
 pub type Bounds = [f32; 4]; // min latitude, max latitude, min longitude, max longitude
@@ -45,13 +45,12 @@ fn key(layer: [u8; 4], y: i32, x: i32) -> Key {
     }
 }
 
-pub fn pack_cell(
-    writer: &mut Writer,
+pub fn encode_cell(
     layer: [u8; 4],
     lat: i32,
     lon: i32,
     features: &[CellFeature],
-) -> Result<usize, String> {
+) -> Result<(Vec<(Key, Vec<u8>)>, usize), String> {
     // Existing builders use floor(min)..=floor(max), so a feature touching
     // +180 longitude or +90 latitude also has a cell at that boundary. Keep
     // those parent keys and their full geometry instead of wrapping or dropping
@@ -61,7 +60,7 @@ pub fn pack_cell(
             "Invalid vector cell coordinates ({lat},{lon}): expected latitude -90..=90 and longitude -180..=180"
         ));
     }
-    let mut ids = std::collections::HashSet::new();
+    let mut ids = std::collections::HashSet::with_capacity(features.len());
     if features.iter().any(|f| !ids.insert(f.way_id)) {
         return Err(
             "Duplicate feature ID in source cell; cannot safely deduplicate subtiles".into(),
@@ -109,7 +108,7 @@ pub fn pack_cell(
 
     let mut tiles = Vec::with_capacity(64);
     let mut bytes = 0;
-    let mut selected = Vec::new();
+    let mut selected: Vec<&CellFeature> = Vec::new();
     for dy in 0..DIVISIONS {
         for dx in 0..DIVISIONS {
             let y = base_y + dy;
@@ -118,9 +117,9 @@ pub fn pack_cell(
             selected.clear();
             selected.reserve(bucket.len().saturating_sub(selected.capacity()));
             for &idx in bucket {
-                selected.push(features[idx].clone());
+                selected.push(&features[idx]);
             }
-            let data = write_cell(lat as i16, lon as i16, &[(layer, &selected)]);
+            let data = write_cell_refs(lat as i16, lon as i16, &[(layer, &selected)]);
             bytes += data.len();
             if bytes > crate::MAX_PAYLOAD * 2 {
                 return Err(
@@ -130,6 +129,17 @@ pub fn pack_cell(
             tiles.push((key(layer, y, x), data));
         }
     }
+    Ok((tiles, bytes))
+}
+
+pub fn pack_cell(
+    writer: &mut Writer,
+    layer: [u8; 4],
+    lat: i32,
+    lon: i32,
+    features: &[CellFeature],
+) -> Result<usize, String> {
+    let (tiles, bytes) = encode_cell(layer, lat, lon, features)?;
     writer.put_batch(&tiles, Some((layer, lat, lon)))?;
     Ok(bytes)
 }

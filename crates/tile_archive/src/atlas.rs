@@ -158,6 +158,51 @@ fn decode(bytes: &[u8], crc: i64, key: Key) -> Result<Vec<f32>> {
     }
     Ok(values)
 }
+fn validate_payload(bytes: &[u8], crc: i64, key: Key) -> Result<()> {
+    if !key.valid()
+        || bytes.len() != key.tier.side().pow(2) * 4
+        || i64::from(crc32fast::hash(bytes)) != crc
+    {
+        return Err(format!(
+            "Invalid Atlas tile {key:?}: size/checksum mismatch"
+        ));
+    }
+    if bytes.as_chunks::<4>().0.iter().any(|b| {
+        let v = f32::from_le_bytes(*b);
+        !v.is_nan() && (!v.is_finite() || !(-12000.0..=10000.0).contains(&v))
+    }) {
+        return Err(format!("Invalid Atlas heights in {key:?}"));
+    }
+    Ok(())
+}
+
+fn reusable_row(c: &Connection, key: Key, source: &str) -> Result<bool> {
+    let mut stmt = c
+        .prepare_cached("SELECT payload,crc,source FROM heights WHERE tier=?1 AND x=?2 AND y=?3")
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query(params![key.tier as i32, key.x, key.y])
+        .map_err(|e| e.to_string())?;
+    let Some(row) = rows.next().map_err(|e| e.to_string())? else {
+        return Ok(false);
+    };
+    let saved = row
+        .get_ref(2)
+        .map_err(|e| e.to_string())?
+        .as_str()
+        .map_err(|e| e.to_string())?;
+    if saved != source {
+        return Ok(false);
+    }
+    let bytes = row
+        .get_ref(0)
+        .map_err(|e| e.to_string())?
+        .as_blob()
+        .map_err(|e| e.to_string())?;
+    validate_payload(bytes, row.get(1).map_err(|e| e.to_string())?, key)?;
+    Ok(true)
+}
+
 fn get(c: &Connection, key: Key, source: Option<&str>) -> Result<Option<Vec<f32>>> {
     let mut stmt = c
         .prepare_cached("SELECT payload,crc,source FROM heights WHERE tier=?1 AND x=?2 AND y=?3")
@@ -209,7 +254,7 @@ impl Writer {
         }
         connection
             .execute_batch(
-                "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-8192;",
+                "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-32768;",
             )
             .map_err(|e| e.to_string())?;
         Ok(Self {
@@ -218,7 +263,7 @@ impl Writer {
         })
     }
     pub fn reusable(&self, key: Key, source: &str) -> Result<bool> {
-        get(&self.connection, key, Some(source)).map(|v| v.is_some())
+        reusable_row(&self.connection, key, source)
     }
     pub fn put(&self, key: Key, source: &str, values: &[f32]) -> Result<()> {
         if !key.valid() || values.len() != key.tier.side().pow(2) {
@@ -237,11 +282,11 @@ impl Writer {
             bytes.extend_from_slice(&v.to_le_bytes());
         }
         let crc = i64::from(crc32fast::hash(&bytes));
-        self.connection
-            .execute(
-                "INSERT OR REPLACE INTO heights VALUES (?1,?2,?3,?4,?5,?6)",
-                params![key.tier as i32, key.x, key.y, source, bytes, crc],
-            )
+        let mut stmt = self
+            .connection
+            .prepare_cached("INSERT OR REPLACE INTO heights VALUES (?1,?2,?3,?4,?5,?6)")
+            .map_err(|e| e.to_string())?;
+        stmt.execute(params![key.tier as i32, key.x, key.y, source, bytes, crc])
             .map_err(|e| e.to_string())?;
         Ok(())
     }

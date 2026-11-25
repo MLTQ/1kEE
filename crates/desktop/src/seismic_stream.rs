@@ -1,5 +1,5 @@
 use crate::model::GeoPoint;
-use crate::model::seismic::{Provider, Quake, SeismicLayer, StreamStatus, quake_severity};
+use crate::model::seismic::{Quake, SeismicLayer, StreamStatus, quake_severity};
 use crossbeam_channel::{Receiver, Sender, TryRecvError, bounded};
 use serde_json::Value;
 use std::io::{ErrorKind, Read, Write};
@@ -200,7 +200,6 @@ fn parse_update(text: &str) -> Option<Update> {
         },
         origin_ms: origin.timestamp_millis(),
         severity: quake_severity(Some(magnitude)),
-        provider: Provider::Emsc,
         has_station_picks: false,
     };
     Some(Update::Quake {

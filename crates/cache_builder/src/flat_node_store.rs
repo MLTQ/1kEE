@@ -17,8 +17,10 @@
 //! ascending ID order.  `sort_in_place` first checks whether the file is
 //! already sorted (O(N) scan, no extra disk space) and skips the sort if so.
 
+use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::collections::binary_heap::PeekMut;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::os::unix::fs::FileExt;
@@ -44,6 +46,9 @@ const INDEX_STRIDE: u64 = 4096;
 pub struct NodeWriter {
     writer: BufWriter<File>,
     pub count: u64,
+    already_sorted: bool,
+    last_id: i64,
+    sparse_index: Option<Vec<(i64, u64)>>,
 }
 
 impl NodeWriter {
@@ -53,12 +58,28 @@ impl NodeWriter {
         Ok(Self {
             writer: BufWriter::with_capacity(4 * 1024 * 1024, file),
             count: 0,
+            already_sorted: true,
+            last_id: i64::MIN,
+            sparse_index: Some(Vec::new()),
         })
     }
 
     #[inline]
     #[cfg(test)]
     pub fn write(&mut self, id: i64, lat: f32, lon: f32) -> Result<(), String> {
+        if self.already_sorted {
+            if id < self.last_id {
+                self.already_sorted = false;
+                self.sparse_index = None;
+            } else {
+                if self.count.is_multiple_of(INDEX_STRIDE)
+                    && let Some(idx) = &mut self.sparse_index
+                {
+                    idx.push((id, self.count));
+                }
+                self.last_id = id;
+            }
+        }
         self.writer
             .write_all(&id.to_le_bytes())
             .map_err(|e| e.to_string())?;
@@ -99,17 +120,55 @@ impl NodeWriter {
         Ok(Self {
             writer: BufWriter::with_capacity(4 * 1024 * 1024, file),
             count: checkpoint_record_count,
+            already_sorted: false,
+            last_id: i64::MIN,
+            sparse_index: None,
         })
     }
 
+    #[cfg(test)]
     pub fn finish(mut self) -> Result<(), String> {
         self.checkpoint()
+    }
+
+    /// Finish writing and, when the stream remained monotonically sorted from
+    /// offset 0, persist the on-the-fly sparse index so Pass 2 skips both the
+    /// 128 GB `is_sorted` disk scan and 2M random `pread` index probes.
+    /// Returns `true` if the written file is already guaranteed sorted.
+    pub fn finish_with_index(mut self, index_path: Option<&Path>) -> Result<bool, String> {
+        self.checkpoint()?;
+        if self.already_sorted
+            && let (Some(path), Some(index)) = (index_path, self.sparse_index.as_deref())
+            && let Ok(stamp) = index_cache::stamp(self.writer.get_ref(), self.count)
+            && let Err(error) = index_cache::save(path, stamp, index)
+        {
+            eprintln!("[1kEE] Cannot save pass-1 sparse node index: {error}");
+        }
+        Ok(self.already_sorted)
     }
 
     /// Append already encoded complete records from an ordered PBF batch.
     pub fn write_encoded(&mut self, records: &[u8]) -> Result<(), String> {
         if !records.len().is_multiple_of(RECORD_BYTES as usize) {
             return Err("Node batch contains an incomplete record".to_owned());
+        }
+        if self.already_sorted {
+            let mut rec_idx = self.count;
+            for chunk in records.as_chunks::<16>().0 {
+                let id = i64::from_le_bytes(chunk[..8].try_into().unwrap());
+                if id < self.last_id {
+                    self.already_sorted = false;
+                    self.sparse_index = None;
+                    break;
+                }
+                if rec_idx.is_multiple_of(INDEX_STRIDE)
+                    && let Some(idx) = &mut self.sparse_index
+                {
+                    idx.push((id, rec_idx));
+                }
+                self.last_id = id;
+                rec_idx += 1;
+            }
         }
         self.writer.write_all(records).map_err(|e| e.to_string())?;
         self.count += (records.len() / RECORD_BYTES as usize) as u64;
@@ -169,11 +228,11 @@ pub fn sort_in_place(
             let count = ((total_records - start_rec) as usize).min(SORT_CHUNK_RECORDS);
             let chunk = &mut buf[..count];
 
-            for rec in chunk.iter_mut() {
-                reader.read_exact(rec).map_err(|e| e.to_string())?;
-            }
+            reader
+                .read_exact(bytemuck::cast_slice_mut(chunk))
+                .map_err(|e| e.to_string())?;
 
-            chunk.sort_unstable_by_key(|r| i64::from_le_bytes(r[..8].try_into().unwrap()));
+            chunk.par_sort_unstable_by_key(|r| i64::from_le_bytes(r[..8].try_into().unwrap()));
 
             let chunk_path = tmp_dir.join(format!("node_chunk_{chunk_idx:06}.bin"));
             {
@@ -181,9 +240,8 @@ pub fn sort_in_place(
                     4 * 1024 * 1024,
                     File::create(&chunk_path).map_err(|e| e.to_string())?,
                 );
-                for rec in chunk.iter() {
-                    out.write_all(rec).map_err(|e| e.to_string())?;
-                }
+                out.write_all(bytemuck::cast_slice(chunk))
+                    .map_err(|e| e.to_string())?;
                 out.flush().map_err(|e| e.to_string())?;
             }
             chunk_paths.push(chunk_path);
@@ -245,12 +303,15 @@ pub fn sort_in_place(
             8 * 1024 * 1024,
             File::create(&tmp_out).map_err(|e| e.to_string())?,
         );
-        while let Some(Entry(_, idx, rec)) = heap.pop() {
-            out.write_all(&rec).map_err(|e| e.to_string())?;
+        while let Some(mut top) = heap.peek_mut() {
+            let idx = top.1;
+            out.write_all(&top.2).map_err(|e| e.to_string())?;
             let mut next = [0u8; 16];
             if readers[idx].read_exact(&mut next).is_ok() {
                 let id = i64::from_le_bytes(next[..8].try_into().unwrap());
-                heap.push(Entry(id, idx, next));
+                *top = Entry(id, idx, next);
+            } else {
+                PeekMut::pop(top);
             }
         }
         out.flush().map_err(|e| e.to_string())?;
@@ -267,19 +328,23 @@ pub fn sort_in_place(
 }
 
 fn is_sorted(path: &Path, total_records: u64) -> Result<bool, String> {
-    let mut reader = BufReader::with_capacity(
-        4 * 1024 * 1024,
-        File::open(path).map_err(|e| e.to_string())?,
-    );
+    const CHUNK_RECS: usize = 256 * 1024; // 4 MiB bulk reads
+    let mut reader = File::open(path).map_err(|e| e.to_string())?;
+    let mut buf = vec![0u8; CHUNK_RECS * RECORD_BYTES as usize];
     let mut prev_id = i64::MIN;
-    let mut buf = [0u8; 16];
-    for _ in 0..total_records {
-        reader.read_exact(&mut buf).map_err(|e| e.to_string())?;
-        let id = i64::from_le_bytes(buf[..8].try_into().unwrap());
-        if id < prev_id {
-            return Ok(false);
+    let mut remaining = total_records;
+    while remaining > 0 {
+        let take = (remaining as usize).min(CHUNK_RECS);
+        let slice = &mut buf[..take * RECORD_BYTES as usize];
+        reader.read_exact(slice).map_err(|e| e.to_string())?;
+        for rec in slice.as_chunks::<16>().0 {
+            let id = i64::from_le_bytes(rec[..8].try_into().unwrap());
+            if id < prev_id {
+                return Ok(false);
+            }
+            prev_id = id;
         }
-        prev_id = id;
+        remaining -= take as u64;
     }
     Ok(true)
 }

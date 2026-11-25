@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GeoPoint {
     pub lat: f32,
@@ -15,7 +17,7 @@ pub struct GeoBounds {
 #[derive(Clone, Debug)]
 pub struct RoadPolyline {
     pub way_id: i64,
-    pub road_class: String,
+    pub road_class: Cow<'static, str>,
     pub name: Option<String>,
     pub points: Vec<GeoPoint>,
 }
@@ -23,7 +25,7 @@ pub struct RoadPolyline {
 #[derive(Clone, Debug)]
 pub struct WayFeature {
     pub way_id: i64,
-    pub feature_class: String,
+    pub feature_class: Cow<'static, str>,
     pub name: Option<String>,
     pub points: Vec<GeoPoint>,
     pub is_polygon: bool, // true = close ring for Polygon geometry
@@ -66,16 +68,25 @@ pub fn canonical_tree_class(key: &str, value: &str) -> Option<&'static str> {
 
 /// Parse an OSM voltage string (raw volts like "110000", or kV like "110 kV") to kV integer.
 pub fn parse_voltage_kv(value: &str) -> Option<i32> {
-    // Strip whitespace and take the leading numeric run
     let trimmed = value.trim();
-    let numeric: String = trimmed.chars().take_while(|c| c.is_ascii_digit()).collect();
-    let raw: i32 = numeric.parse().ok()?;
-    // If the value mentions kV or kv, treat raw as already-kV
-    if trimmed.to_ascii_lowercase().contains("kv") {
+    let bytes = trimmed.as_bytes();
+    let digit_end = bytes
+        .iter()
+        .position(|b| !b.is_ascii_digit())
+        .unwrap_or(bytes.len());
+    if digit_end == 0 {
+        return None;
+    }
+    let raw: i32 = trimmed[..digit_end].parse().ok()?;
+    let has_kv = bytes[digit_end..]
+        .windows(2)
+        .any(|w| w[0].eq_ignore_ascii_case(&b'k') && w[1].eq_ignore_ascii_case(&b'v'));
+    if has_kv {
         Some(raw)
+    } else if raw >= 1000 {
+        Some(raw / 1000)
     } else {
-        // OSM stores volts (e.g. 110000 → 110 kV); protect against < 1000 values
-        if raw >= 1000 { Some(raw / 1000) } else { Some(raw) }
+        Some(raw)
     }
 }
 
@@ -269,14 +280,18 @@ pub fn bounds_intersect(left: GeoBounds, right: GeoBounds) -> bool {
         && left.max_lon >= right.min_lon
 }
 
-pub fn focus_cells_for_bounds(bounds: GeoBounds) -> Vec<(i32, i32)> {
+#[inline]
+pub fn focus_cells_iter(bounds: GeoBounds) -> impl Iterator<Item = (i32, i32)> {
     let min_lat_c = bounds.min_lat.floor() as i32;
     let max_lat_c = bounds.max_lat.floor() as i32;
     let min_lon_c = bounds.min_lon.floor() as i32;
     let max_lon_c = bounds.max_lon.floor() as i32;
     (min_lat_c..=max_lat_c)
-        .flat_map(|lat| (min_lon_c..=max_lon_c).map(move |lon| (lat, lon)))
-        .collect()
+        .flat_map(move |lat| (min_lon_c..=max_lon_c).map(move |lon| (lat, lon)))
+}
+
+pub fn focus_cells_for_bounds(bounds: GeoBounds) -> Vec<(i32, i32)> {
+    focus_cells_iter(bounds).collect()
 }
 
 pub fn focus_cell_bounds(cell_lat: i32, cell_lon: i32) -> GeoBounds {

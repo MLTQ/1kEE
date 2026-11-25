@@ -1,5 +1,6 @@
 mod detect;
-mod seedlink;
+mod follow;
+pub(super) mod seedlink;
 
 use super::{Pick, StationId, day};
 use crossbeam_channel::{Receiver, Sender, bounded};
@@ -45,7 +46,7 @@ enum Update {
     Stream(String),
     Readings(HashMap<StationId, Reading>),
     Inventory(Inventory, String),
-    Picks(Arc<str>, Vec<(StationId, Pick)>),
+    Picks(Arc<str>, i64, Vec<(StationId, Pick)>),
     Catalog(String),
 }
 
@@ -53,6 +54,16 @@ struct Session {
     stop: Arc<AtomicBool>,
     rx: Receiver<Update>,
     started_ms: i64,
+    stream: Option<StreamWorker>,
+    tx: Sender<Update>,
+}
+
+struct StreamWorker(Arc<AtomicBool>);
+
+impl Drop for StreamWorker {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
 }
 
 impl Drop for Session {
@@ -70,21 +81,30 @@ pub(crate) struct LiveStations {
     pub inventory_status: String,
     pub catalog_status: String,
     pub reporting: usize,
+    pub follow: follow::QuakeFollow,
     session: Option<Session>,
     next_count_ms: i64,
 }
 
 impl LiveStations {
-    pub fn tick(&mut self, ctx: &egui::Context) {
-        if !self.enabled {
+    pub fn tick(&mut self, ctx: &egui::Context, following: bool) {
+        let now = chrono::Utc::now().timestamp_millis();
+        self.follow.set_enabled(following, now);
+        if !self.enabled && !following {
             if self.session.is_some() {
                 *self = Self::default();
             }
             return;
         }
         ctx.request_repaint_after(Duration::from_secs(1));
-        let now = chrono::Utc::now().timestamp_millis();
         let session = self.session.get_or_insert_with(|| start(ctx, now));
+        if self.enabled {
+            session
+                .stream
+                .get_or_insert_with(|| start_stream(ctx, session.tx.clone()));
+        } else {
+            session.stream = None;
+        }
         while let Ok(update) = session.rx.try_recv() {
             match update {
                 Update::Stream(s) => self.stream_status = s,
@@ -114,7 +134,8 @@ impl LiveStations {
                         }
                     }
                 }
-                Update::Picks(event, picks) => {
+                Update::Picks(event, origin, picks) => {
+                    self.follow.observe(&event, origin, &picks);
                     for (id, pick) in picks {
                         // Opening the layer must not light up old arrivals from its bootstrap query.
                         if pick.time_ms < session.started_ms - FLASH_MS
@@ -167,8 +188,22 @@ impl LiveStations {
 fn start(ctx: &egui::Context, started_ms: i64) -> Session {
     let (tx, rx) = bounded(128);
     let stop = Arc::new(AtomicBool::new(false));
-    let stream_stop = Arc::clone(&stop);
-    let stream_tx = tx.clone();
+    let archive_stop = Arc::clone(&stop);
+    let archive_tx = tx.clone();
+    let repaint = ctx.clone();
+    std::thread::spawn(move || poll_catalog(&archive_stop, |u| emit(&archive_tx, &repaint, u)));
+    Session {
+        stop,
+        rx,
+        started_ms,
+        stream: None,
+        tx,
+    }
+}
+
+fn start_stream(ctx: &egui::Context, stream_tx: Sender<Update>) -> StreamWorker {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stream_stop = stop.clone();
     let repaint = ctx.clone();
     std::thread::spawn(move || {
         let send = |update| emit(&stream_tx, &repaint, update);
@@ -195,14 +230,7 @@ fn start(ctx: &egui::Context, started_ms: i64) -> Session {
             wait(&stream_stop, Duration::from_secs(30));
         }
     });
-    let archive_stop = Arc::clone(&stop);
-    let repaint = ctx.clone();
-    std::thread::spawn(move || poll_catalog(&archive_stop, |u| emit(&tx, &repaint, u)));
-    Session {
-        stop,
-        rx,
-        started_ms,
-    }
+    StreamWorker(stop)
 }
 
 fn emit(tx: &Sender<Update>, ctx: &egui::Context, update: Update) {
@@ -211,7 +239,7 @@ fn emit(tx: &Sender<Update>, ctx: &egui::Context, update: Update) {
     }
 }
 
-fn wait(stop: &AtomicBool, duration: Duration) {
+pub(super) fn wait(stop: &AtomicBool, duration: Duration) {
     let end = Instant::now() + duration;
     while !stop.load(Ordering::Relaxed) {
         let delay = end.saturating_duration_since(Instant::now());
@@ -253,22 +281,21 @@ fn poll_catalog(stop: &AtomicBool, send: impl Fn(Update) + Sync) {
                 origin_ms,
                 picks,
             } => {
-                let latest = picks
+                let arrivals = picks
                     .into_iter()
-                    .filter_map(|(station, picks)| {
-                        let pick = picks
+                    .flat_map(|(station, picks)| {
+                        picks
                             .into_iter()
-                            .filter(|p| {
-                                (from * 1000..=now * 1000).contains(&p.time_ms)
+                            .filter(move |p| {
+                                p.time_ms <= now * 1000
                                     && (super::source::MIN_PICK_MS..=super::source::MAX_PICK_MS)
                                         .contains(&(p.time_ms - origin_ms))
                             })
-                            .max_by_key(|p| p.time_ms)?;
-                        Some((station, pick))
+                            .map(move |p| (station.clone(), p))
                     })
                     .collect::<Vec<_>>();
-                if !latest.is_empty() {
-                    send(Update::Picks(id.into(), latest));
+                if !arrivals.is_empty() {
+                    send(Update::Picks(id.into(), origin_ms, arrivals));
                 }
             }
             day::Update::Cooldown(_) => send(Update::Catalog(
@@ -307,6 +334,8 @@ mod tests {
                 stop: stop.clone(),
                 rx,
                 started_ms: now,
+                tx: tx.clone(),
+                stream: Some(StreamWorker(Arc::new(AtomicBool::new(false)))),
             }),
             ..Default::default()
         };
@@ -317,14 +346,18 @@ mod tests {
                 time_ms,
                 used: true,
             };
-            tx.send(Update::Picks("quake".into(), vec![(id.clone(), pick)]))
-                .unwrap();
+            tx.send(Update::Picks(
+                "quake".into(),
+                now - 1000,
+                vec![(id.clone(), pick)],
+            ))
+            .unwrap();
         };
         send_pick(now - 60_000);
-        layer.tick(&ctx);
+        layer.tick(&ctx, false);
         assert!(layer.activity.is_empty());
         send_pick(now - 1_000);
-        layer.tick(&ctx);
+        layer.tick(&ctx, false);
         let report = layer
             .activity
             .get_mut(&id)
@@ -335,13 +368,13 @@ mod tests {
         assert_eq!(&*report.event, "quake");
         report.received_ms = now - 5_000;
         send_pick(now - 1_000);
-        layer.tick(&ctx);
+        layer.tick(&ctx, false);
         assert_eq!(
             layer.activity[&id].report.as_ref().unwrap().received_ms,
             now - 5_000
         );
         layer.enabled = false;
-        layer.tick(&ctx);
+        layer.tick(&ctx, false);
         assert!(stop.load(Ordering::Relaxed));
         assert!(layer.activity.is_empty());
     }
@@ -356,7 +389,7 @@ mod tests {
         let ctx = egui::Context::default();
         let deadline = Instant::now() + Duration::from_secs(90);
         while Instant::now() < deadline {
-            layer.tick(&ctx);
+            layer.tick(&ctx, false);
             if layer.reporting >= 1000 {
                 break;
             }
@@ -371,7 +404,7 @@ mod tests {
         );
         assert!(layer.reporting >= 10);
         layer.enabled = false;
-        layer.tick(&ctx);
+        layer.tick(&ctx, false);
         assert!(layer.session.is_none());
     }
 }

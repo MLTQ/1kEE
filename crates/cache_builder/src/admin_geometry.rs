@@ -1,6 +1,6 @@
 //! Exact OSM node-ID stitching, shared by focused and whole-planet builds.
 use crate::util::GeoPoint;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 pub type CoordinateResolver<'a> = dyn FnMut(&[i64]) -> Result<Vec<Option<GeoPoint>>, String> + 'a;
 
@@ -18,25 +18,40 @@ pub fn assemble(
     ways: &HashMap<i64, Vec<i64>>,
     resolve: &mut CoordinateResolver<'_>,
 ) -> Result<AdminRegion, String> {
-    let mut region = AdminRegion {
-        relation_id,
-        name,
-        rings: Vec::new(),
-        complete: true,
-    };
     let chains = stitch(ways);
     let refs: Vec<_> = chains.iter().flatten().copied().collect();
     // Resolve all rings together: country islands often refer to the same PBF
     // blocks. Per-ring lookups repeatedly decompress those blocks after eviction.
     let resolved = resolve(&refs)?;
-    if resolved.len() != refs.len() {
+    build_region_from_chains(relation_id, name, chains, &resolved)
+}
+
+pub(super) fn stitch_chains(ways: &HashMap<i64, Vec<i64>>) -> Vec<Vec<i64>> {
+    stitch(ways)
+}
+
+pub(super) fn build_region_from_chains(
+    relation_id: i64,
+    name: Option<String>,
+    chains: Vec<Vec<i64>>,
+    resolved: &[Option<GeoPoint>],
+) -> Result<AdminRegion, String> {
+    let total_refs: usize = chains.iter().map(Vec::len).sum();
+    if resolved.len() != total_refs {
         return Err("Admin coordinate lookup changed reference count".into());
     }
-    let mut points = resolved.into_iter();
+    let mut region = AdminRegion {
+        relation_id,
+        name,
+        rings: Vec::with_capacity(chains.len()),
+        complete: true,
+    };
+    let mut cursor = 0usize;
     for chain in chains {
-        region.complete &= chain.len() >= 4 && chain.first() == chain.last();
+        let len = chain.len();
+        region.complete &= len >= 4 && chain.first() == chain.last();
         let mut run = Vec::new();
-        for point in points.by_ref().take(chain.len()) {
+        for &point in &resolved[cursor..cursor + len] {
             if let Some(point) = point {
                 run.push(point);
             } else {
@@ -50,32 +65,39 @@ pub fn assemble(
         if run.len() >= 2 {
             region.rings.push(run);
         }
+        cursor += len;
     }
     Ok(region)
 }
 
 fn stitch(ways: &HashMap<i64, Vec<i64>>) -> Vec<Vec<i64>> {
-    let mut ids: Vec<_> = ways.keys().copied().collect();
-    ids.sort_unstable();
-    let mut endpoints: HashMap<i64, Vec<i64>> = HashMap::new();
-    for &id in &ids {
-        let nodes = &ways[&id];
-        if nodes.len() < 2 {
-            continue;
-        }
-        endpoints.entry(nodes[0]).or_default().push(id);
+    let mut sorted: Vec<(i64, &[i64])> = ways
+        .iter()
+        .filter(|(_, nodes)| nodes.len() >= 2)
+        .map(|(&id, nodes)| (id, nodes.as_slice()))
+        .collect();
+    sorted.sort_unstable_by_key(|&(id, _)| id);
+
+    let n = sorted.len();
+    let mut endpoints: HashMap<i64, Vec<usize>> = HashMap::with_capacity(n * 2);
+    for (idx, &(_, nodes)) in sorted.iter().enumerate() {
+        endpoints.entry(nodes[0]).or_default().push(idx);
         endpoints
             .entry(*nodes.last().unwrap())
             .or_default()
-            .push(id);
+            .push(idx);
     }
-    let mut used = HashSet::new();
+
+    let mut used = vec![false; n];
     let mut result = Vec::new();
-    for id in ids {
-        if !used.insert(id) || ways[&id].len() < 2 {
+    for start_idx in 0..n {
+        if used[start_idx] {
             continue;
         }
-        let mut chain: VecDeque<i64> = ways[&id].iter().copied().collect();
+        used[start_idx] = true;
+        let first_nodes = sorted[start_idx].1;
+        let mut chain: VecDeque<i64> = VecDeque::with_capacity(first_nodes.len());
+        chain.extend(first_nodes.iter().copied());
         // Extend both ends: the first way may be in the middle of an open border.
         for front in [false, true] {
             loop {
@@ -87,27 +109,32 @@ fn stitch(ways: &HashMap<i64, Vec<i64>>) -> Vec<Vec<i64>> {
                 } else {
                     *chain.back().unwrap()
                 };
-                let next = endpoints
+                let Some(&next_idx) = endpoints
                     .get(&end)
-                    .and_then(|list| list.iter().find(|id| !used.contains(id)));
-                let Some(&next) = next else { break };
-                used.insert(next);
-                let nodes = &ways[&next];
-                let extension: Vec<_> = if nodes[0] == end {
-                    nodes.iter().skip(1).copied().collect()
-                } else {
-                    nodes.iter().rev().skip(1).copied().collect()
+                    .and_then(|list| list.iter().find(|&&idx| !used[idx]))
+                else {
+                    break;
                 };
-                for node in extension {
+                used[next_idx] = true;
+                let nodes = sorted[next_idx].1;
+                if nodes[0] == end {
                     if front {
-                        chain.push_front(node);
+                        for &node in &nodes[1..] {
+                            chain.push_front(node);
+                        }
                     } else {
-                        chain.push_back(node);
+                        chain.extend(nodes[1..].iter().copied());
                     }
+                } else if front {
+                    for &node in nodes[..nodes.len() - 1].iter().rev() {
+                        chain.push_front(node);
+                    }
+                } else {
+                    chain.extend(nodes[..nodes.len() - 1].iter().rev().copied());
                 }
             }
         }
-        result.push(chain.into_iter().collect());
+        result.push(Vec::from(chain));
     }
     result
 }

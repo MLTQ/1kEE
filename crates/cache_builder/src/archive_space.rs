@@ -8,6 +8,7 @@ pub fn gb(bytes: u64) -> String {
     format!("{:.2} GB", bytes as f64 / 1_000_000_000.0)
 }
 
+#[cfg(any(test, not(unix)))]
 fn parse_available(output: &str) -> Option<u64> {
     output.lines().skip(1).find_map(|line| {
         line.split_whitespace()
@@ -18,6 +19,21 @@ fn parse_available(output: &str) -> Option<u64> {
     })
 }
 
+#[cfg(unix)]
+pub(crate) fn available(path: &Path) -> Option<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let existing = path.ancestors().find(|p| p.exists())?;
+    let c_path = CString::new(existing.as_os_str().as_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+    if rc != 0 {
+        return None;
+    }
+    (stat.f_bavail as u64).checked_mul(stat.f_frsize as u64)
+}
+
+#[cfg(not(unix))]
 pub(crate) fn available(path: &Path) -> Option<u64> {
     let existing = path.ancestors().find(|p| p.exists())?.canonicalize().ok()?;
     let output = std::process::Command::new("df")

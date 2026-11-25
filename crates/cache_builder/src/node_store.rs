@@ -24,6 +24,9 @@ impl NodeStore {
             .pragma_update(None, "temp_store", "MEMORY")
             .map_err(|error| error.to_string())?;
         connection
+            .pragma_update(None, "cache_size", -65536)
+            .map_err(|error| error.to_string())?;
+        connection
             .execute_batch(
                 "
                 CREATE TABLE IF NOT EXISTS candidate_nodes (
@@ -470,19 +473,48 @@ impl NodeStore {
 
     /// Preserve node IDs for exact topology, including references outside a focused extract.
     pub fn admin_way_refs(&self, way_ids: &[i64]) -> Result<HashMap<i64, Vec<i64>>, String> {
-        let mut result = HashMap::new();
-        let mut stmt = self
-            .connection
-            .prepare("SELECT node_id FROM admin_way_nodes WHERE way_id = ?1 ORDER BY seq")
-            .map_err(|e| e.to_string())?;
-        for &way_id in way_ids {
-            let ids = stmt
-                .query_map(params![way_id], |row| row.get::<_, i64>(0))
-                .map_err(|e| e.to_string())?
-                .collect::<Result<Vec<_>, _>>()
+        let mut result: HashMap<i64, Vec<i64>> = HashMap::with_capacity(way_ids.len());
+        if way_ids.is_empty() {
+            return Ok(result);
+        }
+        // Chunked IN (...) queries replace N+1 single-way lookups (10–100× fewer SQLite roundtrips).
+        let mut unique: Vec<i64> = way_ids.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        for chunk in unique.chunks(500) {
+            let placeholders = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT way_id, node_id FROM admin_way_nodes WHERE way_id IN ({placeholders}) ORDER BY way_id, seq"
+            );
+            let mut stmt = self
+                .connection
+                .prepare_cached(&sql)
                 .map_err(|e| e.to_string())?;
-            if ids.len() >= 2 {
-                result.insert(way_id, ids);
+            let mut rows = stmt
+                .query(rusqlite::params_from_iter(chunk.iter()))
+                .map_err(|e| e.to_string())?;
+            let mut cur_way: Option<i64> = None;
+            let mut cur_nodes: Vec<i64> = Vec::new();
+            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                let wid: i64 = row.get(0).map_err(|e| e.to_string())?;
+                let nid: i64 = row.get(1).map_err(|e| e.to_string())?;
+                if cur_way != Some(wid) {
+                    if let Some(prev) = cur_way.replace(wid)
+                        && cur_nodes.len() >= 2
+                    {
+                        result.insert(prev, std::mem::take(&mut cur_nodes));
+                    } else {
+                        cur_nodes.clear();
+                    }
+                }
+                cur_nodes.push(nid);
+            }
+            if let Some(prev) = cur_way
+                && cur_nodes.len() >= 2
+            {
+                result.insert(prev, cur_nodes);
             }
         }
         Ok(result)

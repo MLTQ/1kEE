@@ -123,32 +123,32 @@ fn decode_features(data: &[u8]) -> Option<Vec<CellFeature>> {
         let point_count = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
 
-        // Points (8 or 12 bytes each).
+        // Points (8 or 12 bytes each) — hoist branch out of inner loop.
         let point_stride = if has_elevation { 12 } else { 8 };
-        if point_count > data.len().checked_sub(pos)? / point_stride {
-            return None;
-        }
+        let byte_len = point_count.checked_mul(point_stride)?;
+        let end = pos.checked_add(byte_len)?;
+        let raw_points = data.get(pos..end)?;
+        pos = end;
 
         let mut points = Vec::with_capacity(point_count);
-        let mut elevations: Option<Vec<f32>> = if has_elevation {
-            Some(Vec::with_capacity(point_count))
+        let elevations = if has_elevation {
+            let mut elevs = Vec::with_capacity(point_count);
+            for rec in raw_points.chunks_exact(12) {
+                let lon = f32::from_le_bytes(rec[0..4].try_into().unwrap());
+                let lat = f32::from_le_bytes(rec[4..8].try_into().unwrap());
+                let elev = f32::from_le_bytes(rec[8..12].try_into().unwrap());
+                points.push(CellPoint { lon, lat });
+                elevs.push(elev);
+            }
+            Some(elevs)
         } else {
+            for rec in raw_points.chunks_exact(8) {
+                let lon = f32::from_le_bytes(rec[0..4].try_into().unwrap());
+                let lat = f32::from_le_bytes(rec[4..8].try_into().unwrap());
+                points.push(CellPoint { lon, lat });
+            }
             None
         };
-
-        for _ in 0..point_count {
-            let lon = f32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
-            let lat = f32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap());
-            points.push(CellPoint { lon, lat });
-
-            if has_elevation {
-                let elev = f32::from_le_bytes(data[pos + 8..pos + 12].try_into().unwrap());
-                elevations.as_mut().unwrap().push(elev);
-                pos += 12;
-            } else {
-                pos += 8;
-            }
-        }
 
         features.push(CellFeature {
             way_id,

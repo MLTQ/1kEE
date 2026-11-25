@@ -133,8 +133,7 @@ fn remove_verified(source: &Input, proofs: &Proofs, output: &Handle) -> Result<(
     for layer in LAYERS {
         let (tiles, complete) = layer::inventory(&src, layer)?;
         ensure!(complete, "unreadable manifest");
-        let mut total = 0i64;
-        for t in tiles {
+        for t in &tiles {
             if let Some(key) = source.repair {
                 ensure!(t.key == key, "unexpected additional tile")
             }
@@ -142,23 +141,19 @@ fn remove_verified(source: &Input, proofs: &Proofs, output: &Handle) -> Result<(
                 .get(&(layer, t.key))
                 .ok_or_else(|| anyhow!("tile {:?} absent from output", t.key))?;
             ensure!(
-                p.count == t.count
-                    && p.built >= t.built
-                    && layer::transfer(&src, None, layer, &t, false)? == p.hash,
+                p.count == t.count && p.built >= t.built,
                 "tile {:?} differs from the output",
                 t.key
             );
-            total += t.count;
-            layers += 1;
         }
-        ensure!(
-            src.query_row(
-                &format!("SELECT COUNT(*) FROM {} NOT INDEXED", layer.table()),
-                [],
-                |r| r.get::<_, i64>(0)
-            )? == total,
-            "unaccounted geometry"
-        );
+        layer::verify_layer_sequential(&src, layer, &tiles, "unaccounted geometry", |t, hash| {
+            let p = proofs
+                .get(&(layer, t.key))
+                .ok_or_else(|| anyhow!("tile {:?} absent from output", t.key))?;
+            ensure!(hash == p.hash, "tile {:?} differs from the output", t.key);
+            layers += 1;
+            Ok(())
+        })?;
     }
     ensure!(layers > 0, "no tile manifests");
     // Exclusive locking mode keeps the writer lock after COMMIT. Leave SQLite

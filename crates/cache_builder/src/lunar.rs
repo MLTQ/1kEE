@@ -11,12 +11,12 @@
 ///   SQLite writer thread                                      → lunar_focus_cache.sqlite
 use crate::contours::{
     ContourBuildProgress, FocusContourSpec, GeoBounds, TileKey, bucket_range, open_cache_db,
-    resolve_gdal_tool, tile_exists,
+    resolve_gdal_tool,
 };
-use crate::marching_squares::{ContourLine, build_tile_contours_with_sampler};
+use crate::marching_squares::build_tile_contours_with_sampler;
 use rayon::prelude::*;
 use rusqlite::{Connection, params};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -103,6 +103,7 @@ pub struct LunarBuildCommand {
 fn run_gdal_with_timeout(mut cmd: Command, label: &str, timeout: Duration) -> std::io::Result<()> {
     let start = Instant::now();
     let mut child = cmd.spawn()?;
+    let mut poll_ms = 2u64;
     loop {
         if let Some(status) = child.try_wait()? {
             return if status.success() {
@@ -121,7 +122,8 @@ fn run_gdal_with_timeout(mut cmd: Command, label: &str, timeout: Duration) -> st
                 format!("{label} timed out after {:?}", timeout),
             ));
         }
-        std::thread::sleep(Duration::from_millis(500));
+        std::thread::sleep(Duration::from_millis(poll_ms));
+        poll_ms = (poll_ms * 2).min(50);
     }
 }
 
@@ -251,22 +253,28 @@ fn ensure_source_chunk(
     Ok(chunk)
 }
 
+enum LunarSamples {
+    I16(Vec<i16>),
+    F32(Vec<f32>),
+}
+
 struct LunarChunkRaster {
     width: u32,
     height: u32,
     bounds: GeoBounds,
-    samples: Vec<f32>,
+    samples: LunarSamples,
 }
 
 impl LunarChunkRaster {
     fn load(path: &Path, bounds: GeoBounds) -> Option<Self> {
         use std::fs::File;
+        use std::io::BufReader;
         use tiff::decoder::{Decoder, DecodingResult};
 
         let file = File::open(path)
             .map_err(|e| eprintln!("[1kEE] lunar chunk open error {}: {e}", path.display()))
             .ok()?;
-        let mut decoder = Decoder::new(file)
+        let mut decoder = Decoder::new(BufReader::with_capacity(256 * 1024, file))
             .map_err(|e| eprintln!("[1kEE] lunar chunk TIFF init error {}: {e}", path.display()))
             .ok()?;
         let (width, height) = decoder
@@ -283,11 +291,15 @@ impl LunarChunkRaster {
             .map_err(|e| eprintln!("[1kEE] lunar chunk read error {}: {e}", path.display()))
             .ok()?;
 
-        let samples: Vec<f32> = match result {
-            DecodingResult::I16(data) => data.into_iter().map(|s| s as f32).collect(),
-            DecodingResult::U16(data) => data.into_iter().map(|u| (u as i16) as f32).collect(),
-            DecodingResult::F32(data) => data,
-            DecodingResult::F64(data) => data.into_iter().map(|f| f as f32).collect(),
+        let samples = match result {
+            DecodingResult::I16(data) => LunarSamples::I16(data),
+            DecodingResult::U16(data) => {
+                LunarSamples::I16(data.into_iter().map(|u| u as i16).collect())
+            }
+            DecodingResult::F32(data) => LunarSamples::F32(data),
+            DecodingResult::F64(data) => {
+                LunarSamples::F32(data.into_iter().map(|f| f as f32).collect())
+            }
             _ => {
                 eprintln!(
                     "[1kEE] lunar chunk unsupported pixel format in {}",
@@ -297,11 +309,15 @@ impl LunarChunkRaster {
             }
         };
 
-        if samples.len() != (width * height) as usize {
+        let len = match &samples {
+            LunarSamples::I16(v) => v.len(),
+            LunarSamples::F32(v) => v.len(),
+        };
+        if len != (width * height) as usize {
             eprintln!(
                 "[1kEE] lunar chunk sample count mismatch {}: got {} expected {}",
                 path.display(),
-                samples.len(),
+                len,
                 width * height
             );
             return None;
@@ -315,13 +331,16 @@ impl LunarChunkRaster {
         })
     }
 
+    #[inline]
     fn get(&self, x: u32, y: u32) -> f32 {
-        self.samples
-            .get((y * self.width + x) as usize)
-            .copied()
-            .unwrap_or(f32::NAN)
+        let idx = (y * self.width + x) as usize;
+        match &self.samples {
+            LunarSamples::I16(data) => data.get(idx).map(|&v| v as f32).unwrap_or(f32::NAN),
+            LunarSamples::F32(data) => data.get(idx).copied().unwrap_or(f32::NAN),
+        }
     }
 
+    #[inline]
     fn sample(&self, lat: f32, lon: f32) -> f32 {
         let u = ((lon - self.bounds.min_lon) / (self.bounds.max_lon - self.bounds.min_lon))
             .clamp(0.0, 0.999_999);
@@ -348,57 +367,82 @@ impl LunarChunkRaster {
     }
 }
 
-struct LunarChunkSampler {
+type LunarChunkKey = (i32, i32, i32); // (zoom_bucket, lat_bucket, lon_bucket)
+
+struct SharedLunarChunkCache {
     cache_db_path: PathBuf,
+    lru: std::sync::Mutex<hashlink::LruCache<LunarChunkKey, Option<Arc<LunarChunkRaster>>>>,
+}
+
+impl SharedLunarChunkCache {
+    fn new(cache_db_path: PathBuf, capacity: usize) -> Arc<Self> {
+        Arc::new(Self {
+            cache_db_path,
+            lru: std::sync::Mutex::new(hashlink::LruCache::new(capacity.max(4))),
+        })
+    }
+
+    fn get_or_load(&self, key: LunarChunkKey, spec: LunarSpec) -> Option<Arc<LunarChunkRaster>> {
+        if let Ok(mut guard) = self.lru.lock() {
+            if let Some(hit) = guard.get(&key) {
+                return hit.clone();
+            }
+        }
+        let (_, lat_bucket, lon_bucket) = key;
+        let chunk_center_lat = lat_bucket as f32 * SOURCE_CHUNK_CENTER_STEP_DEG;
+        let chunk_center_lon = lon_bucket as f32 * SOURCE_CHUNK_CENTER_STEP_DEG;
+        let bounds = GeoBounds {
+            min_lat: (chunk_center_lat - SOURCE_CHUNK_HALF_EXTENT_DEG).clamp(-89.999, 89.999),
+            max_lat: (chunk_center_lat + SOURCE_CHUNK_HALF_EXTENT_DEG).clamp(-89.999, 89.999),
+            min_lon: chunk_center_lon - SOURCE_CHUNK_HALF_EXTENT_DEG,
+            max_lon: chunk_center_lon + SOURCE_CHUNK_HALF_EXTENT_DEG,
+        };
+        let path = source_chunk_root(&self.cache_db_path)
+            .join(format!("z{}", spec.zoom_bucket))
+            .join(format!("lat{lat_bucket:+04}_lon{lon_bucket:+04}.tif"));
+        let loaded = LunarChunkRaster::load(&path, bounds).map(Arc::new);
+        if let Ok(mut guard) = self.lru.lock() {
+            guard.insert(key, loaded.clone());
+        }
+        loaded
+    }
+}
+
+struct LunarChunkSampler {
+    shared: Arc<SharedLunarChunkCache>,
     spec: LunarSpec,
-    loaded: Vec<(PathBuf, LunarChunkRaster)>,
-    missing: HashSet<PathBuf>,
+    last: Option<(LunarChunkKey, Option<Arc<LunarChunkRaster>>)>,
 }
 
 impl LunarChunkSampler {
-    fn new(cache_db_path: PathBuf, spec: LunarSpec) -> Self {
+    fn new(shared: Arc<SharedLunarChunkCache>, spec: LunarSpec) -> Self {
         Self {
-            cache_db_path,
+            shared,
             spec,
-            loaded: Vec::new(),
-            missing: HashSet::new(),
+            last: None,
         }
     }
 
+    #[inline]
     fn sample(&mut self, lat: f32, lon: f32) -> f32 {
-        let chunk = source_chunk_for_bounds(
-            &self.cache_db_path,
-            GeoBounds {
-                min_lat: lat,
-                max_lat: lat,
-                min_lon: lon,
-                max_lon: lon,
-            },
-            self.spec,
-        );
-        if self.missing.contains(&chunk.path) {
-            return f32::NAN;
+        let lat_bucket = (lat / SOURCE_CHUNK_CENTER_STEP_DEG).round() as i32;
+        let lon_bucket = (lon / SOURCE_CHUNK_CENTER_STEP_DEG).round() as i32;
+        let key = (self.spec.zoom_bucket, lat_bucket, lon_bucket);
+        if let Some((last_key, ref raster)) = self.last
+            && last_key == key
+        {
+            return match raster {
+                Some(r) => r.sample(lat, lon),
+                None => f32::NAN,
+            };
         }
-        if let Some(idx) = self.loaded.iter().position(|(path, _)| *path == chunk.path) {
-            let entry = self.loaded.remove(idx);
-            let value = entry.1.sample(lat, lon);
-            self.loaded.insert(0, entry);
-            return value;
-        }
-        match LunarChunkRaster::load(&chunk.path, chunk.bounds) {
-            Some(raster) => {
-                let value = raster.sample(lat, lon);
-                self.loaded.insert(0, (chunk.path, raster));
-                if self.loaded.len() > 8 {
-                    self.loaded.pop();
-                }
-                value
-            }
-            None => {
-                self.missing.insert(chunk.path);
-                f32::NAN
-            }
-        }
+        let raster = self.shared.get_or_load(key, self.spec);
+        let value = match &raster {
+            Some(r) => r.sample(lat, lon),
+            None => f32::NAN,
+        };
+        self.last = Some((key, raster));
+        value
     }
 }
 
@@ -419,10 +463,10 @@ fn encode_gpkg_linestring(points: &[(f32, f32)]) -> Vec<u8> {
     buf
 }
 
-fn write_tile_native_lunar(
+fn write_tile_native_lunar_encoded(
     conn: &mut Connection,
     tile: TileKey,
-    contours: &[ContourLine],
+    encoded: &[(i64, f32, Vec<u8>)],
 ) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
     tx.execute(
@@ -434,24 +478,26 @@ fn write_tile_native_lunar(
         params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket],
     )?;
 
-    for (fid, line) in contours.iter().enumerate() {
-        tx.execute(
+    {
+        let mut insert = tx.prepare_cached(
             "INSERT INTO contour_tiles (zoom_bucket,lat_bucket,lon_bucket,fid,elevation_m,geom)
              VALUES (?1,?2,?3,?4,?5,?6)",
-            params![
+        )?;
+        for (fid, elevation_m, blob) in encoded {
+            insert.execute(params![
                 tile.zoom_bucket,
                 tile.lat_bucket,
                 tile.lon_bucket,
-                fid as i64,
-                line.elevation_m,
-                encode_gpkg_linestring(&line.points),
-            ],
-        )?;
+                fid,
+                elevation_m,
+                blob.as_slice(),
+            ])?;
+        }
     }
     tx.execute(
         "INSERT INTO contour_tile_manifest (zoom_bucket,lat_bucket,lon_bucket,contour_count,built_at)
          VALUES (?1,?2,?3,?4,unixepoch())",
-        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket, contours.len() as i64],
+        params![tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket, encoded.len() as i64],
     )?;
 
     tx.execute(
@@ -548,6 +594,8 @@ pub fn build_lunar_contour_tiles(
     }
 
     let conn = open_cache_db(&command.cache_db_path).map_err(|e| e.to_string())?;
+    let existing = crate::contours::load_manifest_set(&conn).unwrap_or_default();
+    drop(conn);
     let mut work: Vec<TileWork> = Vec::new();
     let mut skipped = 0usize;
 
@@ -565,7 +613,7 @@ pub fn build_lunar_contour_tiles(
                     lat_bucket,
                     lon_bucket,
                 };
-                if tile_exists(&conn, tile) {
+                if existing.contains(&(tile.zoom_bucket, tile.lat_bucket, tile.lon_bucket)) {
                     skipped += 1;
                     continue;
                 }
@@ -584,7 +632,6 @@ pub fn build_lunar_contour_tiles(
             }
         }
     }
-    drop(conn);
 
     let total = work.len() + skipped;
     let to_build = work.len();
@@ -680,15 +727,15 @@ pub fn build_lunar_contour_tiles(
         ),
     ));
 
-    type ComputeResult = (TileKey, GeoBounds, Vec<ContourLine>);
-    let (compute_tx, compute_rx) = mpsc::channel::<ComputeResult>();
+    type ComputeResult = (TileKey, GeoBounds, Vec<(i64, f32, Vec<u8>)>);
+    let (compute_tx, compute_rx) = mpsc::sync_channel::<ComputeResult>(32);
     enum Outcome {
         Built(GeoBounds),
         Error(String),
     }
     let (outcome_tx, rx) = mpsc::channel::<Outcome>();
     let done_count = Arc::new(AtomicUsize::new(0));
-    let cache_db_owned = command.cache_db_path.clone();
+    let shared_chunks = SharedLunarChunkCache::new(command.cache_db_path.clone(), 8);
 
     std::thread::spawn(move || {
         let num_threads = std::thread::available_parallelism()
@@ -703,7 +750,7 @@ pub fn build_lunar_contour_tiles(
                 .map_init(
                     || {
                         LunarChunkSampler::new(
-                            cache_db_owned.clone(),
+                            shared_chunks.clone(),
                             LunarSpec {
                                 half_extent_deg: 0.55,
                                 raster_size: 704,
@@ -719,7 +766,18 @@ pub fn build_lunar_contour_tiles(
                             item.bounds,
                             |lat, lon| sampler.sample(lat, lon),
                         );
-                        (item.tile, item.bounds, contours)
+                        let encoded: Vec<(i64, f32, Vec<u8>)> = contours
+                            .into_iter()
+                            .enumerate()
+                            .map(|(fid, line)| {
+                                (
+                                    fid as i64,
+                                    line.elevation_m,
+                                    encode_gpkg_linestring(&line.points),
+                                )
+                            })
+                            .collect();
+                        (item.tile, item.bounds, encoded)
                     },
                 )
                 .for_each_with(compute_tx, |tx, result| {
@@ -738,8 +796,8 @@ pub fn build_lunar_contour_tiles(
                 return;
             }
         };
-        for (tile, tile_bounds, contours) in compute_rx {
-            let outcome = write_tile_native_lunar(&mut conn, tile, &contours);
+        for (tile, tile_bounds, encoded) in compute_rx {
+            let outcome = write_tile_native_lunar_encoded(&mut conn, tile, &encoded);
             done_arc.fetch_add(1, Ordering::Relaxed);
             let _ = outcome_tx.send(match outcome {
                 Ok(()) => Outcome::Built(tile_bounds),

@@ -49,6 +49,21 @@ pub(super) struct CountedFile {
     bytes: u64,
     io_seconds: f64,
 }
+impl CountedFile {
+    pub(super) fn new(file: File) -> Self {
+        Self {
+            file,
+            bytes: 0,
+            io_seconds: 0.0,
+        }
+    }
+    pub(super) fn bytes_read(&self) -> u64 {
+        self.bytes
+    }
+    pub(super) fn io_ms(&self) -> f64 {
+        self.io_seconds * 1000.0
+    }
+}
 impl Read for CountedFile {
     fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
         let start = Instant::now();
@@ -76,6 +91,7 @@ pub(super) struct Decoded {
     pub bytes_read: u64,
     pub io_ms: f64,
     pub cpu_ms: f64,
+    pub fast_meta: Option<super::deflate::FastTiffMeta>,
 }
 pub(super) fn copy_heights(output: &mut [i16], source: &[i16]) -> Result<(), &'static str> {
     if source
@@ -105,9 +121,72 @@ pub(super) fn load(path: &Path, needed: Window) -> Result<Decoded, String> {
     load_cached(open(path)?, path, needed, &mut Default::default())
 }
 
+#[cfg(test)]
 pub(super) fn load_cached(
+    decoder: TiffReader,
+    path: &Path,
+    needed: Window,
+    cache: &mut super::deflate::BlockCache,
+) -> Result<Decoded, String> {
+    load_cached_with_coords(decoder, path, 0, 0, needed, cache)
+}
+
+pub(super) fn load_fast(
+    path: &Path,
+    meta: &super::deflate::FastTiffMeta,
+    needed: Window,
+    cache: &mut super::deflate::BlockCache,
+) -> Result<Option<Decoded>, String> {
+    if needed.width == 0
+        || needed.height == 0
+        || needed.x >= 3601
+        || needed.y >= 3601
+        || needed.width > 3601 - needed.x
+        || needed.height > 3601 - needed.y
+    {
+        return Err(format!(
+            "SRTM window {}: Unsupported SRTM window or pixel layout",
+            path.display()
+        ));
+    }
+    let cw = super::deflate::SIDE;
+    let ch = super::deflate::SIDE;
+    let right = (u64::from(needed.x + needed.width).div_ceil(u64::from(cw)) * u64::from(cw))
+        .min(3601) as u32;
+    let bottom = (u64::from(needed.y + needed.height).div_ceil(u64::from(ch)) * u64::from(ch))
+        .min(3601) as u32;
+    let x = needed.x / cw * cw;
+    let y = needed.y / ch * ch;
+    let window = Window {
+        x,
+        y,
+        width: right - x,
+        height: bottom - y,
+    };
+    let mut samples = vec![0i16; window.width as usize * window.height as usize];
+    let Some((stats, bytes_read, io_ms)) =
+        super::deflate::read_window_fast(path, meta, cache, needed, window, &mut samples)
+            .map_err(|e| format!("SRTM window {}: {e}", path.display()))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(Decoded {
+        window,
+        samples,
+        chunks: window.width.div_ceil(cw) * window.height.div_ceil(ch) - stats.hits,
+        hits: stats.hits,
+        bytes_read,
+        io_ms,
+        cpu_ms: stats.cpu.as_secs_f64() * 1000.,
+        fast_meta: None,
+    }))
+}
+
+pub(super) fn load_cached_with_coords(
     mut decoder: TiffReader,
     path: &Path,
+    lat: i32,
+    lon: i32,
     needed: Window,
     cache: &mut super::deflate::BlockCache,
 ) -> Result<Decoded, String> {
@@ -148,9 +227,16 @@ pub(super) fn load_cached(
             height: bottom - y,
         };
         let mut samples = vec![0i16; window.width as usize * window.height as usize];
-        if let Some(stats) =
-            super::deflate::read_window(&mut decoder, path, cache, needed, window, &mut samples)?
-        {
+        if let Some(stats) = super::deflate::read_window(
+            &mut decoder,
+            path,
+            lat,
+            lon,
+            cache,
+            needed,
+            window,
+            &mut samples,
+        )? {
             let reader = decoder.inner().get_ref();
             return Ok(Decoded {
                 window,
@@ -160,6 +246,7 @@ pub(super) fn load_cached(
                 bytes_read: reader.bytes,
                 io_ms: reader.io_seconds * 1000.,
                 cpu_ms: stats.cpu.as_secs_f64() * 1000.,
+                fast_meta: stats.fast_meta,
             });
         }
         let columns = 3601u32.div_ceil(cw);
@@ -201,6 +288,7 @@ pub(super) fn load_cached(
             io_ms: reader.io_seconds * 1000.0,
             cpu_ms: (start.elapsed().as_secs_f64() - (reader.io_seconds - initial_io_seconds))
                 * 1000.0,
+            fast_meta: None,
         })
     };
     read().map_err(|e| format!("SRTM window {}: {e}", path.display()))

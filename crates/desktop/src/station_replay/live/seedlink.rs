@@ -17,7 +17,7 @@ const MAX_FRAME: usize = 1 << 20;
 type Socket = WebSocketStream<reqwest::Upgraded>;
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
-async fn connect() -> Result<Socket, Error> {
+async fn connect(station: &str, data: &str) -> Result<Socket, Error> {
     // Let reqwest negotiate TLS and honor the user's HTTPS proxy, as it does
     // for the FDSN inventory. Switch to WebSocket framing after the upgrade.
     let client = reqwest::Client::builder()
@@ -56,10 +56,10 @@ async fn connect() -> Result<Socket, Error> {
     // starts at the live edge for every public station matching the wildcard.
     for command in [
         "SLPROTO 4.0",
-        "STATION *",
+        &format!("STATION {station}"),
         "SELECT *_?_H_Z.?D",
         "SELECT *_?_N_Z.?D",
-        "DATA",
+        data,
     ] {
         ws.send(Message::Text(format!("{command}\r\n"))).await?;
         let reply = ws
@@ -141,6 +141,62 @@ fn record_bytes(format: u8, data: &[u8]) -> Option<Cow<'_, [u8]>> {
     None
 }
 
+fn decode_packet(frame: &[u8]) -> Option<(StationId, miniseed_rs::MseedRecord, i64, i64)> {
+    if frame.len() < 17 || !matches!(&frame[..4], b"SE2D" | b"SE3D") {
+        return None;
+    }
+    let length = u32::from_le_bytes(frame[4..8].try_into().unwrap()) as usize;
+    let offset = 17 + frame[16] as usize;
+    let data = frame.get(offset..)?;
+    if data.len() != length {
+        return None;
+    }
+    let data = record_bytes(frame[2], data)?;
+    let mut record = miniseed_rs::decode(&data).ok()?;
+    if frame[2] == b'3' && record.sample_rate < 0.0 {
+        // miniSEED 3 permits the sample interval in seconds as a negative number.
+        record.sample_rate = -1.0 / record.sample_rate;
+    }
+    if record.activity_flags & 1 != 0
+        || record.data_quality_flags & 0x80 != 0
+        || record.flags & 3 != 0
+    {
+        return None;
+    }
+    let id = super::super::source::station_id(Some(&record.network), Some(&record.station))?;
+    if frame.get(17..offset) != Some(format!("{}_{}", id.network, id.code).as_bytes()) {
+        return None;
+    }
+    let channel = record.channel.as_bytes();
+    if !matches!(channel, [_, b'H' | b'N', b'Z'])
+        || !(0.05..=5000.).contains(&record.sample_rate)
+        || record.samples.is_empty()
+    {
+        return None;
+    }
+    let t = record.start_time;
+    let start = NaiveDate::from_yo_opt(i32::from(t.year), u32::from(t.day))
+        .and_then(|d| {
+            d.and_hms_nano_opt(
+                t.hour.into(),
+                t.minute.into(),
+                t.second.into(),
+                t.nanosecond,
+            )
+        })
+        .map(|t| t.and_utc().timestamp_millis())?;
+    // In miniSEED 2 the fixed header correction is in tenths of a
+    // millisecond. Apply it only if the data producer hasn't already.
+    let start = if frame[2] == b'2' && record.activity_flags & 2 == 0 {
+        start + i64::from(i32::from_be_bytes(data[40..44].try_into().unwrap())) / 10
+    } else {
+        start
+    };
+    let end =
+        start + ((record.samples.len() - 1) as f64 * 1000. / record.sample_rate).round() as i64;
+    Some((id, record, start, end))
+}
+
 #[derive(Default)]
 struct Processor {
     channels: HashMap<String, Detector>,
@@ -149,71 +205,9 @@ struct Processor {
 
 impl Processor {
     fn packet(&mut self, frame: &[u8], now: i64) {
-        if frame.len() < 17 || !matches!(&frame[..4], b"SE2D" | b"SE3D") {
-            return;
-        }
-        let length = u32::from_le_bytes(frame[4..8].try_into().unwrap()) as usize;
-        let offset = 17 + frame[16] as usize;
-        let Some(data) = frame.get(offset..) else {
+        let Some((id, record, start, end)) = decode_packet(frame) else {
             return;
         };
-        if data.len() != length {
-            return;
-        }
-        let Some(data) = record_bytes(frame[2], data) else {
-            return;
-        };
-        let Ok(mut record) = miniseed_rs::decode(&data) else {
-            return;
-        };
-        if frame[2] == b'3' && record.sample_rate < 0.0 {
-            // miniSEED 3 permits the sample interval in seconds as a negative number.
-            record.sample_rate = -1.0 / record.sample_rate;
-        }
-        if record.activity_flags & 1 != 0
-            || record.data_quality_flags & 0x80 != 0
-            || record.flags & 3 != 0
-        {
-            return;
-        }
-        let Some(id) =
-            super::super::source::station_id(Some(&record.network), Some(&record.station))
-        else {
-            return;
-        };
-        if frame.get(17..offset) != Some(format!("{}_{}", id.network, id.code).as_bytes()) {
-            return;
-        }
-        let channel = record.channel.as_bytes();
-        if !matches!(channel, [_, b'H' | b'N', b'Z'])
-            || !(0.05..=5000.).contains(&record.sample_rate)
-            || record.samples.is_empty()
-        {
-            return;
-        }
-        let t = record.start_time;
-        let Some(start) = NaiveDate::from_yo_opt(i32::from(t.year), u32::from(t.day))
-            .and_then(|d| {
-                d.and_hms_nano_opt(
-                    t.hour.into(),
-                    t.minute.into(),
-                    t.second.into(),
-                    t.nanosecond,
-                )
-            })
-            .map(|t| t.and_utc().timestamp_millis())
-        else {
-            return;
-        };
-        // In miniSEED 2 the fixed header correction is in tenths of a
-        // millisecond. Apply it only if the data producer hasn't already.
-        let start = if frame[2] == b'2' && record.activity_flags & 2 == 0 {
-            start + i64::from(i32::from_be_bytes(data[40..44].try_into().unwrap())) / 10
-        } else {
-            start
-        };
-        let end =
-            start + ((record.samples.len() - 1) as f64 * 1000. / record.sample_rate).round() as i64;
         if !(now - FRESH_MS..=now + 2_000).contains(&end) {
             return;
         }
@@ -241,7 +235,7 @@ pub(super) async fn run(
     mut publish: impl FnMut(HashMap<StationId, Reading>),
     connected: impl FnOnce(),
 ) -> Result<(), Error> {
-    let handshake = timeout(Duration::from_secs(20), connect());
+    let handshake = timeout(Duration::from_secs(20), connect("*", "DATA"));
     tokio::pin!(handshake);
     let mut socket = loop {
         if stop.load(Ordering::Relaxed) {
@@ -281,6 +275,72 @@ pub(super) async fn run(
             let cutoff = chrono::Utc::now().timestamp_millis() - FRESH_MS;
             processor.channels.retain(|_, d| d.last_ms >= cutoff);
             last_prune = Instant::now();
+        }
+    }
+    Ok(())
+}
+
+/// One time-selected station connection supplies recent quake traces or a rolling live chart.
+pub(in crate::station_replay) async fn watch(
+    station: &StationId,
+    from: i64,
+    to: Option<i64>,
+    stop: &AtomicBool,
+    mut deliver: impl FnMut(miniseed_rs::MseedRecord, i64) -> bool,
+) -> Result<(), String> {
+    use chrono::{DateTime, SecondsFormat};
+    let utc = |at| {
+        DateTime::from_timestamp_millis(at)
+            .unwrap()
+            .to_rfc3339_opts(SecondsFormat::Millis, true)
+    };
+    let name = format!("{}_{}", station.network, station.code);
+    let mut data = format!("DATA ALL {}", utc(from));
+    if let Some(to) = to {
+        data.push(' ');
+        data.push_str(&utc(to));
+    }
+    let handshake = timeout(Duration::from_secs(12), connect(&name, &data));
+    tokio::pin!(handshake);
+    let mut socket = loop {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        if let Ok(result) = timeout(Duration::from_millis(250), &mut handshake).await {
+            break result
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+        }
+    };
+    let mut last = Instant::now();
+    let limit = Duration::from_secs(if to.is_some() { 6 } else { 45 });
+    while !stop.load(Ordering::Relaxed) {
+        if last.elapsed() > limit {
+            return Err("Station stream has no recent packets".into());
+        }
+        let Ok(next) = timeout(Duration::from_millis(500), socket.next()).await else {
+            continue;
+        };
+        match next.transpose().map_err(|e| e.to_string())? {
+            Some(Message::Binary(frame)) => {
+                if frame.as_slice() == b"END" {
+                    break;
+                }
+                if let Some((id, record, start, end)) = decode_packet(&frame)
+                    && id == *station
+                    && end >= from
+                    && to.is_none_or(|to| start <= to)
+                {
+                    last = Instant::now();
+                    if !deliver(record, start) {
+                        break;
+                    }
+                }
+            }
+            Some(Message::Ping(_)) => socket.flush().await.map_err(|e| e.to_string())?,
+            Some(Message::Close(_)) | None => break,
+            Some(Message::Text(text)) if text.trim() == "END" => break,
+            _ => {}
         }
     }
     Ok(())

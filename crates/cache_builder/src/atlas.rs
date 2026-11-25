@@ -162,20 +162,35 @@ fn land_files(catalog: &HashMap<(i32, i32), PathBuf>, b: [f64; 4]) -> Vec<PathBu
     out.sort();
     out
 }
-fn identity(files: &[PathBuf]) -> Result<String, String> {
-    let mut stamps = Vec::new();
-    for p in files {
-        let m = fs::metadata(p).map_err(|e| format!("{}: {e}", p.display()))?;
-        stamps.push((
-            fs::canonicalize(p).map_err(|e| e.to_string())?,
-            m.len(),
-            m.modified()
-                .map_err(|e| e.to_string())?
-                .duration_since(UNIX_EPOCH)
-                .map_err(|e| e.to_string())?
-                .as_nanos(),
-        ));
-    }
+type FileStamp = (PathBuf, u64, u128);
+
+fn file_stamp(p: &Path) -> Result<FileStamp, String> {
+    let m = fs::metadata(p).map_err(|e| format!("{}: {e}", p.display()))?;
+    Ok((
+        fs::canonicalize(p).map_err(|e| e.to_string())?,
+        m.len(),
+        m.modified()
+            .map_err(|e| e.to_string())?
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos(),
+    ))
+}
+
+fn restat_stamp(canonical: &Path) -> Result<FileStamp, String> {
+    let m = fs::metadata(canonical).map_err(|e| format!("{}: {e}", canonical.display()))?;
+    Ok((
+        canonical.to_path_buf(),
+        m.len(),
+        m.modified()
+            .map_err(|e| e.to_string())?
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos(),
+    ))
+}
+
+fn hash_stamps(stamps: &[FileStamp]) -> Result<String, String> {
     let bytes = serde_json::to_vec(&(1, stamps)).map_err(|e| e.to_string())?;
     Ok(ring::digest::digest(&ring::digest::SHA256, &bytes)
         .as_ref()
@@ -183,11 +198,34 @@ fn identity(files: &[PathBuf]) -> Result<String, String> {
         .map(|b| format!("{b:02x}"))
         .collect())
 }
+
+fn build_base_vrt(base: &[PathBuf], gdal: &Path, scratch: &Path) -> Option<PathBuf> {
+    if base.len() <= 1 {
+        return None;
+    }
+    let vrt = scratch.join("base.vrt");
+    let mut cmd = Process::new(if gdal.as_os_str().is_empty() {
+        PathBuf::from("gdalbuildvrt")
+    } else {
+        gdal.join("gdalbuildvrt")
+    });
+    cmd.arg("-q")
+        .args(["--config", "GDAL_PAM_ENABLED", "NO"])
+        .arg(&vrt)
+        .args(base)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    crate::contours::run_gdal(cmd, "Atlas gdalbuildvrt").ok()?;
+    vrt.is_file().then_some(vrt)
+}
+
 struct Scratch(PathBuf);
 impl Scratch {
     fn new() -> Result<Self, String> {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "1kee-atlas-{}-{}",
+            "1kee-atlas-{}-{}-{id}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -263,6 +301,9 @@ fn warp(
                 "--config",
                 "GDAL_CACHEMAX",
                 "64",
+                "--config",
+                "GDAL_PAM_ENABLED",
+                "NO",
             ])
             .args(files)
             .arg(&output)
@@ -369,16 +410,54 @@ pub fn run(c: Command, progress: &mut dyn FnMut(Progress)) -> Result<String, Str
             return Err("No SRTM coverage intersects the selected bounds".into());
         }
         let writer = Writer::open(&c.cache)?;
+        // Precompute canonical stamps for `base` once (and any SRTM files on demand)
+        // to avoid thousands of redundant canonicalize/JSON/SHA-256 calls.
+        let base_stamps: Vec<FileStamp> = base
+            .iter()
+            .map(|p| file_stamp(p))
+            .collect::<Result<Vec<_>, _>>()?;
+        let base_identity = hash_stamps(&base_stamps)?;
+        let mut land_stamp_cache: HashMap<PathBuf, FileStamp> = HashMap::new();
+
+        // Phase 1: check reusability sequentially on the writer connection and
+        // collect the tiles that actually need building.
+        struct BuildItem {
+            key: Key,
+            land: Vec<PathBuf>,
+            canonical_files: Vec<PathBuf>,
+            stamp: String,
+            needed: u64,
+        }
+        let mut to_build: Vec<BuildItem> = Vec::new();
+        p.state = "Checking Atlas tiles".into();
         for key in keys {
             let land = if key.tier == Tier::Land {
                 land_files(&catalog, key.source_bounds())
             } else {
                 Vec::new()
             };
-            let files: [&[PathBuf]; 2] = [&base, &land];
-            let all: Vec<_> = files.into_iter().flatten().cloned().collect();
-            let stamp = identity(&all)?;
-            p.state = "Checking Atlas tiles".into();
+            let (stamp, canonical_files) = if land.is_empty() {
+                (
+                    base_identity.clone(),
+                    base_stamps.iter().map(|s| s.0.clone()).collect(),
+                )
+            } else {
+                let mut stamps = Vec::with_capacity(base_stamps.len() + land.len());
+                stamps.extend(base_stamps.iter().cloned());
+                for p in &land {
+                    let s = if let Some(cached) = land_stamp_cache.get(p) {
+                        cached.clone()
+                    } else {
+                        let fresh = file_stamp(p)?;
+                        land_stamp_cache.insert(p.clone(), fresh.clone());
+                        fresh
+                    };
+                    stamps.push(s);
+                }
+                let hash = hash_stamps(&stamps)?;
+                let canon = stamps.into_iter().map(|s| s.0).collect();
+                (hash, canon)
+            };
             p.message = format!("{} · tile {},{}", key.tier.name(), key.x, key.y);
             emit(&mut p);
             match writer.reusable(key, &stamp) {
@@ -395,28 +474,168 @@ pub fn run(c: Command, progress: &mut dyn FnMut(Progress)) -> Result<String, Str
                 }
             }
             let needed = (key.tier.side().pow(2) * 4) as u64;
+            to_build.push(BuildItem {
+                key,
+                land,
+                canonical_files,
+                stamp,
+                needed,
+            });
+        }
+
+        if !to_build.is_empty() {
+            // Build a single shared GEBCO VRT once when multiple base files exist.
+            let vrt_scratch = Scratch::new()?;
+            let warp_base: Vec<PathBuf> = match build_base_vrt(&base, &c.gdal_bin_dir, &vrt_scratch.0)
+            {
+                Some(vrt) => vec![vrt],
+                None => base.clone(),
+            };
+
+            let max_needed = to_build.iter().map(|i| i.needed).max().unwrap_or(0);
             if crate::archive_space::available(&c.cache)
-                .is_some_and(|free| free < needed * 4 + 1024 * 1024 * 1024)
+                .is_some_and(|free| free < max_needed * 4 + 1024 * 1024 * 1024)
             {
                 return Err("Not enough free space for Atlas tile; saved tiles preserved. Free space and resume.".into());
             }
-            p.state = "Building Atlas tiles".into();
+
+            let cache_path = &c.cache;
+            let gdal_dir = &c.gdal_bin_dir;
+
+            // Build the first pending tile sequentially as a fast-fail preflight
+            // (verifies GDAL tooling/inputs and avoids thread-pool overhead for
+            // 1-tile builds), then fan out all remaining tiles in parallel.
+            let mut rest = to_build;
+            let first = rest.remove(0);
+            p.state = "Building Atlas tile".into();
+            p.message = format!(
+                "{} · tile {},{}",
+                first.key.tier.name(),
+                first.key.x,
+                first.key.y
+            );
             emit(&mut p);
-            let heights = crate::build_monitor::with_heartbeat(
-                || tile(key, &base, &land, &c.gdal_bin_dir),
-                || emit(&mut p),
-                Duration::from_secs(1),
-            )??;
-            if identity(&all)? != stamp {
+            let heights = tile(first.key, &warp_base, &first.land, gdal_dir)?;
+            let after: Vec<FileStamp> = first
+                .canonical_files
+                .iter()
+                .map(|path| restat_stamp(path))
+                .collect::<Result<Vec<_>, _>>()?;
+            if hash_stamps(&after)? != first.stamp {
                 return Err(
                     "Atlas source changed during tile generation; tile was not published".into(),
                 );
             }
-            writer.put(key, &stamp, &heights)?;
+            writer.put(first.key, &first.stamp, &heights)?;
             p.built += 1;
             p.done += 1;
-            p.bytes += needed;
+            p.bytes += first.needed;
             emit(&mut p);
+
+            if !rest.is_empty() {
+                let num_workers = (std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4)
+                    / 2)
+                .clamp(2, 8)
+                .min(rest.len());
+
+                p.state = "Building Atlas tiles".into();
+                p.message = format!("Building {} tiles across {num_workers} workers", rest.len());
+                emit(&mut p);
+
+                let stop = std::sync::atomic::AtomicBool::new(false);
+                let (tx, rx) =
+                    std::sync::mpsc::sync_channel::<Result<(Key, String, Vec<f32>, u64), String>>(
+                        num_workers * 2,
+                    );
+
+                let build_result: Result<(), String> = std::thread::scope(|scope| {
+                    let stop_ref = &stop;
+                    let warp_base_ref = &warp_base;
+                    let producer = scope.spawn(move || {
+                        use rayon::prelude::*;
+                        let pool = rayon::ThreadPoolBuilder::new()
+                            .num_threads(num_workers)
+                            .build()
+                            .expect("atlas rayon pool");
+                        pool.install(|| {
+                            rest.into_par_iter().for_each_with(tx, |tx, item| {
+                                if stop_ref.load(std::sync::atomic::Ordering::Relaxed) {
+                                    return;
+                                }
+                                let res = (|| -> Result<(Key, String, Vec<f32>, u64), String> {
+                                    let heights =
+                                        tile(item.key, warp_base_ref, &item.land, gdal_dir)?;
+                                    let after: Vec<FileStamp> = item
+                                        .canonical_files
+                                        .iter()
+                                        .map(|p| restat_stamp(p))
+                                        .collect::<Result<Vec<_>, _>>()?;
+                                    if hash_stamps(&after)? != item.stamp {
+                                        return Err(
+                                            "Atlas source changed during tile generation; tile was not published"
+                                                .into(),
+                                        );
+                                    }
+                                    Ok((item.key, item.stamp, heights, item.needed))
+                                })();
+                                if res.is_err() {
+                                    stop_ref.store(true, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                let _ = tx.send(res);
+                            });
+                        });
+                    });
+
+                    let mut last_space = Instant::now();
+                    let mut err: Option<String> = None;
+                    loop {
+                        match rx.recv_timeout(Duration::from_secs(1)) {
+                            Ok(Ok((key, stamp, heights, needed))) => {
+                                if err.is_some() {
+                                    continue;
+                                }
+                                if last_space.elapsed() >= Duration::from_secs(2) {
+                                    last_space = Instant::now();
+                                    if crate::archive_space::available(cache_path)
+                                        .is_some_and(|free| free < needed * 4 + 1024 * 1024 * 1024)
+                                    {
+                                        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                                        err = Some("Not enough free space for Atlas tile; saved tiles preserved. Free space and resume.".into());
+                                        continue;
+                                    }
+                                }
+                                if let Err(e) = writer.put(key, &stamp, &heights) {
+                                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    err = Some(e);
+                                    continue;
+                                }
+                                p.built += 1;
+                                p.done += 1;
+                                p.bytes += needed;
+                                p.message =
+                                    format!("{} · tile {},{}", key.tier.name(), key.x, key.y);
+                                emit(&mut p);
+                            }
+                            Ok(Err(e)) => {
+                                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                                err.get_or_insert(e);
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                emit(&mut p);
+                            }
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                        }
+                    }
+                    let _ = producer.join();
+                    match err {
+                        Some(e) => Err(e),
+                        None => Ok(()),
+                    }
+                });
+                build_result?;
+            }
         }
         writer.finish()?;
         Ok(format!(

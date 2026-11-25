@@ -1,6 +1,6 @@
 //! Controls for consolidating native Earth contour caches.
 use super::{ActiveTab, BuilderApp};
-use crate::job::{BuildJob, spawn_job};
+use crate::job::{BuildJob, spawn_job_with_wake};
 use eframe::egui;
 use std::path::PathBuf;
 use tile_archive::contour_grid::SRTM_NATIVE_DB_NAME;
@@ -92,22 +92,40 @@ impl BuilderApp {
             "Build recovered cache"
         };
         if ui.add_enabled(ready, egui::Button::new(label)).clicked() {
-            self.active_job = Some(spawn_job(BuildJob::RecoverContours(form.clone())));
+            self.active_job = Some(spawn_job_with_wake(
+                BuildJob::RecoverContours(form.clone()),
+                Some(ui.ctx().clone()),
+            ));
             self.active_job_tab = Some(ActiveTab::Recovery);
             self.status = "Checking terrain caches".into();
             self.progress_detail.clear();
+            self.needs_fresh_working_folder = false;
             self.log_lines.clear();
         }
     }
     pub(super) fn show_recovery_log(&self, ui: &mut egui::Ui) {
         ui.heading("Recovery progress");
-        ui.label(&self.status);
-        if self.active_job_tab == Some(ActiveTab::Recovery) {
-            ui.spinner();
-        }
+        ui.horizontal(|ui| {
+            ui.label(&self.status);
+            if self.active_job_tab == Some(ActiveTab::Recovery) {
+                ui.label(
+                    egui::RichText::new("· Running…")
+                        .color(egui::Color32::from_rgb(95, 210, 190)),
+                );
+            }
+        });
         ui.separator();
-        for line in self.log_lines.iter().rev() {
-            ui.label(line);
-        }
+        let row_height = ui.text_style_height(&egui::TextStyle::Body);
+        let count = self.log_lines.len();
+        egui::ScrollArea::vertical()
+            .id_salt("recovery_log_scroll")
+            .show_rows(ui, row_height, count, |ui, range| {
+                for row in range {
+                    let idx = count - 1 - row;
+                    if let Some(line) = self.log_lines.get(idx) {
+                        ui.label(line);
+                    }
+                }
+            });
     }
 }

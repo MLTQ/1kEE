@@ -5,38 +5,78 @@
 /// Produces the same output schema as the GDAL pipeline so the desktop
 /// reads both transparently.
 use crate::contours::{FocusContourSpec, GeoBounds};
-use std::collections::{HashMap, HashSet, VecDeque};
+use hashlink::LruCache;
+use std::collections::{HashMap, VecDeque};
+use std::hash::{BuildHasherDefault, Hasher};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+/// Fast deterministic non-cryptographic hasher for `u64` endpoint keys.
+#[derive(Default)]
+pub(crate) struct FxHasher(u64);
+
+impl Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ b as u64).wrapping_mul(0x517cc1b727220a95);
+        }
+    }
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.0 = (self.0.rotate_left(5) ^ i).wrapping_mul(0x517cc1b727220a95);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+pub(crate) type FxHashMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 
 // ── SRTM tile reader (NaN for nodata / missing tiles) ─────────────────────────
+
+pub(crate) enum SrtmSamples {
+    /// Compact 2 bytes/pixel storage for canonical signed Int16 SRTM (`i16::MIN` = nodata).
+    I16(Vec<i16>),
+    /// Float32 storage for reprojected products (`NaN` = nodata).
+    F32(Vec<f32>),
+}
 
 pub(crate) struct SrtmTile {
     pub(crate) width: u32,
     pub(crate) height: u32,
-    /// NaN for SRTM nodata (-32768); otherwise elevation in metres.
-    pub(crate) samples: Vec<f32>,
+    pub(crate) samples: SrtmSamples,
 }
 
 impl SrtmTile {
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn sample_at_index(&self, idx: usize) -> f32 {
+        match &self.samples {
+            SrtmSamples::I16(v) => {
+                let s = v[idx];
+                if s <= -32767 { f32::NAN } else { s as f32 }
+            }
+            SrtmSamples::F32(v) => v[idx],
+        }
+    }
     /// Load an SRTM GeoTIFF tile.  Handles both signed Int16 (the most common
     /// SRTM distribution format) and Float32 (some re-processed products).
-    ///
-    /// Using the `tiff` crate directly rather than going through `image` avoids
-    /// a silent failure mode where `image` rejects Int16 TIFFs tagged with
-    /// SampleFormat=2 (SAMPLEFORMAT_INT) and `decode()` returns an error.
     pub(crate) fn load(path: &Path) -> Option<Self> {
         use std::fs::File;
         use tiff::decoder::{Decoder, DecodingResult};
 
-        // Missing file = ocean/nodata area — expected, return None silently.
-        if !path.exists() {
-            return None;
-        }
-
-        let file = File::open(path)
-            .map_err(|e| eprintln!("[1kEE] SRTM open error {}: {e}", path.display()))
-            .ok()?;
-        let mut decoder = Decoder::new(file)
+        let file = match File::open(path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(e) => {
+                eprintln!("[1kEE] SRTM open error {}: {e}", path.display());
+                return None;
+            }
+        };
+        let mut decoder = Decoder::new(BufReader::with_capacity(256 * 1024, file))
             .map_err(|e| eprintln!("[1kEE] SRTM TIFF init error {}: {e}", path.display()))
             .ok()?;
 
@@ -50,45 +90,31 @@ impl SrtmTile {
             .map_err(|e| eprintln!("[1kEE] SRTM read error {}: {e}", path.display()))
             .ok()?;
 
-        let samples: Vec<f32> = match result {
-            // Signed Int16 — the canonical SRTM format (SampleFormat=2).
-            // -32768 is the SRTM nodata sentinel; map to NaN.
-            DecodingResult::I16(data) => data
-                .into_iter()
-                .map(|s| if s == i16::MIN { f32::NAN } else { s as f32 })
-                .collect(),
-            // Unsigned 16-bit — sometimes written by tools that ignore SampleFormat.
-            // Reinterpret bits as i16 so negative elevations decode correctly.
-            DecodingResult::U16(data) => data
-                .into_iter()
-                .map(|u| {
-                    let s = u as i16;
-                    if s == i16::MIN { f32::NAN } else { s as f32 }
-                })
-                .collect(),
-            // Float32 — used by some re-projected SRTM products.
-            // Common nodata values: NaN, -32768.0, -9999.0.
-            DecodingResult::F32(data) => data
-                .into_iter()
-                .map(|f| {
-                    if f.is_nan() || f <= -32767.0 {
-                        f32::NAN
-                    } else {
-                        f
+        let samples = match result {
+            DecodingResult::I16(data) => SrtmSamples::I16(data),
+            DecodingResult::U16(data) => {
+                let signed: Vec<i16> = data.into_iter().map(|u| u as i16).collect();
+                SrtmSamples::I16(signed)
+            }
+            DecodingResult::F32(mut data) => {
+                for f in &mut data {
+                    if f.is_nan() || *f <= -32767.0 {
+                        *f = f32::NAN;
                     }
-                })
-                .collect(),
-            // Float64 — rare but possible after reprojection.
-            DecodingResult::F64(data) => data
-                .into_iter()
-                .map(|f| {
-                    if f.is_nan() || f <= -32767.0 {
-                        f32::NAN
-                    } else {
-                        f as f32
-                    }
-                })
-                .collect(),
+                }
+                SrtmSamples::F32(data)
+            }
+            DecodingResult::F64(data) => SrtmSamples::F32(
+                data.into_iter()
+                    .map(|f| {
+                        if f.is_nan() || f <= -32767.0 {
+                            f32::NAN
+                        } else {
+                            f as f32
+                        }
+                    })
+                    .collect(),
+            ),
             _other => {
                 eprintln!(
                     "[1kEE] SRTM unsupported pixel format in {} (not I16/U16/F32/F64)",
@@ -98,11 +124,15 @@ impl SrtmTile {
             }
         };
 
-        if samples.len() != (width * height) as usize {
+        let len = match &samples {
+            SrtmSamples::I16(v) => v.len(),
+            SrtmSamples::F32(v) => v.len(),
+        };
+        if len != (width * height) as usize {
             eprintln!(
                 "[1kEE] SRTM sample count mismatch {}: got {} expected {}",
                 path.display(),
-                samples.len(),
+                len,
                 width * height
             );
             return None;
@@ -115,20 +145,24 @@ impl SrtmTile {
         })
     }
 
+    #[inline]
     fn get(&self, x: u32, y: u32) -> f32 {
-        self.samples
-            .get((y * self.width + x) as usize)
-            .copied()
-            .unwrap_or(f32::NAN)
+        let idx = (y * self.width + x) as usize;
+        match &self.samples {
+            SrtmSamples::I16(data) => match data.get(idx).copied() {
+                Some(s) if s != i16::MIN => s as f32,
+                _ => f32::NAN,
+            },
+            SrtmSamples::F32(data) => data.get(idx).copied().unwrap_or(f32::NAN),
+        }
     }
 
     /// Bilinear sample at (lat, lon).
     /// Assumes the tile covers [floor_lat, floor_lat+1) × [floor_lon, floor_lon+1).
-    fn sample(&self, lat: f32, lon: f32) -> f32 {
-        let lat_base = lat.floor();
-        let lon_base = lon.floor();
-        let u = (lon - lon_base).clamp(0.0, 0.999_999);
-        let v = (1.0 - (lat - lat_base)).clamp(0.0, 0.999_999);
+    #[inline]
+    fn sample(&self, lat: f32, lon: f32, lat_base: i32, lon_base: i32) -> f32 {
+        let u = (lon - lon_base as f32).clamp(0.0, 0.999_999);
+        let v = (1.0 - (lat - lat_base as f32)).clamp(0.0, 0.999_999);
 
         let x = u * self.width.saturating_sub(1) as f32;
         let y = v * self.height.saturating_sub(1) as f32;
@@ -145,7 +179,7 @@ impl SrtmTile {
         let bl = self.get(x0, y1);
         let br = self.get(x1, y1);
 
-        if tl.is_nan() || tr.is_nan() || bl.is_nan() || br.is_nan() {
+        if !(tl + tr + bl + br).is_finite() {
             return f32::NAN;
         }
 
@@ -155,54 +189,73 @@ impl SrtmTile {
     }
 }
 
-/// LRU SRTM tile cache.  Returns NaN for missing tiles and nodata cells,
-/// unlike `SrtmSampler` in `srtm.rs` (which converts -32768 → 0.0).
-pub struct NativeSrtmSampler {
+/// Thread-safe bounded LRU SRTM tile cache shared across Rayon workers.
+pub struct SharedSrtmCache {
     root: PathBuf,
-    tiles: Vec<(PathBuf, SrtmTile)>,
-    missing: HashSet<PathBuf>,
+    lru: Mutex<LruCache<(i32, i32), Option<Arc<SrtmTile>>>>,
+}
+
+impl SharedSrtmCache {
+    pub fn new(root: PathBuf, capacity: usize) -> Arc<Self> {
+        Arc::new(Self {
+            root,
+            lru: Mutex::new(LruCache::new(capacity.max(8))),
+        })
+    }
+
+    fn get_or_load(&self, key: (i32, i32)) -> Option<Arc<SrtmTile>> {
+        if let Ok(mut guard) = self.lru.lock() {
+            if let Some(hit) = guard.get(&key) {
+                return hit.clone();
+            }
+        }
+        let path = srtm_tile_path_for_key(&self.root, key.0, key.1);
+        let loaded = SrtmTile::load(&path).map(Arc::new);
+        if let Ok(mut guard) = self.lru.lock() {
+            guard.insert(key, loaded.clone());
+        }
+        loaded
+    }
+}
+
+/// Per-worker SRTM sampler backed by a shared LRU with a lock-free 1-slot
+/// fast path (zero locks and zero heap allocations for 99.9%+ of pixels).
+pub struct NativeSrtmSampler {
+    shared: Arc<SharedSrtmCache>,
+    last: Option<((i32, i32), Option<Arc<SrtmTile>>)>,
 }
 
 impl NativeSrtmSampler {
     pub fn new(root: PathBuf) -> Self {
-        Self {
-            root,
-            tiles: Vec::new(),
-            missing: HashSet::new(),
-        }
+        Self::with_shared(SharedSrtmCache::new(root, 16))
     }
 
+    pub fn with_shared(shared: Arc<SharedSrtmCache>) -> Self {
+        Self { shared, last: None }
+    }
+
+    #[inline]
     pub fn sample(&mut self, lat: f32, lon: f32) -> f32 {
-        let path = srtm_tile_path(&self.root, lat, lon);
-        if self.missing.contains(&path) {
-            return f32::NAN;
+        let key = (lat.floor() as i32, lon.floor() as i32);
+        if let Some((last_key, ref tile)) = self.last
+            && last_key == key
+        {
+            return match tile {
+                Some(t) => t.sample(lat, lon, key.0, key.1),
+                None => f32::NAN,
+            };
         }
-        if let Some(idx) = self.tiles.iter().position(|(p, _)| *p == path) {
-            let entry = self.tiles.remove(idx);
-            let v = entry.1.sample(lat, lon);
-            self.tiles.insert(0, entry);
-            return v;
-        }
-        match SrtmTile::load(&path) {
-            Some(tile) => {
-                let v = tile.sample(lat, lon);
-                self.tiles.insert(0, (path, tile));
-                if self.tiles.len() > 8 {
-                    self.tiles.pop();
-                }
-                v
-            }
-            None => {
-                self.missing.insert(path);
-                f32::NAN
-            }
-        }
+        let tile = self.shared.get_or_load(key);
+        let v = match &tile {
+            Some(t) => t.sample(lat, lon, key.0, key.1),
+            None => f32::NAN,
+        };
+        self.last = Some((key, tile));
+        v
     }
 }
 
-fn srtm_tile_path(root: &Path, lat: f32, lon: f32) -> PathBuf {
-    let lat_base = lat.floor() as i32;
-    let lon_base = lon.floor() as i32;
+fn srtm_tile_path_for_key(root: &Path, lat_base: i32, lon_base: i32) -> PathBuf {
     let lat_prefix = if lat_base >= 0 { 'N' } else { 'S' };
     let lon_prefix = if lon_base >= 0 { 'E' } else { 'W' };
     root.join(format!(
@@ -259,7 +312,96 @@ pub fn build_tile_contours_on_grid(
         return (Vec::new(), Vec::new()); // all nodata
     }
 
-    let coast_segs = extract_segments(&grid, n, 0.0, bounds);
+    let interval_m = spec.interval_m.max(1);
+    let interval = interval_m as f32;
+    let k_min = (min_e / interval).ceil() as i32;
+    let k_max = (max_e / interval).floor() as i32;
+    let num_levels = if k_min <= k_max {
+        (k_max - k_min + 1) as usize
+    } else {
+        0
+    };
+
+    let mut coast_segs: Vec<[(f32, f32); 2]> = Vec::new();
+    let mut level_segs: Vec<Vec<[(f32, f32); 2]>> = (0..num_levels).map(|_| Vec::new()).collect();
+
+    // Single pass over all 2×2 cells: emit only the levels actually crossed by
+    // each cell (instead of up to 800 full-grid passes) and compute only the
+    // 2 active edge crossings per case.
+    let dlat = (bounds.max_lat - bounds.min_lat) / n as f64;
+    let dlon = (bounds.max_lon - bounds.min_lon) / n as f64;
+    let lats: Vec<f32> = (0..n)
+        .map(|row| (bounds.max_lat - (row as f64 + 0.5) * dlat) as f32)
+        .collect();
+    let lons: Vec<f32> = (0..n)
+        .map(|col| (bounds.min_lon + (col as f64 + 0.5) * dlon) as f32)
+        .collect();
+
+    let need_coast = min_e <= 0.0 && max_e > 0.0;
+
+    for row in 0..n.saturating_sub(1) {
+        let lat0 = lats[row];
+        let lat1 = lats[row + 1];
+        let row0 = &grid[row * n..(row + 1) * n];
+        let row1 = &grid[(row + 1) * n..(row + 2) * n];
+        for col in 0..n.saturating_sub(1) {
+            let tl = row0[col];
+            let tr = row0[col + 1];
+            let br = row1[col + 1];
+            let bl = row1[col];
+            if !(tl + tr + br + bl).is_finite() {
+                continue;
+            }
+            let cell_min = tl.min(tr).min(br).min(bl);
+            let cell_max = tl.max(tr).max(br).max(bl);
+            if cell_min == cell_max {
+                continue;
+            }
+            let lon0 = lons[col];
+            let lon1 = lons[col + 1];
+
+            if need_coast && cell_min <= 0.0 && cell_max > 0.0 {
+                emit_cell_segments(
+                    tl,
+                    tr,
+                    br,
+                    bl,
+                    0.0,
+                    lon0,
+                    lon1,
+                    lat0,
+                    lat1,
+                    &mut coast_segs,
+                );
+            }
+
+            if num_levels > 0 {
+                let c_lo = ((cell_min / interval).ceil() as i32).max(k_min);
+                let c_hi = ((cell_max / interval).floor() as i32).min(k_max);
+                for k in c_lo..=c_hi {
+                    if k == 0 {
+                        continue;
+                    }
+                    let threshold = (k * interval_m) as f32;
+                    if cell_min <= threshold && cell_max > threshold {
+                        emit_cell_segments(
+                            tl,
+                            tr,
+                            br,
+                            bl,
+                            threshold,
+                            lon0,
+                            lon1,
+                            lat0,
+                            lat1,
+                            &mut level_segs[(k - k_min) as usize],
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     let coastlines = if coast_segs.is_empty() {
         Vec::new()
     } else {
@@ -269,28 +411,24 @@ pub fn build_tile_contours_on_grid(
             .collect()
     };
 
-    let interval = spec.interval_m as f32;
-    let lo = ((min_e / interval).ceil() as i32) * spec.interval_m;
-    let hi = ((max_e / interval).floor() as i32) * spec.interval_m;
-
     let mut contours = Vec::new();
-    let mut level = lo;
-    while level <= hi {
-        if level != 0 {
-            let threshold = level as f32;
-            let segs = extract_segments(&grid, n, threshold, bounds);
-            if !segs.is_empty() {
-                for poly in chain_segments(segs) {
-                    if poly.len() >= 2 {
-                        contours.push(ContourLine {
-                            elevation_m: threshold,
-                            points: poly,
-                        });
-                    }
-                }
+    for (offset, segs) in level_segs.into_iter().enumerate() {
+        if segs.is_empty() {
+            continue;
+        }
+        let level = (k_min + offset as i32) * interval_m;
+        if level == 0 {
+            continue;
+        }
+        let threshold = level as f32;
+        for poly in chain_segments(segs) {
+            if poly.len() >= 2 {
+                contours.push(ContourLine {
+                    elevation_m: threshold,
+                    points: poly,
+                });
             }
         }
-        level += spec.interval_m;
     }
 
     (contours, coastlines)
@@ -333,6 +471,74 @@ fn build_grid(
 // Bit convention:  8=TL  4=TR  2=BR  1=BL  (set = above threshold)
 // Edge names:      N=top  E=right  S=bottom  W=left
 
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn emit_cell_segments(
+    tl: f32,
+    tr: f32,
+    br: f32,
+    bl: f32,
+    threshold: f32,
+    lon0: f32,
+    lon1: f32,
+    lat0: f32,
+    lat1: f32,
+    segs: &mut Vec<[(f32, f32); 2]>,
+) {
+    let idx = ((tl > threshold) as u8) << 3
+        | ((tr > threshold) as u8) << 2
+        | ((br > threshold) as u8) << 1
+        | ((bl > threshold) as u8);
+
+    if idx == 0 || idx == 15 {
+        return;
+    }
+
+    let n_pt = || (lon0 + interp(tl, tr, threshold) * (lon1 - lon0), lat0);
+    let e_pt = || (lon1, lat0 + interp(tr, br, threshold) * (lat1 - lat0));
+    let s_pt = || (lon0 + interp(bl, br, threshold) * (lon1 - lon0), lat1);
+    let w_pt = || (lon0, lat0 + interp(tl, bl, threshold) * (lat1 - lat0));
+
+    match idx {
+        1 | 14 => segs.push([w_pt(), s_pt()]),
+        2 | 13 => segs.push([s_pt(), e_pt()]),
+        3 | 12 => segs.push([w_pt(), e_pt()]),
+        4 | 11 => segs.push([n_pt(), e_pt()]),
+        5 => {
+            let n = n_pt();
+            let e = e_pt();
+            let s = s_pt();
+            let w = w_pt();
+            let avg = (tl + tr + br + bl) * 0.25;
+            if avg > threshold {
+                segs.push([n, w]);
+                segs.push([e, s]);
+            } else {
+                segs.push([n, e]);
+                segs.push([w, s]);
+            }
+        }
+        6 | 9 => segs.push([n_pt(), s_pt()]),
+        7 | 8 => segs.push([n_pt(), w_pt()]),
+        10 => {
+            let n = n_pt();
+            let e = e_pt();
+            let s = s_pt();
+            let w = w_pt();
+            let avg = (tl + tr + br + bl) * 0.25;
+            if avg > threshold {
+                segs.push([n, e]);
+                segs.push([w, s]);
+            } else {
+                segs.push([n, w]);
+                segs.push([e, s]);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn extract_segments(
     grid: &[f32],
     n: usize,
@@ -341,93 +547,36 @@ pub(crate) fn extract_segments(
 ) -> Vec<[(f32, f32); 2]> {
     let dlat = (bounds.max_lat - bounds.min_lat) / n as f64;
     let dlon = (bounds.max_lon - bounds.min_lon) / n as f64;
-
-    let lat_at = |row: usize| (bounds.max_lat - (row as f64 + 0.5) * dlat) as f32;
-    let lon_at = |col: usize| (bounds.min_lon + (col as f64 + 0.5) * dlon) as f32;
-    let g = |row: usize, col: usize| grid[row * n + col];
-
+    let lats: Vec<f32> = (0..n)
+        .map(|row| (bounds.max_lat - (row as f64 + 0.5) * dlat) as f32)
+        .collect();
+    let lons: Vec<f32> = (0..n)
+        .map(|col| (bounds.min_lon + (col as f64 + 0.5) * dlon) as f32)
+        .collect();
     let mut segs: Vec<[(f32, f32); 2]> = Vec::new();
-
-    for row in 0..n - 1 {
-        for col in 0..n - 1 {
-            let tl = g(row, col);
-            let tr = g(row, col + 1);
-            let br = g(row + 1, col + 1);
-            let bl = g(row + 1, col);
-
-            if tl.is_nan() || tr.is_nan() || br.is_nan() || bl.is_nan() {
+    for row in 0..n.saturating_sub(1) {
+        let lat0 = lats[row];
+        let lat1 = lats[row + 1];
+        for col in 0..n.saturating_sub(1) {
+            let tl = grid[row * n + col];
+            let tr = grid[row * n + col + 1];
+            let br = grid[(row + 1) * n + col + 1];
+            let bl = grid[(row + 1) * n + col];
+            if !(tl + tr + br + bl).is_finite() {
                 continue;
             }
-
-            let idx = ((tl > threshold) as u8) << 3
-                | ((tr > threshold) as u8) << 2
-                | ((br > threshold) as u8) << 1
-                | ((bl > threshold) as u8);
-
-            if idx == 0 || idx == 15 {
-                continue;
-            }
-
-            let lat0 = lat_at(row);
-            let lat1 = lat_at(row + 1);
-            let lon0 = lon_at(col);
-            let lon1 = lon_at(col + 1);
-
-            // Interpolated edge crossing points
-            let n_pt = {
-                let t = interp(tl, tr, threshold);
-                (lon0 + t * (lon1 - lon0), lat0)
-            };
-            let e_pt = {
-                let t = interp(tr, br, threshold);
-                (lon1, lat0 + t * (lat1 - lat0))
-            };
-            let s_pt = {
-                let t = interp(bl, br, threshold);
-                (lon0 + t * (lon1 - lon0), lat1)
-            };
-            let w_pt = {
-                let t = interp(tl, bl, threshold);
-                (lon0, lat0 + t * (lat1 - lat0))
-            };
-
-            match idx {
-                1 => segs.push([w_pt, s_pt]),
-                2 => segs.push([s_pt, e_pt]),
-                3 => segs.push([w_pt, e_pt]),
-                4 => segs.push([n_pt, e_pt]),
-                5 => {
-                    // Saddle: TR+BL above, TL+BR below
-                    let avg = (tl + tr + br + bl) * 0.25;
-                    if avg > threshold {
-                        segs.push([n_pt, w_pt]);
-                        segs.push([e_pt, s_pt]);
-                    } else {
-                        segs.push([n_pt, e_pt]);
-                        segs.push([w_pt, s_pt]);
-                    }
-                }
-                6 => segs.push([n_pt, s_pt]),
-                7 => segs.push([n_pt, w_pt]),
-                8 => segs.push([n_pt, w_pt]),
-                9 => segs.push([n_pt, s_pt]),
-                10 => {
-                    // Saddle: TL+BR above, TR+BL below
-                    let avg = (tl + tr + br + bl) * 0.25;
-                    if avg > threshold {
-                        segs.push([n_pt, e_pt]);
-                        segs.push([w_pt, s_pt]);
-                    } else {
-                        segs.push([n_pt, w_pt]);
-                        segs.push([e_pt, s_pt]);
-                    }
-                }
-                11 => segs.push([n_pt, e_pt]),
-                12 => segs.push([w_pt, e_pt]),
-                13 => segs.push([s_pt, e_pt]),
-                14 => segs.push([w_pt, s_pt]),
-                _ => {}
-            }
+            emit_cell_segments(
+                tl,
+                tr,
+                br,
+                bl,
+                threshold,
+                lons[col],
+                lons[col + 1],
+                lat0,
+                lat1,
+                &mut segs,
+            );
         }
     }
     segs
@@ -451,8 +600,9 @@ pub(crate) fn chain_segments(segments: Vec<[(f32, f32); 2]>) -> Vec<Vec<(f32, f3
     const EMPTY: u32 = u32::MAX;
     // Compact [u32; 2] inline slots handle 99.9%+ of contour vertices (degree <= 2)
     // without heap-allocating SmallVecs; degree > 2 saddles spill into `overflow`.
-    let mut ep_map: HashMap<u64, [u32; 2]> = HashMap::with_capacity(segments.len() + 16);
-    let mut overflow: HashMap<u64, Vec<u32>> = HashMap::new();
+    let mut ep_map: FxHashMap<u64, [u32; 2]> =
+        FxHashMap::with_capacity_and_hasher(segments.len() + 16, Default::default());
+    let mut overflow: FxHashMap<u64, Vec<u32>> = FxHashMap::default();
     for (i, seg) in segments.iter().enumerate() {
         let idx = i as u32;
         for &pt in seg {
@@ -539,8 +689,8 @@ fn ebits(p: (f32, f32)) -> u64 {
 
 #[inline]
 fn find_next(
-    ep_map: &HashMap<u64, [u32; 2]>,
-    overflow: &HashMap<u64, Vec<u32>>,
+    ep_map: &FxHashMap<u64, [u32; 2]>,
+    overflow: &FxHashMap<u64, Vec<u32>>,
     used: &[bool],
     key: u64,
 ) -> Option<usize> {

@@ -65,6 +65,7 @@ fn empty(cmd: &PlanetAllCommand, nodes: &PbfNodes, start: u64) -> Join {
         scan: start,
         collected: false,
         joined: 0,
+        blocks_per_shard: BLOCKS_PER_SHARD,
         requests: vec![Spool::default(); nodes.block_count().div_ceil(BLOCKS_PER_SHARD)],
         groups: Vec::new(),
     };

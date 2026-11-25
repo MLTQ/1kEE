@@ -57,7 +57,7 @@ pub(super) fn check(
         fs::create_dir_all(parent)?;
         log(format!("Writing verification copy to {}", fast.display()));
         let mut temp = tempfile::NamedTempFile::new_in(parent)?;
-        std::io::copy(&mut fs::File::open(path)?, &mut temp)?;
+        std::io::copy(&mut fs::File::open(path)?, temp.as_file_mut())?;
         temp.flush()?;
         temp.as_file().sync_all()?;
         temp.persist_noclobber(fast)?;
@@ -69,30 +69,66 @@ pub(super) fn check(
     let reference = open_read(fast)?;
     standalone(&reference)?;
     // Both SQLite snapshots hold a read lock on their rollback-mode file.
-    // Compare the complete byte stream, including pages outside the manifests.
+    // Compare the complete byte stream, including pages outside the manifests,
+    // overlapping reads across both devices concurrently.
     let mut archive = fs::File::open(path)?;
     let mut copy = fs::File::open(fast)?;
-    let mut remaining = archive.metadata()?.len();
+    let total_len = archive.metadata()?.len();
     ensure!(
-        remaining == copy.metadata()?.len(),
+        total_len == copy.metadata()?.len(),
         "verification copy has a different length"
     );
-    let (mut a, mut b) = (vec![0; CHUNK], vec![0; CHUNK]);
     log(format!(
         "Comparing every byte of {} with {}",
         path.display(),
         fast.display()
     ));
-    while remaining > 0 {
-        let n = remaining.min(CHUNK as u64) as usize;
-        archive.read_exact(&mut a[..n])?;
-        copy.read_exact(&mut b[..n])?;
-        ensure!(
-            a[..n] == b[..n],
-            "verification copy differs from the archive"
-        );
-        remaining -= n as u64;
-    }
+    std::thread::scope(|scope| -> Result<()> {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<std::io::Result<(Vec<u8>, usize)>>(2);
+        let (recycle_tx, recycle_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(3);
+        let _ = recycle_tx.send(vec![0u8; CHUNK]);
+        let _ = recycle_tx.send(vec![0u8; CHUNK]);
+        let reader = scope.spawn(move || {
+            let mut rem = total_len;
+            while rem > 0 {
+                let n = rem.min(CHUNK as u64) as usize;
+                let mut buf = recycle_rx.recv().unwrap_or_else(|_| vec![0u8; CHUNK]);
+                match copy.read_exact(&mut buf[..n]) {
+                    Ok(()) => {
+                        if tx.send(Ok((buf, n))).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        break;
+                    }
+                }
+                rem -= n as u64;
+            }
+        });
+        let mut a = vec![0u8; CHUNK];
+        let mut rem = total_len;
+        let cmp_res: Result<()> = (|| {
+            while rem > 0 {
+                let n = rem.min(CHUNK as u64) as usize;
+                archive.read_exact(&mut a[..n])?;
+                let (b, bn) = rx
+                    .recv()
+                    .map_err(|_| anyhow!("verification reader stopped"))??;
+                ensure!(
+                    bn == n && a[..n] == b[..n],
+                    "verification copy differs from the archive"
+                );
+                let _ = recycle_tx.try_send(b);
+                rem -= n as u64;
+            }
+            Ok(())
+        })();
+        drop(rx);
+        let _ = reader.join();
+        cmp_res
+    })?;
     ensure!(
         receipts(&reference)? == *proofs,
         "verification receipts differ from copied tiles"

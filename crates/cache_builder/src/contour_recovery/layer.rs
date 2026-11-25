@@ -1,8 +1,9 @@
 //! A manifest is authoritative for counts, even when an index or a range of pages is damaged.
 use anyhow::{Result, anyhow, bail, ensure};
-use ring::digest::{Context, SHA256};
+use rayon::prelude::*;
+use ring::digest::{Context, Digest, SHA256};
 use rusqlite::{Connection, OptionalExtension, params};
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 pub(super) type Key = [i32; 3];
 pub(super) type Hash = [u8; 32];
@@ -155,6 +156,20 @@ fn select(layer: Layer, range: bool) -> String {
     )
 }
 
+fn finalize_tile_hash(entries: &mut [(i64, Digest)], sorted: bool) -> Result<Hash> {
+    if !sorted {
+        entries.sort_unstable_by_key(|(fid, _)| *fid);
+        for w in entries.windows(2) {
+            ensure!(w[0].0 != w[1].0, "duplicate feature ID");
+        }
+    }
+    let mut hash = Context::new(&SHA256);
+    for (_, h) in entries.iter() {
+        hash.update(h.as_ref());
+    }
+    Ok(hash.finish().as_ref().try_into()?)
+}
+
 pub(super) fn transfer(
     src: &Connection,
     dst: Option<&Connection>,
@@ -162,7 +177,10 @@ pub(super) fn transfer(
     tile: &Tile,
     range: bool,
 ) -> Result<Hash> {
-    let mut hashes = BTreeMap::new();
+    let mut hashes: Vec<(i64, Digest)> = Vec::with_capacity(tile.count.max(0) as usize);
+    let mut sorted = true;
+    let mut last_fid = i64::MIN;
+    let mut has_prev = false;
     // Empty manifests are useful coverage. For a normal indexed read, check
     // that no unexpected geometry hides behind a zero count as well.
     if tile.count != 0 || !range {
@@ -192,22 +210,25 @@ pub(super) fn transfer(
             let fid: i64 = row.get(3)?;
             let elevation: f64 = row.get(4)?;
             let blob = row.get_ref(5)?.as_blob()?;
-            let mut finite = true;
-            let lines = tile_archive::gpkg::try_parse_gpkg_lines(blob, |x, y| {
-                finite &= x.is_finite() && y.is_finite();
-            });
             ensure!(
-                elevation.is_finite() && finite && lines.is_some(),
+                elevation.is_finite() && tile_archive::gpkg::validate_gpkg_lines(blob),
                 "invalid contour geometry"
             );
             let mut h = Context::new(&SHA256);
             h.update(&fid.to_le_bytes());
             h.update(&elevation.to_bits().to_le_bytes());
             h.update(blob);
-            ensure!(
-                hashes.insert(fid, h.finish()).is_none(),
-                "duplicate feature ID"
-            );
+            if has_prev {
+                if fid == last_fid {
+                    bail!("duplicate feature ID");
+                }
+                if fid < last_fid {
+                    sorted = false;
+                }
+            }
+            last_fid = fid;
+            has_prev = true;
+            hashes.push((fid, h.finish()));
             if let Some(stmt) = writer.as_mut() {
                 stmt.execute(params![key[0], key[1], key[2], fid, elevation, blob])?;
             }
@@ -219,10 +240,7 @@ pub(super) fn transfer(
         tile.count,
         hashes.len()
     );
-    let mut hash = Context::new(&SHA256);
-    for h in hashes.values() {
-        hash.update(h.as_ref());
-    }
+    let tile_hash = finalize_tile_hash(&mut hashes, sorted)?;
     if let Some(dst) = dst {
         dst.prepare_cached(&format!(
             "INSERT INTO {} VALUES (?1,?2,?3,?4,?5)",
@@ -236,7 +254,224 @@ pub(super) fn transfer(
             tile.built
         ])?;
     }
-    Ok(hash.finish().as_ref().try_into()?)
+    Ok(tile_hash)
+}
+
+/// Verify every tile in `tiles` and guarantee no orphan geometry exists using a
+/// single sequential `NOT INDEXED` table scan with parallel Rayon batch validation
+/// and SHA-256 hashing.
+pub(super) fn verify_layer_sequential(
+    db: &Connection,
+    layer: Layer,
+    tiles: &[Tile],
+    orphan_msg: &str,
+    mut on_tile: impl FnMut(&Tile, Hash) -> Result<()>,
+) -> Result<()> {
+    struct Slot<'a> {
+        tile: &'a Tile,
+        verified: bool,
+    }
+    let mut expected: HashMap<Key, Slot<'_>> = HashMap::with_capacity(tiles.len());
+    for tile in tiles {
+        ensure!(
+            expected
+                .insert(
+                    tile.key,
+                    Slot {
+                        tile,
+                        verified: false,
+                    },
+                )
+                .is_none(),
+            "duplicate manifest key {:?}",
+            tile.key
+        );
+    }
+
+    const BATCH: usize = 4096;
+    struct RawRow {
+        key: Key,
+        fid: i64,
+        elevation: f64,
+        blob: Vec<u8>,
+    }
+    struct Accum {
+        entries: Vec<(i64, Digest)>,
+        sorted: bool,
+        last_fid: i64,
+    }
+    impl Accum {
+        fn with_capacity(cap: usize) -> Self {
+            Self {
+                entries: Vec::with_capacity(cap),
+                sorted: true,
+                last_fid: i64::MIN,
+            }
+        }
+        fn push(&mut self, fid: i64, digest: Digest) -> Result<()> {
+            if !self.entries.is_empty() {
+                if fid == self.last_fid {
+                    bail!("duplicate feature ID");
+                }
+                if fid < self.last_fid {
+                    self.sorted = false;
+                }
+            }
+            self.last_fid = fid;
+            self.entries.push((fid, digest));
+            Ok(())
+        }
+    }
+
+    let mut active_key: Option<Key> = None;
+    let mut active_acc: Option<Accum> = None;
+    let mut split_tiles: HashMap<Key, Accum> = HashMap::new();
+
+    let flush_active = |active_key: &mut Option<Key>,
+                            active_acc: &mut Option<Accum>,
+                            split_tiles: &mut HashMap<Key, Accum>,
+                            expected: &mut HashMap<Key, Slot<'_>>,
+                            on_tile: &mut dyn FnMut(&Tile, Hash) -> Result<()>|
+     -> Result<()> {
+        let Some(key) = active_key.take() else {
+            return Ok(());
+        };
+        let mut acc = active_acc.take().unwrap();
+        let slot = expected
+            .get_mut(&key)
+            .ok_or_else(|| anyhow!("{orphan_msg}"))?;
+        if !split_tiles.contains_key(&key) && acc.entries.len() as i64 == slot.tile.count {
+            let h = finalize_tile_hash(&mut acc.entries, acc.sorted)?;
+            on_tile(slot.tile, h)?;
+            slot.verified = true;
+        } else {
+            match split_tiles.get_mut(&key) {
+                Some(existing) => {
+                    for (fid, d) in acc.entries {
+                        existing.push(fid, d)?;
+                    }
+                }
+                None => {
+                    split_tiles.insert(key, acc);
+                }
+            }
+        }
+        Ok(())
+    };
+
+    let sql = format!(
+        "SELECT zoom_bucket,lat_bucket,lon_bucket,fid,{},geom FROM {} NOT INDEXED",
+        layer.elevation(),
+        layer.table()
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let mut rows = stmt.query([])?;
+    let mut batch: Vec<RawRow> = Vec::with_capacity(BATCH);
+
+    let process_batch = |batch: &mut Vec<RawRow>,
+                         active_key: &mut Option<Key>,
+                         active_acc: &mut Option<Accum>,
+                         split_tiles: &mut HashMap<Key, Accum>,
+                         expected: &mut HashMap<Key, Slot<'_>>,
+                         on_tile: &mut dyn FnMut(&Tile, Hash) -> Result<()>|
+     -> Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let hashed: Vec<(Key, i64, Digest)> = batch
+            .par_iter()
+            .map(|row| -> Result<(Key, i64, Digest)> {
+                ensure!(
+                    row.elevation.is_finite()
+                        && tile_archive::gpkg::validate_gpkg_lines(&row.blob),
+                    "invalid contour geometry"
+                );
+                let mut h = Context::new(&SHA256);
+                h.update(&row.fid.to_le_bytes());
+                h.update(&row.elevation.to_bits().to_le_bytes());
+                h.update(&row.blob);
+                Ok((row.key, row.fid, h.finish()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        batch.clear();
+
+        for (key, fid, digest) in hashed {
+            if *active_key != Some(key) {
+                flush_active(active_key, active_acc, split_tiles, expected, on_tile)?;
+                let slot = expected
+                    .get(&key)
+                    .ok_or_else(|| anyhow!("{orphan_msg}"))?;
+                ensure!(!slot.verified, "{orphan_msg}");
+                *active_key = Some(key);
+                *active_acc = Some(Accum::with_capacity(slot.tile.count.max(0) as usize));
+            }
+            active_acc.as_mut().unwrap().push(fid, digest)?;
+        }
+        Ok(())
+    };
+
+    while let Some(row) = rows.next()? {
+        let key: Key = [row.get(0)?, row.get(1)?, row.get(2)?];
+        let fid: i64 = row.get(3)?;
+        let elevation: f64 = row.get(4)?;
+        let blob = row.get_ref(5)?.as_blob()?.to_vec();
+        batch.push(RawRow {
+            key,
+            fid,
+            elevation,
+            blob,
+        });
+        if batch.len() >= BATCH {
+            process_batch(
+                &mut batch,
+                &mut active_key,
+                &mut active_acc,
+                &mut split_tiles,
+                &mut expected,
+                &mut on_tile,
+            )?;
+        }
+    }
+    process_batch(
+        &mut batch,
+        &mut active_key,
+        &mut active_acc,
+        &mut split_tiles,
+        &mut expected,
+        &mut on_tile,
+    )?;
+    flush_active(
+        &mut active_key,
+        &mut active_acc,
+        &mut split_tiles,
+        &mut expected,
+        &mut on_tile,
+    )?;
+
+    let empty_hash: Hash = Context::new(&SHA256).finish().as_ref().try_into()?;
+    for tile in tiles {
+        let slot = expected.get_mut(&tile.key).unwrap();
+        if slot.verified {
+            continue;
+        }
+        if let Some(mut acc) = split_tiles.remove(&tile.key) {
+            ensure!(
+                acc.entries.len() as i64 == tile.count,
+                "expected {} rows, read {}",
+                tile.count,
+                acc.entries.len()
+            );
+            let h = finalize_tile_hash(&mut acc.entries, acc.sorted)?;
+            on_tile(tile, h)?;
+            slot.verified = true;
+        } else {
+            ensure!(tile.count == 0, "expected {} rows, read 0", tile.count);
+            on_tile(tile, empty_hash)?;
+            slot.verified = true;
+        }
+    }
+    ensure!(split_tiles.is_empty(), "{orphan_msg}");
+    Ok(())
 }
 
 pub(super) fn copy_tile(
