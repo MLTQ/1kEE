@@ -1,8 +1,333 @@
 use crate::city_catalog;
 use crate::model::AppModel;
 use crate::osm_ingest;
+use crate::panels::world_map::contour_asset;
+use crate::settings_store;
+use crate::terrain_assets;
 use crate::terrain_precompute::{self, PrecomputeJobState};
 use crate::theme;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+struct ViewportBuildState {
+    running: bool,
+    cancel: Arc<AtomicBool>,
+    last_line: String,
+    completed_ok: bool,
+}
+
+struct CoverageCache {
+    last_osm_refresh: Option<Instant>,
+    last_scan: Option<Instant>,
+    scanning: bool,
+    /// 360×180 grid of covered 1° SRTM / contour cells (row = 89 - lat, col = lon + 180).
+    cells: Vec<u8>,
+    covered_count: usize,
+    viewport_build: ViewportBuildState,
+}
+
+fn library_state() -> &'static Mutex<CoverageCache> {
+    static STATE: OnceLock<Mutex<CoverageCache>> = OnceLock::new();
+    STATE.get_or_init(|| {
+        Mutex::new(CoverageCache {
+            last_osm_refresh: None,
+            last_scan: None,
+            scanning: false,
+            cells: vec![0u8; 360 * 180],
+            covered_count: 0,
+            viewport_build: ViewportBuildState {
+                running: false,
+                cancel: Arc::new(AtomicBool::new(false)),
+                last_line: String::new(),
+                completed_ok: false,
+            },
+        })
+    })
+}
+
+fn spawn_coverage_scan(root: Option<PathBuf>) {
+    {
+        let mut st = library_state().lock().unwrap_or_else(|p| p.into_inner());
+        if st.scanning {
+            return;
+        }
+        st.scanning = true;
+    }
+    std::thread::spawn(move || {
+        let mut grid = vec![0u8; 360 * 180];
+        let mut count = 0usize;
+        if let Some(srtm_dir) = terrain_assets::find_srtm_root(root.as_deref())
+            && let Ok(entries) = std::fs::read_dir(&srtm_dir)
+        {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str()
+                    && let Some((lat, lon)) = parse_hgt_cell(name)
+                {
+                    let row = (89 - lat).clamp(0, 179) as usize;
+                    let col = (lon + 180).clamp(0, 359) as usize;
+                    if grid[row * 360 + col] == 0 {
+                        grid[row * 360 + col] = 1;
+                        count += 1;
+                    }
+                }
+            }
+        }
+        let mut st = library_state().lock().unwrap_or_else(|p| p.into_inner());
+        st.cells = grid;
+        st.covered_count = count;
+        st.last_scan = Some(Instant::now());
+        st.scanning = false;
+        crate::app::request_repaint();
+    });
+}
+
+fn parse_hgt_cell(filename: &str) -> Option<(i32, i32)> {
+    let stem = filename.split('.').next()?;
+    if stem.len() < 7 {
+        return None;
+    }
+    let bytes = stem.as_bytes();
+    let lat_sign = match bytes[0] as char {
+        'N' | 'n' => 1,
+        'S' | 's' => -1,
+        _ => return None,
+    };
+    let lat: i32 = stem.get(1..3)?.parse().ok()?;
+    let lon_sign = match bytes[3] as char {
+        'E' | 'e' => 1,
+        'W' | 'w' => -1,
+        _ => return None,
+    };
+    let lon: i32 = stem.get(4..7)?.parse().ok()?;
+    Some((lat_sign * lat, lon_sign * lon))
+}
+
+fn find_cache_builder_exe() -> Option<PathBuf> {
+    let exe_dir = settings_store::executable_dir()?;
+    let candidate = exe_dir.join(if cfg!(windows) {
+        "one-thousand-electric-eye-cache-builder.exe"
+    } else {
+        "one-thousand-electric-eye-cache-builder"
+    });
+    candidate.exists().then_some(candidate)
+}
+
+fn spawn_viewport_build(model: &mut AppModel) {
+    let Some(builder) = find_cache_builder_exe() else {
+        model.push_log(
+            "Cache builder binary not found beside executable; build one-thousand-electric-eye-cache-builder first."
+                .into(),
+        );
+        return;
+    };
+    let Some(srtm_root) = terrain_assets::find_srtm_root(model.selected_root.as_deref()) else {
+        model.push_log("SRTM source folder not found; configure SRTM root in Settings.".into());
+        return;
+    };
+    let Some(derived) = terrain_assets::find_derived_root(model.selected_root.as_deref()) else {
+        model.push_log("Derived root not configured; configure Derived root in Settings.".into());
+        return;
+    };
+
+    let center = if model.globe_view.local_mode {
+        model.globe_view.local_center
+    } else {
+        model.globe_view.globe_center_latlon()
+    };
+    let half = if model.globe_view.local_mode {
+        crate::panels::world_map::vr_local_extent(model.globe_view.local_zoom).clamp(0.5, 4.0)
+    } else {
+        (12.0 / model.globe_view.zoom.max(1.0)).clamp(1.0, 5.0)
+    };
+    let min_lat = (center.lat - half).clamp(-60.0, 60.0);
+    let max_lat = (center.lat + half).clamp(-60.0, 60.0);
+    let min_lon = (center.lon - half).clamp(-180.0, 180.0);
+    let max_lon = (center.lon + half).clamp(-180.0, 180.0);
+    let cache_db = derived.join("terrain/srtm_native_v1.sqlite");
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let mut st = library_state().lock().unwrap_or_else(|p| p.into_inner());
+        if st.viewport_build.running {
+            return;
+        }
+        st.viewport_build.running = true;
+        st.viewport_build.cancel = Arc::clone(&cancel);
+        st.viewport_build.completed_ok = false;
+        st.viewport_build.last_line = format!(
+            "Building viewport [{min_lat:.1}..{max_lat:.1}, {min_lon:.1}..{max_lon:.1}]…"
+        );
+    }
+
+    let worker_cancel = Arc::clone(&cancel);
+    std::thread::spawn(move || {
+        let mut cmd = Command::new(&builder);
+        cmd.args([
+            "contours-bbox",
+            "--engine",
+            "gpu",
+            "--srtm-root",
+            &srtm_root.display().to_string(),
+            "--cache-db",
+            &cache_db.display().to_string(),
+            "--min-lat",
+            &format!("{min_lat:.3}"),
+            "--max-lat",
+            &format!("{max_lat:.3}"),
+            "--min-lon",
+            &format!("{min_lon:.3}"),
+            "--max-lon",
+            &format!("{max_lon:.3}"),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+        let mut ok = false;
+        let final_msg = match cmd.spawn() {
+            Ok(mut child) => {
+                if let Some(stdout) = child.stdout.take() {
+                    let reader = BufReader::new(stdout);
+                    for line in reader.lines().flatten() {
+                        if worker_cancel.load(Ordering::Acquire) {
+                            let _ = child.kill();
+                            break;
+                        }
+                        if let Ok(mut st) = library_state().lock() {
+                            st.viewport_build.last_line = line;
+                        }
+                        crate::app::request_repaint();
+                    }
+                }
+                match child.wait() {
+                    Ok(status) if status.success() => {
+                        ok = true;
+                        contour_asset::blast_tile_caches();
+                        "Viewport contour cache build complete (caches refreshed).".into()
+                    }
+                    Ok(status) => format!("Viewport build exited with status {status}"),
+                    Err(e) => format!("Viewport build wait failed: {e}"),
+                }
+            }
+            Err(e) => format!("Failed to spawn cache builder: {e}"),
+        };
+
+        if let Ok(mut st) = library_state().lock() {
+            st.viewport_build.running = false;
+            st.viewport_build.completed_ok = ok;
+            st.viewport_build.last_line = final_msg;
+        }
+        crate::app::request_repaint();
+    });
+}
+
+fn render_coverage_map_and_viewport_builder(ui: &mut egui::Ui, model: &mut AppModel) {
+    let should_scan = {
+        let st = library_state().lock().unwrap_or_else(|p| p.into_inner());
+        st.last_scan
+            .is_none_or(|t| t.elapsed() > Duration::from_secs(30))
+    };
+    if should_scan {
+        spawn_coverage_scan(model.selected_root.clone());
+    }
+
+    let (covered_count, cells_snapshot, running, last_line) = {
+        let st = library_state().lock().unwrap_or_else(|p| p.into_inner());
+        (
+            st.covered_count,
+            st.cells.clone(),
+            st.viewport_build.running,
+            st.viewport_build.last_line.clone(),
+        )
+    };
+
+    ui.heading("Local Coverage & Viewport Pre-Build");
+    ui.small(format!(
+        "SRTM 1° cell coverage on disk: {covered_count} tiles · Amber box shows current camera viewport"
+    ));
+
+    let map_w = ui.available_width().clamp(260.0, 460.0);
+    let map_h = map_w * 0.5;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(map_w, map_h), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 4.0, theme::canvas_background());
+    painter.rect_stroke(
+        rect,
+        4.0,
+        egui::Stroke::new(1.0, theme::panel_stroke()),
+        egui::StrokeKind::Inside,
+    );
+
+    // Draw 2° downsampled dots for fast egui rendering of global 360×180 coverage.
+    let cell_col = theme::topo_color().gamma_multiply(0.85);
+    let sx = rect.width() / 360.0;
+    let sy = rect.height() / 180.0;
+    for row in (0..180).step_by(2) {
+        for col in (0..360).step_by(2) {
+            if cells_snapshot[row * 360 + col] > 0
+                || cells_snapshot[row * 360 + (col + 1).min(359)] > 0
+            {
+                let x = rect.left() + col as f32 * sx;
+                let y = rect.top() + row as f32 * sy;
+                painter.rect_filled(
+                    egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2((sx * 2.0).max(1.5), (sy * 2.0).max(1.5))),
+                    0.0,
+                    cell_col,
+                );
+            }
+        }
+    }
+
+    // Current viewport highlight box
+    let center = if model.globe_view.local_mode {
+        model.globe_view.local_center
+    } else {
+        model.globe_view.globe_center_latlon()
+    };
+    let half = if model.globe_view.local_mode {
+        crate::panels::world_map::vr_local_extent(model.globe_view.local_zoom).clamp(0.5, 10.0)
+    } else {
+        (25.0 / model.globe_view.zoom.max(1.0)).clamp(1.5, 25.0)
+    };
+    let vx0 = rect.left() + (center.lon - half + 180.0).clamp(0.0, 360.0) * sx;
+    let vx1 = rect.left() + (center.lon + half + 180.0).clamp(0.0, 360.0) * sx;
+    let vy0 = rect.top() + (90.0 - (center.lat + half)).clamp(0.0, 180.0) * sy;
+    let vy1 = rect.top() + (90.0 - (center.lat - half)).clamp(0.0, 180.0) * sy;
+    painter.rect_stroke(
+        egui::Rect::from_min_max(egui::pos2(vx0, vy0), egui::pos2(vx1.max(vx0 + 4.0), vy1.max(vy0 + 4.0))),
+        1.0,
+        egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 196, 68)),
+        egui::StrokeKind::Outside,
+    );
+
+    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .add_enabled(!running, egui::Button::new("Pre-build Current Viewport"))
+            .on_hover_text("Run cache-builder GPU contour generation for the current camera viewport and hot-reload tiles")
+            .clicked()
+        {
+            spawn_viewport_build(model);
+        }
+        if running && ui.button("Cancel Build").clicked() {
+            if let Ok(st) = library_state().lock() {
+                st.viewport_build.cancel.store(true, Ordering::Release);
+            }
+        }
+        if running {
+            ui.spinner();
+        }
+    });
+    if !last_line.is_empty() {
+        ui.small(last_line);
+    }
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(6.0);
+}
 
 pub(crate) fn tick(ctx: &egui::Context, model: &mut AppModel) {
     // tick() is O(1) when no jobs are queued (reads an AtomicBool).
@@ -23,8 +348,19 @@ pub(crate) fn tick(ctx: &egui::Context, model: &mut AppModel) {
 
 pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
     super::offline_regions::show(ui, model);
-    // The inventory opens SQLite; only inspect it while this section is visible.
-    if !model.asset_inventory_pending() {
+    render_coverage_map_and_viewport_builder(ui, model);
+    // Throttle SQLite OSM inventory probes to once every 3 seconds instead of every paint frame.
+    let refresh_osm = {
+        let mut st = library_state().lock().unwrap_or_else(|p| p.into_inner());
+        let due = st
+            .last_osm_refresh
+            .is_none_or(|t| t.elapsed() > Duration::from_secs(3));
+        if due {
+            st.last_osm_refresh = Some(Instant::now());
+        }
+        due
+    };
+    if refresh_osm && !model.asset_inventory_pending() {
         model.osm_inventory = osm_ingest::OsmInventory::detect_from(model.selected_root.as_deref());
     }
     ui.colored_label(

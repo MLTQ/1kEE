@@ -13,6 +13,7 @@ pub enum Command {
     RoadsBbox(BboxCommand),
     ContoursBbox(ContoursBboxCommand),
     PlanetAll(PlanetAllCommand),
+    Gazetteer(crate::gazetteer::Command),
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +127,7 @@ where
         "roads-bbox" => parse_roads_bbox(args).map(Command::RoadsBbox),
         "contours-bbox" => parse_contours_bbox(args).map(Command::ContoursBbox),
         "planet-all" => parse_planet_all(args).map(Command::PlanetAll),
+        "gazetteer" => crate::gazetteer::parse(args).map(Command::Gazetteer),
         "--help" | "-h" | "help" => Err(usage()),
         other => Err(format!("Unknown command '{other}'.\n\n{}", usage())),
     }

@@ -3,7 +3,7 @@ mod controls;
 mod grid;
 mod render;
 pub(crate) use controls::controls;
-pub(super) use render::{draw_globe, draw_local};
+pub(super) use render::{draw_globe, draw_local, draw_unified};
 
 use super::layer_snapshot::Snapshot;
 use crate::model::gravity::gravity_maps;

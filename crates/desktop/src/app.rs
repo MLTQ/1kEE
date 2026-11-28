@@ -36,7 +36,14 @@ pub struct DashboardApp {
     camera_feed_viewer: CameraFeedViewer,
     event_camera_sidebar: panels::EventCameraSidebar,
     event_radio: panels::EventRadio,
+    command_palette: panels::CommandPalette,
+    narrator: crate::narrator::Narrator,
+    agent_harness: crate::agent_harness::AgentHarness,
+    agent_director: crate::agent_director::AgentDirector,
+    screenshot_in_flight: bool,
     seismic_stream: crate::seismic_stream::Stream,
+    /// Shared WGPU render state captured at startup for offscreen high-DPI poster export.
+    wgpu_render_state: Option<eframe::egui_wgpu::RenderState>,
     /// Gruve mesh bridge: serves the companion web view + announces to the local
     /// agent. `None` when no port was free; the app runs identically without it.
     gruve: Option<crate::gruve::GruveBridge>,
@@ -52,6 +59,7 @@ impl DashboardApp {
             );
         }
         let mut app = Self::initialize(&cc.egui_ctx, true);
+        app.wgpu_render_state = cc.wgpu_render_state.clone();
         app.model.share_map = share_map && app.gruve.is_some();
         app
     }
@@ -73,6 +81,21 @@ impl DashboardApp {
         renderer.callback_resources.insert(
             panels::world_map::local_contour_pass::LocalContourPassResources::new(device, format),
         );
+        renderer.callback_resources.insert(
+            panels::world_map::unified_scene_target::UnifiedSceneTarget::new(device, format),
+        );
+        renderer.callback_resources.insert(
+            panels::world_map::unified_globe_pass::UnifiedGlobePassResources::new(device, format),
+        );
+        renderer.callback_resources.insert(
+            panels::world_map::unified_line_pass::UnifiedLineResources::new(device),
+        );
+        renderer.callback_resources.insert(
+            panels::world_map::unified_terrain_pass::UnifiedTerrainResources::new(device),
+        );
+        renderer.callback_resources.insert(
+            panels::world_map::point_cloud_pass::PointCloudResources::new(device),
+        );
     }
 
     pub(crate) fn initialize(ctx: &egui::Context, announce: bool) -> Self {
@@ -89,7 +112,13 @@ impl DashboardApp {
             camera_feed_viewer: CameraFeedViewer::default(),
             event_camera_sidebar: panels::EventCameraSidebar::default(),
             event_radio: panels::EventRadio::default(),
+            command_palette: panels::CommandPalette::default(),
+            narrator: crate::narrator::Narrator::default(),
+            agent_harness: crate::agent_harness::AgentHarness::default(),
+            agent_director: crate::agent_director::AgentDirector::default(),
+            screenshot_in_flight: false,
             seismic_stream: crate::seismic_stream::Stream::default(),
+            wgpu_render_state: None,
             gruve,
         }
     }
@@ -147,6 +176,89 @@ impl DashboardApp {
                 ctx.request_repaint();
             }
         }
+
+        // Synchronize the unified Master UTC Clock across recaps, replays, sunlight & weather.
+        let now_utc_ms = chrono::Utc::now().timestamp_millis();
+        if let Some(recap) = self.model.follow_recaps.active.as_ref() {
+            let secs = recap.replay.unix_at_elapsed(recap.replay.wall_elapsed());
+            self.model.master_clock.set_external((secs * 1000.0) as i64);
+        } else if self.model.replay_mode
+            && let Some(state) = self.model.replay_state.as_ref()
+        {
+            let secs = state.unix_at_elapsed(state.wall_elapsed());
+            self.model.master_clock.set_external((secs * 1000.0) as i64);
+        } else {
+            if matches!(
+                self.model.master_clock.mode(),
+                crate::model::clock::ClockMode::External { .. }
+            ) {
+                self.model.master_clock.set_live();
+            }
+            let dt = ctx.input(|i| i.stable_dt) as f64;
+            if self.model.master_clock.tick(dt, now_utc_ms) {
+                ctx.request_repaint();
+            }
+        }
+        if self.model.master_clock.sync_subsystems && !self.model.master_clock.is_live() {
+            let utc_s = self.model.master_clock.utc_secs() as i64;
+            self.model.global_weather.sync_to_unix(utc_s);
+        }
+
+        // Opt-in loopback agent harness, autonomous AI Director & ReverbTTS narrator
+        self.agent_harness.sync_lifecycle(
+            self.model.agent_voice.agent_harness_enabled,
+            self.model.agent_voice.agent_harness_port,
+        );
+        self.model.agent_harness_status = self.agent_harness.status.clone();
+
+        // Deliver any completed viewport screenshot to the AI Director and HTTP /v1/screenshot.
+        let mut captured_screenshot: Option<std::sync::Arc<egui::ColorImage>> = None;
+        ctx.input(|i| {
+            if i.pointer.any_down() {
+                self.agent_harness.cancel_flight();
+            }
+            for event in &i.events {
+                if let egui::Event::Screenshot { image, .. } = event {
+                    captured_screenshot = Some(std::sync::Arc::clone(image));
+                }
+            }
+        });
+        if let Some(img) = captured_screenshot {
+            self.screenshot_in_flight = false;
+            if let Some(jpeg) = crate::agent_director::encode_viewport_screenshot_jpeg(&img) {
+                self.agent_harness.set_latest_screenshot(jpeg.clone());
+                self.agent_director.deliver_screenshot(jpeg, &self.model);
+            }
+        }
+
+        self.agent_director.tick(
+            &mut self.model,
+            &mut self.agent_harness,
+            &mut self.narrator,
+            self.event_radio.is_playing(),
+        );
+        self.agent_harness
+            .publish_and_drain(&mut self.model, &mut self.narrator);
+
+        if !self.screenshot_in_flight
+            && (self.agent_director.wants_screenshot() || self.agent_harness.wants_screenshot())
+        {
+            self.screenshot_in_flight = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+        }
+
+        if let Some(test_text) = self.model.pending_test_narration.take() {
+            self.narrator.enqueue(
+                test_text,
+                "TEST",
+                crate::narrator::SpeechPriority::High,
+                &self.model.agent_voice,
+            );
+        }
+        self.narrator
+            .tick(&self.model, self.event_radio.is_playing());
+        self.model.active_narrator_caption = self.narrator.active_caption();
+        self.model.narrator_status = self.narrator.status_summary();
 
         theme::sync_view(ctx, &self.model);
         // The USGS quake feed polls with no key configured, so the frame loop
@@ -210,6 +322,12 @@ impl eframe::App for DashboardApp {
         if !self.model.obs_view {
             panels::render_settings(ctx, &mut self.model);
             panels::render_stellar_observatory(ctx, &mut self.model);
+            panels::world_map::poster_export::render_dialog(
+                ctx,
+                &mut self.model,
+                self.wgpu_render_state.as_ref(),
+            );
+            self.command_palette.render(ctx, &mut self.model);
         }
         self.camera_feed_viewer.render(ctx, &mut self.model);
         self.event_radio.render(ctx, self.model.selected_event());

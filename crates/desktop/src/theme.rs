@@ -41,12 +41,15 @@ pub enum MapTheme {
     Mars,
     /// Deep crimson / dark iron / pitch black — high-contrast low-light Mars mode.
     MarsDark,
+    /// Obsidian void / bioluminescent teal / crimson pulse — the Electric Eye theme.
+    Abyss,
 }
 
 impl MapTheme {
     pub const ALL: &'static [MapTheme] = &[
         MapTheme::Topo,
         MapTheme::Atlas,
+        MapTheme::Abyss,
         MapTheme::Phosphor,
         MapTheme::Thermal,
         MapTheme::Ghost,
@@ -62,6 +65,7 @@ impl MapTheme {
             Self::Sodium => "SODIUM",
             Self::Topo => "TOPO",
             Self::Atlas => "ATLAS",
+            Self::Abyss => "ABYSS",
             Self::Phosphor => "PHOSPHOR",
             Self::Thermal => "THERMAL",
             Self::Ghost => "GHOST",
@@ -77,6 +81,7 @@ impl MapTheme {
             Self::Sodium => "monochrome · sodium amber / lamp black",
             Self::Topo => "complementary · blue / orange",
             Self::Atlas => "printed atlas · parchment / mineral earth / ocean blue",
+            Self::Abyss => "electric eye · obsidian abyss / bioluminescent teal / crimson pulse",
             Self::Phosphor => "analogous · green / amber",
             Self::Thermal => "split-complementary · violet / gold",
             Self::Ghost => "achromatic · value contrast only",
@@ -170,6 +175,7 @@ impl Palette {
             7 => MapTheme::Lunar,
             8 => MapTheme::Mars,
             9 => MapTheme::MarsDark,
+            10 => MapTheme::Abyss,
             _ => MapTheme::Topo,
         };
         let night_mix = f32::from_bits((raw >> 32) as u32);
@@ -185,8 +191,23 @@ static ACTIVE_PALETTE: AtomicU64 = AtomicU64::new(
     .pack(),
 );
 
+static TANAKA_CONTOURS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static TERRAIN_ANALYSIS_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
 pub fn is_atlas() -> bool {
     current() == MapTheme::Atlas
+}
+
+pub fn is_abyss() -> bool {
+    current() == MapTheme::Abyss
+}
+
+pub fn tanaka_contours() -> bool {
+    TANAKA_CONTOURS.load(Ordering::Relaxed)
+}
+
+pub fn terrain_analysis_mode_u8() -> u8 {
+    TERRAIN_ANALYSIS_MODE.load(Ordering::Relaxed)
 }
 
 pub(crate) fn atlas_day_weight() -> f32 {
@@ -217,6 +238,8 @@ pub fn set_theme(ctx: &egui::Context, theme: MapTheme) {
 }
 
 pub fn sync_view(ctx: &egui::Context, model: &crate::model::AppModel) {
+    TANAKA_CONTOURS.store(model.tanaka_contours, Ordering::Relaxed);
+    TERRAIN_ANALYSIS_MODE.store(model.terrain_analysis_mode as u8, Ordering::Relaxed);
     let current = active_palette();
     let mut desired = Palette::for_view(model);
     if desired.map == MapTheme::Atlas && model.active_body == crate::model::ActiveBody::Earth {
@@ -367,6 +390,18 @@ fn visuals_for(theme: MapTheme) -> egui::Visuals {
                 egui::Color32::from_rgb(255, 80, 80),
                 Some(egui::Color32::from_rgb(230, 150, 150)),
             ),
+            MapTheme::Abyss => (
+                egui::Color32::from_rgb(3, 5, 11),
+                egui::Color32::from_rgb(7, 11, 20),
+                egui::Color32::from_rgb(1, 2, 5),
+                egui::Color32::from_rgb(12, 76, 86),
+                egui::Color32::from_rgb(9, 54, 64),
+                egui::Color32::from_rgb(7, 14, 24),
+                egui::Color32::from_rgb(4, 7, 14),
+                egui::Color32::from_rgb(0, 158, 150),
+                egui::Color32::from_rgb(0, 245, 212),
+                Some(egui::Color32::from_rgb(218, 244, 242)),
+            ),
         };
 
     visuals.panel_fill = panel;
@@ -401,6 +436,7 @@ pub fn canvas_background() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(2, 2, 3),
         MapTheme::Mars => egui::Color32::from_rgb(3, 1, 0),
         MapTheme::MarsDark => egui::Color32::from_rgb(0, 0, 0),
+        MapTheme::Abyss => egui::Color32::from_rgb(1, 2, 5),
     })
 }
 
@@ -416,6 +452,7 @@ pub fn section_background() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(9, 9, 13),
         MapTheme::Mars => egui::Color32::from_rgb(12, 5, 3),
         MapTheme::MarsDark => egui::Color32::from_rgb(5, 0, 0),
+        MapTheme::Abyss => egui::Color32::from_rgb(4, 7, 14),
     })
 }
 
@@ -431,6 +468,7 @@ pub fn grid_color() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(46, 46, 54),
         MapTheme::Mars => egui::Color32::from_rgb(60, 20, 10),
         MapTheme::MarsDark => egui::Color32::from_rgb(40, 5, 5),
+        MapTheme::Abyss => egui::Color32::from_rgb(12, 46, 58),
     }
 }
 
@@ -450,6 +488,7 @@ pub fn text_muted() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(155, 152, 142),
         MapTheme::Mars => egui::Color32::from_rgb(190, 145, 120),
         MapTheme::MarsDark => egui::Color32::from_rgb(190, 100, 100),
+        MapTheme::Abyss => egui::Color32::from_rgb(124, 178, 186),
     })
 }
 
@@ -465,6 +504,7 @@ pub fn wireframe_color() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(68, 67, 78),
         MapTheme::Mars => egui::Color32::from_rgb(85, 30, 20),
         MapTheme::MarsDark => egui::Color32::from_rgb(80, 15, 15),
+        MapTheme::Abyss => egui::Color32::from_rgb(14, 110, 128),
     }
 }
 
@@ -480,6 +520,7 @@ pub fn topo_color() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(54, 53, 62),
         MapTheme::Mars => egui::Color32::from_rgb(68, 25, 16),
         MapTheme::MarsDark => egui::Color32::from_rgb(45, 5, 5),
+        MapTheme::Abyss => egui::Color32::from_rgb(0, 232, 214),
     }
 }
 
@@ -503,6 +544,7 @@ fn hot_color_for(theme: MapTheme) -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(215, 210, 188), // sunlit regolith
         MapTheme::Mars => egui::Color32::from_rgb(255, 145, 80),
         MapTheme::MarsDark => egui::Color32::from_rgb(255, 60, 60),
+        MapTheme::Abyss => egui::Color32::from_rgb(255, 42, 109), // electric eye crimson
     }
 }
 
@@ -518,6 +560,7 @@ pub fn contour_color() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(138, 136, 126),
         MapTheme::Mars => egui::Color32::from_rgb(165, 85, 55),
         MapTheme::MarsDark => egui::Color32::from_rgb(160, 30, 30),
+        MapTheme::Abyss => egui::Color32::from_rgb(0, 218, 204), // bioluminescent teal
     }
 }
 
@@ -540,6 +583,7 @@ fn panel_fill_for(theme: MapTheme, alpha: u8) -> egui::Color32 {
         MapTheme::Lunar => (5, 5, 7),
         MapTheme::Mars => (6, 2, 1),
         MapTheme::MarsDark => (3, 1, 1),
+        MapTheme::Abyss => (3, 5, 11),
     };
     egui::Color32::from_rgba_premultiplied(r, g, b, alpha)
 }
@@ -557,6 +601,7 @@ pub fn panel_stroke() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(40, 40, 50),
         MapTheme::Mars => egui::Color32::from_rgb(60, 25, 15),
         MapTheme::MarsDark => egui::Color32::from_rgb(60, 10, 10),
+        MapTheme::Abyss => egui::Color32::from_rgb(10, 88, 96),
     })
 }
 
@@ -573,6 +618,7 @@ pub fn window_fill() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(8, 8, 12),
         MapTheme::Mars => egui::Color32::from_rgb(10, 4, 2),
         MapTheme::MarsDark => egui::Color32::from_rgb(5, 0, 0),
+        MapTheme::Abyss => egui::Color32::from_rgb(4, 7, 15),
     })
 }
 
@@ -590,6 +636,7 @@ pub fn window_stroke() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(38, 38, 50),
         MapTheme::Mars => egui::Color32::from_rgb(50, 20, 12),
         MapTheme::MarsDark => egui::Color32::from_rgb(45, 5, 5),
+        MapTheme::Abyss => egui::Color32::from_rgb(14, 92, 102),
     })
 }
 
@@ -606,6 +653,7 @@ pub fn chrome_active_fill() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(44, 43, 58),
         MapTheme::Mars => egui::Color32::from_rgb(72, 28, 14),
         MapTheme::MarsDark => egui::Color32::from_rgb(90, 15, 15),
+        MapTheme::Abyss => egui::Color32::from_rgb(10, 74, 86),
     })
 }
 
@@ -622,6 +670,7 @@ pub fn chrome_active_text() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(218, 214, 204), // pale warm grey
         MapTheme::Mars => egui::Color32::from_rgb(240, 210, 195),
         MapTheme::MarsDark => egui::Color32::from_rgb(255, 190, 190),
+        MapTheme::Abyss => egui::Color32::from_rgb(185, 255, 248),
     })
 }
 
@@ -638,6 +687,7 @@ pub fn item_fill() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(11, 11, 15),
         MapTheme::Mars => egui::Color32::from_rgb(14, 6, 4),
         MapTheme::MarsDark => egui::Color32::from_rgb(8, 0, 0),
+        MapTheme::Abyss => egui::Color32::from_rgb(6, 10, 19),
     })
 }
 
@@ -654,6 +704,7 @@ pub fn selected_item_fill() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(28, 28, 40),
         MapTheme::Mars => egui::Color32::from_rgb(45, 18, 10),
         MapTheme::MarsDark => egui::Color32::from_rgb(35, 5, 5),
+        MapTheme::Abyss => egui::Color32::from_rgb(10, 52, 64),
     })
 }
 
@@ -670,6 +721,7 @@ pub fn scene_backdrop() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgba_premultiplied(2, 2, 3, 252),
         MapTheme::Mars => egui::Color32::from_rgba_premultiplied(4, 1, 0, 252),
         MapTheme::MarsDark => egui::Color32::from_rgba_premultiplied(3, 0, 0, 252),
+        MapTheme::Abyss => egui::Color32::from_rgba_premultiplied(1, 2, 5, 254),
     }
 }
 
@@ -686,6 +738,7 @@ pub fn marker_glow_warm() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgba_premultiplied(220, 215, 200, 170),
         MapTheme::Mars => egui::Color32::from_rgba_premultiplied(240, 160, 110, 170),
         MapTheme::MarsDark => egui::Color32::from_rgba_premultiplied(255, 60, 60, 170),
+        MapTheme::Abyss => egui::Color32::from_rgba_premultiplied(255, 72, 128, 185),
     }
 }
 
@@ -710,6 +763,7 @@ pub fn flight_airline_color() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(155, 200, 248),
         MapTheme::Mars => egui::Color32::from_rgb(120, 180, 240),
         MapTheme::MarsDark => egui::Color32::from_rgb(255, 120, 120),
+        MapTheme::Abyss => egui::Color32::from_rgb(56, 189, 248),
     }
 }
 
@@ -726,6 +780,7 @@ pub fn flight_cargo_color() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(215, 195, 155),
         MapTheme::Mars => egui::Color32::from_rgb(240, 185, 110),
         MapTheme::MarsDark => egui::Color32::from_rgb(255, 80, 40),
+        MapTheme::Abyss => egui::Color32::from_rgb(251, 191, 36),
     }
 }
 
@@ -742,6 +797,7 @@ pub fn flight_military_color() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(200, 100, 100),
         MapTheme::Mars => egui::Color32::from_rgb(230, 80, 80),
         MapTheme::MarsDark => egui::Color32::from_rgb(255, 0, 0),
+        MapTheme::Abyss => egui::Color32::from_rgb(255, 42, 109),
     }
 }
 
@@ -758,6 +814,7 @@ pub fn flight_ga_color() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(185, 210, 178),
         MapTheme::Mars => egui::Color32::from_rgb(190, 220, 110),
         MapTheme::MarsDark => egui::Color32::from_rgb(255, 100, 80),
+        MapTheme::Abyss => egui::Color32::from_rgb(52, 211, 153),
     }
 }
 
@@ -774,6 +831,7 @@ pub fn flight_unknown_color() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(165, 160, 145),
         MapTheme::Mars => egui::Color32::from_rgb(185, 165, 95),
         MapTheme::MarsDark => egui::Color32::from_rgb(160, 40, 40),
+        MapTheme::Abyss => egui::Color32::from_rgb(192, 132, 252),
     }
 }
 
@@ -791,6 +849,7 @@ pub fn water_color() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(100, 140, 185),
         MapTheme::Mars => egui::Color32::from_rgb(70, 120, 175),
         MapTheme::MarsDark => egui::Color32::from_rgb(120, 20, 20),
+        MapTheme::Abyss => egui::Color32::from_rgb(14, 165, 233),
     }
 }
 
@@ -807,6 +866,7 @@ pub fn road_major_color() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(125, 121, 111),
         MapTheme::Mars => egui::Color32::from_rgb(142, 89, 72),
         MapTheme::MarsDark => egui::Color32::from_rgb(138, 44, 50),
+        MapTheme::Abyss => egui::Color32::from_rgb(112, 62, 92),
     }
 }
 
@@ -838,6 +898,7 @@ pub fn road_minor_color() -> egui::Color32 {
         MapTheme::Lunar => egui::Color32::from_rgb(62, 61, 57),
         MapTheme::Mars => egui::Color32::from_rgb(72, 48, 42),
         MapTheme::MarsDark => egui::Color32::from_rgb(65, 24, 28),
+        MapTheme::Abyss => egui::Color32::from_rgb(38, 52, 68),
     }
 }
 

@@ -671,7 +671,28 @@ impl ContourUniforms {
             } else {
                 0.0
             },
-            _pad: [0.0; 2],
+            _pad: {
+                let is_contour = matches!(
+                    layer,
+                    ContourLayer::GlobalTopo
+                        | ContourLayer::SrtmGlobe
+                        | ContourLayer::Bathymetry
+                        | ContourLayer::LunarTopo
+                        | ContourLayer::MarsTopo
+                );
+                [
+                    if is_contour && crate::theme::tanaka_contours() {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    if is_contour && crate::theme::is_abyss() {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                ]
+            },
         }
     }
     pub(super) fn set_viewport(&mut self, rect: egui::Rect) {

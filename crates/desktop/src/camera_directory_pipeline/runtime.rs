@@ -50,6 +50,44 @@ impl RequestPacer {
     }
 }
 
+/// Per-host pacer for probing independent third-party camera endpoints in parallel
+/// without throttling them behind the directory host's global rate limit.
+pub(super) struct HostPacer {
+    per_host_interval: Duration,
+    next_by_host: Mutex<HashMap<String, Instant>>,
+}
+
+impl HostPacer {
+    pub(super) fn new(per_host_interval: Duration) -> Self {
+        Self {
+            per_host_interval,
+            next_by_host: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub(super) fn wait_for_host(&self, host: &str, cancelled: &AtomicBool) -> bool {
+        loop {
+            if cancelled.load(Ordering::Acquire) {
+                return false;
+            }
+            let remaining = {
+                let mut map = self
+                    .next_by_host
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let now = Instant::now();
+                let entry = map.entry(host.to_ascii_lowercase()).or_insert(now);
+                if now >= *entry {
+                    *entry = now + self.per_host_interval;
+                    return true;
+                }
+                entry.saturating_duration_since(now)
+            };
+            thread::sleep(remaining.min(CANCELLATION_POLL_INTERVAL));
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Cached<T> {
     value: T,

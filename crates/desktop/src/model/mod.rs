@@ -2,6 +2,8 @@ pub mod admin;
 mod arcgis;
 mod asset_inventory;
 mod cameras;
+pub mod clock;
+pub mod convergence;
 mod recap_regions;
 mod events;
 mod event_follow;
@@ -44,16 +46,52 @@ pub enum ActiveBody {
     Mars,
 }
 
+impl ActiveBody {
+    /// Mean volumetric sphere radius in metres for unified 3D ECEF projection.
+    pub const fn radius_m(self) -> f64 {
+        match self {
+            Self::Earth => 6_371_008.8,
+            Self::Moon => 1_737_400.0,
+            Self::Mars => 3_389_500.0,
+        }
+    }
+}
+
 impl Default for ActiveBody {
     fn default() -> Self {
         ActiveBody::Earth
     }
 }
 
+/// GPU analytical terrain relief shader mode (Atlas / Target DEM).
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TerrainAnalysisMode {
+    #[default]
+    None = 0,
+    Slope = 1,
+    Aspect = 2,
+    Ridgeline = 3,
+}
+
+impl TerrainAnalysisMode {
+    pub const ALL: &'static [Self] = &[Self::None, Self::Slope, Self::Aspect, Self::Ridgeline];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "Off",
+            Self::Slope => "Slope",
+            Self::Aspect => "Aspect",
+            Self::Ridgeline => "Ridgelines",
+        }
+    }
+}
+
 pub struct AppModel {
     pub(crate) target: crate::target_mode::TargetMode,
+    pub point_cloud: crate::panels::world_map::point_cloud_layer::PointCloudLayerState,
     pub events: Vec<EventRecord>,
     pub cameras: Vec<CameraFeed>,
+    pub camera_health: CameraHealthTracker,
     /// Live AIS vessel positions; refreshed periodically by `moving_tracks`.
     pub tracks: Arc<Vec<MovingTrack>>,
     /// Live ADS-B flight positions; refreshed periodically by `flight_tracks`.
@@ -69,6 +107,23 @@ pub struct AppModel {
     pub globe_view: GlobeViewState,
     pub event_follow: event_follow::EventFollow,
     pub follow_recaps: follow_recap::FollowRecaps,
+    pub follow_director: settings_store::FollowDirectorSettings,
+    pub convergence: convergence::ConvergenceState,
+    pub master_clock: clock::MasterClock,
+    pub agent_voice: crate::narrator::AgentVoiceSettings,
+    pub agent_annotations: Vec<crate::agent_harness::AgentAnnotation>,
+    pub agent_harness_status: String,
+    pub agent_director_status: String,
+    pub agent_director_last_action: String,
+    pub agent_director_last_thought: String,
+    pub agent_director_detected_models: Vec<String>,
+    pub agent_director_nudge_input: String,
+    pub pending_director_step: bool,
+    pub pending_director_detect: bool,
+    pub pending_director_nudge: Option<String>,
+    pub narrator_status: String,
+    pub pending_test_narration: Option<String>,
+    pub active_narrator_caption: Option<(String, String)>,
     pub focused_city_id: Option<String>,
     /// Session-only clean window capture; content layers and open briefs stay visible.
     pub obs_view: bool,
@@ -100,6 +155,11 @@ pub struct AppModel {
     pub hillshade_source: crate::hillshade_source::Source,
     pub show_contours: bool,
     pub contour_occlusion: bool,
+    pub tanaka_contours: bool,
+    pub show_contour_labels: bool,
+    pub terrain_analysis_mode: TerrainAnalysisMode,
+    pub viewshed: crate::panels::world_map::viewshed::ViewshedState,
+    pub poster_export: crate::panels::world_map::poster_export::PosterExportConfig,
     /// Saved multiplier used only when an older settings file has no physical
     /// pixel-width value. Keeping it preserves pre-slider visual output.
     legacy_contour_stroke_scale: f32,
@@ -207,6 +267,7 @@ pub struct AppModel {
     pub windy_webcams_api_key: String,
     pub ny511_api_key: String,
     pub eyes_on_enabled: bool,
+    pub open_public_cameras_enabled: bool,
     pub eyes_on_country_code: String,
     pub eyes_on_requests_per_minute: u16,
     pub aisstream_api_key: String,
@@ -290,6 +351,7 @@ impl AppModel {
         Self {
             events: Vec::new(),
             cameras: Vec::new(),
+            camera_health: CameraHealthTracker::default(),
             tracks: Arc::new(Vec::new()),
             flights: Arc::new(Vec::new()),
             selected_event_id: None,
@@ -299,10 +361,28 @@ impl AppModel {
             selected_flight_icao24: None,
             globe_view: GlobeViewState::from_focus(GeoPoint { lat: 0.0, lon: 0.0 }),
             target: Default::default(),
+            point_cloud: Default::default(),
             event_follow: event_follow::EventFollow::with_dwell_seconds(
                 app_settings.event_follow_dwell_seconds,
             ),
             follow_recaps: follow_recap::FollowRecaps::default(),
+            follow_director: app_settings.follow_director.normalized(),
+            convergence: convergence::ConvergenceState::default(),
+            master_clock: clock::MasterClock::default(),
+            agent_voice: app_settings.agent_voice.normalized(),
+            agent_annotations: Vec::new(),
+            agent_harness_status: "off".into(),
+            agent_director_status: "Standby".into(),
+            agent_director_last_action: String::new(),
+            agent_director_last_thought: String::new(),
+            agent_director_detected_models: Vec::new(),
+            agent_director_nudge_input: String::new(),
+            pending_director_step: false,
+            pending_director_detect: false,
+            pending_director_nudge: None,
+            narrator_status: "Idle".into(),
+            pending_test_narration: None,
+            active_narrator_caption: None,
             focused_city_id: None,
             obs_view: false,
             show_layer_drawer: false,
@@ -330,6 +410,11 @@ impl AppModel {
             gravity: gravity::GravityState::default(),
             show_contours: true,
             contour_occlusion: true,
+            tanaka_contours: app_settings.tanaka_contours,
+            show_contour_labels: app_settings.show_contour_labels,
+            terrain_analysis_mode: TerrainAnalysisMode::None,
+            viewshed: Default::default(),
+            poster_export: Default::default(),
             legacy_contour_stroke_scale: app_settings.contour_stroke_scale,
             contour_stroke_width_px: app_settings.contour_stroke_width_px,
             show_trees: false,
@@ -416,6 +501,7 @@ impl AppModel {
             windy_webcams_api_key: windy_webcams_api_key.clone(),
             ny511_api_key: ny511_api_key.clone(),
             eyes_on_enabled,
+            open_public_cameras_enabled: app_settings.open_public_cameras_enabled,
             eyes_on_country_code,
             eyes_on_requests_per_minute,
             aisstream_api_key: aisstream_api_key.clone(),
@@ -500,7 +586,7 @@ impl AppModel {
     }
 
     pub fn has_enabled_camera_sources(&self) -> bool {
-        self.has_camera_source_keys() || self.eyes_on_enabled
+        self.has_camera_source_keys() || self.eyes_on_enabled || self.open_public_cameras_enabled
     }
 
     /// Return the primary globe contour width in physical pixels. Older
@@ -599,6 +685,7 @@ impl AppModel {
             windy_webcams_api_key: self.windy_webcams_api_key.trim().to_owned(),
             ny511_api_key: self.ny511_api_key.trim().to_owned(),
             eyes_on_enabled: self.eyes_on_enabled,
+            open_public_cameras_enabled: self.open_public_cameras_enabled,
             ai_buildout_enabled: self.buildout.enabled,
             ghostmaps: self.ghostmaps.settings.clone(),
             global_weather: self.global_weather.settings(),
@@ -625,7 +712,11 @@ impl AppModel {
             atlas_style: self.atlas_style.normalized(),
             show_loading_animation: self.show_loading_animation,
             event_follow_dwell_seconds: self.event_follow.dwell_seconds(),
+            follow_director: self.follow_director.normalized(),
+            agent_voice: self.agent_voice.clone().normalized(),
             threedep_enabled: self.settings_threedep_enabled,
+            tanaka_contours: self.tanaka_contours,
+            show_contour_labels: self.show_contour_labels,
             threedep_cache_budget_gb: settings_store::normalize_threedep_cache_budget_gb(
                 self.settings_threedep_cache_budget_gb,
             ),
@@ -680,6 +771,8 @@ impl AppModel {
         self.settings_osmium_bin_dir = settings.osmium_bin_dir.unwrap_or_default();
         self.settings_prefer_overpass = settings.prefer_overpass;
         self.settings_threedep_enabled = settings.threedep_enabled;
+        self.tanaka_contours = settings.tanaka_contours;
+        self.show_contour_labels = settings.show_contour_labels;
         self.settings_threedep_cache_budget_gb =
             settings_store::normalize_threedep_cache_budget_gb(settings.threedep_cache_budget_gb);
         self.settings_local_contour_vram_budget_gb =
@@ -693,9 +786,12 @@ impl AppModel {
         self.atlas_style = settings.atlas_style;
         self.show_loading_animation = settings.show_loading_animation;
         self.event_follow.set_dwell_seconds(settings.event_follow_dwell_seconds);
+        self.follow_director = settings.follow_director.normalized();
+        self.agent_voice = settings.agent_voice.normalized();
         self.windy_webcams_api_key = settings.windy_webcams_api_key.trim().to_owned();
         self.ny511_api_key = settings.ny511_api_key.trim().to_owned();
         self.eyes_on_enabled = settings.eyes_on_enabled;
+        self.open_public_cameras_enabled = settings.open_public_cameras_enabled;
         self.eyes_on_country_code = settings.eyes_on_country_code;
         self.eyes_on_requests_per_minute = settings.eyes_on_requests_per_minute;
         self.aisstream_api_key = settings.aisstream_api_key.trim().to_owned();
@@ -746,15 +842,15 @@ impl AppModel {
 
     pub(crate) fn focus_station_replay(&mut self, point: GeoPoint, zoom: f32) {
         if self.active_body == ActiveBody::Earth
-            && !self.globe_view.local_mode
             && !self.replay_mode
             && self.follow_recaps.active.is_none()
-            && self.target.session.is_none()
         {
             self.stop_event_follow();
             self.globe_view.stop_motion();
             self.globe_view.focus_on(point);
             self.globe_view.zoom = zoom;
+            self.globe_view.range_m =
+                GlobeViewState::range_for_legacy_globe_zoom(zoom, ActiveBody::Earth.radius_m());
         }
     }
 

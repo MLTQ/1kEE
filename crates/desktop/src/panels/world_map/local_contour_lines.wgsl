@@ -149,7 +149,24 @@ fn vs_main(in: VsIn) -> VsOut {
         dir = dir / len;
     }
     let normal = vec2<f32>(-dir.y, dir.x);
-    let half_extent = stroke_half_px + feather_px;
+    let tanaka_on = u.ground_chart.y > 0.5;
+    let abyss_glow = u.ground_chart.z > 0.5;
+    var width_mult = 1.0;
+    var base_color = in.color;
+    if (u.palette_enabled > 0.5) {
+        base_color = select(u.minor_color, u.major_color, in.major != 0u);
+    }
+    if (tanaka_on) {
+        let lit = clamp(dot(normal, vec2<f32>(-0.70710678, -0.70710678)), -1.0, 1.0);
+        let a = max(base_color.a, 0.001);
+        let hi = vec3<f32>(0.98, 0.97, 0.92) * a;
+        let sh = base_color.rgb * 0.22;
+        let mixed = select(mix(base_color.rgb, sh, -lit * 0.78), mix(base_color.rgb, hi, lit * 0.65), lit >= 0.0);
+        base_color = vec4<f32>(mixed, base_color.a);
+        width_mult = 0.85 + 0.35 * abs(lit);
+    }
+    let extra_feather = select(feather_px, max(feather_px * 2.2, 2.0), abyss_glow);
+    let half_extent = stroke_half_px * width_mult + extra_feather;
     // Extend endpoints lengthwise by the feather to hide joint cracks on smooth
     // contours — but never by more than half the segment, or a segment shorter
     // than its own feather inflates into a blob roughly `2 * feather` across.
@@ -166,12 +183,9 @@ fn vs_main(in: VsIn) -> VsOut {
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
     let ground = mix(pa.z, pb.z, t);
     out.ground_depth = 0.5 + (ground - u.depth_center) * u.depth_scale;
-    out.color = in.color;
-    if (u.palette_enabled > 0.5) {
-        out.color = select(u.minor_color, u.major_color, in.major != 0u);
-    }
+    out.color = base_color;
     out.dist_px = side * half_extent;
-    out.stroke_half_px = stroke_half_px;
+    out.stroke_half_px = stroke_half_px * width_mult;
     out.feather_px = feather_px;
     return out;
 }
@@ -197,8 +211,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // has to be drawn *fainter*. Taken from the per-instance width so major and
     // minor contours each get their own factor. At a pixel and above it is 1.0.
     let sub_pixel = clamp(2.0 * in.stroke_half_px, 0.0, 1.0);
+    var cov = edge * sub_pixel;
+    if (u.ground_chart.z > 0.5) {
+        let glow = exp(-d / max(in.stroke_half_px * 1.4, 0.85)) * 0.36;
+        cov = max(cov, glow);
+    }
     // Colour is premultiplied — scale the whole vector by coverage x pass fade.
-    return map_output_gamma(in.color * (edge * u.alpha * sub_pixel));
+    return map_output_gamma(in.color * (cov * u.alpha));
 }
 
 // Ground distance remains constant down a vertical contour curtain. For the

@@ -316,6 +316,44 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
     {
         ui_overlays::draw_empty_state(painter, rect, "Preparing terrain…");
     }
+    if model.show_contours && model.show_contour_labels && !contours_slice.is_empty() {
+        let major_interval = match model.active_body {
+            crate::model::ActiveBody::Earth => 50,
+            crate::model::ActiveBody::Moon | crate::model::ActiveBody::Mars => 1_000,
+        };
+        super::contour_labels::draw(painter, rect, contours_slice, major_interval, |geo, elev| {
+            projection::project_local(
+                &layout,
+                &model.globe_view,
+                viewport_center,
+                geo,
+                elev,
+                extent_x,
+                extent_y,
+            )
+            .map(|p| p.pos)
+        });
+    }
+    if model.viewshed.enabled && model.active_body == crate::model::ActiveBody::Earth {
+        super::viewshed::draw_local(
+            painter,
+            model.selected_root.as_deref(),
+            &model.viewshed,
+            viewport_center,
+            |geo, elev| {
+                projection::project_local(
+                    &layout,
+                    &model.globe_view,
+                    viewport_center,
+                    geo,
+                    elev,
+                    extent_x,
+                    extent_y,
+                )
+                .map(|p| p.pos)
+            },
+        );
+    }
     if model.active_body == crate::model::ActiveBody::Earth {
         super::road_layer::draw_roads(
             painter,
@@ -646,7 +684,31 @@ pub fn paint(painter: &egui::Painter, rect: egui::Rect, model: &AppModel, time: 
             .filter(|marker| nearby.iter().any(|camera| camera.id == marker.id))
             .cloned()
             .collect();
-        markers::draw_camera_links(painter, anchor, &nearby_markers);
+        markers::draw_camera_links(painter, anchor, &nearby_markers, time);
+    }
+    if !model.agent_annotations.is_empty() {
+        for ann in &model.agent_annotations {
+            if let Some(pt) = projection::project_local(
+                &layout,
+                &model.globe_view,
+                viewport_center,
+                ann.location,
+                30.0,
+                extent_x,
+                extent_y,
+            ) {
+                let col = theme::topo_color();
+                painter.circle_stroke(pt.pos, 8.0, egui::Stroke::new(1.5, col));
+                painter.circle_filled(pt.pos, 3.0, egui::Color32::WHITE);
+                painter.text(
+                    pt.pos + egui::vec2(10.0, -4.0),
+                    egui::Align2::LEFT_CENTER,
+                    &ann.label,
+                    egui::FontId::proportional(11.0),
+                    col,
+                );
+            }
+        }
     }
     if model.show_coastlines && model.active_body == crate::model::ActiveBody::Earth && !atlas_terrain {
         geography::draw_coastlines_local(

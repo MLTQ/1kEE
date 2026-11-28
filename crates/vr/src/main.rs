@@ -21,6 +21,8 @@ mod vulkan;
 #[cfg(target_os = "linux")]
 mod wrist;
 #[cfg(target_os = "linux")]
+mod wrist_ui;
+#[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<()> {
     app::main()
 }

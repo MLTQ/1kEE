@@ -1,6 +1,9 @@
-use crate::model::{GLOBE_PITCH_LIMIT_RAD, GlobeViewState, LOCAL_MAX_TILT, polar};
+use crate::model::{
+    ActiveBody, GLOBE_PITCH_LIMIT_RAD, GlobeViewState, LOCAL_MAX_TILT, MIN_CAMERA_RANGE_M, polar,
+};
 
 use super::local_terrain_scene;
+use super::projection::MapProjection;
 
 /// Half-life for momentum decay in seconds.
 /// After this many seconds the velocity has dropped to 50% of its release value.
@@ -322,6 +325,271 @@ pub fn apply_interaction(
     }
 }
 
+/// Continuous planet-to-metre interaction handler driven by [`MapProjection`].
+///
+/// - **Left-drag**: grab-point panning (keeps the ground under the cursor fixed across
+///   every zoom level and smoothly across both poles).
+/// - **Right-drag / Ctrl+Shift-drag**: orbit `heading` and `tilt` around the ground target.
+/// - **Scroll**: logarithmic zoom of `range_m` (~25,000 km -> 20 m) anchored to the cursor.
+/// - **Arrows**: screen-plane pan (or Ctrl/Shift orbit) with smooth hold ramp.
+/// - **Home**: return to North-up nadir (`heading = 0, tilt = 0`) at any scale.
+pub fn apply_unified_interaction(
+    ctx: &egui::Context,
+    response: &egui::Response,
+    view: &mut GlobeViewState,
+    body: ActiveBody,
+) {
+    let dt = ctx.input(|i| i.stable_dt).clamp(1.0 / 240.0, 1.0 / 20.0);
+    let ppp = ctx.pixels_per_point();
+    let radius_m = body.radius_m();
+    let max_range = GlobeViewState::max_range_for_body(radius_m);
+    let mut input_active = false;
+
+    if response.hovered() && ctx.input(|i| i.key_pressed(egui::Key::Home)) {
+        view.stop_motion();
+        view.look_down();
+        ctx.request_repaint();
+    }
+
+    // ── Mouse drag (left = grab-pan, right or Ctrl/Shift = orbit/tilt) ────
+    let right_drag = response.dragged_by(egui::PointerButton::Secondary);
+    let left_drag = response.dragged_by(egui::PointerButton::Primary);
+    if left_drag || right_drag {
+        input_active = true;
+        let raw_delta = ctx.input(|i| i.pointer.delta());
+        let delta = egui::Vec2::new(
+            raw_delta.x.clamp(-64.0, 64.0),
+            raw_delta.y.clamp(-64.0, 64.0),
+        );
+        let orbit_mod = right_drag || ctx.input(|i| i.modifiers.ctrl || i.modifiers.shift);
+        let proj = MapProjection::from_view(view, body, response.rect, ppp);
+
+        if orbit_mod {
+            let iv_heading = -delta.x * 0.007 / dt;
+            let iv_tilt = -delta.y * 0.0055 / dt;
+            view.vel_heading = lerp(view.vel_heading, iv_heading, 0.88);
+            view.vel_tilt = lerp(view.vel_tilt, iv_tilt, 0.88);
+            view.vel_pan_right_m *= 0.3;
+            view.vel_pan_up_m *= 0.3;
+        } else if delta.length_sq() > 1e-6 {
+            let curr = response
+                .interact_pointer_pos()
+                .unwrap_or_else(|| response.rect.center());
+            let prev = curr - delta;
+            if let Some((next_geo, next_heading)) = proj.grab_pan_step(prev, curr) {
+                view.target_lat = next_geo.lat;
+                view.target_lon = next_geo.lon;
+                view.heading = next_heading;
+                // Record ground-plane velocity for smooth inertial coast on release.
+                let mpp = proj.meters_per_point();
+                let tilt_cos = (view.tilt as f64).cos().max(0.25);
+                let v_right = -(delta.x as f64) * mpp / (dt as f64);
+                let v_up = (delta.y as f64) * mpp / tilt_cos / (dt as f64);
+                view.vel_pan_right_m = view.vel_pan_right_m * 0.25 + v_right * 0.75;
+                view.vel_pan_up_m = view.vel_pan_up_m * 0.25 + v_up * 0.75;
+            } else {
+                // Pointer outside limb: fall back to smooth screen-scale sphere pan.
+                let mpp = proj.meters_per_point();
+                let (next_geo, next_heading) =
+                    proj.pan_by_meters(-(delta.x as f64) * mpp, (delta.y as f64) * mpp);
+                view.target_lat = next_geo.lat;
+                view.target_lon = next_geo.lon;
+                view.heading = next_heading;
+                view.vel_pan_right_m = 0.0;
+                view.vel_pan_up_m = 0.0;
+            }
+            view.vel_heading *= 0.3;
+            view.vel_tilt *= 0.3;
+        }
+        view.auto_spin = false;
+    }
+
+    // ── Scroll zoom (logarithmic, cursor-anchored) ────────────────────────
+    let scroll_y = ctx.input(|i| {
+        if response.hovered() {
+            i.raw_scroll_delta.y
+        } else {
+            0.0
+        }
+    });
+    if scroll_y.abs() > f32::EPSILON {
+        let factor = (-scroll_y as f64 * 0.0055).exp();
+        let anchor = response.hover_pos();
+        unified_zoom_at_pointer(view, body, response.rect, ppp, factor, anchor);
+        view.auto_spin = false;
+    }
+
+    // ── Keyboard arrows (pan or Ctrl/Shift orbit) ─────────────────────────
+    if response.hovered() {
+        let (left, right, up, down, orbit_mod) = ctx.input(|i| {
+            (
+                i.key_down(egui::Key::ArrowLeft),
+                i.key_down(egui::Key::ArrowRight),
+                i.key_down(egui::Key::ArrowUp),
+                i.key_down(egui::Key::ArrowDown),
+                i.modifiers.ctrl || i.modifiers.shift,
+            )
+        });
+        if left || right || up || down {
+            const KEY_RAMP_SECS: f32 = 1.8;
+            view.key_hold_secs = (view.key_hold_secs + dt).min(KEY_RAMP_SECS);
+            let ramp = (view.key_hold_secs / KEY_RAMP_SECS).sqrt();
+            input_active = true;
+            let h = if left { -1.0_f32 } else if right { 1.0 } else { 0.0 };
+            let v = if up { -1.0_f32 } else if down { 1.0 } else { 0.0 };
+            if orbit_mod {
+                view.vel_heading = lerp(view.vel_heading, h * 1.1 * ramp, 0.5);
+                view.vel_tilt = lerp(view.vel_tilt, v * 0.8 * ramp, 0.5);
+                view.vel_pan_right_m *= 0.9;
+                view.vel_pan_up_m *= 0.9;
+            } else {
+                let proj = MapProjection::from_view(view, body, response.rect, ppp);
+                let speed_m = proj.half_h_m * 0.75 * (ramp as f64);
+                view.vel_pan_right_m =
+                    view.vel_pan_right_m * 0.5 + (h as f64) * speed_m * 0.5;
+                view.vel_pan_up_m =
+                    view.vel_pan_up_m * 0.5 + (-v as f64) * speed_m * 0.5;
+                view.vel_heading *= 0.9;
+                view.vel_tilt *= 0.9;
+            }
+            view.auto_spin = false;
+        } else {
+            view.key_hold_secs = 0.0;
+        }
+    } else {
+        view.key_hold_secs = 0.0;
+    }
+
+    // ── Auto-spin & Cinematic Meander ─────────────────────────────────────
+    if view.auto_spin && !response.hovered() {
+        let proj = MapProjection::from_view(view, body, response.rect, ppp);
+        let speed_m = (proj.half_h_m * 0.14).max(1.0);
+        let (next_geo, next_heading) = proj.pan_by_meters(-speed_m * (dt as f64), 0.0);
+        view.target_lat = next_geo.lat;
+        view.target_lon = next_geo.lon;
+        view.heading = next_heading;
+        input_active = true;
+    } else if view.meander_mode && !(left_drag || right_drag) {
+        let t = ctx.input(|i| i.time) as f32;
+        const PHI: f32 = 1.618_034;
+        const SQRT2: f32 = std::f32::consts::SQRT_2;
+        let s = view.meander_speed;
+        let proj = MapProjection::from_view(view, body, response.rect, ppp);
+
+        let yaw_sum = (t * 0.035).sin() * 0.75
+            + (t * 0.063 * PHI).sin() * 0.45
+            + (t * 0.098 * SQRT2).sin() * 0.30;
+        let tilt_sum = (t * 0.027 + 1.3).sin() * 0.55 + (t * 0.050 * PHI + 2.5).sin() * 0.35;
+        let pan_x = (t * 0.018 + 2.5).sin() * 0.60 + (t * 0.035 * PHI + 1.4).sin() * 0.40;
+        let pan_y = (t * 0.020 + 1.7).sin() * 0.60 + (t * 0.038 * SQRT2 + 0.8).sin() * 0.40;
+        let pan_scale = (s as f64) * 0.025 * proj.half_h_m;
+
+        view.vel_heading = lerp(view.vel_heading, s * 0.09 * yaw_sum / 1.50, 0.03);
+        view.vel_tilt = lerp(view.vel_tilt, s * 0.025 * tilt_sum / 0.90, 0.03);
+        view.vel_pan_right_m = view.vel_pan_right_m * 0.97 + (pan_x as f64) * pan_scale * 0.03;
+        view.vel_pan_up_m = view.vel_pan_up_m * 0.97 + (pan_y as f64) * pan_scale * 0.03;
+        input_active = true;
+    }
+
+    // ── Momentum decay & velocity integration ─────────────────────────────
+    if !input_active {
+        let decay = 0.5_f32.powf(dt / MOMENTUM_HALF_LIFE);
+        view.vel_heading *= decay;
+        view.vel_tilt *= decay;
+        view.vel_pan_right_m *= decay as f64;
+        view.vel_pan_up_m *= decay as f64;
+    }
+    let proj_now = MapProjection::from_view(view, body, response.rect, ppp);
+    let dead_pan_m = (proj_now.meters_per_point() * 0.25).max(0.01);
+    if view.vel_heading.abs() < DEAD_VEL {
+        view.vel_heading = 0.0;
+    }
+    if view.vel_tilt.abs() < DEAD_VEL {
+        view.vel_tilt = 0.0;
+    }
+    if view.vel_pan_right_m.abs() < dead_pan_m {
+        view.vel_pan_right_m = 0.0;
+    }
+    if view.vel_pan_up_m.abs() < dead_pan_m {
+        view.vel_pan_up_m = 0.0;
+    }
+
+    // Integrate heading & tilt.
+    let max_tilt = GlobeViewState::max_tilt_for_range(view.range_m, radius_m);
+    view.heading += view.vel_heading * dt;
+    let next_tilt = view.tilt + view.vel_tilt * dt;
+    view.tilt = next_tilt.clamp(0.0, max_tilt);
+    if (next_tilt - view.tilt).abs() > 1e-6 {
+        view.vel_tilt = 0.0;
+    }
+
+    // Integrate pan coasting (only when not actively grab-dragging with pointer).
+    if !(left_drag && !ctx.input(|i| i.modifiers.ctrl || i.modifiers.shift))
+        && (view.vel_pan_right_m != 0.0 || view.vel_pan_up_m != 0.0)
+    {
+        let proj = MapProjection::from_view(view, body, response.rect, ppp);
+        let (next_geo, next_heading) =
+            proj.pan_by_meters(view.vel_pan_right_m * (dt as f64), view.vel_pan_up_m * (dt as f64));
+        view.target_lat = next_geo.lat;
+        view.target_lon = next_geo.lon;
+        view.heading = next_heading;
+    }
+
+    view.range_m = view.range_m.clamp(MIN_CAMERA_RANGE_M, max_range);
+    view.sync_legacy_from_unified();
+
+    let coasting = view.vel_heading != 0.0
+        || view.vel_tilt != 0.0
+        || view.vel_pan_right_m != 0.0
+        || view.vel_pan_up_m != 0.0
+        || view.auto_spin
+        || view.meander_mode;
+    if coasting {
+        ctx.request_repaint();
+    }
+}
+
+/// Logarithmically zoom `range_m` by `factor` (`< 1` zooms in, `> 1` zooms out),
+/// keeping the geographic point under `anchor_screen` pinned if it hits the planet.
+pub fn unified_zoom_at_pointer(
+    view: &mut GlobeViewState,
+    body: ActiveBody,
+    rect: egui::Rect,
+    ppp: f32,
+    factor: f64,
+    anchor_screen: Option<egui::Pos2>,
+) {
+    let radius_m = body.radius_m();
+    let max_range = GlobeViewState::max_range_for_body(radius_m);
+    let before = MapProjection::from_view(view, body, rect, ppp);
+    let anchor_geo = anchor_screen.and_then(|pos| before.screen_to_geo(pos));
+
+    view.range_m = (view.range_m * factor).clamp(MIN_CAMERA_RANGE_M, max_range);
+    let max_tilt = GlobeViewState::max_tilt_for_range(view.range_m, radius_m);
+    if view.tilt > max_tilt {
+        view.tilt = max_tilt;
+    }
+
+    if let (Some(cursor), Some(anchor)) = (anchor_screen, anchor_geo) {
+        let after = MapProjection::from_view(view, body, rect, ppp);
+        if let Some(moved) = after
+            .project_ecef(super::projection::geo_to_ecef(
+                anchor.lat,
+                anchor.lon,
+                view.target_elev_m * (view.local_layer_spread as f64),
+                radius_m,
+            ))
+            .filter(|p| p.front_facing)
+            && let Some((new_geo, new_heading)) = after.grab_pan_step(moved.pos, cursor)
+        {
+            view.target_lat = new_geo.lat;
+            view.target_lon = new_geo.lon;
+            view.heading = new_heading;
+        }
+    }
+    view.sync_legacy_from_unified();
+}
+
 fn zoom_by(view: &mut GlobeViewState, factor: f32) {
     if view.local_mode {
         view.local_zoom = (view.local_zoom * factor)
@@ -334,27 +602,30 @@ fn zoom_by(view: &mut GlobeViewState, factor: f32) {
     }
 }
 
-/// Apply one viewer gesture using the host canvas and its current projection.
-pub(crate) fn remote_navigation(view: &mut GlobeViewState, rect: egui::Rect, action: crate::gruve::Navigation) {
+/// Apply one viewer gesture using the host canvas and its unified continuous projection.
+pub(crate) fn remote_navigation(
+    view: &mut GlobeViewState,
+    rect: egui::Rect,
+    action: crate::gruve::Navigation,
+) {
     use crate::gruve::Navigation;
     view.stop_motion();
+    let body = ActiveBody::Earth;
     match action {
-        Navigation::Zoom { factor } => zoom_by(view, factor),
-        Navigation::Pan { dx, dy } => {
-            let delta = egui::vec2(dx * rect.width(), dy * rect.height());
-            if view.local_mode {
-                let (lat, lon) = local_pan_delta(rect, view, delta);
-                view.vel_local_lat = lat;
-                view.vel_local_lon = lon;
-                pan_local(view, 1.0);
-                view.stop_motion();
-            } else {
-                let scale = super::globe_scene::drag_sensitivity_scale(view);
-                view.yaw -= delta.x * 0.0055 * scale;
-                view.pitch = (view.pitch + delta.y * 0.004 * scale)
-                    .clamp(-GLOBE_PITCH_LIMIT_RAD, GLOBE_PITCH_LIMIT_RAD);
-                view.local_center = view.globe_center_latlon();
+        Navigation::Zoom { factor } => {
+            if factor > 0.0 && factor.is_finite() {
+                unified_zoom_at_pointer(view, body, rect, 1.0, 1.0 / (factor as f64), None);
             }
+        }
+        Navigation::Pan { dx, dy } => {
+            let proj = MapProjection::from_view(view, body, rect, 1.0);
+            let right_m = -(dx as f64) * (rect.width() as f64) * proj.meters_per_point();
+            let up_m = (dy as f64) * (rect.height() as f64) * proj.meters_per_point();
+            let (next_geo, next_heading) = proj.pan_by_meters(right_m, up_m);
+            view.target_lat = next_geo.lat;
+            view.target_lon = next_geo.lon;
+            view.heading = next_heading;
+            view.sync_legacy_from_unified();
         }
     }
 }

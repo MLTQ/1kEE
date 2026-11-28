@@ -288,15 +288,106 @@ fn draw_ground_strike(
     painter.circle_filled(pos, 2.5 * scale, col.gamma_multiply(alpha));
 }
 
+/// Draw 3D great-circle geodesic gaze arcs linking nearby cameras to the focused event,
+/// complete with an animated traveling pulse bead from camera to event.
 pub(super) fn draw_camera_links(
     painter: &egui::Painter,
+    layout: &super::GlobeLayout,
+    view: &crate::model::GlobeViewState,
+    event_loc: crate::model::GeoPoint,
     event_marker: egui::Pos2,
-    camera_markers: &[MapMarker],
+    camera_links: &[(crate::model::GeoPoint, &MapMarker)],
+    time: f64,
 ) {
-    for marker in camera_markers {
-        painter.line_segment(
-            [event_marker, marker.base],
-            egui::Stroke::new(0.8, theme::camera_color().gamma_multiply(0.36)),
-        );
+    let base_col = if theme::is_abyss() {
+        egui::Color32::from_rgb(0, 245, 212)
+    } else {
+        theme::camera_color()
+    };
+    let pulse_col = if theme::is_abyss() {
+        egui::Color32::from_rgb(255, 42, 109)
+    } else {
+        theme::marker_glow_warm()
+    };
+
+    let v_event = geo_to_unit_vec(event_loc);
+    for (idx, &(cam_loc, marker)) in camera_links.iter().enumerate() {
+        let v_cam = geo_to_unit_vec(cam_loc);
+        let dot = (v_cam[0] * v_event[0] + v_cam[1] * v_event[1] + v_cam[2] * v_event[2])
+            .clamp(-1.0, 1.0);
+        let omega = dot.acos();
+        if omega < 1e-4 {
+            painter.line_segment(
+                [event_marker, marker.base],
+                egui::Stroke::new(0.85, base_col.gamma_multiply(0.42)),
+            );
+            continue;
+        }
+        let sin_omega = omega.sin().max(1e-5);
+        let lift_max = (0.014 + 0.055 * (omega / 0.6).min(1.0)).min(0.08);
+        const STEPS: usize = 14;
+        let mut pts: Vec<egui::Pos2> = Vec::with_capacity(STEPS + 1);
+        for s in 0..=STEPS {
+            let t = s as f32 / STEPS as f32;
+            let w0 = ((1.0 - t) * omega).sin() / sin_omega;
+            let w1 = (t * omega).sin() / sin_omega;
+            let lift = 1.0 + lift_max * (t * std::f32::consts::PI).sin();
+            let p = [
+                (v_cam[0] * w0 + v_event[0] * w1) * lift,
+                (v_cam[1] * w0 + v_event[1] * w1) * lift,
+                (v_cam[2] * w0 + v_event[2] * w1) * lift,
+            ];
+            if let Some(screen) = project_unit_vec(layout, view, p) {
+                pts.push(screen);
+            }
+        }
+        if pts.len() >= 2 {
+            painter.add(egui::Shape::line(
+                pts.clone(),
+                egui::Stroke::new(1.1, base_col.gamma_multiply(0.48)),
+            ));
+            // Traveling pulse bead from camera toward event
+            let phase = ((time * 0.45 + idx as f64 * 0.19).fract()) as f32;
+            let seg_f = phase * (pts.len() - 1) as f32;
+            let seg = (seg_f as usize).min(pts.len() - 2);
+            let local_t = seg_f - seg as f32;
+            let bead = pts[seg].lerp(pts[seg + 1], local_t);
+            painter.circle_filled(bead, 2.3, pulse_col.gamma_multiply(0.92));
+            painter.circle_stroke(
+                bead,
+                4.2,
+                egui::Stroke::new(1.0, base_col.gamma_multiply(0.45)),
+            );
+        }
     }
+}
+
+#[inline]
+fn geo_to_unit_vec(p: crate::model::GeoPoint) -> [f32; 3] {
+    let lat = p.lat.to_radians();
+    let lon = p.lon.to_radians();
+    let cl = lat.cos();
+    [cl * lon.cos(), lat.sin(), cl * lon.sin()]
+}
+
+fn project_unit_vec(
+    layout: &super::GlobeLayout,
+    view: &crate::model::GlobeViewState,
+    p: [f32; 3],
+) -> Option<egui::Pos2> {
+    let (sy, cy) = view.yaw.sin_cos();
+    let (sp, cp) = view.pitch.sin_cos();
+    let x1 = p[0] * cy + p[2] * sy;
+    let z1 = -p[0] * sy + p[2] * cy;
+    let y2 = p[1] * cp - z1 * sp;
+    let z2 = p[1] * sp + z1 * cp;
+    let depth = layout.camera_distance - z2;
+    if depth <= 0.05 || z2 < -0.15 {
+        return None;
+    }
+    let persp = (layout.radius * layout.focal_length) / depth;
+    Some(egui::pos2(
+        layout.center.x - x1 * persp,
+        layout.center.y - y2 * persp,
+    ))
 }

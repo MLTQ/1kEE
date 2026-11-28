@@ -1,7 +1,29 @@
 use crate::model::{GeoPoint, GlobeViewState};
 
+use super::super::projection::{MapProjection, geo_to_ecef};
 use super::terrain_field;
 use super::{GlobeLayout, ProjectedPoint};
+
+thread_local! {
+    static ACTIVE_UNIFIED_GLOBE: std::cell::RefCell<Option<MapProjection>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn with_unified_projection<R>(proj: MapProjection, f: impl FnOnce() -> R) -> R {
+    struct Guard(Option<MapProjection>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ACTIVE_UNIFIED_GLOBE.with(|cell| *cell.borrow_mut() = self.0);
+        }
+    }
+    let prev = ACTIVE_UNIFIED_GLOBE.with(|cell| cell.borrow_mut().replace(proj));
+    let _guard = Guard(prev);
+    f()
+}
+
+#[inline]
+fn active_unified_globe() -> Option<MapProjection> {
+    ACTIVE_UNIFIED_GLOBE.with(|cell| *cell.borrow())
+}
 
 /// The GPU globe backdrop ray-intersects this exact radius. Terrain affects
 /// shading there, not the sphere's geometric surface.
@@ -127,6 +149,20 @@ fn project_geo_at_radius(
     point: GeoPoint,
     radius: f32,
 ) -> Option<ProjectedPoint> {
+    if let Some(u) = active_unified_globe() {
+        let extra_m = (radius as f64 - 1.0) * u.radius_m;
+        let p = u.project_ecef(geo_to_ecef(
+            point.lat as f64,
+            point.lon as f64,
+            extra_m,
+            u.radius_m,
+        ))?;
+        return Some(ProjectedPoint {
+            pos: p.pos,
+            depth: p.depth_ndc,
+            front_facing: p.front_facing,
+        });
+    }
     let lat = point.lat.to_radians();
     let lon = point.lon.to_radians();
     let lat_cos = lat.cos();
@@ -169,6 +205,10 @@ pub(super) fn project_visible_unit_vector(
     view: &GlobeViewState,
     point: glam::Vec3,
 ) -> Option<egui::Pos2> {
+    if let Some(u) = active_unified_globe() {
+        let p = u.project_ecef(point.as_dvec3() * u.radius_m)?;
+        return p.front_facing.then_some(p.pos);
+    }
     let projected = with_xform(layout, view, |xf| xf.apply(point.x, point.y, point.z))?;
     // The tangent plane of the perspective silhouette is at z = 1 / distance.
     let visible_depth = (1.0 + layout.camera_distance.recip()) * 0.5;

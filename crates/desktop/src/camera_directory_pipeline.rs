@@ -20,7 +20,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use runtime::RequestPacer;
+use runtime::{HostPacer, RequestPacer};
+use std::io::Read;
 
 const INSECAM_ORIGIN: &str = "http://www.insecam.org";
 const DIRECTORY_TIMEOUT: Duration = Duration::from_secs(12);
@@ -158,7 +159,7 @@ fn recheck_saved<F>(
 where
     F: Fn(EyesOnPipelineProgress) + Sync,
 {
-    let pacer = RequestPacer::new(config.requests_per_minute);
+    let host_pacer = HostPacer::new(Duration::from_millis(500));
     let total = plan.snapshot.endpoints.len();
     let reachable = AtomicUsize::new(0);
     let completed = AtomicUsize::new(0);
@@ -176,8 +177,9 @@ where
                     return Err("camera check cancelled".into());
                 }
                 let mut camera = entry.camera;
-                let (kind, status) = probe_feed(client, &camera.stream_url, &pacer, cancelled)
-                    .ok_or("camera check cancelled")?;
+                let (kind, status) =
+                    probe_feed(client, &camera.stream_url, &host_pacer, cancelled)
+                        .ok_or("camera check cancelled")?;
                 if cancelled.load(Ordering::Acquire) {
                     return Err("camera check cancelled".into());
                 }
@@ -234,6 +236,7 @@ where
 {
     runtime::prune_expired();
     let pacer = RequestPacer::new(config.requests_per_minute);
+    let host_pacer = HostPacer::new(Duration::from_millis(500));
     let candidates = discover_candidates(client, config, cancelled, &pacer, &on_progress)?;
     if cancelled.load(Ordering::Acquire) {
         return Err("camera scan cancelled".into());
@@ -287,7 +290,8 @@ where
                 if cancelled.load(Ordering::Acquire) {
                     return Ok(None);
                 }
-                let camera = enrich_candidate(client, &candidate, &pacer, cancelled);
+                let camera =
+                    enrich_candidate(client, &candidate, &pacer, &host_pacer, cancelled);
                 if cancelled.load(Ordering::Acquire) {
                     return Ok(None);
                 }
@@ -560,10 +564,11 @@ fn enrich_candidate(
     client: &Client,
     candidate: &DirectoryCandidate,
     pacer: &RequestPacer,
+    host_pacer: &HostPacer,
     cancelled: &AtomicBool,
 ) -> Option<CameraFeed> {
     let location = fetch_directory_point(client, &candidate.detail_url, pacer, cancelled)?;
-    let (kind, status) = probe_feed(client, &candidate.feed_url, pacer, cancelled)?;
+    let (kind, status) = probe_feed(client, &candidate.feed_url, host_pacer, cancelled)?;
     let last_seen = match status {
         CameraConnectionState::Reachable => "verified during Eyes On sync",
         CameraConnectionState::Unreachable => "directory listed; feed probe failed",
@@ -636,10 +641,14 @@ fn parse_coordinate_pair_prefix(text: &str) -> Option<(f32, f32)> {
 fn probe_feed(
     client: &Client,
     advertised_url: &str,
-    pacer: &RequestPacer,
+    host_pacer: &HostPacer,
     cancelled: &AtomicBool,
 ) -> Option<(String, CameraConnectionState)> {
-    pacer.wait(cancelled).then_some(())?;
+    let host = Url::parse(advertised_url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".into());
+    host_pacer.wait_for_host(&host, cancelled).then_some(())?;
     let url = materialize_feed_url(advertised_url);
     let response = client
         .get(&url)
@@ -648,7 +657,7 @@ fn probe_feed(
         .timeout(FEED_PROBE_TIMEOUT)
         .send();
 
-    let Ok(response) = response else {
+    let Ok(mut response) = response else {
         return Some((
             kind_from_url(&url).into(),
             CameraConnectionState::Unreachable,
@@ -665,14 +674,61 @@ fn probe_feed(
         .headers()
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    let kind = classify_feed(content_type, &url);
-    let status = if kind == "camera" {
+        .unwrap_or_default()
+        .to_owned();
+    let kind = classify_feed(&content_type, &url);
+
+    // Peek at the opening bytes so HTML login/error pages with HTTP 200 are demoted.
+    let mut header_buf = [0u8; 4096];
+    let n = response.read(&mut header_buf).unwrap_or(0);
+    let sample = &header_buf[..n];
+    let status = if has_valid_media_magic(sample, &content_type) {
+        CameraConnectionState::Reachable
+    } else if looks_like_html(sample, &content_type) {
+        CameraConnectionState::Unreachable
+    } else if kind == "camera" {
         CameraConnectionState::Attempted
     } else {
         CameraConnectionState::Reachable
     };
     Some((kind.into(), status))
+}
+
+fn has_valid_media_magic(bytes: &[u8], content_type: &str) -> bool {
+    if bytes.len() >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+        return true; // JPEG SOI
+    }
+    if bytes.len() >= 8 && &bytes[..8] == b"\x89PNG\r\n\x1a\n" {
+        return true; // PNG
+    }
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return true; // WebP
+    }
+    if bytes.len() >= 4 && (&bytes[..4] == b"GIF8") {
+        return true; // GIF
+    }
+    // Multipart MJPEG boundary or embedded JPEG SOI within opening chunk
+    let ct = content_type.to_ascii_lowercase();
+    if ct.contains("multipart") || ct.contains("x-mixed-replace") {
+        return bytes.windows(3).any(|w| w == [0xFF, 0xD8, 0xFF])
+            || bytes.starts_with(b"--")
+            || bytes.windows(6).any(|w| w.eq_ignore_ascii_case(b"image/"));
+    }
+    false
+}
+
+fn looks_like_html(bytes: &[u8], content_type: &str) -> bool {
+    if content_type.to_ascii_lowercase().contains("text/html") {
+        return true;
+    }
+    let trimmed = bytes
+        .iter()
+        .skip_while(|b| b.is_ascii_whitespace())
+        .take(16)
+        .copied()
+        .collect::<Vec<_>>();
+    let lower = String::from_utf8_lossy(&trimmed).to_ascii_lowercase();
+    lower.starts_with("<!doctype") || lower.starts_with("<html") || lower.starts_with("<head")
 }
 
 fn classify_feed(content_type: &str, url: &str) -> &'static str {
@@ -902,5 +958,16 @@ mod tests {
             classify_feed("text/plain", "http://8.8.8.8/video.mjpg"),
             "mjpeg stream"
         );
+    }
+
+    #[test]
+    fn media_magic_validation_accepts_frames_and_rejects_html() {
+        assert!(has_valid_media_magic(&[0xFF, 0xD8, 0xFF, 0xE0], "image/jpeg"));
+        assert!(has_valid_media_magic(
+            b"--frame\r\nContent-Type: image/jpeg\r\n\r\n",
+            "multipart/x-mixed-replace; boundary=frame"
+        ));
+        assert!(!has_valid_media_magic(b"<html><body>Login</body></html>", "text/html"));
+        assert!(looks_like_html(b"  <!DOCTYPE html><html>", "application/octet-stream"));
     }
 }

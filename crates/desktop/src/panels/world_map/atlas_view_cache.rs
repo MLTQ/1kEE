@@ -12,7 +12,7 @@ use std::{
 const FILE_NAME: &str = "atlas_recent_views_v1.sqlite";
 const APPLICATION_ID: i32 = 0x314b4156;
 // Increment when the unlit elevation palette changes. Heights stay reusable.
-const MATERIAL_VERSION: i32 = 1;
+const MATERIAL_VERSION: i32 = 2;
 const MAX_PIXELS: usize = 32_020_000;
 type Result<T> = std::result::Result<T, String>;
 

@@ -4,7 +4,108 @@ use super::local_terrain_scene::{
     LocalLayout,
     projection::{LocalProjectionParams, local_projection_params},
 };
+use super::projection::{MapProjection, geo_to_ecef};
 use crate::model::{GeoPoint, GlobeViewState};
+
+/// Adaptive curved-Earth raster projector shared across ALL zoom scales and
+/// both Perspective and Orthographic projections.
+pub(super) fn unified(
+    proj: &MapProjection,
+    texture: egui::TextureId,
+    bounds: [f32; 4],
+) -> egui::Mesh {
+    let mut mesh = egui::Mesh::with_texture(texture);
+    let [west, south, east, north] = bounds;
+    if !bounds.iter().all(|v| v.is_finite()) || east <= west || north <= south {
+        return mesh;
+    }
+
+    // Clamp raster sampling to visible geographic bounds when zoomed in so we
+    // don't tessellate global 360° textures outside the viewport.
+    let (draw_w, draw_s, draw_e, draw_n) = if let Some(vis) = proj.visible_bounds() {
+        let mut w = west;
+        let mut e = east;
+        let span = e - w;
+        if span < 359.0 {
+            let vis_mid = (vis[0] + vis[2]) * 0.5;
+            let shift = ((vis_mid - (w + e) as f64 * 0.5) / 360.0).round() * 360.0;
+            w += shift as f32;
+            e += shift as f32;
+        }
+        let cw = w.max(vis[0] as f32);
+        let ce = e.min(vis[2] as f32);
+        let cs = south.max(vis[1] as f32);
+        let cn = north.min(vis[3] as f32);
+        if ce <= cw || cn <= cs {
+            return mesh;
+        }
+        (cw, cs, ce, cn)
+    } else {
+        (west, south, east, north)
+    };
+
+    // Subdivide smoothly enough to follow curvature at wide zoom, collapsing
+    // down to a few quads at street scale where the sphere is flat.
+    let span_lon = (draw_e - draw_w).abs();
+    let span_lat = (draw_n - draw_s).abs();
+    let step_deg = (span_lon.max(span_lat) / 24.0).clamp(0.05, 2.0);
+    let cols = ((span_lon / step_deg).ceil() as usize).clamp(2, 96);
+    let rows = ((span_lat / step_deg).ceil() as usize).clamp(2, 96);
+    let lat_verts = rows + 1;
+    let lon_verts = cols + 1;
+
+    let mut vert_indices = vec![u32::MAX; lat_verts * lon_verts];
+    mesh.vertices.reserve((lat_verts * lon_verts) / 2 + 16);
+    mesh.indices.reserve((rows * cols / 2) * 6 + 16);
+
+    let full_lon = (east - west).max(1e-6);
+    let full_lat = (north - south).max(1e-6);
+
+    for r in 0..lat_verts {
+        let fy = r as f32 / rows as f32;
+        let lat_deg = draw_s + (draw_n - draw_s) * fy;
+        let v_uv = ((north - lat_deg) / full_lat).clamp(0.0, 1.0);
+        let row_offset = r * lon_verts;
+        for c in 0..lon_verts {
+            let fx = c as f32 / cols as f32;
+            let lon_deg = draw_w + (draw_e - draw_w) * fx;
+            // Compute wrapped UV back into [west, east].
+            let lon_unwrapped = west + ((lon_deg - west).rem_euclid(360.0));
+            let u_uv = if full_lon >= 359.5 {
+                ((lon_deg - west) / full_lon).rem_euclid(1.0)
+            } else {
+                ((lon_unwrapped - west) / full_lon).clamp(0.0, 1.0)
+            };
+            let p_ecef = geo_to_ecef(lat_deg as f64, lon_deg as f64, 0.0, proj.radius_m);
+            if let Some(p) = proj.project_ecef(p_ecef)
+                && p.front_facing
+            {
+                let idx = mesh.vertices.len() as u32;
+                mesh.vertices.push(egui::epaint::Vertex {
+                    pos: p.pos,
+                    uv: egui::pos2(u_uv, v_uv),
+                    color: egui::Color32::WHITE,
+                });
+                vert_indices[row_offset + c] = idx;
+            }
+        }
+    }
+
+    for r in 0..rows {
+        let row_s = r * lon_verts;
+        let row_n = (r + 1) * lon_verts;
+        for c in 0..cols {
+            let nw = vert_indices[row_n + c];
+            let ne = vert_indices[row_n + c + 1];
+            let se = vert_indices[row_s + c + 1];
+            let sw = vert_indices[row_s + c];
+            if nw != u32::MAX && ne != u32::MAX && se != u32::MAX && sw != u32::MAX {
+                mesh.indices.extend_from_slice(&[nw, ne, se, nw, se, sw]);
+            }
+        }
+    }
+    mesh
+}
 
 pub(super) fn globe(
     layout: &GlobeLayout,

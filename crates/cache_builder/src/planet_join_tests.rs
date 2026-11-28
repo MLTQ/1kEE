@@ -500,7 +500,7 @@ fn damaged_temporary_sort_rebuilds_once_and_discards_uncommitted_output() {
             }
             if p.message.contains("GB sorted") && (persistent || injections == 0) {
                 injections += 1;
-                let path = root.join("sort/0/000000.bin");
+                let path = root.join("sort/000000.bin");
                 let mut bytes = fs::read(&path).unwrap();
                 bytes[0] ^= 1;
                 fs::write(path, bytes).unwrap();

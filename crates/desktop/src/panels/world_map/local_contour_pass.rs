@@ -644,7 +644,20 @@ impl LocalContourCallback {
                 palette_enabled: 0.0,
                 major_color: [0.0; 4],
                 minor_color: [0.0; 4],
-                ground_chart: [params.pole, 0.0, 0.0, 0.0],
+                ground_chart: [
+                    params.pole,
+                    if pass == LocalContourPass::Surface && crate::theme::tanaka_contours() {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    if pass == LocalContourPass::Surface && crate::theme::is_abyss() {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    0.0,
+                ],
             },
         }
     }

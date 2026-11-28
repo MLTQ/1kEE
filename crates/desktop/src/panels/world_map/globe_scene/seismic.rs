@@ -6,8 +6,7 @@ use glam::Vec3;
 const EPICENTER_COLOR: Color32 = Color32::from_rgb(255, 176, 77);
 
 pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
-    let available =
-        can_draw(model) && !model.globe_view.local_mode && model.target.session.is_none();
+    let available = can_draw(model);
     let checkbox = ui.add_enabled(
         available,
         egui::Checkbox::new(&mut model.seismic.enabled, "Earthquake epicenters"),

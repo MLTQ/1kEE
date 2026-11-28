@@ -14,10 +14,22 @@ mod layout;
 pub(super) fn draw<'a>(
     painter: &egui::Painter,
     viewport: Rect,
+    events: impl Iterator<Item = &'a EventRecord>,
+    markers: &[MapMarker],
+    opacity: f32,
+    selected: Option<&str>,
+) {
+    draw_with_badge(painter, viewport, events, markers, opacity, selected, None);
+}
+
+pub(super) fn draw_with_badge<'a>(
+    painter: &egui::Painter,
+    viewport: Rect,
     mut events: impl Iterator<Item = &'a EventRecord>,
     markers: &[MapMarker],
     opacity: f32,
     selected: Option<&str>,
+    convergence_badge: Option<&str>,
 ) {
     let layout_id = egui::Id::new("follow_event_card_layout");
     let mut layout = painter.ctx().data_mut(|data| {
@@ -53,39 +65,42 @@ pub(super) fn draw<'a>(
     let mut painter = painter.with_clip_rect(viewport);
     painter.multiply_opacity(opacity);
     let style = painter.ctx().style();
-    let width = 220.0_f32.min(bounds.width() - PADDING * 2.0);
+    let width = 240.0_f32.min(bounds.width() - PADDING * 2.0);
     let mut requests = Vec::with_capacity(visible.len());
     let mut cards = Vec::with_capacity(visible.len());
     for (event, marker) in visible {
-        let fields = [
-            (
-                event.severity.label(),
-                egui::TextStyle::Body,
-                event.severity.color(),
-            ),
-            (
-                event.title.as_str(),
-                egui::TextStyle::Body,
-                style.visuals.strong_text_color(),
-            ),
-            (
-                event.location_name.as_str(),
-                egui::TextStyle::Small,
-                theme::text_muted(),
-            ),
-        ];
+        let mut fields: Vec<(&str, egui::TextStyle, egui::Color32)> = Vec::with_capacity(4);
+        if let Some(badge) = convergence_badge.filter(|b| !b.is_empty()) {
+            fields.push((badge, egui::TextStyle::Small, theme::topo_color()));
+        }
+        fields.push((
+            event.severity.label(),
+            egui::TextStyle::Body,
+            event.severity.color(),
+        ));
+        fields.push((
+            event.title.as_str(),
+            egui::TextStyle::Body,
+            style.visuals.strong_text_color(),
+        ));
+        fields.push((
+            event.location_name.as_str(),
+            egui::TextStyle::Small,
+            theme::text_muted(),
+        ));
         let text: Vec<_> = fields
             .into_iter()
             .map(|(text, font, color)| {
                 painter.layout(text.to_owned(), font.resolve(&style), color, width)
             })
             .collect();
+        let gaps = FIELD_GAP * text.len().saturating_sub(1) as f32;
         let size = egui::vec2(
             text.iter()
                 .map(|line| line.size().x)
                 .fold(0.0_f32, f32::max)
                 + PADDING * 2.0,
-            text.iter().map(|line| line.size().y).sum::<f32>() + FIELD_GAP * 2.0 + PADDING * 2.0,
+            text.iter().map(|line| line.size().y).sum::<f32>() + gaps + PADDING * 2.0,
         );
         requests.push(layout::Request {
             id: &event.id,

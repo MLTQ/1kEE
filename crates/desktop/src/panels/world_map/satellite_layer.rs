@@ -57,6 +57,20 @@ impl SatelliteLayer {
         }
     }
 
+    pub(super) fn draw_unified(
+        &self,
+        painter: &egui::Painter,
+        proj: &super::projection::MapProjection,
+    ) {
+        if !self.visible || self.opacity == 0 {
+            return;
+        }
+        let mesh = raster_mesh::unified(proj, self.texture.id(), self.bounds);
+        if !mesh.vertices.is_empty() {
+            painter.add(egui::Shape::mesh(Arc::new(self.tint(mesh))));
+        }
+    }
+
     pub(super) fn draw_globe(
         &self,
         painter: &egui::Painter,

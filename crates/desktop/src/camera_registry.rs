@@ -42,6 +42,7 @@ enum PollOutcome {
     Success {
         cameras: Vec<CameraFeed>,
         source_label: String,
+        warnings: Vec<String>,
     },
     Error(String),
 }
@@ -97,7 +98,10 @@ pub fn tick(model: &mut AppModel) {
         }
     }
 
-    let public_sources = camera_source_catalog::load_public_sources(model.selected_root.as_deref());
+    let public_sources = camera_source_catalog::load_public_sources_with_builtin(
+        model.selected_root.as_deref(),
+        model.open_public_cameras_enabled,
+    );
     let scrape_sources = camera_scrape_catalog::load_scrape_sources(model.selected_root.as_deref());
     if !model.has_enabled_camera_sources() && public_sources.is_empty() && scrape_sources.is_empty()
     {
@@ -132,7 +136,7 @@ pub fn tick(model: &mut AppModel) {
                 model.eyes_on_requests_per_minute,
             ),
         });
-        let focus = model.terrain_focus_location();
+        let windy_centers = collect_windy_centers(model);
         let public_sources = public_sources;
         let scrape_sources = scrape_sources;
         let (progress_sender, progress_receiver) = crossbeam_channel::unbounded();
@@ -144,7 +148,7 @@ pub fn tick(model: &mut AppModel) {
                 &windy_key,
                 &ny511_key,
                 eyes_on_config.as_ref(),
-                focus,
+                &windy_centers,
                 &public_sources,
                 &scrape_sources,
                 &progress_sender,
@@ -199,10 +203,14 @@ fn apply_outcome(model: &mut AppModel, generation: u64, outcome: PollOutcome) {
         PollOutcome::Success {
             cameras,
             source_label,
+            warnings,
         } => {
             // An intentionally emptied endpoint cache must clear old markers,
             // including when the settings window closed before its worker ended.
             model.replace_camera_registry(cameras, &source_label);
+            for warning in warnings {
+                model.push_log(format!("Camera source warning: {warning}"));
+            }
         }
         PollOutcome::Error(error) => {
             model.camera_registry_status = "error".into();
@@ -280,17 +288,48 @@ fn eyes_on_poll_progress(scope: &str, progress: EyesOnPipelineProgress) -> PollP
     }
 }
 
+fn collect_windy_centers(model: &AppModel) -> Vec<GeoPoint> {
+    let mut centers: Vec<GeoPoint> = Vec::new();
+    if let Some(focus) = model.terrain_focus_location() {
+        centers.push(focus);
+    }
+    for cluster in model.convergence.clusters().iter().take(6) {
+        if centers.len() >= 3 {
+            break;
+        }
+        let loc = cluster.center;
+        if centers
+            .iter()
+            .all(|c| (c.lat - loc.lat).abs() > 2.5 || (c.lon - loc.lon).abs() > 2.5)
+        {
+            centers.push(loc);
+        }
+    }
+    centers
+}
+
 fn poll_signature(model: &AppModel) -> String {
-    let focus = model
-        .terrain_focus_location()
-        .map(|point| format!("{:.2}:{:.2}", point.lat, point.lon))
-        .unwrap_or_else(|| "nofocus".into());
-    let public_sources = camera_source_catalog::load_public_sources(model.selected_root.as_deref());
+    let windy_enabled = !model.windy_webcams_api_key.trim().is_empty();
+    // Only tie poll signature to focus (quantized to 1°) when Windy is enabled,
+    // so panning or switching events never cancels healthy DOT/public/Eyes-On syncs.
+    let focus = if windy_enabled {
+        model
+            .terrain_focus_location()
+            .map(|point| format!("{:.0}:{:.0}", point.lat, point.lon))
+            .unwrap_or_else(|| "nofocus".into())
+    } else {
+        "static".into()
+    };
+    let public_sources = camera_source_catalog::load_public_sources_with_builtin(
+        model.selected_root.as_deref(),
+        model.open_public_cameras_enabled,
+    );
     let scrape_sources = camera_scrape_catalog::load_scrape_sources(model.selected_root.as_deref());
     format!(
-        "windy:{}|511ny:{}|eyes-on:{}:{}:{}rpm|public:{}|scrape:{}|focus:{}",
-        !model.windy_webcams_api_key.trim().is_empty(),
+        "windy:{}|511ny:{}|open-public:{}|eyes-on:{}:{}:{}rpm|public:{}|scrape:{}|focus:{}",
+        windy_enabled,
         !model.ny511_api_key.trim().is_empty(),
+        model.open_public_cameras_enabled,
         model.eyes_on_enabled,
         model.eyes_on_country_code.trim(),
         settings_store::normalize_eyes_on_requests_per_minute(model.eyes_on_requests_per_minute),
@@ -300,54 +339,73 @@ fn poll_signature(model: &AppModel) -> String {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fetch_camera_registry(
     windy_key: &str,
     ny511_key: &str,
     eyes_on_config: Option<&EyesOnPipelineConfig>,
-    focus: Option<GeoPoint>,
+    windy_centers: &[GeoPoint],
     public_sources: &[PublicCameraSource],
     scrape_sources: &[ScrapedCameraSource],
     progress: &Sender<PollProgress>,
     cancelled: &AtomicBool,
 ) -> PollOutcome {
     report_progress(progress, 0.02, "Preparing camera sources…");
-    let client = match Client::builder().timeout(REQUEST_TIMEOUT).build() {
+    let client = match Client::builder()
+        .timeout(REQUEST_TIMEOUT)
+        .user_agent("1kEE/0.1 public-camera-registry")
+        .build()
+    {
         Ok(client) => client,
         Err(error) => return PollOutcome::Error(error.to_string()),
     };
 
     let mut cameras = Vec::new();
     let mut source_parts = Vec::new();
+    let mut warnings = Vec::new();
+    let mut succeeded_sources = 0usize;
 
-    if !ny511_key.trim().is_empty() {
+    if !ny511_key.trim().is_empty() && !cancelled.load(Ordering::Acquire) {
         report_progress(progress, 0.08, "Querying 511NY cameras…");
         match fetch_511ny_cameras(&client, ny511_key.trim()) {
             Ok(mut fetched) => {
+                succeeded_sources += 1;
                 source_parts.push("511NY".to_owned());
                 cameras.append(&mut fetched);
             }
             Err(error) => {
-                return PollOutcome::Error(format!("511NY adapter failed: {error}"));
+                warnings.push(format!("511NY adapter failed: {error}"));
             }
         }
     }
 
-    if !windy_key.trim().is_empty() {
-        if let Some(focus) = focus {
-            report_progress(progress, 0.12, "Querying Windy Webcams…");
-            match fetch_windy_cameras(&client, windy_key.trim(), focus) {
+    if !windy_key.trim().is_empty() && !windy_centers.is_empty() && !cancelled.load(Ordering::Acquire)
+    {
+        report_progress(progress, 0.12, "Querying Windy Webcams…");
+        let mut windy_ok = false;
+        for &center in windy_centers {
+            if cancelled.load(Ordering::Acquire) {
+                break;
+            }
+            match fetch_windy_cameras(&client, windy_key.trim(), center) {
                 Ok(mut fetched) => {
-                    source_parts.push("Windy Webcams".to_owned());
+                    windy_ok = true;
                     cameras.append(&mut fetched);
                 }
                 Err(error) => {
-                    return PollOutcome::Error(format!("Windy adapter failed: {error}"));
+                    warnings.push(format!("Windy adapter failed: {error}"));
                 }
             }
         }
+        if windy_ok {
+            succeeded_sources += 1;
+            source_parts.push("Windy Webcams".to_owned());
+        }
     }
 
-    if let Some(config) = eyes_on_config {
+    if let Some(config) = eyes_on_config
+        && !cancelled.load(Ordering::Acquire)
+    {
         let scope = config
             .country_code
             .as_deref()
@@ -359,49 +417,60 @@ fn fetch_camera_registry(
             let _ = progress.send(update);
         }) {
             Ok(mut fetched) => {
+                succeeded_sources += 1;
                 source_parts.push("Project Eyes On · Insecam".to_owned());
                 cameras.append(&mut fetched);
             }
             Err(error) => {
-                return PollOutcome::Error(format!(
-                    "Project Eyes On directory adapter failed: {error}"
-                ));
+                warnings.push(format!("Project Eyes On directory adapter failed: {error}"));
             }
         }
     }
 
-    for source in public_sources {
+    let public_total = public_sources.len().max(1);
+    for (idx, source) in public_sources.iter().enumerate() {
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
+        report_progress(
+            progress,
+            0.55 + 0.35 * (idx as f32 / public_total as f32),
+            format!("Querying {}…", source.name),
+        );
         match fetch_public_source(&client, source) {
             Ok(mut fetched) => {
+                succeeded_sources += 1;
                 if !fetched.is_empty() {
                     source_parts.push(source.name.clone());
                     cameras.append(&mut fetched);
                 }
             }
             Err(error) => {
-                return PollOutcome::Error(format!(
-                    "Public source '{}' failed: {error}",
-                    source.name
-                ));
+                warnings.push(format!("Public source '{}' failed: {error}", source.name));
             }
         }
     }
 
     for source in scrape_sources {
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
         match fetch_scraped_source(&client, source) {
             Ok(mut fetched) => {
+                succeeded_sources += 1;
                 if !fetched.is_empty() {
                     source_parts.push(source.name.clone());
                     cameras.append(&mut fetched);
                 }
             }
             Err(error) => {
-                return PollOutcome::Error(format!(
-                    "Scraped source '{}' failed: {error}",
-                    source.name
-                ));
+                warnings.push(format!("Scraped source '{}' failed: {error}", source.name));
             }
         }
+    }
+
+    if succeeded_sources == 0 && !warnings.is_empty() {
+        return PollOutcome::Error(warnings.join("; "));
     }
 
     dedupe_cameras(&mut cameras);
@@ -418,6 +487,7 @@ fn fetch_camera_registry(
         } else {
             source_parts.join(" + ")
         },
+        warnings,
     }
 }
 
@@ -429,7 +499,103 @@ fn fetch_public_source(
         PublicCameraSourceKind::JsonArray => fetch_public_json_array_source(client, source),
         PublicCameraSourceKind::GeoJson => fetch_public_geojson_source(client, source),
         PublicCameraSourceKind::ArcGisFeatureService => fetch_public_arcgis_source(client, source),
+        PublicCameraSourceKind::TflJamCam => fetch_tfl_jamcam_source(client, source),
+        PublicCameraSourceKind::StaticList => Ok(fetch_static_list_source(source)),
     }
+}
+
+fn fetch_static_list_source(source: &PublicCameraSource) -> Vec<CameraFeed> {
+    source
+        .static_cameras
+        .iter()
+        .filter(|entry| is_safe_public_http_url(&entry.stream_url))
+        .map(|entry| CameraFeed {
+            id: format!("{}-{}", slugify(&source.provider), slugify(&entry.id)),
+            label: entry.label.clone(),
+            provider: source.provider.clone(),
+            kind: entry
+                .kind
+                .clone()
+                .or_else(|| source.kind_value.clone())
+                .unwrap_or_else(|| "snapshot".into()),
+            location: GeoPoint {
+                lat: entry.latitude,
+                lon: entry.longitude,
+            },
+            stream_url: entry.stream_url.clone(),
+            last_seen: "public catalog".into(),
+            status: CameraConnectionState::Idle,
+        })
+        .collect()
+}
+
+fn fetch_tfl_jamcam_source(
+    client: &Client,
+    source: &PublicCameraSource,
+) -> Result<Vec<CameraFeed>, String> {
+    let response = client
+        .get(&source.endpoint)
+        .send()
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("unexpected status {}", response.status()));
+    }
+    let body = response.text().map_err(|error| error.to_string())?;
+    parse_tfl_jamcam_json(source, &body)
+}
+
+fn parse_tfl_jamcam_json(
+    source: &PublicCameraSource,
+    body: &str,
+) -> Result<Vec<CameraFeed>, String> {
+    let payload: Value = serde_json::from_str(body).map_err(|error| error.to_string())?;
+    let places = payload
+        .as_array()
+        .ok_or_else(|| "TfL JamCam response was not an array".to_owned())?;
+    let mut out = Vec::with_capacity(places.len());
+    for place in places {
+        let Some(id) = place.get("id").and_then(value_as_string_ref) else {
+            continue;
+        };
+        let Some(lat) = place.get("lat").and_then(value_as_f32_ref) else {
+            continue;
+        };
+        let Some(lon) = place.get("lon").and_then(value_as_f32_ref) else {
+            continue;
+        };
+        let label = place
+            .get("commonName")
+            .and_then(value_as_string_ref)
+            .unwrap_or_else(|| source.name.clone());
+        let mut image_url = String::new();
+        let mut available = true;
+        if let Some(props) = place.get("additionalProperties").and_then(Value::as_array) {
+            for prop in props {
+                let key = prop.get("key").and_then(Value::as_str).unwrap_or_default();
+                let val = prop.get("value").and_then(Value::as_str).unwrap_or_default();
+                if key.eq_ignore_ascii_case("imageUrl") && !val.is_empty() {
+                    image_url = val.to_owned();
+                } else if key.eq_ignore_ascii_case("available") && val.eq_ignore_ascii_case("false")
+                {
+                    available = false;
+                }
+            }
+        }
+        if !available || !is_safe_public_http_url(&image_url) {
+            continue;
+        }
+        out.push(CameraFeed {
+            id: format!("{}-{}", slugify(&source.provider), slugify(&id)),
+            label,
+            provider: source.provider.clone(),
+            kind: source.kind_value.clone().unwrap_or_else(|| "snapshot".into()),
+            location: GeoPoint { lat, lon },
+            stream_url: image_url,
+            last_seen: "public source".into(),
+            status: CameraConnectionState::Idle,
+        });
+    }
+    Ok(out)
 }
 
 fn fetch_scraped_source(
@@ -544,66 +710,128 @@ fn fetch_public_arcgis_source(
     client: &Client,
     source: &PublicCameraSource,
 ) -> Result<Vec<CameraFeed>, String> {
-    let query_url = if source.endpoint.contains('?') {
-        format!(
-            "{}&where=1%3D1&outFields=*&returnGeometry=true&f=json",
-            source.endpoint
-        )
-    } else {
-        format!(
-            "{}?where=1%3D1&outFields=*&returnGeometry=true&f=json",
-            source.endpoint
-        )
-    };
-
-    let response = client
-        .get(query_url)
-        .send()
-        .map_err(|error| error.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("unexpected status {}", response.status()));
-    }
-
-    let body = response.text().map_err(|error| error.to_string())?;
-    let payload: Value = serde_json::from_str(&body).map_err(|error| error.to_string())?;
-    let features = payload
-        .get("features")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "arcgis response did not contain features".to_owned())?;
-
+    const PAGE_SIZE: usize = 1000;
+    const MAX_PAGES: usize = 10;
     let mut out = Vec::new();
-    for feature in features {
-        let attributes = feature
-            .get("attributes")
-            .filter(|value| value.is_object())
-            .unwrap_or(feature);
-        let geometry = feature.get("geometry");
-        let lat = geometry
-            .and_then(|geometry| geometry.get("y"))
-            .and_then(value_as_f32_ref)
-            .or_else(|| {
-                source
-                    .geometry_y_field
-                    .as_deref()
-                    .and_then(|field| attributes.get(field))
-                    .and_then(value_as_f32_ref)
-            });
-        let lon = geometry
-            .and_then(|geometry| geometry.get("x"))
-            .and_then(value_as_f32_ref)
-            .or_else(|| {
-                source
-                    .geometry_x_field
-                    .as_deref()
-                    .and_then(|field| attributes.get(field))
-                    .and_then(value_as_f32_ref)
-            });
+    let mut offset = 0usize;
 
-        if let Some(camera) = camera_from_record(source, attributes, lat, lon) {
-            out.push(camera);
+    for _ in 0..MAX_PAGES {
+        let query_url = arcgis_query_url(&source.endpoint, offset, PAGE_SIZE);
+        let response = client
+            .get(&query_url)
+            .send()
+            .map_err(|error| error.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("unexpected status {}", response.status()));
         }
+
+        let body = response.text().map_err(|error| error.to_string())?;
+        let payload: Value = serde_json::from_str(&body).map_err(|error| error.to_string())?;
+        let features = payload
+            .get("features")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "arcgis response did not contain features".to_owned())?;
+        let page_count = features.len();
+
+        for feature in features {
+            let attributes = feature
+                .get("attributes")
+                .filter(|value| value.is_object())
+                .unwrap_or(feature);
+            let geometry = feature.get("geometry");
+            let lat = geometry
+                .and_then(|geometry| geometry.get("y"))
+                .and_then(value_as_f32_ref)
+                .or_else(|| {
+                    source
+                        .geometry_y_field
+                        .as_deref()
+                        .and_then(|field| json_path(attributes, field))
+                        .and_then(value_as_f32_ref)
+                });
+            let lon = geometry
+                .and_then(|geometry| geometry.get("x"))
+                .and_then(value_as_f32_ref)
+                .or_else(|| {
+                    source
+                        .geometry_x_field
+                        .as_deref()
+                        .and_then(|field| json_path(attributes, field))
+                        .and_then(value_as_f32_ref)
+                });
+
+            if let Some(camera) = camera_from_record(source, attributes, lat, lon) {
+                out.push(camera);
+            }
+        }
+
+        let exceeded = payload
+            .get("exceededTransferLimit")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !exceeded || page_count == 0 {
+            break;
+        }
+        offset += page_count;
     }
     Ok(out)
+}
+
+fn arcgis_query_url(endpoint: &str, offset: usize, page_size: usize) -> String {
+    let sep = if endpoint.contains('?') { '&' } else { '?' };
+    format!(
+        "{endpoint}{sep}where=1%3D1&outFields=*&returnGeometry=true&outSR=4326&resultOffset={offset}&resultRecordCount={page_size}&f=json"
+    )
+}
+
+fn json_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
+    if !path.contains('.') {
+        return value.get(path);
+    }
+    let mut cur = value;
+    for segment in path.split('.') {
+        if let Ok(index) = segment.parse::<usize>()
+            && let Some(arr) = cur.as_array()
+        {
+            cur = arr.get(index)?;
+        } else {
+            cur = cur.get(segment)?;
+        }
+    }
+    Some(cur)
+}
+
+fn is_safe_public_http_url(raw: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(raw.trim()) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") || host.ends_with(".local") {
+        return false;
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) => {
+                !(v4.is_private()
+                    || v4.is_loopback()
+                    || v4.is_link_local()
+                    || v4.is_unspecified()
+                    || v4.is_multicast())
+            }
+            std::net::IpAddr::V6(v6) => {
+                !(v6.is_loopback() || v6.is_unspecified() || v6.is_multicast())
+            }
+        };
+    }
+    true
 }
 
 fn camera_from_record(
@@ -617,19 +845,31 @@ fn camera_from_record(
     let lat_field = source.latitude_field.as_deref().unwrap_or("latitude");
     let lon_field = source.longitude_field.as_deref().unwrap_or("longitude");
 
-    let id = record.get(id_field).and_then(value_as_string_ref)?;
-    let label = record
-        .get(label_field)
+    let id = json_path(record, id_field).and_then(value_as_string_ref)?;
+    let label = json_path(record, label_field)
         .and_then(value_as_string_ref)
         .unwrap_or_else(|| source.name.clone());
-    let lat = lat_override.or_else(|| record.get(lat_field).and_then(value_as_f32_ref))?;
-    let lon = lon_override.or_else(|| record.get(lon_field).and_then(value_as_f32_ref))?;
+    let lat = lat_override.or_else(|| json_path(record, lat_field).and_then(value_as_f32_ref))?;
+    let lon = lon_override.or_else(|| json_path(record, lon_field).and_then(value_as_f32_ref))?;
+    if !lat.is_finite() || !lon.is_finite() || lat.abs() > 90.0 || lon.abs() > 180.0 {
+        return None;
+    }
     let stream_url = source
         .stream_url_field
         .as_deref()
-        .and_then(|field| record.get(field))
+        .and_then(|field| json_path(record, field))
         .and_then(value_as_string_ref)
+        .filter(|u| !u.trim().is_empty())
+        .or_else(|| {
+            source
+                .stream_url_template
+                .as_deref()
+                .map(|tpl| tpl.replace("{id}", &id))
+        })
         .unwrap_or_default();
+    if !stream_url.is_empty() && !is_safe_public_http_url(&stream_url) {
+        return None;
+    }
 
     Some(CameraFeed {
         id: format!("{}-{id}", slugify(&source.provider)),
@@ -754,14 +994,12 @@ fn fetch_windy_cameras(
     api_key: &str,
     focus: GeoPoint,
 ) -> Result<Vec<CameraFeed>, String> {
+    const PAGE_LIMIT: usize = 50;
+    const MAX_PAGES: usize = 4;
     let west = (focus.lon - WINDY_BBOX_HALF_SPAN_DEG).clamp(-180.0, 180.0);
     let east = (focus.lon + WINDY_BBOX_HALF_SPAN_DEG).clamp(-180.0, 180.0);
     let south = (focus.lat - WINDY_BBOX_HALF_SPAN_DEG).clamp(-85.0, 85.0);
     let north = (focus.lat + WINDY_BBOX_HALF_SPAN_DEG).clamp(-85.0, 85.0);
-
-    let url = format!(
-        "https://api.windy.com/webcams/api/v3/webcams?bbox={west},{south},{east},{north}&limit=200&include=location,urls,player"
-    );
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -769,17 +1007,39 @@ fn fetch_windy_cameras(
         HeaderValue::from_str(api_key).map_err(|error| error.to_string())?,
     );
 
-    let response = client
-        .get(url)
-        .headers(headers)
-        .send()
-        .map_err(|error| error.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("unexpected status {}", response.status()));
+    let mut out = Vec::new();
+    for page in 0..MAX_PAGES {
+        let offset = page * PAGE_LIMIT;
+        let url = format!(
+            "https://api.windy.com/webcams/api/v3/webcams?bbox={west},{south},{east},{north}&limit={PAGE_LIMIT}&offset={offset}&include=location,urls,images,player"
+        );
+
+        let response = client
+            .get(url)
+            .headers(headers.clone())
+            .send()
+            .map_err(|error| error.to_string())?;
+        if !response.status().is_success() {
+            if page > 0 {
+                break;
+            }
+            return Err(format!("unexpected status {}", response.status()));
+        }
+
+        let body = response.text().map_err(|error| error.to_string())?;
+        let batch = parse_windy_cameras_json(&body)?;
+        let count = batch.len();
+        out.extend(batch);
+        if count < PAGE_LIMIT {
+            break;
+        }
     }
 
-    let body = response.text().map_err(|error| error.to_string())?;
-    let payload: Value = serde_json::from_str(&body).map_err(|error| error.to_string())?;
+    Ok(out)
+}
+
+fn parse_windy_cameras_json(body: &str) -> Result<Vec<CameraFeed>, String> {
+    let payload: Value = serde_json::from_str(body).map_err(|error| error.to_string())?;
     let webcams = payload
         .get("webcams")
         .and_then(Value::as_array)
@@ -793,7 +1053,11 @@ fn fetch_windy_cameras(
 
     let mut out = Vec::new();
     for raw in webcams {
-        let Some(id) = raw.get("id").and_then(value_as_string) else {
+        let Some(id) = raw
+            .get("webcamId")
+            .or_else(|| raw.get("id"))
+            .and_then(value_as_string)
+        else {
             continue;
         };
 
@@ -820,22 +1084,33 @@ fn fetch_windy_cameras(
             .or_else(|| location.get("city"))
             .and_then(value_as_string)
             .unwrap_or_else(|| "Windy webcam".into());
-        let stream_url = raw
-            .get("player")
-            .and_then(|player| player.get("live"))
-            .and_then(value_as_string)
-            .or_else(|| {
-                raw.get("urls")
-                    .and_then(|urls| urls.get("detail"))
-                    .and_then(value_as_string)
-            })
-            .unwrap_or_default();
+
+        // Prefer direct JPEG preview image URLs that CameraFeedPlayer can render directly.
+        let direct_image = json_path(raw, "images.current.preview")
+            .or_else(|| json_path(raw, "images.daylight.preview"))
+            .or_else(|| json_path(raw, "images.current.thumbnail"))
+            .and_then(value_as_string);
+        let (stream_url, kind) = if let Some(img) = direct_image {
+            (img, "snapshot")
+        } else {
+            let fallback = raw
+                .get("player")
+                .and_then(|player| player.get("live"))
+                .and_then(value_as_string)
+                .or_else(|| {
+                    raw.get("urls")
+                        .and_then(|urls| urls.get("detail"))
+                        .and_then(value_as_string)
+                })
+                .unwrap_or_default();
+            (fallback, "webcam")
+        };
 
         out.push(CameraFeed {
             id: format!("windy-{id}"),
             label,
             provider: "Windy Webcams".into(),
-            kind: "webcam".into(),
+            kind: kind.into(),
             location: GeoPoint { lat, lon },
             stream_url,
             last_seen: "live sync".into(),
@@ -1153,5 +1428,82 @@ mod tests {
             progress.label,
             "Reusing global directory snapshot · 512 candidates · 12 min old"
         );
+    }
+
+    #[test]
+    fn windy_v3_parser_prefers_direct_preview_image_over_html_player() {
+        let json = r#"{
+            "webcams": [{
+                "webcamId": 12345,
+                "title": "Golden Gate Bridge",
+                "location": { "latitude": 37.8199, "longitude": -122.4783 },
+                "images": { "current": { "preview": "https://images-webcams.windy.com/45/12345/current/preview/12345.jpg" } },
+                "player": { "live": "https://webcams.windy.com/webcams/public/embed/player/12345/live" }
+            }]
+        }"#;
+        let cams = parse_windy_cameras_json(json).unwrap();
+        assert_eq!(cams.len(), 1);
+        assert_eq!(cams[0].id, "windy-12345");
+        assert_eq!(cams[0].kind, "snapshot");
+        assert!(cams[0].stream_url.ends_with(".jpg"));
+    }
+
+    #[test]
+    fn dot_path_and_template_extraction_handles_caltrans_and_digitraffic() {
+        let caltrans = &camera_source_catalog::builtin_public_sources()[0];
+        let record: Value = serde_json::json!({
+            "cctv": {
+                "index": "101",
+                "location": {
+                    "locationName": "US-101 at Golden Gate",
+                    "latitude": "37.8199",
+                    "longitude": "-122.4783"
+                },
+                "imageData": {
+                    "static": { "currentImageURL": "https://cwwp2.dot.ca.gov/data/d4/cctv/image/tv101.jpg" }
+                }
+            }
+        });
+        let cam = camera_from_record(caltrans, &record, None, None).unwrap();
+        assert_eq!(cam.label, "US-101 at Golden Gate");
+        assert_eq!(cam.stream_url, "https://cwwp2.dot.ca.gov/data/d4/cctv/image/tv101.jpg");
+
+        let arcgis_url = arcgis_query_url("https://services.arcgis.com/Layer/query", 1000, 1000);
+        assert!(arcgis_url.contains("outSR=4326"));
+        assert!(arcgis_url.contains("resultOffset=1000"));
+    }
+
+    #[test]
+    fn tfl_jamcam_parser_extracts_available_cameras_only() {
+        let source = camera_source_catalog::builtin_public_sources()
+            .into_iter()
+            .find(|s| s.kind == PublicCameraSourceKind::TflJamCam)
+            .unwrap();
+        let body = r#"[
+            {
+                "id": "JamCams_00001.01234",
+                "commonName": "Tower Bridge Rd",
+                "lat": 51.5055,
+                "lon": -0.0754,
+                "additionalProperties": [
+                    { "key": "available", "value": "true" },
+                    { "key": "imageUrl", "value": "https://s3-eu-west-1.amazonaws.com/jamcams.tfl.gov.uk/00001.01234.jpg" }
+                ]
+            },
+            {
+                "id": "JamCams_00001.09999",
+                "commonName": "Offline Cam",
+                "lat": 51.51,
+                "lon": -0.08,
+                "additionalProperties": [
+                    { "key": "available", "value": "false" },
+                    { "key": "imageUrl", "value": "https://s3-eu-west-1.amazonaws.com/jamcams.tfl.gov.uk/00001.09999.jpg" }
+                ]
+            }
+        ]"#;
+        let cams = parse_tfl_jamcam_json(&source, body).unwrap();
+        assert_eq!(cams.len(), 1);
+        assert_eq!(cams[0].label, "Tower Bridge Rd");
+        assert!(cams[0].stream_url.ends_with("00001.01234.jpg"));
     }
 }

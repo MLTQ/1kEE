@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/cache_builder", "crates/cell_format", "crates/tile_archive", "crates/desktop", "crates/gruve_sdk", "crates/vr", "crates/lidar"]
+members = ["crates/cache_builder", "crates/cell_format", "crates/tile_archive", "crates/desktop", "crates/gruve_sdk", "crates/vr", "crates/lidar", "crates/reverb_tts"]
 resolver = "2"
 
 [workspace.package]

@@ -1,31 +1,39 @@
 use super::*;
 
 #[test]
-fn target_tool_is_available_only_on_local_earth() {
-    let ctx=egui::Context::default();let mut model=AppModel::new();
-    for (body,local,expected) in [(ActiveBody::Earth,false,false),(ActiveBody::Earth,true,true),
-        (ActiveBody::Moon,true,false),(ActiveBody::Mars,true,false)] {
-        model.active_body=body;model.globe_view.local_mode=local;
-        let output=ctx.run(egui::RawInput::default(),|ctx| {
-            egui::CentralPanel::default().show(ctx,|ui|view_buttons(ui,&mut model));
+fn rail_exposes_persp_ortho_and_no_legacy_globe_local_target_buttons() {
+    let ctx = egui::Context::default();
+    let mut model = AppModel::new();
+    for body in [ActiveBody::Earth, ActiveBody::Moon, ActiveBody::Mars] {
+        model.active_body = body;
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.horizontal(|ui| view_buttons(ui, &mut model));
+            });
         });
-        assert_eq!(output.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="TARGET")),expected);
+        let has = |label: &str| {
+            output
+                .shapes
+                .iter()
+                .any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == label))
+        };
+        assert!(has("PERSP"), "PERSP missing on {body:?}");
+        assert!(has("ORTHO"), "ORTHO missing on {body:?}");
+        assert!(has("N↑"), "N↑ missing on {body:?}");
+        assert!(!has("GLOBE"), "legacy GLOBE button should be removed");
+        assert!(!has("LOCAL"), "legacy LOCAL button should be removed");
+        assert!(!has("TARGET"), "legacy TARGET button should be removed");
     }
 }
 
 #[test]
-fn local_button_enters_the_local_renderer_without_a_selected_event() {
+fn ortho_button_toggles_unified_projection_mode() {
     let ctx = egui::Context::default();
     let mut model = AppModel::new();
-    model.events.clear();
-    model.selected_event_id = None;
-    model.focused_city_id = None;
-    model.globe_view.local_mode = false;
-    model.globe_view.focus_on(crate::model::GeoPoint {
-        lat: 48.85,
-        lon: 2.35,
-    });
-    let center = model.globe_view.globe_center_latlon();
+    assert_eq!(
+        model.globe_view.projection,
+        crate::model::ProjectionMode::Perspective
+    );
     let frame = |model: &mut AppModel, events| {
         ctx.run(
             egui::RawInput {
@@ -40,23 +48,23 @@ fn local_button_enters_the_local_renderer_without_a_selected_event() {
         )
     };
     let output = frame(&mut model, Vec::new());
-    let local = output
+    let ortho = output
         .shapes
         .iter()
         .find_map(|s| match &s.shape {
-            egui::Shape::Text(t) if t.galley.text() == "LOCAL" => {
+            egui::Shape::Text(t) if t.galley.text() == "ORTHO" => {
                 Some(t.pos + t.galley.size() / 2.0)
             }
             _ => None,
         })
-        .expect("Local control");
+        .expect("ORTHO control");
     for pressed in [true, false] {
         let _ = frame(
             &mut model,
             vec![
-                egui::Event::PointerMoved(local),
+                egui::Event::PointerMoved(ortho),
                 egui::Event::PointerButton {
-                    pos: local,
+                    pos: ortho,
                     button: egui::PointerButton::Primary,
                     pressed,
                     modifiers: Default::default(),
@@ -64,8 +72,10 @@ fn local_button_enters_the_local_renderer_without_a_selected_event() {
             ],
         );
     }
-    assert!(model.globe_view.local_mode);
-    assert_eq!(model.globe_view.local_center, center);
+    assert_eq!(
+        model.globe_view.projection,
+        crate::model::ProjectionMode::Orthographic
+    );
 }
 
 #[test]

@@ -1,5 +1,6 @@
 pub(crate) mod seismogram;
 mod camera_list;
+pub(crate) mod command_palette;
 mod event_camera_sidebar;
 mod event_chyron;
 mod event_list;
@@ -17,6 +18,7 @@ mod stellar_observatory;
 pub(crate) mod terrain_library;
 pub(crate) mod world_map;
 
+pub use command_palette::CommandPalette;
 pub use event_list::render_event_list;
 pub use event_camera_sidebar::EventCameraSidebar;
 pub(crate) use event_camera_sidebar::nearby_preview;

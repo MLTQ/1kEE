@@ -61,6 +61,132 @@ fn covers(outer: osm_ingest::GeoBounds, inner: osm_ingest::GeoBounds) -> bool {
         && outer.max_lon >= inner.max_lon
 }
 
+/// Collect GPU-ready RTC road batches for the unified continuous scene.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn collect_unified_batches(
+    ctx: &egui::Context,
+    proj: &super::projection::MapProjection,
+    selected_root: Option<&Path>,
+    show_major_roads: bool,
+    show_minor_roads: bool,
+    out: &mut Vec<super::unified_line_pass::RtcLineBatch>,
+) {
+    if (!show_major_roads && !show_minor_roads) || proj.visible_half_extent_deg() > 5.0 {
+        return;
+    }
+    let Some(vis) = proj.visible_bounds() else {
+        return;
+    };
+    let bounds = osm_ingest::GeoBounds {
+        min_lat: (vis[1] as f32).clamp(-85.0511, 85.0511),
+        max_lat: (vis[3] as f32).clamp(-85.0511, 85.0511),
+        min_lon: (vis[0] as f32).clamp(-180.0, 180.0),
+        max_lon: (vis[2] as f32).clamp(-180.0, 180.0),
+    };
+    let current_gen = osm_ingest::road_data_generation();
+    let colors = [theme::road_major_color(), theme::road_minor_color()];
+    let half_deg = proj.visible_half_extent_deg();
+    let tile_zoom: u8 = if half_deg <= 0.12 {
+        10
+    } else if half_deg <= 0.6 {
+        8
+    } else if half_deg <= 1.8 {
+        6
+    } else {
+        4
+    };
+    let cache = {
+        let Ok(mut store) = road_cache().try_lock() else {
+            ctx.request_repaint();
+            return;
+        };
+        let stale = store.cache.as_ref().is_none_or(|c| {
+            c.road_gen != current_gen
+                || c.root.as_deref() != selected_root
+                || c.colors != colors
+                || !covers(c.bounds, bounds)
+        });
+        if stale && store.building.is_none() {
+            let lat_margin = (bounds.max_lat - bounds.min_lat) * GEO_MARGIN_FACTOR;
+            let lon_margin = (bounds.max_lon - bounds.min_lon) * GEO_MARGIN_FACTOR;
+            let load_bounds = osm_ingest::GeoBounds {
+                min_lat: (bounds.min_lat - lat_margin).max(-85.0),
+                max_lat: (bounds.max_lat + lat_margin).min(85.0),
+                min_lon: (bounds.min_lon - lon_margin).max(-180.0),
+                max_lon: (bounds.max_lon + lon_margin).min(180.0),
+            };
+            store.building = Some(load_bounds);
+            let epoch = store.epoch;
+            let root = selected_root.map(Path::to_owned);
+            let ctx = ctx.clone();
+            if std::thread::Builder::new()
+                .name("road-geometry".into())
+                .spawn(move || {
+                    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        static VERSION: AtomicU64 = AtomicU64::new(1);
+                        let version = VERSION.fetch_add(1, Ordering::Relaxed);
+                        let roads = osm_ingest::load_roads_for_bounds(
+                            root.as_deref(),
+                            load_bounds,
+                            tile_zoom,
+                            RoadLayerKind::All,
+                        );
+                        let geometry = RoadGeometry::build(roads, root.as_deref(), version, colors);
+                        Arc::new(RoadCache {
+                            road_gen: current_gen,
+                            root,
+                            bounds: load_bounds,
+                            colors,
+                            geometry,
+                        })
+                    }));
+                    let mut retired = None;
+                    if let Ok(mut store) = road_cache().lock() {
+                        store.building = None;
+                        if let Ok(cache) = built {
+                            retired = if store.epoch == epoch {
+                                store.cache.replace(cache)
+                            } else {
+                                Some(cache)
+                            };
+                        }
+                    }
+                    drop(retired);
+                    ctx.request_repaint();
+                })
+                .is_err()
+            {
+                store.building = None;
+            }
+        }
+        store
+            .cache
+            .as_ref()
+            .filter(|c| c.root.as_deref() == selected_root)
+            .cloned()
+    };
+    let Some(cache) = cache else {
+        return;
+    };
+    let ppp = proj.pixels_per_point;
+    if show_minor_roads {
+        for b in &cache.geometry.rtc_minor {
+            let mut batch = b.clone();
+            batch.stroke_minor_px = 0.65 * ppp;
+            batch.stroke_major_px = 0.9 * ppp;
+            out.push(batch);
+        }
+    }
+    if show_major_roads {
+        for b in &cache.geometry.rtc_major {
+            let mut batch = b.clone();
+            batch.stroke_minor_px = 0.9 * ppp;
+            batch.stroke_major_px = 1.4 * ppp;
+            out.push(batch);
+        }
+    }
+}
+
 pub(super) fn draw_roads(
     painter: &egui::Painter,
     layout: &LocalLayout,

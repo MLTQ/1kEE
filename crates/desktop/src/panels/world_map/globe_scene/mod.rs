@@ -23,8 +23,100 @@ mod station_day;
 mod station_replay;
 
 pub use projection::project_geo;
+pub(crate) use projection::with_unified_projection;
 pub(crate) use seismic::controls as seismic_controls;
 pub(crate) use live_stations::controls as live_station_controls;
+
+pub(crate) fn draw_seismic_and_stations_unified(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    model: &AppModel,
+) {
+    let layout = globe_layout(rect, &model.globe_view);
+    live_stations::draw(painter, rect, &layout, model, false);
+    seismic::draw(painter, rect, &layout, model, false);
+    station_day::draw(painter, rect, &layout, model, false);
+}
+
+pub(crate) fn draw_stellar_unified(painter: &egui::Painter, rect: egui::Rect, model: &AppModel) {
+    if !model.show_stellar_correspondence {
+        return;
+    }
+    let layout = globe_layout(rect, &model.globe_view);
+    super::stellar_layer::draw_stellar_correspondence(
+        painter,
+        &layout,
+        &model.globe_view,
+        model.stellar_jd,
+        model.stellar_precess,
+    );
+    if model.show_planet_trails {
+        super::stellar_layer::draw_planet_trails(
+            painter,
+            &layout,
+            &model.globe_view,
+            model.stellar_jd,
+            model.planet_trail_years,
+        );
+    }
+    if model.show_planets {
+        super::stellar_layer::draw_planets(
+            painter,
+            &layout,
+            &model.globe_view,
+            model.stellar_jd,
+        );
+    }
+}
+
+pub(crate) fn draw_event_marker_pub(
+    painter: &egui::Painter,
+    base: ProjectedPoint,
+    tip: egui::Pos2,
+    event: &crate::model::EventRecord,
+    selected: bool,
+    time: f64,
+    marker_scale: f32,
+) {
+    markers::draw_event_marker(painter, base, tip, event, selected, time, marker_scale);
+}
+
+pub(crate) fn draw_replay_flare_pub(
+    painter: &egui::Painter,
+    base: ProjectedPoint,
+    tip: egui::Pos2,
+    flare: &crate::model::ActiveFlare,
+    wall_elapsed: f64,
+    marker_scale: f32,
+) {
+    markers::draw_replay_flare(painter, base, tip, flare, wall_elapsed, marker_scale);
+}
+
+pub(crate) fn draw_ships_pub(
+    painter: &egui::Painter,
+    tracks: &[crate::model::MovingTrack],
+    projected: &[(usize, ProjectedPoint)],
+    selected_mmsi: Option<u64>,
+) {
+    let list: Vec<ProjectedMarker> = projected
+        .iter()
+        .map(|&(source_index, point)| ProjectedMarker { source_index, point })
+        .collect();
+    markers::draw_ships(painter, tracks, &list, selected_mmsi);
+}
+
+pub(crate) fn draw_flights_pub(
+    painter: &egui::Painter,
+    flights: &[crate::model::FlightTrack],
+    projected: &[(usize, ProjectedPoint)],
+    selected_icao: Option<&str>,
+) {
+    let list: Vec<ProjectedMarker> = projected
+        .iter()
+        .map(|&(source_index, point)| ProjectedMarker { source_index, point })
+        .collect();
+    markers::draw_flights(painter, flights, &list, selected_icao);
+}
 
 /// Unit-sphere imagery avoids synthetic terrain sampling at every mesh vertex.
 pub(super) fn project_surface(
@@ -137,7 +229,7 @@ pub(super) fn paint_with_layout(
     let lod = camera::lod(&model.globe_view);
     contour_asset::globe_residency::set_viewport(
         (model.show_contours
-            && (model.active_body != crate::model::ActiveBody::Earth || model.globe_view.zoom >= 1.5))
+            && (model.active_body != crate::model::ActiveBody::Earth || model.globe_view.zoom >= 4.5))
             .then_some(model.active_body),
         Some(contour_asset::globe_residency::Viewport::new(&layout, &model.globe_view, rect)),
     );
@@ -538,16 +630,44 @@ pub(super) fn paint_with_layout(
             Vec::new()
         };
 
-    if model.show_camera_links && let Some(event_marker) = event_markers
-        .iter()
-        .find(|marker| selected_event_id == Some(marker.id.as_str()))
-    {
-        let nearby_markers: Vec<_> = camera_markers
+    if model.show_camera_links
+        && let Some(event_marker) = event_markers
             .iter()
-            .filter(|marker| nearby.iter().any(|camera| camera.id == marker.id))
-            .cloned()
+            .find(|marker| selected_event_id == Some(marker.id.as_str()))
+        && let Some(event_loc) = model.selected_event().map(|e| e.location)
+    {
+        let links: Vec<_> = camera_markers
+            .iter()
+            .filter_map(|marker| {
+                let cam = nearby.iter().find(|camera| camera.id == marker.id)?;
+                Some((cam.location, marker))
+            })
             .collect();
-        markers::draw_camera_links(painter, event_marker.base, &nearby_markers);
+        markers::draw_camera_links(
+            painter,
+            &layout,
+            &model.globe_view,
+            event_loc,
+            event_marker.base,
+            &links,
+            time,
+        );
+    }
+    if !model.agent_annotations.is_empty() {
+        for ann in &model.agent_annotations {
+            if let Some(pt) = project_geo(&layout, &model.globe_view, ann.location, 0.0) {
+                let col = theme::topo_color();
+                painter.circle_stroke(pt.pos, 8.0, egui::Stroke::new(1.5, col));
+                painter.circle_filled(pt.pos, 3.0, egui::Color32::WHITE);
+                painter.text(
+                    pt.pos + egui::vec2(10.0, -4.0),
+                    egui::Align2::LEFT_CENTER,
+                    &ann.label,
+                    egui::FontId::proportional(11.0),
+                    col,
+                );
+            }
+        }
     }
     if !model.obs_view {
         draw_legend(painter, rect, &layout, &model.globe_view, &lod);

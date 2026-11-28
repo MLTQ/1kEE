@@ -1,8 +1,34 @@
 use crate::model::{GeoPoint, GlobeViewState, polar};
 use crate::osm_ingest::GeoBounds as OsmGeoBounds;
 
+use super::super::projection::MapProjection;
 use super::super::srtm_focus_cache;
 use super::{BASE_VERTICAL_EXAGGERATION, LocalLayout, ProjectedLocalPoint};
+
+thread_local! {
+    static ACTIVE_UNIFIED: std::cell::RefCell<Option<MapProjection>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f` with `proj` bound as the active unified 3D curved-Earth projector so
+/// existing OSM/local vector layers (`water`, `buildings`, `trees`, `power`,
+/// `infra`, `admin_render`, etc.) project through the exact same `f64`/RTC
+/// Perspective or Orthographic camera without duplicating their loaders.
+pub(crate) fn with_unified_projection<R>(proj: MapProjection, f: impl FnOnce() -> R) -> R {
+    struct Guard(Option<MapProjection>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ACTIVE_UNIFIED.with(|cell| *cell.borrow_mut() = self.0);
+        }
+    }
+    let prev = ACTIVE_UNIFIED.with(|cell| cell.borrow_mut().replace(proj));
+    let _guard = Guard(prev);
+    f()
+}
+
+#[inline]
+fn active_unified() -> Option<MapProjection> {
+    ACTIVE_UNIFIED.with(|cell| *cell.borrow())
+}
 
 pub(super) fn visual_half_extent_for_zoom_inner(view_zoom: f32) -> f32 {
     super::visual_half_extent_for_zoom(view_zoom)
@@ -146,6 +172,10 @@ impl LocalProjectionParams {
     /// Exact bounds on the ground. In the polar chart the nearest latitude
     /// can lie on an edge or at the pole inside the screen rectangle.
     pub(crate) fn ground_bounds(&self, clip: egui::Rect) -> Option<[f32; 4]> {
+        if let Some(u) = active_unified() {
+            let b = u.visible_bounds()?;
+            return Some([b[0] as f32, b[1] as f32, b[2] as f32, b[3] as f32]);
+        }
         let origin = egui::pos2(self.focus_center_x, self.focus_center_y);
         let corners = [
             clip.left_top(),
@@ -225,6 +255,12 @@ impl LocalProjectionParams {
     /// out-of-range rejection. The shader's `project` is this function.
     #[inline]
     pub(crate) fn project_logical(&self, point: GeoPoint, elevation_m: f32) -> (f32, f32, f32) {
+        if let Some(u) = active_unified() {
+            return match u.project_geo(point.lat as f64, point.lon as f64, elevation_m as f64) {
+                Some(p) if p.front_facing => (p.pos.x, p.pos.y, p.depth_ndc),
+                _ => (f32::NAN, f32::NAN, -1.0),
+            };
+        }
         // Standard orientation: positive y = north, mapped upward on screen by
         // negating the ground terms in the screen-y formula below.
         let offset = if self.pole != 0.0 {
@@ -350,6 +386,10 @@ pub(super) fn project_local(
     extent_x_km: f32,
     extent_y_km: f32,
 ) -> Option<ProjectedLocalPoint> {
+    if let Some(u) = active_unified() {
+        let p = u.project_geo(point.lat as f64, point.lon as f64, elevation_m as f64)?;
+        return p.front_facing.then_some(ProjectedLocalPoint { pos: p.pos });
+    }
     let key = proj_key(layout, view, focus, extent_x_km, extent_y_km);
 
     // The frame-invariant setup (5 transcendentals + a dozen scale factors) is

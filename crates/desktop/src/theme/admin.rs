@@ -45,6 +45,10 @@ impl MapTheme {
                 0xffd6ce, 0xd98178, 0xff6169, 0xb68a93, 0xffac89, 0xec99ae, 0xd7788e, 0xc9b2ad,
                 0xf58969, 0xa297a6,
             ],
+            Self::Abyss => [
+                0x00f5d4, 0xff2a6d, 0x38bdf8, 0xc084fc, 0xfbbf24, 0x2dd4bf, 0xf472b6, 0x818cf8,
+                0x67e8f9, 0x94a3b8,
+            ],
         };
         rgb.map(|hex| {
             let [_, red, green, blue] = hex.to_be_bytes();

@@ -257,6 +257,55 @@ pub(super) fn frame(
         },
     )
 }
+pub(super) fn frame_unified(
+    ctx: &egui::Context,
+    root: Option<&Path>,
+    proj: &super::projection::MapProjection,
+) -> Frame {
+    let Some(vis) = proj.visible_bounds() else {
+        return Frame {
+            rasters: Vec::new(),
+            wanted: 0,
+            missing: 0,
+            error: None,
+            failed: 0,
+            pending_bounds: Vec::new(),
+        };
+    };
+    let bounds = [
+        vis[0] as f32 - 0.05,
+        vis[1] as f32 - 0.05,
+        vis[2] as f32 + 0.05,
+        vis[3] as f32 + 0.05,
+    ];
+    let mut wanted = keys(bounds);
+    let center = proj.target_geo;
+    let cos_lat = center.lat.to_radians().cos() as f32;
+    let distance = |key: &Key| {
+        let b = key.bounds();
+        let lon = ((b[0] + 2.5 - center.lon as f32 + 180.).rem_euclid(360.) - 180.) * cos_lat;
+        lon * lon + (b[1] + 2.5 - center.lat as f32).powi(2)
+    };
+    wanted.sort_by(|a, b| distance(a).total_cmp(&distance(b)).then(a.cmp(b)));
+    // Stream 5° native GEBCO tiles once viewport pixel density exceeds the 4096-px global overview (~9.8 km/px).
+    let load = proj.meters_per_pixel() < 9_500.0 && wanted.len() <= 144;
+    let settings = crate::gpu_config::settings();
+    STATE.get_or_init(Default::default).lock().unwrap().frame(
+        ctx,
+        root,
+        ctx.input(|i| i.max_texture_side).clamp(16, 8192),
+        &wanted,
+        load,
+        settings.atlas_cpu_bytes,
+        |key, root, edge| {
+            let detail = super::atlas_source::load_globe(root.as_deref(), key.region(), edge)?;
+            detail
+                .into_raster_with_core(Some(key.bounds()))
+                .ok_or_else(|| "Invalid Atlas tile".into())
+        },
+    )
+}
+
 pub(super) fn clear() {
     if let Some(state) = STATE.get() {
         state.lock().unwrap().clear();

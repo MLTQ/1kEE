@@ -229,6 +229,26 @@ impl Player {
         Some(&self.steps.get(self.shown?)?.time)
     }
 
+    /// Align the playback target to the latest weather step at or before `unix_s`.
+    pub fn seek_to_unix(&mut self, unix_s: i64) {
+        if self.steps.is_empty() {
+            return;
+        }
+        let target_iso = chrono::DateTime::from_timestamp(unix_s, 0)
+            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+            .unwrap_or_default();
+        if target_iso.is_empty() {
+            return;
+        }
+        let idx = self
+            .steps
+            .partition_point(|step| step.time.as_str() <= target_iso.as_str())
+            .saturating_sub(1)
+            .min(self.steps.len().saturating_sub(1));
+        self.playing = false;
+        self.target = idx;
+    }
+
     fn next(&self) -> usize {
         (self.target + 1) % self.steps.len()
     }

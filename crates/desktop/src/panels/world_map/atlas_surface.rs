@@ -163,7 +163,9 @@ impl Callback {
             u32::from(bathymetry) as f32,
         ];
         u.light = crate::atlas_style::AtlasStyle::default().light(0.0);
-        u.appearance = [1.0, 1.0, 0.0, 0.0];
+        let flags = u32::from(crate::theme::tanaka_contours())
+            | ((crate::theme::terrain_analysis_mode_u8() as u32 & 3) << 1);
+        u.appearance = [1.0, 1.0, 0.0, flags as f32];
         u.major = super::gpu_color::rgba(crate::theme::hot_color());
         u.minor = super::gpu_color::rgba(crate::theme::contour_color());
         u
@@ -265,7 +267,8 @@ impl Callback {
         let light = style.light(jd);
         for u in &mut self.uniforms {
             u.light = light;
-            u.appearance = [style.color_richness, style.relief_strength, 0.0, 0.0];
+            u.appearance[0] = style.color_richness;
+            u.appearance[1] = style.relief_strength;
         }
         if style.light_mode == crate::atlas_style::LightMode::Sun {
             self.ctx

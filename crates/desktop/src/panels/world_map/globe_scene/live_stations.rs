@@ -14,10 +14,8 @@ const MOTION: Color32 = Color32::from_rgb(255, 174, 68);
 
 pub(crate) fn controls(ui: &mut egui::Ui, model: &mut AppModel) {
     let earth = model.active_body == ActiveBody::Earth
-        && !model.globe_view.local_mode
         && !model.replay_mode
-        && model.follow_recaps.active.is_none()
-        && model.target.session.is_none();
+        && model.follow_recaps.active.is_none();
     let live = &mut model.seismic.live_stations;
     ui.add_enabled(
         earth || live.enabled,

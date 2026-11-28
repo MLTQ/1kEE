@@ -1,7 +1,40 @@
 use crate::model::GeoPoint;
 use crate::terrain_assets;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OpenFlags, params};
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+
+struct CityCatalogCache {
+    path: Option<PathBuf>,
+    conn: Option<Connection>,
+    last_query: String,
+    last_limit: usize,
+    last_results: Vec<CityEntry>,
+}
+
+fn cache() -> &'static Mutex<CityCatalogCache> {
+    static CACHE: OnceLock<Mutex<CityCatalogCache>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        Mutex::new(CityCatalogCache {
+            path: None,
+            conn: None,
+            last_query: String::from("\0"),
+            last_limit: 0,
+            last_results: Vec::new(),
+        })
+    })
+}
+
+fn with_connection<R>(f: impl FnOnce(&Connection) -> R) -> Option<R> {
+    let path = catalog_db_path()?;
+    let mut guard = cache().lock().unwrap_or_else(|p| p.into_inner());
+    if guard.path.as_ref() != Some(&path) || guard.conn.is_none() {
+        guard.conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
+        guard.path = Some(path);
+        guard.last_query = String::from("\0");
+    }
+    guard.conn.as_ref().map(f)
+}
 
 #[derive(Clone)]
 pub struct CityEntry {
@@ -31,88 +64,99 @@ impl CityEntry {
 }
 
 pub fn by_id(id: &str) -> Option<CityEntry> {
-    let path = catalog_db_path()?;
-    let connection = Connection::open(path).ok()?;
-    let mut statement = connection
-        .prepare(
-            "SELECT geoname_id, name, ascii_name, latitude, longitude, country_code, country_name, admin1_code, population, alternate_names
-             FROM cities
-             WHERE geoname_id = ?1",
-        )
-        .ok()?;
+    with_connection(|connection| {
+        let mut statement = connection
+            .prepare(
+                "SELECT geoname_id, name, ascii_name, latitude, longitude, country_code, country_name, admin1_code, population, alternate_names
+                 FROM cities
+                 WHERE geoname_id = ?1",
+            )
+            .ok()?;
 
-    statement
-        .query_row(params![id], |row| {
-            Ok(CityEntry {
-                id: row.get::<_, i64>(0)?.to_string(),
-                name: row.get(1)?,
-                ascii_name: row.get(2)?,
-                country_code: row.get::<_, String>(5).unwrap_or_default(),
-                country: row.get(6)?,
-                admin1_code: row.get::<_, String>(7).unwrap_or_default(),
-                region: region_name(
-                    row.get::<_, String>(5).unwrap_or_default().as_str(),
-                    row.get::<_, String>(7).unwrap_or_default().as_str(),
-                ),
-                location: GeoPoint {
-                    lat: row.get::<_, f64>(3)? as f32,
-                    lon: row.get::<_, f64>(4)? as f32,
-                },
-                population: row.get::<_, i64>(8).unwrap_or_default().max(0) as u32,
-                aliases: row.get::<_, String>(9).unwrap_or_default(),
+        statement
+            .query_row(params![id], |row| {
+                Ok(CityEntry {
+                    id: row.get::<_, i64>(0)?.to_string(),
+                    name: row.get(1)?,
+                    ascii_name: row.get(2)?,
+                    country_code: row.get::<_, String>(5).unwrap_or_default(),
+                    country: row.get(6)?,
+                    admin1_code: row.get::<_, String>(7).unwrap_or_default(),
+                    region: region_name(
+                        row.get::<_, String>(5).unwrap_or_default().as_str(),
+                        row.get::<_, String>(7).unwrap_or_default().as_str(),
+                    ),
+                    location: GeoPoint {
+                        lat: row.get::<_, f64>(3)? as f32,
+                        lon: row.get::<_, f64>(4)? as f32,
+                    },
+                    population: row.get::<_, i64>(8).unwrap_or_default().max(0) as u32,
+                    aliases: row.get::<_, String>(9).unwrap_or_default(),
+                })
             })
-        })
-        .ok()
+            .ok()
+    })
+    .flatten()
 }
 
 pub fn search(query: &str, limit: usize) -> Vec<CityEntry> {
     let Some(path) = catalog_db_path() else {
         return Vec::new();
     };
-    let Ok(connection) = Connection::open(path) else {
+    let mut guard = cache().lock().unwrap_or_else(|p| p.into_inner());
+    if guard.path.as_ref() != Some(&path) || guard.conn.is_none() {
+        guard.conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok();
+        guard.path = Some(path);
+        guard.last_query = String::from("\0");
+    }
+    if guard.last_query == query && guard.last_limit == limit {
+        return guard.last_results.clone();
+    }
+    let Some(connection) = guard.conn.as_ref() else {
         return Vec::new();
     };
 
-    if query.trim().is_empty() {
-        return query_top_cities(&connection, limit).unwrap_or_default();
-    }
+    let results = if query.trim().is_empty() {
+        query_top_cities(connection, limit).unwrap_or_default()
+    } else {
+        let normalized = query.trim().to_ascii_lowercase();
+        let contains = format!("%{normalized}%");
+        let prefix = format!("{normalized}%");
+        let alt_contains = format!("%{query}%");
+        let alt_prefix = format!("{query}%");
 
-    let normalized = query.trim().to_ascii_lowercase();
-    let contains = format!("%{normalized}%");
-    let prefix = format!("{normalized}%");
-    let alt_contains = format!("%{query}%");
-    let alt_prefix = format!("{query}%");
-
-    let mut statement = match connection.prepare(
-        "SELECT geoname_id, name, ascii_name, latitude, longitude, country_code, country_name, admin1_code, population, alternate_names
-         FROM cities
-         WHERE ascii_name LIKE ?1 COLLATE NOCASE
-            OR name LIKE ?1 COLLATE NOCASE
-            OR country_name LIKE ?1 COLLATE NOCASE
-            OR alternate_names LIKE ?2
-         ORDER BY
-            CASE
-              WHEN ascii_name LIKE ?3 COLLATE NOCASE OR name LIKE ?3 COLLATE NOCASE THEN 0
-              WHEN country_name LIKE ?3 COLLATE NOCASE OR alternate_names LIKE ?4 THEN 1
-              ELSE 2
-            END,
-            population DESC,
-            ascii_name ASC
-         LIMIT ?5",
-    ) {
-        Ok(statement) => statement,
-        Err(_) => return Vec::new(),
+        match connection.prepare(
+            "SELECT geoname_id, name, ascii_name, latitude, longitude, country_code, country_name, admin1_code, population, alternate_names
+             FROM cities
+             WHERE ascii_name LIKE ?1 COLLATE NOCASE
+                OR name LIKE ?1 COLLATE NOCASE
+                OR country_name LIKE ?1 COLLATE NOCASE
+                OR alternate_names LIKE ?2
+             ORDER BY
+                CASE
+                  WHEN ascii_name LIKE ?3 COLLATE NOCASE OR name LIKE ?3 COLLATE NOCASE THEN 0
+                  WHEN country_name LIKE ?3 COLLATE NOCASE OR alternate_names LIKE ?4 THEN 1
+                  ELSE 2
+                END,
+                population DESC,
+                ascii_name ASC
+             LIMIT ?5",
+        ) {
+            Ok(mut statement) => match statement.query_map(
+                params![contains, alt_contains, prefix, alt_prefix, limit as i64],
+                map_city_row,
+            ) {
+                Ok(rows) => rows.filter_map(Result::ok).collect(),
+                Err(_) => Vec::new(),
+            },
+            Err(_) => Vec::new(),
+        }
     };
 
-    let rows = match statement.query_map(
-        params![contains, alt_contains, prefix, alt_prefix, limit as i64],
-        map_city_row,
-    ) {
-        Ok(rows) => rows,
-        Err(_) => return Vec::new(),
-    };
-
-    rows.filter_map(Result::ok).collect()
+    guard.last_query = query.to_owned();
+    guard.last_limit = limit;
+    guard.last_results = results.clone();
+    results
 }
 
 fn query_top_cities(connection: &Connection, limit: usize) -> rusqlite::Result<Vec<CityEntry>> {

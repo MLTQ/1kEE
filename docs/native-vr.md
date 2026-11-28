@@ -10,20 +10,24 @@ QT_QPA_PLATFORM=xcb cargo run --release -p one-thousand-electric-eye-vr
 
 The program uses the active OpenXR runtime, the GPU driving the headset, and the desktop settings beside the executable. The Qt environment setting works around an xcb-only SteamVR monitor on this Wayland workstation.
 
-## Wrist controls
+## Forearm Wrist HUD (Half-Life: Alyx style)
 
-Lift the left controller. The panel follows the wrist and faces your eyes. **Left A** hides or shows it. Follow the beam from the right controller. A bright dot marks its position on the wrist. The wrist stays visible and takes clicks where it overlaps the globe or terrain. Squeeze and release the Index trigger to activate a control, or hold it while moving a slider. Use the right stick or the fixed **Page up** and **Page down** buttons to scroll. Looking around, leaning and turning your head continue at the headset’s frame cadence.
+Raise your left forearm as if checking a watch to wake the compact diegetic HUD (`17.5 × 13.2 cm`) mounted physically to your wrist. Lowering your arm fades it out cleanly; **Left A** (Index) / **Left X** (Touch) or the HUD's **PIN** button locks it open. The wrist HUD renders directly onto the OpenXR `wgpu::Device` every stereo frame (zero CPU readback), with trigger-stabilized laser targeting and haptic ticks on hover, press, spire pick, and grab.
 
-| Menu | Actions |
+| Tab | Actions |
 | --- | --- |
-| Navigate | Select Globe or Local terrain, turn or zoom the view, adjust relief and Atlas lighting, recenter the table, open desktop settings, control replay or exit VR. |
-| Layers | Use the native layer drawer, including contours, coastlines, terrain, infrastructure, imported data, and live markers. |
-| Satellite | Toggle daily VIIRS true color or three-hourly EUMETSAT infrared, change opacity, inspect the frame timestamp and provider status, or import a georeferenced GeoTIFF. |
-| Events | Select a geolocated event or enable Follow Events and adjust its dwell time. |
-| Brief | Read the selected event’s title, severity, location, summary and available Factal detail. Pin or unpin it above the map. |
-| Webcams | Play the nearest eligible snapshot/MJPEG feed for an event or choose one from the camera registry. Pin the feed with the brief or stop playback. |
+| **MAP** | Live continuous scale readout (`24,000 km` → `20 m`), 1-tap scale presets (`ORBIT` / `REGION` / `CITY` / `STREET`), continuous logarithmic scale slider, `PERSP` / `ORTHO` toggle, theme cycler, `FOLLOW`, `CENTER`, `HOLOPAD`, `REPLAY`, and `EXIT`. |
+| **LAYERS** | Featured **LIDAR CLOUD (FUSED)** layer toggle (default `1` px point size + live size slider & point count), 2-column tactical toggles (Contours, Coastlines, Bathymetry, Roads, Buildings, Water, Forest, Weather IR, Events, Webcams, Ships, Flights, Seismic), and 3D relief slider. |
+| **EVENTS** | Live geolocated event list with severity badges and `FOLLOW EVENTS` toggle. |
+| **BRIEF** | Full selected event title, severity, location, summary, and floating room holopad pin. |
+| **CAMS** | Nearby snapshot/MJPEG webcam switcher, auto-nearest toggle, and holopad playback controls. |
 
-Away from the wrist, the left stick turns the globe or pans Local terrain. The right stick zooms. Point at an event or camera marker and squeeze the right trigger to select it. Selection opens the corresponding wrist page and room panel. Follow Events uses the desktop scheduler, including regional recaps. Manual navigation releases follow control. Source availability follows the desktop’s provider settings, credentials and cache coverage.
+## Continuous Grab & Stick Navigation
+
+- **1-Hand Grip Grab**: Squeeze either controller's grip to physically grab and spin the 3D orbital globe or pan the 3D stereo relief table 1:1.
+- **2-Hand Grip Pinch/Spread**: Squeeze both grips and spread hands apart to zoom continuously from `24,000 km` planet scale smoothly into the holographic relief table all the way down to `20 m` street/LiDAR scale (pinch together to pull back out to orbit).
+- **Thumbsticks (Fallback)**: Left stick orbits/pans proportionally to the current ground span; right stick zooms continuously (or scrolls when pointing at the wrist HUD).
+- **Spire Picking**: Point at any glowing event or webcam spire and pull the right trigger to focus it and open its brief/feed on the floating room holopad.
 
 ## Terrain and imagery
 

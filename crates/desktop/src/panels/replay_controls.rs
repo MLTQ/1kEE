@@ -69,8 +69,33 @@ fn draw_controls(ui: &mut egui::Ui, model: &mut AppModel) {
             if ui.add(exit_btn).on_hover_text("Exit replay").clicked() {
                 model.toggle_replay();
             }
+            ui.checkbox(&mut model.master_clock.sync_subsystems, "Sync Sun/Wx")
+                .on_hover_text("Synchronize Atlas sunlight and Global Weather satellite frames with the Master UTC timeline");
+            ui.monospace(
+                egui::RichText::new(model.master_clock.formatted_utc())
+                    .small()
+                    .color(theme::text_muted()),
+            );
         });
     });
+
+    // ── Quick window presets ──────────────────────────────────────────────
+    if model.station_day.is_none() {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.small("Preset:");
+            let now = event_store::now_unix();
+            for (label, days) in [("24h", 1_i64), ("7d", 7), ("30d", 30)] {
+                if ui.small_button(label).clicked() {
+                    model.replay_from_unix = now - days * 86_400;
+                    model.replay_to_unix = now;
+                    model.replay_from_str = event_store::unix_to_date_str(model.replay_from_unix);
+                    model.replay_to_str = event_store::unix_to_date_str(model.replay_to_unix);
+                    model.rebuild_replay_state();
+                }
+            }
+        });
+    }
 
     // ── Scrub bar (playback timeline with event tick marks) ───────────────
     ui.add_space(6.0);

@@ -40,6 +40,7 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
                         .fill(egui::Color32::from_rgba_premultiplied(80,40,0,180)).corner_radius(4.0);
                     if ui.add(blast).on_hover_text("Drop in-memory tile caches. Tiles reload from disk; no files are deleted.").clicked() {
                         contour_asset::blast_tile_caches();
+                        super::world_map::point_cloud_layer::clear();
                     }
                     match density {
                         Density::Minimal => {
@@ -79,58 +80,26 @@ fn button(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
     )
 }
 fn view_buttons(ui: &mut egui::Ui, model: &mut AppModel) {
-    if button(ui, "GLOBE", !model.globe_view.local_mode).clicked() && model.globe_view.local_mode {
-        model.stop_event_follow();
-        model.globe_view.local_mode = false;
-    }
-    let disabled = match model.active_body {
-        ActiveBody::Earth => false,
-        ActiveBody::Moon => {
-            crate::terrain_assets::find_sldem_jp2(model.selected_root.as_deref()).is_none()
-        }
-        ActiveBody::Mars => {
-            crate::terrain_assets::find_mars_data_root(model.selected_root.as_deref()).is_none()
-        }
-    };
-    ui.add_enabled_ui(!disabled, |ui| {
-        if button(ui, "LOCAL", model.globe_view.local_mode).clicked()
-            && !model.globe_view.local_mode
-        {
-            let center = model.globe_view.globe_center_latlon();
-            model.stop_event_follow();
-            model.globe_view.local_center = center;
-            if crate::model::polar::pole_for(center.lat) != 0.0 {
-                model.globe_view.stop_motion();
-                model.globe_view.look_down();
-            }
-            model.globe_view.local_mode = true;
-        }
-    })
-    .response
-    .on_disabled_hover_text(match model.active_body {
-        ActiveBody::Moon => "Local Moon view requires SLDEM2015 terrain data.",
-        ActiveBody::Mars => "Local Mars view requires Mars terrain data.",
-        ActiveBody::Earth => "Local terrain view",
-    });
-    if model.active_body == ActiveBody::Earth && model.globe_view.local_mode
-        && button(ui, "TARGET", model.target.selecting)
-            .on_hover_text("Select an adjustable radial cut-out for 3D point-cloud inspection. Escape cancels.")
-            .clicked()
+    use crate::model::ProjectionMode;
+    let is_ortho = model.globe_view.projection == ProjectionMode::Orthographic;
+    if button(ui, "PERSP", !is_ortho)
+        .on_hover_text("3D perspective camera (continuous planet to street scale)")
+        .clicked()
     {
-        model.stop_event_follow();
-        model.globe_view.stop_motion();
-        model.target.selecting = !model.target.selecting;
-        model.target.hover = None;
+        model.globe_view.projection = ProjectionMode::Perspective;
     }
-    if model.target.selecting {
-        ui.scope(|ui| {
-            ui.spacing_mut().slider_width = 90.;
-            crate::target_mode::TargetMode::radius_control(ui, &mut model.target.radius_km);
-        });
+    if button(ui, "ORTHO", is_ortho)
+        .on_hover_text("Orthographic / tabletop projection (same continuous zoom, no perspective convergence)")
+        .clicked()
+    {
+        model.globe_view.projection = ProjectionMode::Orthographic;
     }
-    if !model.globe_view.local_mode || model.active_body != ActiveBody::Earth {
-        model.target.selecting = false;
-        model.target.hover = None;
+    let tilted = model.globe_view.tilt > 0.01 || model.globe_view.heading.abs() > 0.01;
+    if button(ui, "N↑", tilted)
+        .on_hover_text("Reset camera to North-up overhead nadir (Home)")
+        .clicked()
+    {
+        model.globe_view.look_down();
     }
 }
 
@@ -200,8 +169,21 @@ fn focus_button(ui: &mut egui::Ui, model: &mut AppModel) {
     }
 }
 fn presentation_buttons(ui: &mut egui::Ui, model: &mut AppModel) {
+    if button(ui, "AI AGENT", model.agent_voice.director_enabled)
+        .on_hover_text("Hand map camera, layers, and live voice commentary to your local AI agent (configure model, persona, and voice in Settings -> Agent & Voice).")
+        .clicked()
+    {
+        let enable = !model.agent_voice.director_enabled;
+        model.agent_voice.director_enabled = enable;
+        if enable {
+            model.stop_event_follow();
+            model.globe_view.stop_motion();
+        }
+        ui.ctx().request_repaint();
+    }
     if model.active_body == ActiveBody::Earth && button(ui, "FOLLOW EVENTS", model.event_follow.enabled())
         .on_hover_text("Explore all live Factal events, visiting more severe stories more often and spacing out repeats. Every five live minutes, watch a one-minute regional 24hr recap, including the Middle East. Returns to your Globe/Local view. Drag, scroll or arrows to stop.").clicked() {
+        model.agent_voice.director_enabled = false;
         model.toggle_event_follow(); ui.ctx().request_repaint();
     }
     if button(ui, "MEANDER", model.globe_view.meander_mode)
@@ -210,6 +192,7 @@ fn presentation_buttons(ui: &mut egui::Ui, model: &mut AppModel) {
     {
         let enable = !model.globe_view.meander_mode;
         if enable {
+            model.agent_voice.director_enabled = false;
             model.stop_event_follow();
             model.globe_view.stop_motion();
         }

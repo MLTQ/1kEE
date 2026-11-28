@@ -1,4 +1,5 @@
 //! Ranked event touring and smooth camera motion for the live-event idle mode.
+use super::convergence::StopDirective;
 use super::{EventRecord, GeoPoint, GlobeViewState};
 use crate::settings_store::{
     DEFAULT_EVENT_FOLLOW_DWELL_SECONDS, normalize_event_follow_dwell_seconds,
@@ -12,6 +13,7 @@ const MIN_FLIGHT_SECONDS: f64 = 0.65;
 const ORBIT_RATE: f64 = 0.035;
 const LABEL_FADE_IN_SECONDS: f64 = 0.45;
 const LABEL_FADE_OUT_SECONDS: f64 = 0.25;
+const MAX_DWELL_LOG_ZOOM_DRIFT: f64 = 0.18;
 // Latitude, unwrapped longitude, log zoom, local yaw, local pitch.
 type Pose = [f64; 5];
 
@@ -42,6 +44,7 @@ struct Flight {
     zoom_out: bool,
     orbit_center: GeoPoint,
     departure_label_opacity: f32,
+    directive: StopDirective,
 }
 
 impl EventFollow {
@@ -166,7 +169,25 @@ impl EventFollow {
             && self
                 .flight
                 .as_ref()
-                .is_some_and(|f| now < f.started + f.duration + f64::from(self.dwell_seconds))
+                .is_some_and(|f| now < f.started + f.duration + self.effective_dwell_seconds(f))
+    }
+
+    /// Seconds elapsed since arriving at the current stop (`None` while in transit or idle).
+    pub(super) fn dwell_elapsed(&self, now: f64) -> Option<f64> {
+        let flight = self.flight.as_ref()?;
+        let elapsed = now - (flight.started + flight.duration);
+        (elapsed >= 0.0).then_some(elapsed)
+    }
+
+    /// True if there is no active flight or the current stop's dwell period has elapsed.
+    pub(super) fn dwell_finished(&self, now: f64) -> bool {
+        self.flight.as_ref().is_none_or(|flight| {
+            now >= flight.started + flight.duration + self.effective_dwell_seconds(flight)
+        })
+    }
+
+    fn effective_dwell_seconds(&self, flight: &Flight) -> f64 {
+        (f64::from(self.dwell_seconds) * flight.directive.dwell_multiplier).max(5.0)
     }
 
     pub(super) fn tick_with_stop(
@@ -174,6 +195,19 @@ impl EventFollow {
         view: &mut GlobeViewState,
         now: f64,
         station: Option<EventRecord>,
+    ) -> Option<String> {
+        self.tick_with_director(view, now, station.map(|e| (e, StopDirective::default())), None)
+    }
+
+    /// Advance the Follow Events camera with an optional preempting stop (e.g. quake arrival
+    /// or breaking convergence) and an optional director callback invoked when the current
+    /// dwell completes. Falls back to the baseline `EventTour` when the director returns `None`.
+    pub(super) fn tick_with_director(
+        &mut self,
+        view: &mut GlobeViewState,
+        now: f64,
+        preempt: Option<(EventRecord, StopDirective)>,
+        director_next: Option<(EventRecord, StopDirective)>,
     ) -> Option<String> {
         if !self.enabled {
             return None;
@@ -185,24 +219,29 @@ impl EventFollow {
             apply(view, pose);
             self.velocity = velocity;
         }
-        let next = station.or_else(|| {
+        let next = preempt.or_else(|| {
             if self.at_station(now) {
                 return None;
             }
-            self.tour.take_pending().or_else(|| {
-                let dwell_finished = self.flight.as_ref().is_none_or(|flight| {
-                    now >= flight.started + flight.duration + f64::from(self.dwell_seconds)
-                });
-                dwell_finished
-                    .then(|| self.tour.next(self.target.as_ref().map(|e| e.id.as_str())))
-                    .flatten()
-            })
+            if let Some(pending) = self.tour.take_pending() {
+                return Some((pending, StopDirective::default()));
+            }
+            if self.dwell_finished(now) {
+                director_next.or_else(|| {
+                    self.tour
+                        .next(self.target.as_ref().map(|e| e.id.as_str()))
+                        .map(|e| (e, StopDirective::default()))
+                })
+            } else {
+                None
+            }
         });
-        let selected = next.map(|event| {
+        let selected = next.map(|(event, directive)| {
             if self.flight.is_none() {
                 self.velocity = view_velocity(view);
             }
-            let mut flight = Flight::new(view, self.velocity, event.location, now);
+            let mut flight =
+                Flight::new_with_directive(view, self.velocity, event.location, now, directive);
             flight.departure_label_opacity = self.event_label_opacity(now);
             self.flight = Some(flight);
             let id = event.id.clone();
@@ -268,14 +307,18 @@ fn view_velocity(view: &GlobeViewState) -> Pose {
 }
 
 fn apply(view: &mut GlobeViewState, p: Pose) {
-    let center = GeoPoint {
-        lat: if view.local_mode {
-            p[0].clamp(-90.0, 90.0)
-        } else {
-            p[0].clamp(-85.0, 85.0)
-        } as f32,
-        lon: wrap(p[1]) as f32,
+    let lat = if view.local_mode {
+        p[0].clamp(-90.0, 90.0)
+    } else {
+        p[0].clamp(-85.0, 85.0)
     };
+    let lon = wrap(p[1]);
+    let center = GeoPoint {
+        lat: lat as f32,
+        lon: lon as f32,
+    };
+    view.target_lat = lat;
+    view.target_lon = lon;
     view.local_center = center;
     view.yaw = center.lon.to_radians() - std::f32::consts::FRAC_PI_2;
     view.pitch = center.lat.to_radians();
@@ -283,8 +326,15 @@ fn apply(view: &mut GlobeViewState, p: Pose) {
         view.local_zoom = p[2].exp().clamp(1.0, 60.0) as f32;
         view.local_yaw = p[3] as f32;
         view.local_pitch = (p[4] as f32).clamp(0.0, super::LOCAL_MAX_TILT);
+        view.heading = view.local_yaw;
+        view.tilt = view.local_pitch;
+        view.range_m = GlobeViewState::range_for_legacy_local_zoom(view.local_zoom);
     } else {
         view.zoom = p[2].exp().clamp(0.6, 50.0) as f32;
+        view.range_m = GlobeViewState::range_for_legacy_globe_zoom(
+            view.zoom,
+            super::ActiveBody::Earth.radius_m(),
+        );
     }
 }
 
@@ -293,7 +343,25 @@ fn wrap(lon: f64) -> f64 {
 }
 
 impl Flight {
+    #[cfg(test)]
     fn new(view: &GlobeViewState, velocity: Pose, location: GeoPoint, now: f64) -> Self {
+        Self::new_with_directive(view, velocity, location, now, StopDirective::default())
+    }
+
+    fn new_with_directive(
+        view: &GlobeViewState,
+        velocity: Pose,
+        location: GeoPoint,
+        now: f64,
+        mut directive: StopDirective,
+    ) -> Self {
+        directive.globe_zoom = directive.globe_zoom.clamp(1.0, 50.0);
+        directive.local_zoom = directive.local_zoom.clamp(1.0, 60.0);
+        directive.local_pitch = directive.local_pitch.clamp(0.0, super::LOCAL_MAX_TILT as f64);
+        directive.orbit_radius_deg = directive.orbit_radius_deg.clamp(0.2, 2.5);
+        directive.dwell_multiplier = directive.dwell_multiplier.clamp(0.5, 2.0);
+        directive.dwell_zoom_drift = directive.dwell_zoom_drift.clamp(-0.02, 0.02);
+
         let start = pose(view);
         let local = view.local_mode;
         let center = GeoPoint {
@@ -312,25 +380,35 @@ impl Flight {
         let mut end = [
             lat,
             lon,
-            if local { 9.5f64.ln() } else { 35.0f64.ln() },
+            if local {
+                directive.local_zoom.ln()
+            } else {
+                directive.globe_zoom.ln()
+            },
             start[3],
-            if local { 0.90 } else { start[4] },
+            if local {
+                directive.local_pitch
+            } else {
+                start[4]
+            },
         ];
         // Size the travel from the camera's current position to its arrival
         // pose, not from the previous event's coordinates (retargets can happen
         // anywhere along a flight or orbit).
         if !local {
-            end[0] += 0.8;
+            end[0] += directive.orbit_radius_deg;
         }
         let duration = flight_duration(start, end);
         if local {
             end[3] = start[3] + ORBIT_RATE * duration;
         }
         let mut final_velocity = [0.0; 5];
+        final_velocity[2] = directive.dwell_zoom_drift;
         if local {
             final_velocity[3] = ORBIT_RATE;
         } else {
-            final_velocity[1] = 0.8 / lat.to_radians().cos().max(0.15) * ORBIT_RATE;
+            final_velocity[1] =
+                directive.orbit_radius_deg / lat.to_radians().cos().max(0.15) * ORBIT_RATE;
         }
         let excursion = (distance / if local { 8.0 } else { 70.0 }).clamp(0.0, 1.0);
         let near_zoom = start[2].min(end[2]);
@@ -348,6 +426,7 @@ impl Flight {
             zoom_out: excursion > 0.05,
             orbit_center: center,
             departure_label_opacity: 0.0,
+            directive,
         }
     }
 
@@ -357,15 +436,23 @@ impl Flight {
             let t = elapsed - self.duration;
             let mut p = self.end;
             let mut v = [0.0; 5];
+            if self.directive.dwell_zoom_drift != 0.0 {
+                // Smooth C¹ bounded zoom push: derivative at t=0 equals dwell_zoom_drift.
+                let u = self.directive.dwell_zoom_drift * t / MAX_DWELL_LOG_ZOOM_DRIFT;
+                let th = u.tanh();
+                p[2] = self.end[2] + MAX_DWELL_LOG_ZOOM_DRIFT * th;
+                v[2] = self.directive.dwell_zoom_drift * (1.0 - th * th);
+            }
             if self.local {
                 p[3] += ORBIT_RATE * t;
                 v[3] = ORBIT_RATE;
             } else {
+                let r = self.directive.orbit_radius_deg;
                 let phase = ORBIT_RATE * t;
-                let r_lon = 0.8 / (self.orbit_center.lat as f64).to_radians().cos().max(0.15);
-                p[0] = self.orbit_center.lat as f64 + 0.8 * phase.cos();
+                let r_lon = r / (self.orbit_center.lat as f64).to_radians().cos().max(0.15);
+                p[0] = self.orbit_center.lat as f64 + r * phase.cos();
                 p[1] = self.end[1] + r_lon * phase.sin();
-                v[0] = -0.8 * ORBIT_RATE * phase.sin();
+                v[0] = -r * ORBIT_RATE * phase.sin();
                 v[1] = r_lon * ORBIT_RATE * phase.cos();
             }
             return (p, v);
@@ -398,7 +485,7 @@ impl Flight {
                     self.wide_zoom,
                     self.end[2],
                     0.0,
-                    0.0,
+                    self.final_velocity[2],
                     elapsed - widen_seconds,
                     self.duration - widen_seconds,
                 )

@@ -196,6 +196,7 @@ impl Join {
                 .spool
                 .restore(&Sinks::path(&join.root.join("coordinates"), n))?;
         }
+        io::flush_fs_before_writes(&join.root)?;
         join.collect(cmd, nodes, progress, GROUP_BYTES)?;
         join.resolve(nodes, progress)?;
         nodes.validate_source()?;
@@ -387,10 +388,13 @@ impl Join {
             self.state.joined = shard + 1;
             save(&self.root, &self.state)?;
             // Commit first; interrupted cleanup is harmless and retried below.
+            // Keep the `sort` directory itself alive across shards (only removing
+            // flat run files inside it) so we never `rmdir` directory clusters
+            // while appending coordinate spools.
             let sort = self.root.join("sort");
             let request_path = Sinks::path(&self.root.join("requests"), shard);
             if sort.exists() {
-                fs::remove_dir_all(&sort).map_err(|e| e.to_string())?;
+                io::clear_work_dir(&sort)?;
             }
             if request_path.exists() {
                 fs::remove_file(request_path).map_err(|e| e.to_string())?;
@@ -402,6 +406,10 @@ impl Join {
             if p.exists() {
                 fs::remove_file(p).map_err(|e| e.to_string())?;
             }
+        }
+        let sort = self.root.join("sort");
+        if sort.exists() {
+            fs::remove_dir_all(&sort).map_err(|e| e.to_string())?;
         }
         report(
             progress,

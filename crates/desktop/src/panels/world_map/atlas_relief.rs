@@ -494,6 +494,111 @@ pub(super) fn draw_local(
     }
 }
 
+/// Unified continuous Atlas terrain drawer: layers the global overview, 5° GEBCO
+/// tiles, and regional/local SRTM & fine DEM rasters into the shared Reversed-Z
+/// `UnifiedTerrainCallback`, smoothly refining from planet scale down to metres.
+pub(super) fn draw_unified(
+    painter: &egui::Painter,
+    proj: &super::projection::MapProjection,
+    model: &crate::model::AppModel,
+) {
+    if !model.show_trees {
+        super::atlas_forest::suspend();
+    }
+    let root = model.selected_root.as_deref();
+    let mut rasters = Vec::new();
+    if let Some(overview) = texture(painter.ctx(), root) {
+        rasters.push(overview);
+    }
+    let tiles = super::atlas_globe_tiles::frame_unified(painter.ctx(), root, proj);
+    rasters.extend(tiles.rasters.iter().cloned());
+
+    let mut forest = None;
+    let half_deg = proj.visible_half_extent_deg();
+    if half_deg <= 6.0
+        && let Some(vis) = proj.visible_bounds()
+    {
+        let visible = [vis[0] as f32, vis[1] as f32, vis[2] as f32, vis[3] as f32];
+        if let Some(region) = super::atlas_viewport::Region::padded(visible)
+            && let Some(detail) = detail_texture_visible(painter.ctx(), root, region, visible, true)
+        {
+            if painter
+                .ctx()
+                .data(|d| d.get_temp::<bool>(egui::Id::new("vr-local-capture")).unwrap_or(false))
+            {
+                painter.ctx().data_mut(|d| {
+                    d.insert_temp(egui::Id::new("vr-local-raster"), detail.raster.clone());
+                });
+            }
+            if model.show_trees {
+                forest = super::atlas_forest::get(painter.ctx(), root, &detail.raster);
+            }
+            rasters.push(detail.raster.clone());
+        }
+    }
+    if painter
+        .ctx()
+        .data(|d| d.get_temp::<bool>(egui::Id::new("vr-local-capture")).unwrap_or(false))
+        && painter
+            .ctx()
+            .data(|d| {
+                d.get_temp::<std::sync::Arc<super::atlas_surface::Raster>>(egui::Id::new(
+                    "vr-local-raster",
+                ))
+            })
+            .is_none()
+        && let Some(fallback) = rasters.last()
+    {
+        painter.ctx().data_mut(|d| {
+            d.insert_temp(egui::Id::new("vr-local-raster"), fallback.clone());
+        });
+    }
+
+    if !rasters.is_empty() {
+        let interval = if half_deg > 12.0 {
+            200.0
+        } else if half_deg > 4.0 {
+            100.0
+        } else if half_deg > 1.2 {
+            50.0
+        } else if half_deg > 0.3 {
+            25.0
+        } else if half_deg > 0.08 {
+            10.0
+        } else if half_deg > 0.025 {
+            5.0
+        } else if half_deg > 0.008 {
+            2.0
+        } else {
+            1.0
+        };
+        painter.add(
+            super::unified_terrain_pass::UnifiedTerrainCallback {
+                proj: *proj,
+                rasters,
+                forest,
+                style: model.atlas_style,
+                light_jd: model.atlas_light_jd(),
+                contours: model.show_contours,
+                bathymetry: model.show_bathymetry,
+                coastlines: model.show_coastlines,
+                contour_width_px: model.contour_stroke_width_px(proj.pixels_per_point),
+                contour_interval_m: interval,
+            }
+            .into_paint_callback(),
+        );
+    }
+
+    if tiles.missing > 0 && half_deg > 6.0 {
+        let msg = if let Some(err) = tiles.error {
+            format!("Atlas: {} / {} tiles · {err}", tiles.wanted - tiles.missing, tiles.wanted)
+        } else {
+            format!("Atlas: {} / {} tiles · {} loading", tiles.wanted - tiles.missing, tiles.wanted, tiles.missing)
+        };
+        paint_notice(painter, proj.viewport, msg);
+    }
+}
+
 pub(crate) fn clear() {
     super::atlas_globe_tiles::clear();
     super::atlas_surface::clear();

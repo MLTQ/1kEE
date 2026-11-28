@@ -43,6 +43,27 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
     }
     ui.add_space(12.0);
     ui.separator();
+    ui.strong("Cartography & Contours");
+    ui.checkbox(&mut model.tanaka_contours, "Tanaka illuminated contours")
+        .on_hover_text("Shade light-facing contour edges with crisp highlights and shadow-facing edges with deep ink for 3D stepped relief.");
+    ui.checkbox(&mut model.show_contour_labels, "Index-contour elevation labels (Local view)")
+        .on_hover_text("Draw upright, collision-free rotated elevation labels along major index contours in Local Terrain mode.");
+    ui.add_space(12.0);
+    ui.separator();
+    ui.strong("Poster Export");
+    ui.colored_label(
+        theme::text_muted(),
+        "Render a print-ready high-DPI PNG of the active view with a cartographic collar, scale bar, and optional world file.",
+    );
+    ui.add_space(4.0);
+    if ui.button("Export High-DPI Poster…").clicked() {
+        model.poster_export.open = true;
+    }
+    if !model.poster_export.last_status.is_empty() {
+        ui.small(&model.poster_export.last_status);
+    }
+    ui.add_space(12.0);
+    ui.separator();
     ui.strong("Loading");
     ui.checkbox(&mut model.show_loading_animation, "Loading animation")
         .on_hover_text("Animate the terrain loading grid, tile outlines and Globe loading spinner. Downloads and progress information remain active when disabled.");

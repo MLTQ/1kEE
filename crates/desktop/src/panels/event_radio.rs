@@ -78,6 +78,10 @@ impl Default for EventRadio {
 }
 
 impl EventRadio {
+    pub(crate) fn is_playing(&self) -> bool {
+        self.playing.is_some()
+    }
+
     pub(crate) fn title_bar_button(
         &mut self,
         ctx: &egui::Context,

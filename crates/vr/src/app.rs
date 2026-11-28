@@ -34,7 +34,7 @@ fn options() -> Result<Option<Options>> {
         match arg.as_str() {
             "-h" | "--help" => {
                 println!(
-                    "1kEE native OpenXR globe\n\nStart SteamVR with the Index tracking, then run this binary.\n\n  --import FILE       Open a georeferenced GeoTIFF, GeoJSON, KML or KMZ layer\n  --asset-root PATH   Override the desktop asset root for native map tiles\n  --demo              Run the original single-tile stereo diagnostic\n  --frames N          Exit after N rendered stereo frames\n  --stream-after N    Start reading the contour tile after N rendered frames (default 120)\n  --display-test      Use head-relative stereo for display diagnostics only\n  --no-terrain        Baseline without contour work\n  --tile DB Z Y X     Use a tile from a native 1kEE contour SQLite cache\n  --events DB         Focus the latest geolocated event in a desktop event database\n\nLeft A hides/shows wrist controls. Aim and trigger with the right hand. Right stick scrolls over menus and zooms over the map."
+                    "1kEE native OpenXR globe\n\nStart SteamVR with the Index tracking, then run this binary.\n\n  --import FILE       Open a georeferenced GeoTIFF, GeoJSON, KML or KMZ layer\n  --asset-root PATH   Override the desktop asset root for native map tiles\n  --demo              Run the original single-tile stereo diagnostic\n  --frames N          Exit after N rendered stereo frames\n  --stream-after N    Start reading the contour tile after N rendered frames (default 120)\n  --display-test      Use head-relative stereo for display diagnostics only\n  --no-terrain        Baseline without contour work\n  --tile DB Z Y X     Use a tile from a native 1kEE contour SQLite cache\n  --events DB         Focus the latest geolocated event in a desktop event database\n\nRaise your left wrist to wake the forearm HUD (Left A/X pins it). Aim + trigger with the right hand. Squeeze 1 grip to grab/pan, or both grips to pinch-zoom continuously from orbit to street scale."
                 );
                 return Ok(None);
             }
@@ -245,13 +245,11 @@ fn run(o: Options) -> Result<()> {
         )?;
         Some(crate::cockpit::Cockpit::new(
             link,
-            one_thousand_electric_eye_desktop::vr_operator::View {
-                lat: marker.lat,
-                lon: marker.lon,
-                scale: 1.,
-                local: false,
-                local_zoom: 25.,
-            },
+            one_thousand_electric_eye_desktop::vr_operator::View::from_continuous(
+                marker.lat,
+                marker.lon,
+                one_thousand_electric_eye_desktop::vr_operator::MAX_RANGE_M,
+            ),
         ))
     };
     let mut timer = render::GpuTimer::new(&gpu.device);
@@ -357,13 +355,32 @@ fn run(o: Options) -> Result<()> {
             Default::default()
         };
         let dt = (frame.predicted_display_period.as_nanos() as f32 / 1e9).clamp(0., 0.1);
+        gpu.device.poll(wgpu::Maintain::Poll);
+        let measured = timer
+            .as_mut()
+            .and_then(|t| t.sample(gpu.queue.get_timestamp_period()));
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
         if let Some(operator) = &mut cockpit {
             let head = (crate::scene::pose(views[0].pose).w_axis
                 + crate::scene::pose(views[1].pose).w_axis)
                 .truncate()
                 * 0.5;
-            let (reset, exit) =
-                operator.tick(&mut renderer, &gpu.queue, globe, &hands, head, dt)?;
+            let (reset, exit, haptics) = operator.tick(
+                &gpu.device,
+                &mut renderer,
+                &gpu.queue,
+                &mut encoder,
+                globe,
+                &hands,
+                head,
+                dt,
+            )?;
+            if let Some((amp, ms)) = haptics.left {
+                controls.haptic_pulse(&session, false, amp, ms);
+            }
+            if let Some((amp, ms)) = haptics.right {
+                controls.haptic_pulse(&session, true, amp, ms);
+            }
             controls.cursor = operator.cursor;
             if reset {
                 globe.recenter(&views, &marker);
@@ -398,11 +415,6 @@ fn run(o: Options) -> Result<()> {
                 terrain.upload = None;
             }
         }
-        gpu.device.poll(wgpu::Maintain::Poll);
-        let measured = timer
-            .as_mut()
-            .and_then(|t| t.sample(gpu.queue.get_timestamp_period()));
-        let mut encoder = gpu.device.create_command_encoder(&Default::default());
         for (index, eye) in eyes.iter_mut().enumerate() {
             let size = eye.size;
             let target = eye.acquire()?;

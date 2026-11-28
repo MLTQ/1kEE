@@ -2,6 +2,8 @@
 use crate::{model::AppModel, theme};
 #[path = "settings_actions.rs"]
 mod actions;
+#[path = "settings_agent.rs"]
+mod agent;
 #[path = "settings_appearance.rs"]
 mod appearance;
 #[path = "settings_event_follow.rs"]
@@ -22,16 +24,18 @@ enum Section {
     Appearance,
     FollowEvents,
     Sources,
+    Agent,
     Paths,
     Terrain,
     Activity,
 }
 impl Section {
-    const ALL: [(Self, &'static str); 7] = [
+    const ALL: [(Self, &'static str); 8] = [
         (Self::Overview, "Overview"),
         (Self::Appearance, "Appearance"),
         (Self::FollowEvents, "Follow Events"),
         (Self::Sources, "Data Sources"),
+        (Self::Agent, "Agent & Voice"),
         (Self::Paths, "Files & Cache"),
         (Self::Terrain, "Terrain Library"),
         (Self::Activity, "Activity"),
@@ -42,6 +46,7 @@ impl Section {
             Section::Appearance => appearance::render(ui, model),
             Section::FollowEvents => event_follow::render(ui, model),
             Section::Sources => sources::render(ui, model),
+            Section::Agent => agent::render(ui, model),
             Section::Paths => paths::render(ui, model),
             Section::Terrain => super::terrain_library::render(ui, model),
             Section::Activity => super::status_log::render(ui, model),
@@ -62,6 +67,7 @@ pub fn render_settings(ctx: &egui::Context, model: &mut AppModel) {
         .open(&mut open)
         .default_size(egui::vec2(840.0, 600.0))
         .min_size(egui::vec2(640.0, 400.0))
+        .max_width((ctx.screen_rect().width() - 48.0).max(640.0))
         .frame(
             egui::Frame::window(&ctx.style())
                 .fill(theme::window_fill())

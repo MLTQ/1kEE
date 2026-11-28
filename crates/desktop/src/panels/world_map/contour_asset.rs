@@ -1934,7 +1934,16 @@ pub fn load_global_topo(
             "load_global_topo",
             |a, b| a.0 == b.0,
             move |(root, _)| {
-                let path = srtm_focus_cache::ensure_global_land_overview(root.as_deref())?;
+                // Prefer an already-built `global_land_overview.gpkg` if present,
+                // otherwise read global land contours (`elevation_m > 0`) directly
+                // from `gebco_2025_contours_200m.gpkg` so full-globe contours load
+                // immediately without stalling on a background GDAL warp.
+                let overview = srtm_focus_cache::db::focus_cache_root(root.as_deref())
+                    .map(|dir| dir.join("global_land_overview.gpkg"))
+                    .filter(|p| p.exists());
+                let path = overview
+                    .or_else(|| contour_path(root.as_deref(), zoom))
+                    .or_else(|| srtm_focus_cache::ensure_global_land_overview(root.as_deref()))?;
                 query_global_topo(&path, step, budget).ok()
             },
         );
@@ -2050,14 +2059,11 @@ fn query_global_bathymetry(
     Ok(all_contours)
 }
 
-fn global_topo_lod(zoom: f32) -> (i32, usize, usize) {
-    if zoom < 1.5 {
-        (0, 18, 400)
-    } else if zoom < 3.0 {
-        (1, 12, 650)
-    } else {
-        (2, 7, 1_000)
-    }
+fn global_topo_lod(_zoom: f32) -> (i32, usize, usize) {
+    // Single LOD bucket (matching bathymetry/coastlines) so zoom changes never
+    // trigger reloads or flicker, with enough budget to cover every visible
+    // continent cleanly during 24hr recaps and full-globe views.
+    (0, 3, 10_000)
 }
 
 fn query_global_topo(
@@ -2066,9 +2072,81 @@ fn query_global_topo(
     feature_budget: usize,
 ) -> rusqlite::Result<Vec<ContourPath>> {
     let connection = srtm_focus_cache::db::open_cache_db_read_only(path)?;
-    // Land-positive contours only.  The GPKG is ordered by scan position (N→S)
-    // so a bare LIMIT returns only Arctic/northern features.  Stride-sample
-    // across the full FID range to get globally-distributed land contours.
+
+    // Stratified elevation bands mirror `query_global_bathymetry` so every
+    // continent gets balanced lowland, plateau, and alpine contour coverage
+    // across the full globe in one scan of `gebco_2025_contours_200m.gpkg`.
+    let elev_levels: &[(f32, usize)] = &[
+        (200.0, feature_budget * 18 / 100),
+        (400.0, feature_budget * 16 / 100),
+        (600.0, feature_budget * 14 / 100),
+        (1000.0, feature_budget * 14 / 100),
+        (1400.0, feature_budget * 11 / 100),
+        (2000.0, feature_budget * 10 / 100),
+        (3000.0, feature_budget * 7 / 100),
+        (4000.0, feature_budget * 6 / 100),
+        (5000.0, feature_budget * 4 / 100),
+    ];
+
+    let mut heaps: [std::collections::BinaryHeap<std::cmp::Reverse<(usize, usize, Vec<u8>)>>; 9] =
+        std::array::from_fn(|i| std::collections::BinaryHeap::with_capacity(elev_levels[i].1 + 1));
+
+    let mut stmt = connection.prepare(
+        "SELECT elevation_m, geom FROM contour WHERE elevation_m >= 199.0",
+    )?;
+    let mut rows = stmt.query([])?;
+    let mut seq = 0usize;
+    let mut matched_any = false;
+    while let Some(row) = rows.next()? {
+        let elev: f32 = row.get(0)?;
+        let Some((bucket_idx, &(_, per_elev_budget))) = elev_levels
+            .iter()
+            .enumerate()
+            .find(|&(_, &(target, budget))| budget > 0 && (elev - target).abs() < 1.0)
+        else {
+            continue;
+        };
+        matched_any = true;
+        let blob = row.get_ref(1)?.as_blob()?;
+        let len = blob.len();
+        let heap = &mut heaps[bucket_idx];
+        if heap.len() == per_elev_budget {
+            if let Some(std::cmp::Reverse((min_len, _, _))) = heap.peek() {
+                if len <= *min_len {
+                    continue;
+                }
+            }
+            heap.pop();
+        }
+        seq += 1;
+        heap.push(std::cmp::Reverse((len, seq, blob.to_vec())));
+    }
+
+    if matched_any {
+        let mut all_contours: Vec<ContourPath> = Vec::with_capacity(feature_budget);
+        for (bucket_idx, &(elev, _)) in elev_levels.iter().enumerate() {
+            let mut winning: Vec<_> = heaps[bucket_idx].drain().map(|r| r.0).collect();
+            winning.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+            for (_, _, geometry) in winning {
+                for line in parse_gpkg_lines(&geometry) {
+                    if line.len() < 2 {
+                        continue;
+                    }
+                    let simplified = simplify_line(line, simplify_step);
+                    if simplified.len() >= 3 {
+                        all_contours.push(ContourPath {
+                            elevation_m: elev,
+                            points: simplified,
+                        });
+                    }
+                }
+            }
+        }
+        return Ok(all_contours);
+    }
+
+    // Fallback for non-200m overview GPKGs (e.g., 500m `global_land_overview.gpkg`):
+    // stride-sample across the full FID range and keep the longest lines.
     let total: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM contour WHERE elevation_m > 0",
@@ -2105,7 +2183,6 @@ fn query_global_topo(
         }
     }
 
-    // Longest simplified lines are the most geographically prominent at globe scale.
     contours.sort_unstable_by(|a, b| b.points.len().cmp(&a.points.len()));
     contours.truncate(feature_budget);
 

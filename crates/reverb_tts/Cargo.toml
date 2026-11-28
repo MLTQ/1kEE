@@ -1,0 +1,20 @@
+[package]
+name = "reverb-tts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure-Rust Reverb-TTS (Qwen3 masked-diffusion + HiggsAudioV2 DAC decoder) runner"
+
+[features]
+default = []
+cuda = ["candle-core/cuda", "candle-nn/cuda"]
+metal = ["candle-core/metal", "candle-nn/metal"]
+
+[dependencies]
+candle-core = "0.11.1"
+candle-nn = "0.11.1"
+half = "2"
+safetensors = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }

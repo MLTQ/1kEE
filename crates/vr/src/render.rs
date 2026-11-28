@@ -36,6 +36,7 @@ struct Uniforms {
 
 pub struct Renderer {
     pub cartography: crate::cartography::Cartography,
+    pub wrist_hud: crate::wrist_ui::WristHud,
     device: wgpu::Device,
     depths: [Option<([u32; 2], wgpu::TextureView)>; 2],
     spire: wgpu::RenderPipeline,
@@ -98,6 +99,7 @@ impl Renderer {
         });
         let brief_view = crate::brief::texture(device, queue, marker);
         let cartography = crate::cartography::Cartography::new(device);
+        let wrist_hud = crate::wrist_ui::WristHud::new(device);
         let array = |filterable| wgpu::BindingType::Texture {
             sample_type: wgpu::TextureSampleType::Float { filterable },
             view_dimension: wgpu::TextureViewDimension::D2Array,
@@ -121,7 +123,11 @@ impl Renderer {
                 multisampled: false,
             },
             array(true),
-            array(true),
+            wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
             array(false),
             array(true),
         ];
@@ -172,7 +178,7 @@ impl Renderer {
                         },
                         wgpu::BindGroupEntry {
                             binding: 5,
-                            resource: wgpu::BindingResource::TextureView(cartography.wrist_view()),
+                            resource: wgpu::BindingResource::TextureView(wrist_hud.view()),
                         },
                         wgpu::BindGroupEntry {
                             binding: 6,
@@ -192,52 +198,57 @@ impl Renderer {
             bind_group_layouts: &[&bindings],
             push_constant_ranges: &[],
         });
-        let pipeline =
-            |vertex, fragment, topology, buffers: &[wgpu::VertexBufferLayout], foreground: bool| {
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(vertex),
-                    layout: Some(&layout),
-                    vertex: wgpu::VertexState {
-                        module: &shader,
-                        entry_point: Some(vertex),
-                        compilation_options: Default::default(),
-                        buffers,
-                    },
-                    primitive: wgpu::PrimitiveState {
+        let pipeline = |vertex,
+                        fragment,
                         topology,
-                        ..Default::default()
+                        buffers: &[wgpu::VertexBufferLayout],
+                        foreground: bool,
+                        alpha_blend: bool| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(vertex),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some(vertex),
+                    compilation_options: Default::default(),
+                    buffers,
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: !foreground,
+                    depth_compare: if foreground {
+                        wgpu::CompareFunction::Always
+                    } else {
+                        wgpu::CompareFunction::LessEqual
                     },
-                    depth_stencil: Some(wgpu::DepthStencilState {
-                        format: wgpu::TextureFormat::Depth32Float,
-                        depth_write_enabled: !foreground,
-                        depth_compare: if foreground {
-                            wgpu::CompareFunction::Always
-                        } else {
-                            wgpu::CompareFunction::LessEqual
-                        },
-                        stencil: Default::default(),
-                        bias: Default::default(),
-                    }),
-                    multisample: Default::default(),
-                    fragment: Some(wgpu::FragmentState {
-                        module: &shader,
-                        entry_point: Some(fragment),
-                        compilation_options: Default::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    multiview: None,
-                    cache: None,
-                })
-            };
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(fragment),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: alpha_blend.then_some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview: None,
+                cache: None,
+            })
+        };
         let globe = pipeline(
             "vs_main",
             "fs_main",
             wgpu::PrimitiveTopology::TriangleList,
             &[],
+            false,
             false,
         );
         let lines = pipeline(
@@ -250,6 +261,7 @@ impl Renderer {
                 attributes: &wgpu::vertex_attr_array![0 => Float32x3],
             }],
             false,
+            false,
         );
         let brief = pipeline(
             "vs_brief",
@@ -257,12 +269,14 @@ impl Renderer {
             wgpu::PrimitiveTopology::TriangleStrip,
             &[],
             false,
+            true,
         );
         let wrist = pipeline(
             "vs_wrist",
             "fs_wrist",
             wgpu::PrimitiveTopology::TriangleStrip,
             &[],
+            true,
             true,
         );
         let spire = pipeline(
@@ -275,6 +289,7 @@ impl Renderer {
                 attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32, 2 => Float32x3, 3 => Unorm8x4],
             }],
             false,
+            false,
         );
         let laser = pipeline(
             "vs_laser",
@@ -282,12 +297,14 @@ impl Renderer {
             wgpu::PrimitiveTopology::TriangleStrip,
             &[],
             false,
+            true,
         );
         let wrist_laser = pipeline(
             "vs_laser",
             "fs_laser",
             wgpu::PrimitiveTopology::TriangleStrip,
             &[],
+            true,
             true,
         );
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
@@ -304,6 +321,7 @@ impl Renderer {
             spire,
             wrist,
             cartography,
+            wrist_hud,
             globe,
             lines,
             brief,
@@ -466,7 +484,7 @@ impl Renderer {
             pass.set_pipeline(&self.laser);
             pass.draw(0..4, 0..1);
         }
-        if native.wrist_ready && native.wrist_pose.is_some() {
+        if native.wrist_alpha > 0.01 && native.wrist_pose.is_some() {
             pass.set_pipeline(&self.wrist);
             pass.draw(0..4, 0..1);
         }

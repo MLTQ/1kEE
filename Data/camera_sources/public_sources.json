@@ -1,0 +1,192 @@
+[
+  {
+    "name": "Caltrans D4 SF Bay Area CCTV",
+    "provider": "Caltrans D4",
+    "kind": "json-array",
+    "endpoint": "https://cwwp2.dot.ca.gov/data/d4/cctv/cctvStatusD04.json",
+    "description": "California DOT District 4 public highway cameras",
+    "license": "Public Domain (CA Gov)",
+    "homepage": "https://cwwp2.dot.ca.gov",
+    "array_field": "data",
+    "id_field": "cctv.index",
+    "label_field": "cctv.location.locationName",
+    "stream_url_field": "cctv.imageData.static.currentImageURL",
+    "kind_value": "snapshot",
+    "latitude_field": "cctv.location.latitude",
+    "longitude_field": "cctv.location.longitude",
+    "enabled": true
+  },
+  {
+    "name": "Caltrans D7 Los Angeles CCTV",
+    "provider": "Caltrans D7",
+    "kind": "json-array",
+    "endpoint": "https://cwwp2.dot.ca.gov/data/d7/cctv/cctvStatusD07.json",
+    "description": "California DOT District 7 public highway cameras",
+    "license": "Public Domain (CA Gov)",
+    "homepage": "https://cwwp2.dot.ca.gov",
+    "array_field": "data",
+    "id_field": "cctv.index",
+    "label_field": "cctv.location.locationName",
+    "stream_url_field": "cctv.imageData.static.currentImageURL",
+    "kind_value": "snapshot",
+    "latitude_field": "cctv.location.latitude",
+    "longitude_field": "cctv.location.longitude",
+    "enabled": true
+  },
+  {
+    "name": "Caltrans D11 San Diego CCTV",
+    "provider": "Caltrans D11",
+    "kind": "json-array",
+    "endpoint": "https://cwwp2.dot.ca.gov/data/d11/cctv/cctvStatusD11.json",
+    "description": "California DOT District 11 public highway cameras",
+    "license": "Public Domain (CA Gov)",
+    "homepage": "https://cwwp2.dot.ca.gov",
+    "array_field": "data",
+    "id_field": "cctv.index",
+    "label_field": "cctv.location.locationName",
+    "stream_url_field": "cctv.imageData.static.currentImageURL",
+    "kind_value": "snapshot",
+    "latitude_field": "cctv.location.latitude",
+    "longitude_field": "cctv.location.longitude",
+    "enabled": true
+  },
+  {
+    "name": "Caltrans D3 Sacramento & Sierra CCTV",
+    "provider": "Caltrans D3",
+    "kind": "json-array",
+    "endpoint": "https://cwwp2.dot.ca.gov/data/d3/cctv/cctvStatusD03.json",
+    "description": "California DOT District 3 public highway cameras",
+    "license": "Public Domain (CA Gov)",
+    "homepage": "https://cwwp2.dot.ca.gov",
+    "array_field": "data",
+    "id_field": "cctv.index",
+    "label_field": "cctv.location.locationName",
+    "stream_url_field": "cctv.imageData.static.currentImageURL",
+    "kind_value": "snapshot",
+    "latitude_field": "cctv.location.latitude",
+    "longitude_field": "cctv.location.longitude",
+    "enabled": true
+  },
+  {
+    "name": "Digitraffic Finland Weathercams",
+    "provider": "Digitraffic Finland",
+    "kind": "geo-json",
+    "endpoint": "https://tie.digitraffic.fi/api/weathercam/v1/stations",
+    "description": "Fintraffic national road weather camera network",
+    "license": "CC BY 4.0",
+    "homepage": "https://www.digitraffic.fi/en/road-traffic/",
+    "id_field": "id",
+    "label_field": "name",
+    "stream_url_template": "https://weathercam.digitraffic.fi/{id}01.jpg",
+    "kind_value": "snapshot",
+    "enabled": true
+  },
+  {
+    "name": "TfL London JamCams",
+    "provider": "TfL London",
+    "kind": "tfl-jam-cam",
+    "endpoint": "https://api.tfl.gov.uk/Place/Type/JamCam",
+    "description": "Transport for London public JamCam traffic snapshots",
+    "license": "Open Government Licence v2.0",
+    "homepage": "https://api.tfl.gov.uk",
+    "id_field": "id",
+    "label_field": "commonName",
+    "latitude_field": "lat",
+    "longitude_field": "lon",
+    "kind_value": "snapshot",
+    "enabled": true
+  },
+  {
+    "name": "USGS & GeoNet Volcano Observatories",
+    "provider": "USGS / GeoNet Volcano",
+    "kind": "static-list",
+    "endpoint": "",
+    "description": "Public volcano observatory & NOAA marine weather buoy webcams",
+    "license": "US Gov Public Domain / CC BY 3.0 NZ",
+    "homepage": "https://volcanoes.usgs.gov",
+    "kind_value": "snapshot",
+    "static_cameras": [
+      {
+        "id": "usgs-kilauea-kwcam",
+        "label": "Kilauea Halema'uma'u West Rim (KWcam)",
+        "latitude": 19.4069,
+        "longitude": -155.2834,
+        "stream_url": "https://volcanoes.usgs.gov/cams/KWcam/images/M.jpg",
+        "kind": "snapshot"
+      },
+      {
+        "id": "usgs-kilauea-b1cam",
+        "label": "Kilauea Halema'uma'u East Rim (B1cam)",
+        "latitude": 19.4080,
+        "longitude": -155.2680,
+        "stream_url": "https://volcanoes.usgs.gov/cams/B1cam/images/M.jpg",
+        "kind": "snapshot"
+      },
+      {
+        "id": "usgs-maunaloa-mlcam",
+        "label": "Mauna Loa Moku'aweoweo North Rim (MLcam)",
+        "latitude": 19.4795,
+        "longitude": -155.5980,
+        "stream_url": "https://volcanoes.usgs.gov/cams/MLcam/images/M.jpg",
+        "kind": "snapshot"
+      },
+      {
+        "id": "usgs-msh-sugarbowl",
+        "label": "Mount St. Helens Sugar Bowl (SHcam)",
+        "latitude": 46.2004,
+        "longitude": -122.1856,
+        "stream_url": "https://volcanoes.usgs.gov/cams/SHcam/images/M.jpg",
+        "kind": "snapshot"
+      },
+      {
+        "id": "usgs-yellowstone-oldfaithful",
+        "label": "Yellowstone Old Faithful Observatory",
+        "latitude": 44.4605,
+        "longitude": -110.8281,
+        "stream_url": "https://www.nps.gov/webcams-yell/oldfaithful.jpg",
+        "kind": "snapshot"
+      },
+      {
+        "id": "geonet-ruapehu-north",
+        "label": "Mt. Ruapehu North (GeoNet NZ)",
+        "latitude": -39.2817,
+        "longitude": 175.5685,
+        "stream_url": "https://images.geonet.org.nz/volcano/cameras/latest/rimk.jpg",
+        "kind": "snapshot"
+      },
+      {
+        "id": "geonet-whakaari",
+        "label": "Whakaari / White Island (GeoNet NZ)",
+        "latitude": -37.5210,
+        "longitude": 177.1830,
+        "stream_url": "https://images.geonet.org.nz/volcano/cameras/latest/wite.jpg",
+        "kind": "snapshot"
+      },
+      {
+        "id": "geonet-tongariro",
+        "label": "Mt. Tongariro Te Maari (GeoNet NZ)",
+        "latitude": -39.1080,
+        "longitude": 175.6430,
+        "stream_url": "https://images.geonet.org.nz/volcano/cameras/latest/toma.jpg",
+        "kind": "snapshot"
+      },
+      {
+        "id": "noaa-ndbc-46026",
+        "label": "NOAA BuoyCAM 46026 · San Francisco Approach",
+        "latitude": 37.759,
+        "longitude": -122.833,
+        "stream_url": "https://www.ndbc.noaa.gov/buoycam.php?station=46026",
+        "kind": "snapshot"
+      },
+      {
+        "id": "noaa-ndbc-44025",
+        "label": "NOAA BuoyCAM 44025 · Long Island / NY Bight",
+        "latitude": 40.251,
+        "longitude": -73.164,
+        "stream_url": "https://www.ndbc.noaa.gov/buoycam.php?station=44025",
+        "kind": "snapshot"
+      }
+    ],
+    "enabled": true
+  }
+]

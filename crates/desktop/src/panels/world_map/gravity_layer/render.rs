@@ -56,6 +56,24 @@ pub(in super::super) fn draw_globe(
     painter.add(egui::Shape::mesh(mesh));
 }
 
+pub(in super::super) fn draw_unified(
+    painter: &egui::Painter,
+    proj: &super::super::projection::MapProjection,
+    root: Option<&Path>,
+    id: &str,
+) {
+    let Some(image) = texture(painter.ctx(), root, id) else {
+        return;
+    };
+    let Ok(image) = image.as_ref() else {
+        return;
+    };
+    let mesh = super::super::raster_mesh::unified(proj, image.texture.id(), image.bounds);
+    if !mesh.vertices.is_empty() {
+        painter.add(egui::Shape::mesh(Arc::new(mesh)));
+    }
+}
+
 pub(in super::super) fn draw_local(
     painter: &egui::Painter,
     layout: &LocalLayout,

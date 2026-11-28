@@ -148,6 +148,8 @@ impl AppModel {
             self.replay_mode = false;
             self.replay_state = None;
             self.follow_recaps = FollowRecaps::default();
+            self.convergence.reset_tour_history();
+            self.refresh_convergence(0.0, true);
             self.globe_view.stop_motion();
             self.event_follow.enable(&self.events);
             self.seismic
@@ -185,15 +187,36 @@ impl AppModel {
             .or(self.replay_state.as_ref().filter(|_| self.replay_mode))
     }
 
-    /// Atlas sunlight follows the regional recap playhead, then resumes the app clock.
+    /// Atlas sunlight follows the active regional recap or synchronized replay playhead,
+    /// then resumes the app stellar clock.
     pub fn atlas_light_jd(&self) -> f64 {
-        self.follow_recaps
-            .active
-            .as_ref()
-            .map_or(self.stellar_jd, |recap| {
-                let replay = &recap.replay;
-                crate::stellar_time::unix_to_jd(replay.unix_at_elapsed(replay.wall_elapsed()))
-            })
+        if let Some(recap) = self.follow_recaps.active.as_ref() {
+            let replay = &recap.replay;
+            return crate::stellar_time::unix_to_jd(replay.unix_at_elapsed(replay.wall_elapsed()));
+        }
+        if self.master_clock.sync_subsystems
+            && self.replay_mode
+            && let Some(replay) = self.replay_state.as_ref()
+        {
+            return crate::stellar_time::unix_to_jd(replay.unix_at_elapsed(replay.wall_elapsed()));
+        }
+        self.stellar_jd
+    }
+
+    pub fn refresh_convergence(&mut self, now_anim: f64, force: bool) {
+        let now_unix = crate::event_store::now_unix();
+        self.convergence.refresh(
+            now_anim,
+            now_unix,
+            force,
+            &self.events,
+            &self.cameras,
+            &self.active_fires,
+            self.fire_snapshot_revision(),
+            &self.seismic.live_stations,
+            &self.flights,
+            &self.tracks,
+        );
     }
 
     pub fn tick_event_follow(&mut self, now: f64) {
@@ -204,11 +227,29 @@ impl AppModel {
         if !self.event_follow.enabled() {
             return;
         }
+        self.refresh_convergence(now, false);
+        let director = self.follow_director.normalized();
+
         let live = &mut self.seismic.live_stations;
         let station = if self.event_follow.at_station(now) {
             None
         } else {
-            live.follow.next(&live.stations)
+            live.follow.next(&live.stations).filter(|stop| {
+                if !director.smart_director {
+                    return true;
+                }
+                // Gate immediate preemption only when we have a known USGS magnitude below threshold.
+                let usgs_id = format!("{}{}", super::USGS_EVENT_PREFIX, stop.event);
+                match self
+                    .events
+                    .iter()
+                    .find(|e| e.id == usgs_id)
+                    .and_then(|e| super::convergence::parse_quake_magnitude(&e.title))
+                {
+                    Some(mag) => mag >= director.min_quake_interrupt_mag,
+                    None => true,
+                }
+            })
         };
         if station.is_some() {
             if let Some(recap) = self.follow_recaps.active.take() {
@@ -226,8 +267,23 @@ impl AppModel {
         } else {
             let since = *self.follow_recaps.live_since.get_or_insert(now);
             if now - since >= LIVE_SECONDS && !self.event_follow.at_station(now) {
-                let region = RecapRegion::ALL[self.follow_recaps.next];
-                self.follow_recaps.next = (self.follow_recaps.next + 1) % RecapRegion::ALL.len();
+                let mut chosen = self.follow_recaps.next;
+                if director.skip_empty_recap_regions && !self.events.is_empty() {
+                    for offset in 0..RecapRegion::ALL.len() {
+                        let idx = (self.follow_recaps.next + offset) % RecapRegion::ALL.len();
+                        let candidate = RecapRegion::ALL[idx];
+                        if self
+                            .events
+                            .iter()
+                            .any(|e| RecapRegion::at(e.location) == Some(candidate))
+                        {
+                            chosen = idx;
+                            break;
+                        }
+                    }
+                }
+                let region = RecapRegion::ALL[chosen];
+                self.follow_recaps.next = (chosen + 1) % RecapRegion::ALL.len();
                 self.event_follow.release_camera();
                 self.follow_recaps.active = Some(RegionalRecap::new(
                     region,
@@ -266,8 +322,53 @@ impl AppModel {
         });
         let is_quake = quake_stop.is_some();
         let selected = if is_quake {
+            let directive = if director.adaptive_framing {
+                super::convergence::StopDirective {
+                    globe_zoom: 24.0,
+                    local_zoom: 7.5,
+                    local_pitch: 0.82,
+                    orbit_radius_deg: 1.0,
+                    dwell_multiplier: 1.0,
+                    dwell_zoom_drift: 0.002,
+                }
+            } else {
+                super::convergence::StopDirective::default()
+            };
+            self.event_follow.tick_with_director(
+                &mut self.globe_view,
+                now,
+                quake_stop.map(|e| (e, directive)),
+                None,
+            )
+        } else if director.smart_director {
+            let current_id = self.event_follow.target().map(|e| e.id.clone());
+            let current_loc = self.event_follow.target().map(|e| e.location);
+            let breaking = if !self.event_follow.at_station(now) {
+                self.event_follow.dwell_elapsed(now).and_then(|elapsed| {
+                    self.convergence.breaking_interrupt(
+                        current_id.as_deref(),
+                        elapsed,
+                        10.0,
+                        director.adaptive_framing,
+                    )
+                })
+            } else {
+                None
+            };
+            let next_stop = if breaking.is_none()
+                && !self.event_follow.at_station(now)
+                && self.event_follow.dwell_finished(now)
+            {
+                self.convergence.select_next_stop(
+                    current_id.as_deref(),
+                    current_loc,
+                    director.adaptive_framing,
+                )
+            } else {
+                None
+            };
             self.event_follow
-                .tick_with_stop(&mut self.globe_view, now, quake_stop)
+                .tick_with_director(&mut self.globe_view, now, breaking, next_stop)
         } else {
             self.event_follow.tick(&mut self.globe_view, now)
         };

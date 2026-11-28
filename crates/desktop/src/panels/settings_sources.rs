@@ -58,8 +58,13 @@ pub(super) fn render(ui: &mut egui::Ui, model: &mut AppModel) {
         "Camera registry status: {}",
         model.camera_registry_status
     ));
+    ui.add_space(4.0);
+    ui.checkbox(
+        &mut model.open_public_cameras_enabled,
+        "Enable built-in open public camera networks (DOT traffic, weather, volcano, marine)",
+    );
     ui.small(
-        "Optional no-key sources can be declared in Data/camera_sources/public_sources.json \
+        "Optional custom no-key sources can also be declared in Data/camera_sources/public_sources.json \
          and Data/camera_sources/scrape_sources.json under the asset root.",
     );
 

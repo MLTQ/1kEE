@@ -7,6 +7,12 @@ use std::path::Path;
 mod files;
 
 pub const HEIGHT_EDGE: usize = 65;
+/// Camera range below which VR seamlessly transitions from the 3D orbital globe
+/// to the 3D holographic stereo relief table (down to 20 m street/LiDAR scale).
+pub const LOCAL_TABLE_RANGE_M: f64 = 180_000.0;
+pub const MIN_RANGE_M: f64 = 20.0;
+pub const MAX_RANGE_M: f64 = 24_000_000.0;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Target {
     Event(String),
@@ -44,6 +50,195 @@ pub struct View {
     pub scale: f32,
     pub local: bool,
     pub local_zoom: f32,
+    pub range_m: f64,
+}
+impl View {
+    pub fn from_continuous(lat: f32, lon: f32, range_m: f64) -> Self {
+        let range_m = range_m.clamp(MIN_RANGE_M, MAX_RANGE_M);
+        let lat = lat.clamp(-89.9, 89.9);
+        let lon = (lon + 180.0).rem_euclid(360.0) - 180.0;
+        let local = range_m <= LOCAL_TABLE_RANGE_M;
+        let scale = if local {
+            16.0
+        } else {
+            let log_span = (MAX_RANGE_M / LOCAL_TABLE_RANGE_M).ln();
+            let t = ((MAX_RANGE_M / range_m).ln() / log_span).clamp(0.0, 1.0);
+            16.0_f32.powf(t as f32).clamp(1.0, 32.0)
+        };
+        let local_zoom = if local {
+            let log_span = (LOCAL_TABLE_RANGE_M / MIN_RANGE_M).ln();
+            let t = ((LOCAL_TABLE_RANGE_M / range_m).ln() / log_span).clamp(0.0, 1.0);
+            60.0_f32.powf(t as f32).clamp(1.0, 60.0)
+        } else {
+            1.0
+        };
+        Self {
+            lat,
+            lon,
+            scale,
+            local,
+            local_zoom,
+            range_m,
+        }
+    }
+    pub fn scale_label(&self) -> String {
+        if self.range_m >= 1_000_000.0 {
+            format!("{:.1}k km", self.range_m / 1_000_000.0)
+        } else if self.range_m >= 10_000.0 {
+            format!("{:.0} km", self.range_m / 1_000.0)
+        } else if self.range_m >= 1_000.0 {
+            format!("{:.1} km", self.range_m / 1_000.0)
+        } else {
+            format!("{:.0} m", self.range_m)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VrLayer {
+    PointCloud,
+    Contours,
+    Coastlines,
+    Bathymetry,
+    Roads,
+    Buildings,
+    Water,
+    Trees,
+    Weather,
+    Events,
+    Cameras,
+    Ships,
+    Flights,
+    Seismic,
+}
+
+#[derive(Clone, Debug)]
+pub enum VrCommand {
+    SetRange(f64),
+    PanByDeg { dlat: f32, dlon: f32 },
+    ToggleLayer(VrLayer),
+    SetPointCloudSize(f32),
+    SetReliefSpread(f32),
+    ToggleProjection,
+    CycleTheme,
+    ToggleFollow,
+    SetFollowDwell(u32),
+    ToggleRoom,
+    ToggleAutoCamera,
+    StopCamera,
+    SelectEvent(String),
+    SelectCamera(String),
+    FocusSelectedEvent,
+    ToggleReplay,
+    Recenter,
+    Exit,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct VrEventItem {
+    pub id: String,
+    pub title: String,
+    pub location: String,
+    pub severity_label: String,
+    pub severity_rgb: [u8; 3],
+    pub summary: String,
+    pub occurred_at: String,
+    pub source: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct VrCameraItem {
+    pub id: String,
+    pub label: String,
+    pub distance_km: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct VrLayerState {
+    pub point_cloud: bool,
+    pub point_cloud_size_px: f32,
+    pub point_cloud_status: String,
+    pub point_cloud_points: usize,
+    pub contours: bool,
+    pub coastlines: bool,
+    pub bathymetry: bool,
+    pub roads: bool,
+    pub buildings: bool,
+    pub water: bool,
+    pub trees: bool,
+    pub weather: bool,
+    pub events: bool,
+    pub cameras: bool,
+    pub ships: bool,
+    pub flights: bool,
+    pub seismic: bool,
+    pub relief_spread: f32,
+    pub projection_ortho: bool,
+    pub theme_name: String,
+    pub follow_events: bool,
+    pub follow_dwell_s: u32,
+    pub room_visible: bool,
+    pub auto_camera: bool,
+    pub replay_mode: bool,
+}
+impl Default for VrLayerState {
+    fn default() -> Self {
+        Self {
+            point_cloud: false,
+            point_cloud_size_px: 1.0,
+            point_cloud_status: String::new(),
+            point_cloud_points: 0,
+            contours: true,
+            coastlines: true,
+            bathymetry: true,
+            roads: true,
+            buildings: true,
+            water: true,
+            trees: true,
+            weather: false,
+            events: true,
+            cameras: true,
+            ships: false,
+            flights: false,
+            seismic: false,
+            relief_spread: 1.0,
+            projection_ortho: false,
+            theme_name: "Atlas".into(),
+            follow_events: false,
+            follow_dwell_s: 30,
+            room_visible: false,
+            auto_camera: true,
+            replay_mode: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct VrSnapshot {
+    pub view: View,
+    pub layers: VrLayerState,
+    pub events: Vec<VrEventItem>,
+    pub selected_event: Option<VrEventItem>,
+    pub cameras: Vec<VrCameraItem>,
+    pub playing_camera_id: Option<String>,
+    pub playing_camera_label: Option<String>,
+    pub event_status: String,
+    pub camera_status: String,
+}
+impl Default for VrSnapshot {
+    fn default() -> Self {
+        Self {
+            view: View::from_continuous(46.8523, -121.7603, 18_000_000.0),
+            layers: VrLayerState::default(),
+            events: Vec::new(),
+            selected_event: None,
+            cameras: Vec::new(),
+            playing_camera_id: None,
+            playing_camera_label: None,
+            event_status: String::new(),
+            camera_status: String::new(),
+        }
+    }
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
@@ -96,6 +291,8 @@ impl Operator {
             lat: focus[0],
             lon: focus[1],
         });
+        model.globe_view.range_m = MAX_RANGE_M;
+        model.globe_view.sync_legacy_from_unified();
         model.globe_view.zoom = 1.45;
         let mut operator = Self {
             app,
@@ -131,34 +328,219 @@ impl Operator {
     }
     pub fn view(&self) -> View {
         let v = &self.app.model.globe_view;
-        let p = if v.local_mode {
-            v.local_center
-        } else {
-            v.globe_center_latlon()
-        };
-        View {
-            lat: p.lat,
-            lon: p.lon,
-            scale: self.scale,
-            local: v.local_mode,
-            local_zoom: v.local_zoom,
-        }
+        let lat = v.target_lat as f32;
+        let lon = v.target_lon as f32;
+        View::from_continuous(lat, lon, v.range_m)
     }
     pub fn navigate(&mut self, v: View) {
         let m = &mut self.app.model;
         m.stop_event_follow();
         m.globe_view.stop_motion();
-        let p = GeoPoint {
-            lat: v.lat.clamp(-89.9, 89.9),
-            lon: (v.lon + 180.).rem_euclid(360.) - 180.,
+        let range_m = if v.range_m.is_finite() && v.range_m > 0.0 {
+            v.range_m.clamp(MIN_RANGE_M, MAX_RANGE_M)
+        } else if v.local {
+            let log_span = (LOCAL_TABLE_RANGE_M / MIN_RANGE_M).ln();
+            let t = (v.local_zoom.clamp(1.0, 60.0).ln() / 60.0_f32.ln()) as f64;
+            LOCAL_TABLE_RANGE_M * (-t * log_span).exp()
+        } else {
+            let log_span = (MAX_RANGE_M / LOCAL_TABLE_RANGE_M).ln();
+            let t = (v.scale.clamp(1.0, 32.0).ln() / 16.0_f32.ln()).clamp(0.0, 1.0) as f64;
+            MAX_RANGE_M * (-t * log_span).exp()
         };
+        let norm = View::from_continuous(v.lat, v.lon, range_m);
+        let p = GeoPoint {
+            lat: norm.lat,
+            lon: norm.lon,
+        };
+        m.globe_view.target_lat = norm.lat as f64;
+        m.globe_view.target_lon = norm.lon as f64;
+        m.globe_view.range_m = norm.range_m;
         m.globe_view.yaw = p.lon.to_radians() - std::f32::consts::FRAC_PI_2;
         m.globe_view.pitch = p.lat.to_radians();
         m.globe_view.local_center = p;
-        m.globe_view.local_mode = v.local;
-        m.globe_view.local_zoom = v.local_zoom.clamp(1., 60.);
-        self.scale = v.scale.clamp(1., 32.);
+        m.globe_view.local_mode = norm.local;
+        m.globe_view.local_zoom = norm.local_zoom;
+        self.scale = norm.scale;
         m.globe_view.zoom = (1.45 * self.scale).clamp(0.6, 50.);
+    }
+    pub fn snapshot(&self) -> VrSnapshot {
+        let m = &self.app.model;
+        let to_item = |e: &crate::model::EventRecord| {
+            let c = e.severity.color();
+            VrEventItem {
+                id: e.id.clone(),
+                title: e.title.clone(),
+                location: e.location_name.clone(),
+                severity_label: e.severity.label().to_string(),
+                severity_rgb: [c.r(), c.g(), c.b()],
+                summary: e.summary.clone(),
+                occurred_at: e.occurred_at.clone(),
+                source: e.source.clone(),
+            }
+        };
+        let events: Vec<VrEventItem> = m.events.iter().take(48).map(to_item).collect();
+        let selected_event = m.selected_event().map(to_item);
+        let cameras: Vec<VrCameraItem> = m
+            .nearby_camera_snapshot(2000.0)
+            .iter()
+            .filter(|c| panels::nearby_preview(c))
+            .take(24)
+            .map(|c| VrCameraItem {
+                id: c.id.clone(),
+                label: c.label.clone(),
+                distance_km: c.distance_km,
+            })
+            .collect();
+        let playing_camera_label = self
+            .playing
+            .as_ref()
+            .and_then(|id| m.cameras.iter().find(|c| &c.id == id))
+            .map(|c| c.label.clone());
+        let pc_status = m.point_cloud.status_summary();
+        let pc_points = m.point_cloud.loaded_point_count();
+        VrSnapshot {
+            view: self.view(),
+            layers: VrLayerState {
+                point_cloud: m.point_cloud.enabled,
+                point_cloud_size_px: m.point_cloud.point_size_px,
+                point_cloud_status: pc_status,
+                point_cloud_points: pc_points,
+                contours: m.show_contours,
+                coastlines: m.show_coastlines,
+                bathymetry: m.show_bathymetry,
+                roads: m.show_major_roads || m.show_minor_roads,
+                buildings: m.show_buildings,
+                water: m.show_water,
+                trees: m.show_trees,
+                weather: m.global_weather.any_enabled(),
+                events: m.show_event_markers,
+                cameras: m.show_camera_markers,
+                ships: m.show_ships,
+                flights: m.show_flights,
+                seismic: m.seismic.enabled,
+                relief_spread: m.globe_view.local_layer_spread,
+                projection_ortho: m.globe_view.projection
+                    == crate::model::ProjectionMode::Orthographic,
+                theme_name: m.map_theme.label().to_string(),
+                follow_events: m.event_follow.enabled(),
+                follow_dwell_s: m.event_follow.dwell_seconds(),
+                room_visible: self.room,
+                auto_camera: self.automatic_camera,
+                replay_mode: m.replay_mode,
+            },
+            events,
+            selected_event,
+            cameras,
+            playing_camera_id: self.playing.clone(),
+            playing_camera_label,
+            event_status: m.factal_stream_status.clone(),
+            camera_status: m.camera_registry_status.clone(),
+        }
+    }
+    pub fn apply_command(&mut self, cmd: VrCommand) {
+        match cmd {
+            VrCommand::SetRange(range_m) => {
+                let mut v = self.view();
+                v.range_m = range_m.clamp(MIN_RANGE_M, MAX_RANGE_M);
+                self.navigate(v);
+            }
+            VrCommand::PanByDeg { dlat, dlon } => {
+                let mut v = self.view();
+                v.lat = (v.lat + dlat).clamp(-89.9, 89.9);
+                v.lon = (v.lon + dlon + 180.0).rem_euclid(360.0) - 180.0;
+                self.navigate(v);
+            }
+            VrCommand::ToggleLayer(layer) => {
+                let m = &mut self.app.model;
+                match layer {
+                    VrLayer::PointCloud => m.point_cloud.enabled = !m.point_cloud.enabled,
+                    VrLayer::Contours => m.show_contours = !m.show_contours,
+                    VrLayer::Coastlines => m.show_coastlines = !m.show_coastlines,
+                    VrLayer::Bathymetry => m.show_bathymetry = !m.show_bathymetry,
+                    VrLayer::Roads => {
+                        let next = !(m.show_major_roads || m.show_minor_roads);
+                        m.show_major_roads = next;
+                        m.show_minor_roads = next;
+                    }
+                    VrLayer::Buildings => m.show_buildings = !m.show_buildings,
+                    VrLayer::Water => m.show_water = !m.show_water,
+                    VrLayer::Trees => m.show_trees = !m.show_trees,
+                    VrLayer::Weather => {
+                        let next = !m.global_weather.any_enabled();
+                        m.global_weather.set_infrared_enabled(next);
+                    }
+                    VrLayer::Events => m.show_event_markers = !m.show_event_markers,
+                    VrLayer::Cameras => m.show_camera_markers = !m.show_camera_markers,
+                    VrLayer::Ships => m.show_ships = !m.show_ships,
+                    VrLayer::Flights => m.show_flights = !m.show_flights,
+                    VrLayer::Seismic => m.seismic.enabled = !m.seismic.enabled,
+                }
+            }
+            VrCommand::SetPointCloudSize(sz) => {
+                self.app.model.point_cloud.point_size_px = sz.clamp(1.0, 8.0);
+            }
+            VrCommand::SetReliefSpread(spread) => {
+                self.app.model.globe_view.local_layer_spread = spread.clamp(0.0, 3.0);
+            }
+            VrCommand::ToggleProjection => {
+                let gv = &mut self.app.model.globe_view;
+                gv.projection = match gv.projection {
+                    crate::model::ProjectionMode::Perspective => {
+                        crate::model::ProjectionMode::Orthographic
+                    }
+                    crate::model::ProjectionMode::Orthographic => {
+                        crate::model::ProjectionMode::Perspective
+                    }
+                };
+            }
+            VrCommand::CycleTheme => {
+                let all = theme::MapTheme::ALL;
+                let idx = all
+                    .iter()
+                    .position(|&t| t == self.app.model.map_theme)
+                    .unwrap_or(0);
+                self.app.model.map_theme = all[(idx + 1) % all.len()];
+            }
+            VrCommand::ToggleFollow => {
+                self.app.model.toggle_event_follow();
+                self.room = self.app.model.event_follow.enabled();
+            }
+            VrCommand::SetFollowDwell(s) => {
+                self.app.model.event_follow.set_dwell_seconds(s.clamp(5, 300));
+            }
+            VrCommand::ToggleRoom => {
+                self.room = !self.room;
+            }
+            VrCommand::ToggleAutoCamera => {
+                self.automatic_camera = !self.automatic_camera;
+            }
+            VrCommand::StopCamera => {
+                self.automatic_camera = false;
+                self.playing = None;
+                self.camera.stop();
+            }
+            VrCommand::SelectEvent(id) => {
+                self.pick(Target::Event(id));
+            }
+            VrCommand::SelectCamera(id) => {
+                self.pick(Target::Camera(id));
+            }
+            VrCommand::FocusSelectedEvent => {
+                if let Some(ev) = self.app.model.selected_event() {
+                    let p = ev.location;
+                    self.app.model.globe_view.focus_on(p);
+                }
+            }
+            VrCommand::ToggleReplay => {
+                self.app.model.toggle_replay();
+            }
+            VrCommand::Recenter => {
+                self.recenter += 1;
+            }
+            VrCommand::Exit => {
+                self.quit = true;
+            }
+        }
     }
     pub fn pick(&mut self, target: Target) {
         self.room = true;
@@ -486,6 +868,12 @@ impl Operator {
                     );
                 }
                 if view != previous {
+                    if view.local != previous.local
+                        || view.scale != previous.scale
+                        || view.local_zoom != previous.local_zoom
+                    {
+                        view.range_m = 0.0;
+                    }
                     self.navigate(view);
                 }
                 let m = &mut self.app.model;

@@ -1,8 +1,9 @@
-//! The native map and wrist UI have their own frame cadence and GPU device.
-//! Only completed images cross into the headset loop; eye poses never enter the worker.
+//! The native map and analyst data feeds run on a dedicated background cadence.
+//! The wrist HUD renders directly on the headset GPU with zero readback; only
+//! lightweight commands, snapshots, and completed map/room images cross threads.
 use anyhow::{Context, Result, anyhow};
 use one_thousand_electric_eye_desktop::vr_operator::{
-    GlobeCapture, MapFrame, Operator, Target, View,
+    GlobeCapture, MapFrame, Operator, Target, View, VrCommand, VrSnapshot,
 };
 use std::{
     path::PathBuf,
@@ -12,6 +13,7 @@ use std::{
 };
 pub const MAP_SIZE: [u32; 2] = [1024, 1024];
 pub const ROOM_SIZE: [u32; 2] = [832, 384];
+#[cfg(test)]
 pub const WRIST_SIZE: [u32; 2] = [768, 640];
 
 pub struct MapImage {
@@ -23,30 +25,17 @@ pub struct Updates {
     pub map: Option<MapImage>,
     pub room: Option<Vec<u8>>,
     pub show_room: Option<bool>,
-    pub wrist: Option<Vec<u8>>,
+    pub snapshot: Option<VrSnapshot>,
     pub state: Option<(u64, View, u64, bool)>,
     pub error: Option<String>,
 }
 #[derive(Default)]
 struct Requests {
-    events: Vec<egui::Event>,
+    commands: Vec<VrCommand>,
     nav: Option<(u64, View)>,
     capture: Option<GlobeCapture>,
     picks: Vec<Target>,
-    visible: bool,
     stop: bool,
-}
-impl Requests {
-    fn take_wrist_events(&mut self) -> Vec<egui::Event> {
-        // egui hit-tests at the final position of a pass. Preserve the position
-        // of each trigger edge even when a slow map pass batches several XR frames.
-        let end = self
-            .events
-            .iter()
-            .position(|e| matches!(e, egui::Event::PointerButton { .. }))
-            .map_or(self.events.len(), |i| i + 1);
-        self.events.drain(..end).collect()
-    }
 }
 pub struct Link {
     input: Arc<Mutex<Requests>>,
@@ -63,10 +52,7 @@ impl Link {
         events: Option<PathBuf>,
         import: Option<PathBuf>,
     ) -> Result<Self> {
-        let input = Arc::new(Mutex::new(Requests {
-            visible: true,
-            ..Default::default()
-        }));
+        let input = Arc::new(Mutex::new(Requests::default()));
         let output = Arc::new(Mutex::new(Updates::default()));
         let (incoming, outgoing) = (input.clone(), output.clone());
         let thread = thread::Builder::new()
@@ -110,18 +96,10 @@ impl Link {
     pub fn pick(&self, t: Target) {
         self.input.lock().unwrap().picks.push(t);
     }
-    pub fn wrist(&self, events: Vec<egui::Event>, visible: bool, capture: GlobeCapture) {
+    pub fn send_commands(&self, commands: Vec<VrCommand>, capture: GlobeCapture) {
         let mut q = self.input.lock().unwrap();
-        q.visible = visible;
         q.capture = Some(capture);
-        for e in events {
-            if matches!(e, egui::Event::PointerMoved(_))
-                && matches!(q.events.last(), Some(egui::Event::PointerMoved(_)))
-            {
-                q.events.pop();
-            }
-            q.events.push(e);
-        }
+        q.commands.extend(commands);
     }
 }
 impl Drop for Link {
@@ -241,6 +219,7 @@ struct Worker {
     renderer: egui_wgpu::Renderer,
     map: Canvas,
     room: Canvas,
+    #[cfg(test)]
     wrist: Canvas,
     start: Instant,
 }
@@ -269,6 +248,7 @@ fn map_id() -> egui::ViewportId {
 fn room_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("operator-room")
 }
+#[cfg(test)]
 fn wrist_pass(
     ctx: &egui::Context,
     events: Vec<egui::Event>,
@@ -279,8 +259,6 @@ fn wrist_pass(
     ctx.run(
         raw(WRIST_SIZE, egui::ViewportId::ROOT, events, time),
         |ctx| {
-            // egui drops a child's widget and pointer memory when its parent doesn't
-            // declare it. The wrist owns the persistent root; these two are canvases.
             for child in [map_id(), room_id()] {
                 ctx.show_viewport_deferred(child, Default::default(), |_, _| {});
             }
@@ -317,11 +295,6 @@ impl Worker {
             egui_wgpu::Renderer::new(&device, wgpu::TextureFormat::Rgba8Unorm, None, 1, false);
         let ctx = egui::Context::default();
         ctx.set_embed_viewports(false);
-        ctx.options_mut(|o| {
-            // A trigger squeeze can shift the aim several pixels on a wrist display.
-            o.input_options.max_click_dist = 18.;
-            o.input_options.max_click_duration = 2.;
-        });
         let operator = Operator::new(
             &ctx,
             &device,
@@ -334,6 +307,7 @@ impl Worker {
         .map_err(|e| anyhow!(e))?;
         let room = Canvas::new(&device, ROOM_SIZE);
         let map = Canvas::new(&device, MAP_SIZE);
+        #[cfg(test)]
         let wrist = Canvas::new(&device, WRIST_SIZE);
         Ok(Self {
             ctx,
@@ -343,6 +317,7 @@ impl Worker {
             renderer,
             room,
             map,
+            #[cfg(test)]
             wrist,
             start: Instant::now(),
         })
@@ -350,67 +325,64 @@ impl Worker {
     fn run(&mut self, input: &Mutex<Requests>, output: &Mutex<Updates>) -> Result<()> {
         let mut revision = 0;
         let mut next_map = Instant::now();
-        let mut prev_wrist = Vec::new();
         let mut prev_room = Vec::new();
         loop {
             let started = Instant::now();
-            let (events, nav, picks, visible, capture) = {
+            let (commands, nav, picks, capture) = {
                 let mut req = input.lock().unwrap();
                 if req.stop {
                     return Ok(());
                 }
                 (
-                    req.take_wrist_events(),
+                    std::mem::take(&mut req.commands),
                     req.nav.take(),
                     std::mem::take(&mut req.picks),
-                    req.visible,
                     req.capture,
                 )
             };
+            let mut dirty = false;
             if let Some((seq, view)) = nav {
                 revision = seq;
                 self.operator.navigate(view);
+                dirty = true;
             }
             for pick in picks {
                 self.operator.pick(pick);
+                dirty = true;
             }
-            let out = wrist_pass(
-                &self.ctx,
-                events,
-                self.start.elapsed().as_secs_f64(),
+            for cmd in commands {
+                self.operator.apply_command(cmd);
+                dirty = true;
+            }
+            // Tick desktop feeds/services headless (wrist UI renders directly on headset GPU).
+            let out = self.ctx.run(
+                raw([64, 64], egui::ViewportId::ROOT, vec![], self.start.elapsed().as_secs_f64()),
                 |ctx| {
-                    self.operator.tick(ctx, visible);
+                    for child in [map_id(), room_id()] {
+                        ctx.show_viewport_deferred(child, Default::default(), |_, _| {});
+                    }
+                    self.operator.tick(ctx, false);
                 },
             );
-            if visible {
-                let pixels = self.wrist.pixels(
-                    &self.ctx,
-                    out,
-                    &mut self.renderer,
-                    &self.device,
-                    &self.queue,
-                )?;
-                if pixels != prev_wrist {
-                    prev_wrist.clone_from(&pixels);
-                    output.lock().unwrap().wrist = Some(pixels);
-                }
-            } else {
-                for (id, delta) in &out.textures_delta.set {
-                    self.renderer
-                        .update_texture(&self.device, &self.queue, *id, delta);
-                }
-                for id in &out.textures_delta.free {
-                    self.renderer.free_texture(id);
-                }
+            for (id, delta) in &out.textures_delta.set {
+                self.renderer
+                    .update_texture(&self.device, &self.queue, *id, delta);
             }
-            output.lock().unwrap().state = Some((
-                revision,
-                self.operator.view(),
-                self.operator.recenter,
-                self.operator.quit,
-            ));
+            for id in &out.textures_delta.free {
+                self.renderer.free_texture(id);
+            }
+            {
+                let mut out_lock = output.lock().unwrap();
+                out_lock.state = Some((
+                    revision,
+                    self.operator.view(),
+                    self.operator.recenter,
+                    self.operator.quit,
+                ));
+                out_lock.snapshot = Some(self.operator.snapshot());
+                out_lock.show_room = Some(self.operator.room_visible());
+            }
             let show_room = self.operator.room_visible();
-            output.lock().unwrap().show_room = Some(show_room);
             if show_room {
                 let id = room_id();
                 let out = self.ctx.run(
@@ -429,7 +401,7 @@ impl Worker {
                     output.lock().unwrap().room = Some(pixels);
                 }
             }
-            if started >= next_map {
+            if dirty || started >= next_map {
                 let mut frame = None;
                 let out = self.ctx.run(
                     raw(
@@ -453,9 +425,9 @@ impl Worker {
                     pixels,
                     frame: frame.unwrap(),
                 });
-                next_map = Instant::now() + Duration::from_millis(100);
+                next_map = Instant::now() + Duration::from_millis(85);
             }
-            thread::sleep(Duration::from_millis(40).saturating_sub(started.elapsed()));
+            thread::sleep(Duration::from_millis(33).saturating_sub(started.elapsed()));
         }
     }
 }
@@ -552,9 +524,9 @@ mod tests {
         };
         let mut pointer = crate::wrist::Pointer::default();
         let hit = hit_at(p);
-        draw(pointer.events(Some(hit), false, 0.));
-        draw(vec![pointer.press(hit)]);
-        draw(pointer.events(Some(hit_at(p + egui::vec2(3., 1.))), false, 0.));
+        draw(pointer.events(Some(hit), false, false, 0.));
+        draw(pointer.events(Some(hit), true, true, 0.));
+        draw(pointer.events(Some(hit_at(p + egui::vec2(3., 1.))), false, false, 0.));
     }
     fn check_hemispheres_and_spires(worker: &mut Worker) {
         let dir = tempfile::tempdir().unwrap();
@@ -632,10 +604,9 @@ mod tests {
                     frame: f,
                     pixels: rgba,
                 }),
-                None,
             );
             for _ in 0..7 {
-                renderer.cartography.advance(&worker.queue, None, None);
+                renderer.cartography.advance(&worker.queue, None);
             }
             crate::render::stereo_test::check_native_eyes(
                 &worker.device,
@@ -825,13 +796,7 @@ mod tests {
             thread::sleep(Duration::from_millis(40));
         }
         for lon in [0.5, 1.5] {
-            w.operator.navigate(View {
-                lat: 0.5,
-                lon,
-                scale: 1.,
-                local: true,
-                local_zoom: 24.,
-            });
+            w.operator.navigate(View::from_continuous(0.5, lon, 12_000.0));
             let start = Instant::now();
             loop {
                 let (f, pixels) = snapshot(&mut w, "map");
@@ -859,13 +824,8 @@ mod tests {
         if let Some(root) = std::env::var_os("ONEKEE_VR_ASSET_ROOT") {
             let root = std::path::PathBuf::from(root);
             w.operator.use_asset_root(&root);
-            w.operator.navigate(View {
-                lat: 46.8523,
-                lon: -121.7603,
-                scale: 1.,
-                local: true,
-                local_zoom: 16.,
-            });
+            w.operator
+                .navigate(View::from_continuous(46.8523, -121.7603, 28_000.0));
             let start = Instant::now();
             loop {
                 let (f, pixels) = snapshot(&mut w, "map");
@@ -912,7 +872,6 @@ mod tests {
                 );
                 thread::sleep(Duration::from_millis(80));
             };
-            let (_, wrist) = snapshot(&mut w, "wrist");
             let mut r = crate::render::Renderer::new(
                 &w.device,
                 &w.queue,
@@ -921,15 +880,16 @@ mod tests {
             )
             .unwrap();
             r.cartography
-                .advance(&w.queue, Some(MapImage { frame: f, pixels }), Some(wrist));
+                .advance(&w.queue, Some(MapImage { frame: f, pixels }));
             for _ in 0..7 {
-                r.cartography.advance(&w.queue, None, None);
+                r.cartography.advance(&w.queue, None);
             }
             let panel = crate::wrist::mount(
                 glam::Mat4::from_translation(glam::vec3(-0.29, -0.19, -0.66)),
                 glam::Vec3::ZERO,
             );
             r.cartography.wrist_pose = Some(panel);
+            r.cartography.wrist_alpha = 1.0;
             let end = panel.transform_point3(glam::vec3(-0.20, 0.19, 0.));
             let start = glam::vec3(0.29, -0.24, -0.24);
             r.cartography.pointer = crate::wrist::hit(

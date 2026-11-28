@@ -269,8 +269,14 @@ pub fn unix_to_datetime_str(unix: i64) -> String {
 /// Parse an ISO-8601 timestamp string to unix seconds.
 pub fn parse_iso_to_unix(s: &str) -> Option<i64> {
     let s = s.trim();
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(dt.timestamp());
+    }
+    if s.len() < 10 {
+        return None;
+    }
     // Strip timezone: "...+HH:MM" suffix (but don't strip the date's '-')
-    let s = if let Some(pos) = s[10..].rfind('+') {
+    let s = if let Some(pos) = s.get(10..).and_then(|tail| tail.rfind('+')) {
         &s[..10 + pos]
     } else {
         s

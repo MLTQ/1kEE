@@ -12,6 +12,27 @@ use std::sync::{Arc, Mutex, OnceLock};
 pub(super) use globe::draw as draw_globe;
 pub(super) use local::draw as draw_local;
 
+pub(super) fn draw_unified(
+    painter: &egui::Painter,
+    proj: &super::projection::MapProjection,
+    root: Option<&Path>,
+) {
+    let Some(image) = texture(painter.ctx(), root, None, Scene::Overview) else {
+        return;
+    };
+    let Ok(loaded) = image.as_ref() else {
+        return;
+    };
+    let mesh = super::raster_mesh::unified(
+        proj,
+        loaded.texture.id(),
+        [-180.0, -90.0, 180.0, 90.0],
+    );
+    if !mesh.vertices.is_empty() {
+        painter.add(egui::Shape::mesh(std::sync::Arc::new(mesh)));
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct Request {
     root: Option<PathBuf>,

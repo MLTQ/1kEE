@@ -12,6 +12,7 @@ mod args;
 pub mod boundaries;
 mod contours;
 mod flat_node_store;
+pub mod gazetteer;
 mod geojson;
 mod job;
 mod lunar;
@@ -70,6 +71,14 @@ pub fn run() -> Result<(), String> {
         args::Command::Platforms(command) => platforms::run(command),
         args::Command::RoadsBbox(command) => roads::build_bbox_cache(command),
         args::Command::PlanetAll(command) => planet_all::build_planet_cache(command),
+        args::Command::Gazetteer(command) => {
+            let count = gazetteer::run(&command)?;
+            println!(
+                "Built offline FTS5 gazetteer ({count} entries) at {}",
+                command.output_db.display()
+            );
+            Ok(())
+        }
         args::Command::ContoursBbox(command) => {
             let bounds = contours::GeoBounds {
                 min_lat: command.min_lat,

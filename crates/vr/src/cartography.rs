@@ -1,4 +1,4 @@
-use crate::operator::{MAP_SIZE, MapImage, WRIST_SIZE};
+use crate::operator::{MAP_SIZE, MapImage};
 use glam::{Mat4, Vec2, Vec3};
 use one_thousand_electric_eye_desktop::vr_operator::{HEIGHT_EDGE, MapFrame};
 
@@ -89,7 +89,6 @@ pub struct Cartography {
     pub show_room: bool,
     pub room_ready: bool,
     map: Surface,
-    wrist: Surface,
     heights: wgpu::Texture,
     pub height_view: wgpu::TextureView,
     pub frame: Option<MapFrame>,
@@ -98,8 +97,7 @@ pub struct Cartography {
     pub aiming_at_target: bool,
     next: Option<MapImage>,
     uploading: Option<MapFrame>,
-    next_wrist: Option<Vec<u8>>,
-    pub wrist_ready: bool,
+    pub wrist_alpha: f32,
     pub wrist_pose: Option<Mat4>,
     pub pointer: Option<Vec2>,
 }
@@ -117,7 +115,6 @@ impl Cartography {
             show_room: false,
             room_ready: false,
             map: Surface::new(d, MAP_SIZE, "native globe and local map"),
-            wrist: Surface::new(d, WRIST_SIZE, "wrist controls"),
             height_view: heights.create_view(&Default::default()),
             heights,
             frame: None,
@@ -126,8 +123,7 @@ impl Cartography {
             spires: crate::spires::Spires::new(d),
             next: None,
             uploading: None,
-            next_wrist: None,
-            wrist_ready: false,
+            wrist_alpha: 0.0,
             wrist_pose: None,
             pointer: None,
         }
@@ -155,34 +151,19 @@ impl Cartography {
     pub fn map_view(&self) -> &wgpu::TextureView {
         &self.map.view
     }
-    pub fn wrist_view(&self) -> &wgpu::TextureView {
-        &self.wrist.view
-    }
     pub fn layers(&self) -> [f32; 4] {
         [
             self.map.front as f32,
-            self.wrist.front as f32,
+            self.wrist_alpha,
             self.frame
                 .as_ref()
                 .map_or(0., |f| if f.local { 2. } else { 1. }),
             f32::from(self.frame.as_ref().is_some_and(|f| !f.heights.is_empty())),
         ]
     }
-    pub fn advance(&mut self, q: &wgpu::Queue, map: Option<MapImage>, wrist: Option<Vec<u8>>) {
+    pub fn advance(&mut self, q: &wgpu::Queue, map: Option<MapImage>) {
         if let Some(m) = map {
             self.next = Some(m);
-        }
-        if let Some(w) = wrist {
-            self.next_wrist = Some(w);
-        }
-        if self.wrist.bytes.is_none() {
-            self.wrist.bytes = self.next_wrist.take();
-        }
-        if self
-            .wrist
-            .advance(q, (WRIST_SIZE[0] * WRIST_SIZE[1] * 4) as usize)
-        {
-            self.wrist_ready = true;
         }
         if self.map.bytes.is_none()
             && let Some(m) = self.next.take()

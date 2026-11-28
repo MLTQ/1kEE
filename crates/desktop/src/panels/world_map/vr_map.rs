@@ -1,7 +1,7 @@
 //! Render the geography alone, retaining the projection that produced its pixels.
 use super::*;
-use crate::model::GeoPoint;
-use crate::vr_operator::{GlobeCapture, HEIGHT_EDGE, MapFrame, Spire, Target};
+use crate::model::{GeoPoint, ProjectionMode};
+use crate::vr_operator::{GlobeCapture, HEIGHT_EDGE, LOCAL_TABLE_RANGE_M, MapFrame, Spire, Target};
 use std::sync::Arc;
 
 pub(crate) fn paint(
@@ -17,7 +17,7 @@ pub(crate) fn paint(
         d.remove::<String>(egui::Id::new("vr-terrain-status"));
     });
     poll_map_sources(ui, model);
-    let local = local_terrain_scene::is_active(model);
+    let local = model.globe_view.range_m <= LOCAL_TABLE_RANGE_M || model.globe_view.local_mode;
     layer_import::ensure_visible_road_layers(model, local);
     layer_import::ensure_visible_water_layers(model, local);
     painter.add(atlas_surface::visibility_callback(rect));
@@ -34,36 +34,46 @@ pub(crate) fn paint(
         ..MapFrame::default()
     };
     if local {
-        // Render a north-up map. Stereo displacement is applied once by the headset.
+        // Render a north-up orthographic capture using the unified scene so
+        // Atlas terrain, contours, OSM, and the fused LiDAR point cloud (1 px)
+        // all render seamlessly down to 20 m scale. True 3D stereo height
+        // displacement is applied once by the headset's raymarch shader.
         contour_asset::globe_residency::set_viewport(None, None);
         model.globe_view.geographic_capture = true;
-        model.globe_view.local_pitch = 0.;
-        model.globe_view.local_yaw = 0.;
-        model.globe_view.local_layer_spread = 0.;
+        model.globe_view.projection = ProjectionMode::Orthographic;
+        model.globe_view.heading = 0.0;
+        model.globe_view.tilt = 0.0;
+        model.globe_view.local_pitch = 0.0;
+        model.globe_view.local_yaw = 0.0;
+        model.globe_view.local_layer_spread = 0.0;
+        model.globe_view.range_m = saved.range_m.clamp(20.0, LOCAL_TABLE_RANGE_M);
+        model.globe_view.sync_legacy_from_unified();
         ui.ctx().data_mut(|d| {
             d.insert_temp(egui::Id::new("vr-local-capture"), true);
             d.remove::<Arc<atlas_surface::Raster>>(egui::Id::new("vr-local-raster"));
         });
-        local_terrain_scene::paint(&painter, rect, model, t);
-        let layout = local_terrain_scene::layout(rect);
-        let center = saved.local_center;
-        let half = local_terrain_scene::visual_half_extent_for_zoom(saved.local_zoom);
-        let lon_km = 111.32 * center.lat.to_radians().cos().abs().max(0.2);
-        let params = local_terrain_scene::projection::local_projection_params(
-            &layout,
+        let proj = projection::MapProjection::from_view(
             &model.globe_view,
-            center,
-            (half * lon_km).max(1.),
-            (half * 111.32).max(1.),
+            model.active_body,
+            rect,
+            ui.ctx().pixels_per_point(),
         );
-        let dx = params.horizontal_scale * params.x_factor;
-        let dy = params.ground_pitch_scale * params.y_factor;
-        frame.bounds = [
-            center.lon + (rect.left() - params.focus_center_x) / dx,
-            center.lat - (rect.bottom() - params.focus_center_y) / dy,
-            center.lon + (rect.right() - params.focus_center_x) / dx,
-            center.lat - (rect.top() - params.focus_center_y) / dy,
-        ];
+        unified_scene::paint(&painter, rect, model, t);
+        let center_lat = model.globe_view.target_lat as f32;
+        let center_lon = model.globe_view.target_lon as f32;
+        let lon_km = 111.32 * center_lat.to_radians().cos().abs().max(0.2);
+        if let Some(vis) = proj.visible_bounds() {
+            frame.bounds = [vis[0] as f32, vis[1] as f32, vis[2] as f32, vis[3] as f32];
+        } else {
+            let half_lat = (proj.visible_half_extent_deg() as f32).max(1e-4);
+            let half_lon = half_lat / center_lat.to_radians().cos().abs().max(0.2);
+            frame.bounds = [
+                center_lon - half_lon,
+                (center_lat - half_lat).max(-89.9),
+                center_lon + half_lon,
+                (center_lat + half_lat).min(89.9),
+            ];
+        }
         frame.local = true;
         let raster = ui
             .ctx()
@@ -163,7 +173,7 @@ pub(crate) fn paint(
 fn heights(r: &atlas_surface::Raster, b: [f32; 4], lon_km: f32, spread: f32) -> Vec<f32> {
     let [w, h] = r.size;
     let [west, south, east, north] = r.bounds;
-    let width_m = (b[2] - b[0]) * lon_km * 1000.;
+    let width_m = ((b[2] - b[0]) * lon_km * 1000.).max(1.0);
     let mut out = Vec::with_capacity(HEIGHT_EDGE * HEIGHT_EDGE);
     for row in 0..HEIGHT_EDGE {
         let lat = b[3] - (b[3] - b[1]) * row as f32 / (HEIGHT_EDGE - 1) as f32;

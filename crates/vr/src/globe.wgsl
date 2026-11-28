@@ -14,7 +14,7 @@ struct Uniforms {
 @group(0) @binding(2) var earth_sampler: sampler;
 @group(0) @binding(3) var brief: texture_2d<f32>;
 @group(0) @binding(4) var native_map: texture_2d_array<f32>;
-@group(0) @binding(5) var wrist_panel: texture_2d_array<f32>;
+@group(0) @binding(5) var wrist_panel: texture_2d<f32>;
 @group(0) @binding(6) var height_field: texture_2d_array<f32>;
 @group(0) @binding(7) var room_panel:texture_2d_array<f32>;
 @vertex fn vs_main(@builtin(vertex_index) id: u32) -> @builtin(position) vec4<f32> {
@@ -170,12 +170,24 @@ fn local_map(ndc: vec4<f32>) -> SurfacePixel {
 }
 
 @fragment fn fs_wrist(vertex: BriefVertex) -> @location(0) vec4<f32> {
-    let color = textureSampleLevel(wrist_panel, earth_sampler, vertex.uv, i32(u.layers.y), 0.).rgb;
+    let hud_alpha = clamp(u.layers.y, 0., 1.);
+    if hud_alpha < 0.01 { discard; }
+    // Diegetic rounded Half-Life: Alyx bezel mask
+    let q = abs(vertex.uv - vec2(0.5)) - vec2(0.468, 0.456);
+    let corner_dist = length(max(q, vec2(0.))) + min(max(q.x, q.y), 0.) - 0.028;
+    if corner_dist > 0.004 { discard; }
+    let edge_mask = 1. - smoothstep(-0.004, 0.004, corner_dist);
+    let rim = (1. - smoothstep(0.0, 0.012, abs(corner_dist + 0.004))) * 0.85;
+
+    let sample = textureSampleLevel(wrist_panel, earth_sampler, vertex.uv, 0.);
+    var rgb = mix(sample.rgb, vec3(0.32, 0.90, 0.78), rim * 0.75);
     let d = length((vertex.uv - u.wrist_cursor.xy) * vec2<f32>(textureDimensions(wrist_panel)));
-    let outline = 1. - smoothstep(6.,8.,d);
-    let center = 1. - smoothstep(3.,5.,d);
-    let cursor = mix(vec3(0.012,0.024,0.033), vec3(0.6,1.,0.87), center);
-    return vec4(mix(color, cursor, outline * u.wrist_cursor.z), 1.);
+    let outline = 1. - smoothstep(4.5, 6.5, d);
+    let center = 1. - smoothstep(2.0, 3.8, d);
+    let cursor = mix(vec3(0.02, 0.06, 0.08), vec3(0.55, 1., 0.88), center);
+    rgb = mix(rgb, cursor, outline * u.wrist_cursor.z);
+    let out_a = clamp(max(sample.a, rim * 0.9) * edge_mask * hud_alpha, 0., 1.);
+    return vec4(rgb, out_a);
 }
 
 struct SpireVertex { @builtin(position) clip:vec4<f32>, @location(0) color:vec3<f32> }

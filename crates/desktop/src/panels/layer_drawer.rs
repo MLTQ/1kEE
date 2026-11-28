@@ -96,14 +96,77 @@ pub(crate) fn map_controls(ui: &mut egui::Ui, model: &mut AppModel) {
     ui.checkbox(&mut model.show_coastlines, "Coastline");
     ui.checkbox(&mut model.show_bathymetry, "Bathymetry");
     crate::lidar_catalog::toggle(ui, model);
+    world_map::point_cloud_layer::controls(ui, model);
     world_map::swot_controls(ui, model);
     world_map::gravity_controls(ui, model);
     ui.checkbox(&mut model.show_graticule, "Graticule");
     ui.checkbox(&mut model.show_reticle, "Reticle");
+    ui.add_space(4.0);
+    section_label(ui, "TERRAIN ANALYTICS");
+    ui.horizontal_wrapped(|ui| {
+        for &mode in crate::model::TerrainAnalysisMode::ALL {
+            ui.selectable_value(&mut model.terrain_analysis_mode, mode, mode.label());
+        }
+    });
+    ui.small("Slope, Aspect & Ridgelines render live in Atlas theme (Globe & Local).");
+    ui.checkbox(&mut model.viewshed.enabled, "Viewshed / LOS");
+    if model.viewshed.enabled {
+        ui.indent("viewshed_controls", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .selectable_label(model.viewshed.follow_center, "Follow Center")
+                    .on_hover_text("Continuously track the Local Terrain camera center")
+                    .clicked()
+                {
+                    model.viewshed.set_follow_center();
+                }
+                if let Some(ev) = model.selected_event().map(|e| e.location)
+                    && ui
+                        .selectable_label(
+                            !model.viewshed.follow_center && model.viewshed.observer == Some(ev),
+                            "Pin at Event",
+                        )
+                        .clicked()
+                {
+                    model.viewshed.set_observer(ev);
+                }
+                if ui.small_button("Clear").clicked() {
+                    model.viewshed.clear();
+                }
+            });
+            if ui
+                .add(
+                    egui::Slider::new(&mut model.viewshed.observer_agl_m, 2.0..=500.0)
+                        .logarithmic(true)
+                        .suffix(" m AGL")
+                        .text("Height"),
+                )
+                .changed()
+            {
+                model.viewshed.invalidate();
+            }
+            if ui
+                .add(
+                    egui::Slider::new(&mut model.viewshed.max_range_km, 1.0..=100.0)
+                        .suffix(" km")
+                        .text("Range"),
+                )
+                .changed()
+            {
+                model.viewshed.invalidate();
+            }
+            if model.viewshed.follow_center || model.viewshed.observer.is_some() {
+                ui.small(format!(
+                    "Visible horizon: {:.0}%",
+                    model.viewshed.visible_fraction() * 100.0
+                ));
+            }
+        });
+    }
+    ui.add_space(4.0);
     {
         // Public hillshade imagery is a local Earth scene layer.
-        let hillshade_available = model.globe_view.local_mode
-            && model.active_body == crate::model::ActiveBody::Earth
+        let hillshade_available = model.active_body == crate::model::ActiveBody::Earth
             && model.settings_threedep_enabled;
         ui.add_enabled(
             hillshade_available,
@@ -143,7 +206,7 @@ pub(crate) fn map_controls(ui: &mut egui::Ui, model: &mut AppModel) {
     ui.checkbox(&mut model.show_flights, "Flights");
     crate::transit::controls(ui, model);
     ui.checkbox(&mut model.show_stellar_correspondence, "Stars");
-    if model.show_stellar_correspondence && !model.globe_view.local_mode {
+    if model.show_stellar_correspondence {
         let obs_active = model.stellar_observatory_open;
         let fill = if obs_active {
             theme::chrome_active_fill()
@@ -194,8 +257,7 @@ pub(crate) fn map_controls(ui: &mut egui::Ui, model: &mut AppModel) {
             ui.small("Atlas contours follow the solid 3D terrain.");
         } else {
             ui.add_enabled(
-                model.show_contours && model.globe_view.local_mode
-                    && model.active_body == crate::model::ActiveBody::Earth,
+                model.show_contours && model.active_body == crate::model::ActiveBody::Earth,
                 egui::Checkbox::new(&mut model.contour_occlusion, "Hide distant contours"),
             ).on_hover_text("Hide contour lines behind nearer ridges in Local Earth view. Turn off to compare the transparent view.");
         }

@@ -1,6 +1,9 @@
 //! A bounded column of live feeds that follows the current event tour stop.
 use crate::camera_feed_player::{CameraFeedPlayer, fit_size};
-use crate::model::{AppModel, CameraConnectionState, CameraFeed, GeoPoint, haversine_km};
+use crate::model::{
+    AppModel, CameraConnectionState, CameraFeed, CameraHealthTracker, GeoPoint, haversine_km,
+    provider_reliability_bonus_km,
+};
 use crate::theme;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -77,11 +80,21 @@ impl EventCameraSidebar {
                     if focus_changed {
                         scroll = scroll.vertical_scroll_offset(0.0);
                     }
+                    let mut reported_ok: Vec<String> = Vec::new();
+                    let mut reported_fail: Vec<String> = Vec::new();
                     scroll.show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         for (index, ranked) in self.cameras.iter().enumerate() {
                             let player = self.players.get_mut(&ranked.camera.id).unwrap();
+                            let prev_frame = player.last_frame_at;
+                            let prev_err = player.error.is_some();
                             player.sync(ctx, &ranked.camera);
+                            if player.last_frame_at != prev_frame && player.last_frame_at.is_some()
+                            {
+                                reported_ok.push(ranked.camera.id.clone());
+                            } else if !prev_err && player.error.is_some() {
+                                reported_fail.push(ranked.camera.id.clone());
+                            }
                             ui.push_id(&ranked.camera.id, |ui| {
                                 if render_feed(ui, ranked, index + 1, player) {
                                     model.open_camera_feed(&ranked.camera.id);
@@ -89,6 +102,15 @@ impl EventCameraSidebar {
                             });
                         }
                     });
+                    if !reported_ok.is_empty() || !reported_fail.is_empty() {
+                        let now_unix = crate::event_store::now_unix();
+                        for id in reported_ok {
+                            model.camera_health.record_ok(&id, now_unix, None);
+                        }
+                        for id in reported_fail {
+                            model.camera_health.record_failure(&id);
+                        }
+                    }
                     ctx.request_repaint_after(Duration::from_millis(100));
                 }
             });
@@ -100,7 +122,9 @@ impl EventCameraSidebar {
             self.clear();
             return false;
         };
-        let revision = model.camera_registry_revision();
+        let revision = model
+            .camera_registry_revision()
+            .wrapping_add(model.camera_health.revision().rotate_left(32));
         let mut focus_changed = true;
         if let Some((id, location, previous_revision)) = &self.selection_key {
             focus_changed = *id != event.id || *location != event.location;
@@ -108,7 +132,7 @@ impl EventCameraSidebar {
                 return false;
             }
         }
-        self.cameras = nearest_feeds(&model.cameras, event.location);
+        self.cameras = nearest_feeds_with_health(&model.cameras, event.location, &model.camera_health);
         self.players
             .retain(|id, _| self.cameras.iter().any(|ranked| ranked.camera.id == *id));
         for ranked in &self.cameras {
@@ -127,16 +151,33 @@ impl EventCameraSidebar {
     }
 }
 
+#[cfg(test)]
 fn nearest_feeds(cameras: &[CameraFeed], focus: GeoPoint) -> Vec<RankedCamera> {
+    nearest_feeds_with_health(cameras, focus, &CameraHealthTracker::default())
+}
+
+fn nearest_feeds_with_health(
+    cameras: &[CameraFeed],
+    focus: GeoPoint,
+    health: &CameraHealthTracker,
+) -> Vec<RankedCamera> {
     let mut ranked: Vec<_> = cameras
         .iter()
         .filter_map(|camera| {
             let distance = haversine_km(focus, camera.location);
-            (distance.is_finite() && supports_preview(camera)).then_some((camera, distance))
+            if !distance.is_finite() || !supports_preview(camera) {
+                return None;
+            }
+            let effective = (distance + health.penalty_km(&camera.id)
+                - provider_reliability_bonus_km(&camera.provider))
+            .max(0.0);
+            Some((camera, distance, effective))
         })
         .collect();
-    let order = |a: &(&CameraFeed, f32), b: &(&CameraFeed, f32)| {
-        a.1.total_cmp(&b.1).then_with(|| a.0.id.cmp(&b.0.id))
+    let order = |a: &(&CameraFeed, f32, f32), b: &(&CameraFeed, f32, f32)| {
+        a.2.total_cmp(&b.2)
+            .then_with(|| a.1.total_cmp(&b.1))
+            .then_with(|| a.0.id.cmp(&b.0.id))
     };
     if ranked.len() > MAX_FEEDS {
         ranked.select_nth_unstable_by(MAX_FEEDS, order);
@@ -145,7 +186,7 @@ fn nearest_feeds(cameras: &[CameraFeed], focus: GeoPoint) -> Vec<RankedCamera> {
     ranked.sort_by(order);
     ranked
         .into_iter()
-        .map(|(camera, distance_km)| RankedCamera {
+        .map(|(camera, distance_km, _)| RankedCamera {
             camera: camera.clone(),
             distance_km,
         })

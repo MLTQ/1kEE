@@ -8,6 +8,14 @@ mod admin_controls;
 pub(crate) use admin_controls::controls as admin_controls;
 mod building_layer;
 mod camera;
+pub(crate) mod projection;
+pub(crate) mod unified_globe_pass;
+pub(crate) mod unified_line_pass;
+mod unified_scene;
+pub(crate) mod unified_scene_target;
+pub(crate) mod unified_terrain_pass;
+pub(crate) mod point_cloud_layer;
+pub(crate) mod point_cloud_pass;
 pub(crate) mod cell_loader;
 mod fire_layer;
 mod infra_layer;
@@ -21,7 +29,10 @@ mod infrastructure_hover;
 pub(crate) use pipeline_layer::controls as pipeline_controls;
 mod power_layer;
 pub(crate) mod contour_asset;
+mod contour_labels;
 pub(crate) mod contour_pass;
+pub(crate) mod poster_export;
+pub(crate) mod viewshed;
 pub(crate) mod gebco_depth_fill;
 pub(crate) mod globe_pass;
 mod gpu_color;
@@ -84,9 +95,6 @@ pub(crate) fn invalidate_water_cache_pub() {
 pub(crate) use camera::remote_navigation;
 
 pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
-    if model.target.session.is_some() {
-        return target_view::render(ui, model);
-    }
     let panel_frame = if model.obs_view {
         egui::Frame::new().fill(theme::canvas_background())
     } else {
@@ -99,12 +107,6 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
     panel_frame.show(ui, |ui| {
         if model.event_follow.moving() || model.globe_view.auto_spin || model.globe_view.meander_mode {
             ui.ctx().request_repaint();
-        } else if local_terrain_scene::has_pending_cache(model) {
-            // Faster repaint only while the operator allows loading pulses.
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(
-                    if model.show_loading_animation {33} else {180}
-                ));
         } else if (model.show_coastlines
                 && contour_asset::global_coastlines_pending(model.selected_root.as_deref()))
             || ((model.show_major_roads || model.show_minor_roads || model.show_water)
@@ -122,15 +124,12 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
             super::map_rail::render(ui, model);
             ui.add_space(8.0);
         }
-        let local_terrain_mode = local_terrain_scene::is_active(model);
-        layer_import::ensure_visible_road_layers(model, local_terrain_mode);
-        layer_import::ensure_visible_water_layers(model, local_terrain_mode);
+        let close_detail = model.globe_view.range_m <= 1_800_000.0;
+        layer_import::ensure_visible_road_layers(model, close_detail);
+        layer_import::ensure_visible_water_layers(model, close_detail);
 
-        let footer_height = if local_terrain_mode && !model.obs_view {
-            72.0
-        } else {
-            0.0
-        };
+        let show_footer = !model.obs_view && (close_detail || model.show_contours || model.map_theme == theme::MapTheme::Atlas);
+        let footer_height = if show_footer { 46.0 } else { 0.0 };
         let desired = egui::vec2(
             ui.available_width().max(if model.obs_view { 1.0 } else { 480.0 }),
             (ui.available_height() - footer_height).max(if model.obs_view { 1.0 } else { 360.0 }),
@@ -138,49 +137,42 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
         let (response, painter) = ui.allocate_painter(desired, egui::Sense::click_and_drag());
         let rect = response.rect;
 
-        let targeting = model.target.selecting && local_terrain_mode
-            && model.active_body == crate::model::ActiveBody::Earth;
-        if !targeting && camera::manual_input(ui.ctx(), &response, local_terrain_mode) {
+        if camera::manual_input(ui.ctx(), &response, true) {
             model.stop_event_follow();
         }
-        if (!targeting || ui.ctx().input(|input|input.smooth_scroll_delta.y!=0.)) && !model.event_follow.enabled() {
-            camera::apply_interaction(ui.ctx(), &response, &mut model.globe_view);
+        if !model.event_follow.enabled() {
+            camera::apply_unified_interaction(
+                ui.ctx(),
+                &response,
+                &mut model.globe_view,
+                model.active_body,
+            );
         }
         infrastructure_hover::begin(
-            response.hover_pos().filter(|_| !response.dragged() && !model.obs_view && !model.event_follow.enabled()),
+            response
+                .hover_pos()
+                .filter(|_| !response.dragged() && !model.obs_view && !model.event_follow.enabled()),
         );
-        if !(local_terrain_mode && model.map_theme==theme::MapTheme::Atlas
-            && model.active_body==crate::model::ActiveBody::Earth && model.show_trees) {
+        if !(model.map_theme == theme::MapTheme::Atlas
+            && model.active_body == crate::model::ActiveBody::Earth
+            && model.show_trees)
+        {
             atlas_forest::suspend();
         }
         painter.add(atlas_surface::visibility_callback(rect));
-        contour_pass::begin_frame();
-        painter.add(contour_pass::residency_callback(rect));
-        painter.add(local_contour_pass::residency_callback(rect, ui.ctx()));
-        painter.add(target_pass::release(rect));
-        if !local_terrain_mode {
-            contour_asset::leave_local_view();
-        } else {
-            contour_asset::globe_residency::set_viewport(None, None);
-        }
-        let scene = if local_terrain_mode {
-            local_terrain_scene::paint(&painter, rect, model, ui.ctx().input(|input| input.time))
-        } else {
-            globe_scene::paint(&painter, rect, model, ui.ctx().input(|input| input.time))
-        };
-        contour_pass::end_frame();
+        let scene = unified_scene::paint(
+            &painter,
+            rect,
+            model,
+            ui.ctx().input(|input| input.time),
+        );
 
-        if targeting {
-            target_view::selection(&painter, rect, model, &response);
-        }
-
-
-        if local_terrain_mode && !model.obs_view {
-            ui.add_space(10.0);
+        if show_footer {
+            ui.add_space(6.0);
             draw_local_footer(ui, model, scene.beam_elevation_m);
         }
 
-        if !targeting && response.clicked() && response.drag_delta().length_sq() < 4.0 {
+        if response.clicked() && response.drag_delta().length_sq() < 4.0 {
             if let Some(pointer) = response.interact_pointer_pos() {
                 if let Some((icao24, _)) = scene
                     .flight_markers
@@ -239,6 +231,7 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
         }
 
         draw_event_follow_overlay(&painter, rect, model, &scene.event_markers);
+        draw_narrator_caption(&painter, rect, model);
         if model.active_body == crate::model::ActiveBody::Earth {
             model.global_weather.draw_time(&painter, rect);
         }
@@ -266,10 +259,14 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
         draw_arcgis_detail_panel(ui.ctx(), model);
         crate::buildout::view::window(ui.ctx(), &mut model.buildout);
         if let Some(hover) = response.hover_pos() {
-            if !model.globe_view.local_mode {
-                if let Some(geo) = globe_scene::screen_to_latlon(rect, &model.globe_view, hover) {
-                    draw_globe_coord_overlay(ui.ctx(), geo, rect, model.event_follow.enabled());
-                }
+            let proj = projection::MapProjection::from_view(
+                &model.globe_view,
+                model.active_body,
+                rect,
+                ui.ctx().pixels_per_point(),
+            );
+            if let Some(geo) = proj.screen_to_geo(hover) {
+                draw_globe_coord_overlay(ui.ctx(), geo.to_f32(), rect, model.event_follow.enabled());
             }
         }
         rect
@@ -277,20 +274,19 @@ pub fn render_world_map(ui: &mut egui::Ui, model: &mut AppModel) -> egui::Rect {
 }
 
 fn poll_map_sources(ui: &egui::Ui, model:&mut AppModel) {
-        // Refresh AIS vessel cache (non-blocking — spawns background thread
-    // if interval elapsed; returns immediately with cached data).
-    if model.show_ships && !model.globe_view.local_mode {
+    let center = model.globe_view.target_geo().to_f32();
+    // Refresh AIS vessel cache across all zoom levels.
+    if model.show_ships {
         model.tracks = moving_tracks::poll(
             &model.aisstream_api_key,
-            model.globe_view.globe_center_latlon(),
+            center,
             ui.ctx().clone(),
         );
     }
 
-    // Refresh ADS-B flight cache (OpenSky Network, no key required).
-    if model.show_flights && !model.globe_view.local_mode {
-        model.flights =
-            flight_tracks::poll(model.globe_view.globe_center_latlon(), ui.ctx().clone());
+    // Refresh ADS-B flight cache across all zoom levels.
+    if model.show_flights {
+        model.flights = flight_tracks::poll(center, ui.ctx().clone());
     }
 
     if model.active_body == crate::model::ActiveBody::Earth {
@@ -359,7 +355,40 @@ fn draw_event_follow_overlay(
     ));
     let opacity = model.event_follow.event_label_opacity(painter.ctx().input(|input| input.time));
     let selected = model.selected_event_id.as_deref().filter(|_| model.factal_brief_open);
-    event_labels::draw(painter, card_viewport, model.map_events(), markers, opacity, selected);
+    event_labels::draw(
+        painter,
+        card_viewport,
+        model.map_events(),
+        markers,
+        opacity,
+        selected,
+    );
+}
+
+fn draw_narrator_caption(painter: &egui::Painter, rect: egui::Rect, model: &AppModel) {
+    let Some((source, text)) = model.active_narrator_caption.as_ref() else {
+        return;
+    };
+    let max_w = (rect.width() - 64.0).clamp(220.0, 680.0);
+    let label = format!("{source} · {text}");
+    let galley = painter.layout(
+        label,
+        egui::FontId::proportional(13.0),
+        egui::Color32::from_rgb(236, 248, 248),
+        max_w,
+    );
+    let pad = egui::vec2(14.0, 8.0);
+    let size = galley.size() + pad * 2.0;
+    let min = egui::pos2(rect.center().x - size.x * 0.5, rect.bottom() - size.y - 78.0);
+    let pill = egui::Rect::from_min_size(min, size);
+    painter.rect(
+        pill,
+        10.0,
+        theme::panel_fill(236),
+        egui::Stroke::new(1.2, theme::topo_color().gamma_multiply(0.85)),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(min + pad, galley, egui::Color32::WHITE);
 }
 
 fn draw_local_footer(ui: &mut egui::Ui, model: &mut AppModel, beam_elevation_m: Option<f32>) {

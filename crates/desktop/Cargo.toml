@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["reverb-cuda"]
+reverb-cuda = ["reverb-tts/cuda"]
+reverb-metal = ["reverb-tts/metal"]
+
 [dependencies]
 miniseed-rs = "0.2.2"
 tokio = { version = "1", features = ["rt", "time", "net"] }
@@ -42,6 +47,7 @@ flate2 = "1"
 rayon = "1.11.0"
 lyon_tessellation = "1"
 one-thousand-electric-eye-cache-builder = { path = "../cache_builder" }
+reverb-tts = { path = "../reverb_tts" }
 scraper = { version = "0.24", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies]

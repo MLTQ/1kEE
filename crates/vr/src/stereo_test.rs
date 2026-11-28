@@ -295,7 +295,7 @@ fn measure_resident_and_streaming_stereo_gpu_time() {
 #[test]
 #[ignore = "measures the native Local table and wrist on a Vulkan GPU"]
 fn local_relief_and_wrist_remain_registered_while_native_map_uploads() {
-    use crate::operator::{MAP_SIZE, MapImage, WRIST_SIZE};
+    use crate::operator::{MAP_SIZE, MapImage};
     use glam::{Mat4, Quat};
     use one_thousand_electric_eye_desktop::vr_operator::{HEIGHT_EDGE, MapFrame};
     let (device, queue) = device();
@@ -321,6 +321,7 @@ fn local_relief_and_wrist_remain_registered_while_native_map_uploads() {
         Vec3::new(-0.15, -0.12, -1.22),
     );
     renderer.cartography.wrist_pose = Some(hand);
+    renderer.cartography.wrist_alpha = 1.0;
     let at = |u: f32| 0.08 + u * 0.14;
     let frame = MapFrame {
         local: true,
@@ -340,7 +341,7 @@ fn local_relief_and_wrist_remain_registered_while_native_map_uploads() {
             ]);
         }
     }
-    let wrist = [19u8, 211, 140, 255].repeat((WRIST_SIZE[0] * WRIST_SIZE[1]) as usize);
+    let mut snap = one_thousand_electric_eye_desktop::vr_operator::VrSnapshot::default();
     let mut timer = GpuTimer::new(&device).expect("GPU timestamps");
     let mut gpu = vec![];
     let mut cpu = vec![];
@@ -352,12 +353,16 @@ fn local_relief_and_wrist_remain_registered_while_native_map_uploads() {
                 pixels: map.clone(),
                 frame: frame.clone(),
             }),
-            (i == 0).then(|| wrist.clone()),
         );
         if i < 7 {
             assert!(renderer.cartography.frame.is_none());
         }
         let mut encoder = device.create_command_encoder(&Default::default());
+        if i == 0 {
+            let _ = renderer
+                .wrist_hud
+                .render(&device, &queue, &mut encoder, vec![], &mut snap, true);
+        }
         for (eye, v) in stereo(0.06).into_iter().enumerate() {
             renderer.draw(
                 &queue,
@@ -390,9 +395,9 @@ fn local_relief_and_wrist_remain_registered_while_native_map_uploads() {
                 globe
                     .table_transform()
                     .transform_point3(Vec3::new(0.2, 0.16, at(0.7))),
-                [179, 87, 20],
+                Some([179u8, 87, 20]),
             ),
-            (hand.w_axis.truncate(), [19, 211, 140]),
+            (hand.w_axis.truncate(), None),
         ] {
             let n = vp.project_point3(p);
             let origin = wgpu::Origin3d {
@@ -429,14 +434,23 @@ fn local_relief_and_wrist_remain_registered_while_native_map_uploads() {
             device.poll(wgpu::Maintain::Wait);
             rx.recv().unwrap().unwrap();
             let mapped = buf.slice(..).get_mapped_range();
-            assert!(
-                mapped[..3]
-                    .iter()
-                    .zip(expected)
-                    .all(|(&got, want)| got.abs_diff(want) < 5),
-                "surface pixel {:?}, expected {expected:?}",
-                &mapped[..3]
-            );
+            if let Some(expected) = expected {
+                assert!(
+                    mapped[..3]
+                        .iter()
+                        .zip(expected)
+                        .all(|(&got, want)| got.abs_diff(want) < 5),
+                    "surface pixel {:?}, expected {expected:?}",
+                    &mapped[..3]
+                );
+            } else {
+                // Direct-GPU Alyx wrist HUD renders dark slate translucent UI in the foreground.
+                assert!(
+                    mapped[0] < 90 && mapped[1] < 110 && mapped[2] < 110 && mapped[3] == 255,
+                    "wrist HUD pixel {:?} did not draw foreground dark slate panel",
+                    &mapped[..4]
+                );
+            }
         }
     }
     gpu.sort_by(f64::total_cmp);

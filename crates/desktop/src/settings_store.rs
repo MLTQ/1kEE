@@ -8,6 +8,57 @@ pub(crate) const MAX_MARKER_SCALE: f32 = 2.0;
 pub(crate) const DEFAULT_EVENT_FOLLOW_DWELL_SECONDS: u32 = 30;
 pub(crate) const MIN_EVENT_FOLLOW_DWELL_SECONDS: u32 = 5;
 pub(crate) const MAX_EVENT_FOLLOW_DWELL_SECONDS: u32 = 300;
+pub(crate) const DEFAULT_MIN_QUAKE_INTERRUPT_MAG: f32 = 4.5;
+pub(crate) const MIN_QUAKE_INTERRUPT_MAG: f32 = 2.5;
+pub(crate) const MAX_QUAKE_INTERRUPT_MAG: f32 = 6.5;
+
+/// Broadcast director preferences for Follow Events mode.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FollowDirectorSettings {
+    /// Use multi-sensor convergence scoring and regional theater continuity.
+    #[serde(default = "default_true")]
+    pub smart_director: bool,
+    /// Adapt zoom, pitch, orbit radius, and dwell pacing to each event's footprint and sensor density.
+    #[serde(default = "default_true")]
+    pub adaptive_framing: bool,
+    /// Minimum known USGS earthquake magnitude allowed to immediately interrupt an active stop or recap.
+    #[serde(default = "default_min_quake_interrupt_mag")]
+    pub min_quake_interrupt_mag: f32,
+    /// Skip empty regional recap windows that have zero live events in the region.
+    #[serde(default)]
+    pub skip_empty_recap_regions: bool,
+}
+
+impl Default for FollowDirectorSettings {
+    fn default() -> Self {
+        Self {
+            smart_director: true,
+            adaptive_framing: true,
+            min_quake_interrupt_mag: DEFAULT_MIN_QUAKE_INTERRUPT_MAG,
+            skip_empty_recap_regions: false,
+        }
+    }
+}
+
+impl FollowDirectorSettings {
+    pub fn normalized(mut self) -> Self {
+        self.min_quake_interrupt_mag = if self.min_quake_interrupt_mag.is_finite() {
+            self.min_quake_interrupt_mag
+                .clamp(MIN_QUAKE_INTERRUPT_MAG, MAX_QUAKE_INTERRUPT_MAG)
+        } else {
+            DEFAULT_MIN_QUAKE_INTERRUPT_MAG
+        };
+        self
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_min_quake_interrupt_mag() -> f32 {
+    DEFAULT_MIN_QUAKE_INTERRUPT_MAG
+}
 
 const SETTINGS_FILE: &str = ".1kee_settings.json";
 
@@ -72,6 +123,10 @@ pub struct AppSettings {
     /// requests to directory-listed feeds.
     #[serde(default)]
     pub eyes_on_enabled: bool,
+    /// Enable built-in openly published public government & science camera networks
+    /// (DOT traffic, weather, volcano, marine buoys; no API key required).
+    #[serde(default = "default_true")]
+    pub open_public_cameras_enabled: bool,
     #[serde(default)]
     pub ai_buildout_enabled: bool,
     #[serde(default)]
@@ -127,10 +182,22 @@ pub struct AppSettings {
     /// Time spent orbiting each followed event after the camera arrives.
     #[serde(default = "default_event_follow_dwell_seconds")]
     pub event_follow_dwell_seconds: u32,
+    /// Broadcast director settings for Follow Events mode.
+    #[serde(default)]
+    pub follow_director: FollowDirectorSettings,
+    /// Opt-in BreezeTTS narrator & loopback local agent harness settings.
+    #[serde(default)]
+    pub agent_voice: crate::narrator::AgentVoiceSettings,
     /// Enables on-demand detailed elevation from USGS and international
     /// providers. The persisted key is retained for settings compatibility.
     #[serde(default = "default_threedep_enabled")]
     pub threedep_enabled: bool,
+    /// Render Tanaka Kitiro illuminated contours (light-facing highlight, shadow-facing ink).
+    #[serde(default)]
+    pub tanaka_contours: bool,
+    /// Render upright rotated elevation labels along index contours in Local view.
+    #[serde(default)]
+    pub show_contour_labels: bool,
     /// Ceiling in gigabytes for the shared elevation chunk store.
     #[serde(default = "default_threedep_cache_budget_gb")]
     pub threedep_cache_budget_gb: f32,
@@ -148,6 +215,7 @@ impl Default for AppSettings {
             windy_webcams_api_key: String::new(),
             ny511_api_key: String::new(),
             eyes_on_enabled: false,
+            open_public_cameras_enabled: true,
             ai_buildout_enabled: false,
             ghostmaps: Default::default(),
             global_weather: Default::default(),
@@ -168,7 +236,11 @@ impl Default for AppSettings {
             contour_stroke_width_px: None,
             marker_scale: default_marker_scale(),
             event_follow_dwell_seconds: DEFAULT_EVENT_FOLLOW_DWELL_SECONDS,
+            follow_director: FollowDirectorSettings::default(),
+            agent_voice: crate::narrator::AgentVoiceSettings::default(),
             threedep_enabled: true,
+            tanaka_contours: false,
+            show_contour_labels: false,
             threedep_cache_budget_gb: DEFAULT_THREEDEP_CACHE_BUDGET_GB,
             local_contour_vram_budget_gb: DEFAULT_LOCAL_CONTOUR_VRAM_BUDGET_GB,
         }
@@ -526,6 +598,8 @@ fn normalize_settings(mut settings: AppSettings) -> AppSettings {
     settings.marker_scale = normalize_marker_scale(settings.marker_scale);
     settings.event_follow_dwell_seconds =
         normalize_event_follow_dwell_seconds(settings.event_follow_dwell_seconds);
+    settings.follow_director = settings.follow_director.normalized();
+    settings.agent_voice = settings.agent_voice.normalized();
     settings.contour_stroke_scale = normalize_contour_stroke_scale(settings.contour_stroke_scale);
     settings.contour_stroke_width_px =
         normalize_optional_contour_stroke_width_px(settings.contour_stroke_width_px);
@@ -671,6 +745,34 @@ mod tests {
         );
         settings.event_follow_dwell_seconds = u32::MAX;
         assert_eq!(normalize_settings(settings).event_follow_dwell_seconds, 300);
+    }
+
+    #[test]
+    fn follow_director_settings_default_and_normalize_bounds() {
+        let legacy: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(legacy.follow_director.smart_director);
+        assert!(legacy.follow_director.adaptive_framing);
+        assert!(!legacy.follow_director.skip_empty_recap_regions);
+        assert_eq!(
+            legacy.follow_director.min_quake_interrupt_mag,
+            DEFAULT_MIN_QUAKE_INTERRUPT_MAG
+        );
+
+        let mut settings = legacy;
+        settings.follow_director.min_quake_interrupt_mag = 99.0;
+        assert_eq!(
+            normalize_settings(settings.clone())
+                .follow_director
+                .min_quake_interrupt_mag,
+            MAX_QUAKE_INTERRUPT_MAG
+        );
+        settings.follow_director.min_quake_interrupt_mag = f32::NAN;
+        assert_eq!(
+            normalize_settings(settings)
+                .follow_director
+                .min_quake_interrupt_mag,
+            DEFAULT_MIN_QUAKE_INTERRUPT_MAG
+        );
     }
 
     #[test]

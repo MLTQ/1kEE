@@ -95,6 +95,9 @@ impl Globe {
             lat: marker.lat,
         }
     }
+    pub fn heading(&self) -> Quat {
+        self.heading
+    }
     pub fn transform(&self) -> Mat4 {
         let rotation = self.heading
             * Quat::from_rotation_x(self.lat.to_radians())

@@ -400,10 +400,10 @@ pub(super) fn draw_global_topo(
     selected_root: Option<&std::path::Path>,
     contour_stroke_width_px: f32,
 ) {
-    // Crossfade: full opacity at zoom ≤ 3.0, fade to zero by zoom 5.0.
-    // SRTM globe tiles fade in from 1.5→3.0, so there is overlap in the
-    // 3–5× range where both layers contribute before SRTM dominates.
-    let alpha = (1.0 - (view.zoom - 3.0) / 2.0).clamp(0.0, 1.0);
+    // Crossfade: full opacity across all hemispheric & continental globe views
+    // (including 24hr recaps at zoom 1.5–2.2), fading out over zoom 5.5→8.0 as
+    // the regional SRTM tile grid covers the viewport seamlessly.
+    let alpha = (1.0 - (view.zoom - 5.5) / 2.5).clamp(0.0, 1.0);
     if alpha <= 0.01 {
         return;
     }
@@ -423,7 +423,7 @@ pub(super) fn draw_global_topo(
         contour_pass::palette_key(major_color, minor_color),
         painter.ctx(),
         move |contour| {
-            let major = (contour.elevation_m.round() as i32).rem_euclid(2_000) == 0;
+            let major = (contour.elevation_m.round() as i32).rem_euclid(1_000) == 0;
             if major { major_color } else { minor_color }
         },
     );
@@ -440,9 +440,8 @@ pub(super) fn draw_global_topo(
 }
 
 /// Draw SRTM focus-tile contours directly on the sphere surface.
-/// Fades in from zoom 2.0 → 4.0, crossfading with the coarser global topo.
-/// Because these go through `draw_geo_path` / `project_geo` they are
-/// sphere-projected and rotate with the globe — no floating flat overlay.
+/// Fades in from zoom 4.5 → 6.5 (where the 15×15 tile window covers the screen)
+/// so continental/24hr-recap views never display an isolated rectangular patch.
 pub(super) fn draw_srtm_on_globe(
     painter: &egui::Painter,
     layout: &GlobeLayout,
@@ -451,13 +450,10 @@ pub(super) fn draw_srtm_on_globe(
     selected_root: Option<&std::path::Path>,
     contour_stroke_width_px: f32,
 ) {
-    if view.zoom < 1.5 {
+    if view.zoom < 4.5 {
         return;
     }
-    // Fade in over 1.5→3.0x.  Tiles are fixed-size (zoom_bucket=1, ~2.2°
-    // half-extent) so they maintain constant apparent size on screen as the
-    // globe grows rather than shrinking with each zoom step.
-    let alpha = ((view.zoom - 1.5) / 1.5).clamp(0.0, 1.0);
+    let alpha = ((view.zoom - 4.5) / 2.0).clamp(0.0, 1.0);
 
     let Some(contours) = contour_asset::load_srtm_for_globe(
         selected_root,

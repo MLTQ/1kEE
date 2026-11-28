@@ -97,7 +97,22 @@ fn vs_main(in: VsIn) -> VsOut {
         dir = dir / len;
     }
     let normal = vec2<f32>(-dir.y, dir.x);
-    let half_extent = u.stroke_half_px + u.feather_px;
+    let tanaka_on = u._pad1 > 0.5;
+    let abyss_glow = u._pad2 > 0.5;
+    var shade_color = in.color;
+    var width_mult = 1.0;
+    if (tanaka_on) {
+        // Screen-space NW key light (-0.7071, -0.7071): illuminated ridges brighten, shadowed edges darken.
+        let lit = clamp(dot(normal, vec2<f32>(-0.70710678, -0.70710678)), -1.0, 1.0);
+        let a = max(in.color.a, 0.001);
+        let hi = vec3<f32>(0.98, 0.97, 0.92) * a;
+        let sh = in.color.rgb * 0.22;
+        let mixed = select(mix(in.color.rgb, sh, -lit * 0.78), mix(in.color.rgb, hi, lit * 0.65), lit >= 0.0);
+        shade_color = vec4<f32>(mixed, in.color.a);
+        width_mult = 0.85 + 0.35 * abs(lit);
+    }
+    let extra_feather = select(u.feather_px, max(u.feather_px * 2.2, 2.0), abyss_glow);
+    let half_extent = u.stroke_half_px * width_mult + extra_feather;
     // Extend endpoints lengthwise by the feather to hide joint cracks on smooth
     // contours — but never by more than half the segment, or a segment shorter
     // than its own feather inflates into a blob roughly `2 * feather` across.
@@ -111,7 +126,7 @@ fn vs_main(in: VsIn) -> VsOut {
     let rel = (px - u.viewport_min) / u.viewport_size;
     let ndc = vec2<f32>(rel.x * 2.0 - 1.0, 1.0 - rel.y * 2.0);
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
-    out.color = in.color;
+    out.color = shade_color;
     out.dist_px = side * half_extent;
     return out;
 }
@@ -126,6 +141,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // happens to cover at full opacity, giving a broken one-pixel line rather
     // than a fine one. At a pixel and above this is exactly 1.0.
     let sub_pixel = clamp(2.0 * u.stroke_half_px, 0.0, 1.0);
+    var cov = edge * sub_pixel;
+    if (u._pad2 > 0.5) {
+        let glow = exp(-d / max(u.stroke_half_px * 1.4, 0.85)) * 0.36;
+        cov = max(cov, glow);
+    }
     // Colour is premultiplied — scale the whole vector by coverage × layer fade.
-    return map_output_gamma(in.color * (edge * u.alpha * sub_pixel));
+    return map_output_gamma(in.color * (cov * u.alpha));
 }

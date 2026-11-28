@@ -149,8 +149,8 @@ fn chrome_rail_stays_one_row_with_primary_controls_at_narrow_widths() {
             let output = frame(&ctx, &mut model, width, vec![]);
             let labels = labels(&output);
             for name in [
-                "GLOBE",
-                "LOCAL",
+                "PERSP",
+                "ORTHO",
                 "EARTH",
                 "Layers",
                 "⚡ Cache Blast",
@@ -159,6 +159,12 @@ fn chrome_rail_stays_one_row_with_primary_controls_at_narrow_widths() {
                 assert!(
                     labels.iter().any(|(text, _)| text == name),
                     "{width}: missing {name}"
+                );
+            }
+            for retired in ["GLOBE", "LOCAL", "TARGET"] {
+                assert!(
+                    !labels.iter().any(|(text, _)| text == retired),
+                    "{width}: retired mode button {retired} should not appear"
                 );
             }
             assert!(
@@ -339,4 +345,35 @@ fn chrome_camera_motion_controls_work_without_a_mode_toggle() {
     assert!(model.globe_view.meander_mode);
     click(&ctx, &mut model, 1536., "MEANDER");
     assert!(!model.globe_view.meander_mode);
+}
+
+#[test]
+fn chrome_settings_window_width_stays_stable_across_frames() {
+    for (section, name) in Section::ALL {
+        let ctx = context();
+        let mut model = model();
+        model.settings_open = true;
+        model.agent_voice.tts_ref_audio = "/run/media/m/Minkowski/Models/sample.wav".into();
+        model.agent_voice.tts_ref_text = "Sample reference voice transcript.".into();
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new("settings-section"), section));
+        let size = egui::vec2(1536., 900.);
+        for _ in 0..4 {
+            frame_at_size(&ctx, &mut model, size, vec![]);
+        }
+        let width_after_settle = ctx
+            .memory(|m| m.area_rect(egui::Id::new("app-settings")))
+            .unwrap_or_else(|| panic!("{name}: missing settings area rect"))
+            .width();
+        for _ in 0..10 {
+            frame_at_size(&ctx, &mut model, size, vec![]);
+        }
+        let width_later = ctx
+            .memory(|m| m.area_rect(egui::Id::new("app-settings")))
+            .unwrap()
+            .width();
+        assert!(
+            (width_later - width_after_settle).abs() < 1.0,
+            "{name}: settings window grew across frames ({width_after_settle:.1} -> {width_later:.1})"
+        );
+    }
 }

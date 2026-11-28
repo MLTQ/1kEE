@@ -234,7 +234,7 @@ mod tests {
             },
             |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    super::super::render_world_map(ui, &mut model);
+                    let _ = super::render(ui, &mut model);
                 });
             },
         );

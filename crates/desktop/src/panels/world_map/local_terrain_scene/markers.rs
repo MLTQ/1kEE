@@ -13,20 +13,51 @@ pub(super) const CAMERA_BEAM_HEIGHT: f32 = 76.0;
 /// Small visual clearance above the sampled terrain for marker ground strokes.
 pub(super) const MARKER_SURFACE_CLEARANCE_M: f32 = 18.0;
 
+/// Draw parabolic elevated gaze arcs linking nearby cameras to the focused event,
+/// with animated traveling pulse beads.
 pub(super) fn draw_camera_links(
     painter: &egui::Painter,
     event_marker: Option<egui::Pos2>,
     camera_markers: &[MapMarker],
+    time: f64,
 ) {
     let Some(event_marker) = event_marker else {
         return;
     };
+    let base_col = if theme::is_abyss() {
+        egui::Color32::from_rgb(0, 245, 212)
+    } else {
+        theme::camera_color()
+    };
+    let pulse_col = if theme::is_abyss() {
+        egui::Color32::from_rgb(255, 42, 109)
+    } else {
+        theme::marker_glow_warm()
+    };
 
-    for marker in camera_markers {
-        painter.line_segment(
-            [event_marker, marker.base],
-            egui::Stroke::new(0.75, theme::camera_color().gamma_multiply(0.32)),
-        );
+    for (idx, marker) in camera_markers.iter().enumerate() {
+        let start = marker.base;
+        let end = event_marker;
+        let dist = start.distance(end);
+        let lift = (dist * 0.22).clamp(14.0, 95.0);
+        const STEPS: usize = 12;
+        let mut pts = Vec::with_capacity(STEPS + 1);
+        for s in 0..=STEPS {
+            let t = s as f32 / STEPS as f32;
+            let p = start.lerp(end, t);
+            let arc_y = 4.0 * t * (1.0 - t) * lift;
+            pts.push(egui::pos2(p.x, p.y - arc_y));
+        }
+        painter.add(egui::Shape::line(
+            pts.clone(),
+            egui::Stroke::new(1.0, base_col.gamma_multiply(0.45)),
+        ));
+        let phase = ((time * 0.50 + idx as f64 * 0.23).fract()) as f32;
+        let seg_f = phase * (pts.len() - 1) as f32;
+        let seg = (seg_f as usize).min(pts.len() - 2);
+        let local_t = seg_f - seg as f32;
+        let bead = pts[seg].lerp(pts[seg + 1], local_t);
+        painter.circle_filled(bead, 2.2, pulse_col.gamma_multiply(0.92));
     }
 }
 

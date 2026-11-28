@@ -132,3 +132,37 @@ fn local_surface_unwraps_data_beside_the_focus() {
         (callback.uniforms[0].region[0] + callback.uniforms[0].extra[1] - focus.lon).abs() < 2.0
     );
 }
+
+#[test]
+fn with_style_preserves_appearance_flags() {
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024., 768.));
+    let layout = LocalLayout {
+        center: rect.center(),
+        focus_center: rect.center(),
+        width: 840.,
+        height: 568.,
+        horizontal_scale: 317.,
+    };
+    let focus = GeoPoint { lat: 46.5, lon: 7.5 };
+    let view = GlobeViewState::from_focus(focus);
+    let ctx = egui::Context::default();
+    let painter = ctx
+        .layer_painter(egui::LayerId::background())
+        .with_clip_rect(rect);
+    let data = Raster::new(
+        HeightGrid {
+            width: 4,
+            height: 4,
+            metres: vec![200.; 16],
+        },
+        [7., 46., 8., 47.],
+    )
+    .unwrap();
+    let mut callback = Callback::local(&painter, &layout, &view, data, focus, 0.5, true, false, 1.0);
+    callback.uniforms[0].appearance[3] = 7.0; // tanaka=1, analysis=3 (Ridgelines)
+    let styled = callback.with_style(crate::atlas_style::AtlasStyle::default(), 0.0);
+    assert_eq!(
+        styled.uniforms[0].appearance[3], 7.0,
+        "with_style must preserve tanaka & terrain analysis flags in appearance.w"
+    );
+}

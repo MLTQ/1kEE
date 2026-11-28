@@ -274,9 +274,24 @@ impl GlobalWeather {
         self.feeds[0].options = settings.true_color;
         self.feeds[1].options = settings.infrared;
     }
+    pub(crate) fn any_enabled(&self) -> bool {
+        self.feeds.iter().any(|f| f.options.enabled)
+    }
+    pub(crate) fn set_infrared_enabled(&mut self, enabled: bool) {
+        self.feeds[1].options.enabled = enabled;
+        if !enabled {
+            self.feeds[0].options.enabled = false;
+        }
+    }
     pub(crate) fn set_cache_path(&mut self, path: PathBuf) {
         if self.cache_path != path {
             *self = Self::new(self.settings(), path);
+        }
+    }
+    /// Synchronize an active weather player to the unified master UTC timeline.
+    pub(crate) fn sync_to_unix(&mut self, unix_s: i64) {
+        if let Some(player) = &mut self.player {
+            player.seek_to_unix(unix_s);
         }
     }
     pub(crate) fn tick(&mut self, ctx: &egui::Context, body: ActiveBody) {
